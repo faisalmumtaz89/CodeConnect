@@ -1,0 +1,17 @@
+[package]
+name = "cc-hook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tiny hook binary invoked by Claude Code; posts to ccd and never blocks the agent."
+
+[[bin]]
+name = "cc-hook"
+path = "src/main.rs"
+
+# Deliberately no tokio: this process is spawned on every tool call, so startup
+# cost is a feature of the product. Blocking std sockets only.
+[dependencies]
+protocol = { workspace = true }
+serde_json = { workspace = true }

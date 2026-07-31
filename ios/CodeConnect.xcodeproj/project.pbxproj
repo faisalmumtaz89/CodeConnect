@@ -1,0 +1,663 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		CC0000000000000000000101 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F1 /* SwiftTerm */; };
+		CC0000000000000000000102 /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F2 /* NIOSSH */; };
+		CC0000000000000000000103 /* NIOCore in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F3 /* NIOCore */; };
+		CC0000000000000000000104 /* NIOPosix in Frameworks */ = {isa = PBXBuildFile; productRef = CC00000000000000000000F4 /* NIOPosix */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		CC00000000000000000000A5 /* CodeConnect.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodeConnect.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC00000000000000000000C2 /* CodeConnectUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC00000000000000000000E6 /* CodeConnectTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0000000000000000000201 /* CodeConnectRenderHarness.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodeConnectRenderHarness.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		CC00000000000000000000A4 /* CodeConnect */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CodeConnect;
+			sourceTree = "<group>";
+		};
+		CC00000000000000000000C1 /* CodeConnectUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CodeConnectUITests;
+			sourceTree = "<group>";
+		};
+		CC00000000000000000000E7 /* CodeConnectTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CodeConnectTests;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000202 /* CodeConnectRenderHarness */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CodeConnectRenderHarness;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		CC00000000000000000000D2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CC00000000000000000000A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC00000000000000000000A6;
+			remoteInfo = CodeConnect;
+		};
+		CC00000000000000000000EC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CC00000000000000000000A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC00000000000000000000A6;
+			remoteInfo = CodeConnect;
+		};
+		CC0000000000000000000204 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CC00000000000000000000A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC00000000000000000000A6;
+			remoteInfo = CodeConnect;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		CC00000000000000000000C5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000A8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC0000000000000000000101 /* SwiftTerm in Frameworks */,
+				CC0000000000000000000102 /* NIOSSH in Frameworks */,
+				CC0000000000000000000103 /* NIOCore in Frameworks */,
+				CC0000000000000000000104 /* NIOPosix in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000E9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000206 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		CC00000000000000000000A2 = {
+			isa = PBXGroup;
+			children = (
+				CC00000000000000000000A4 /* CodeConnect */,
+				CC00000000000000000000E7 /* CodeConnectTests */,
+				CC00000000000000000000C1 /* CodeConnectUITests */,
+				CC0000000000000000000202 /* CodeConnectRenderHarness */,
+				CC00000000000000000000A3 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		CC00000000000000000000A3 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CC00000000000000000000A5 /* CodeConnect.app */,
+				CC00000000000000000000E6 /* CodeConnectTests.xctest */,
+				CC00000000000000000000C2 /* CodeConnectUITests.xctest */,
+				CC0000000000000000000201 /* CodeConnectRenderHarness.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CC00000000000000000000C3 /* CodeConnectUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC00000000000000000000C7 /* Build configuration list for PBXNativeTarget "CodeConnectUITests" */;
+			buildPhases = (
+				CC00000000000000000000C4 /* Sources */,
+				CC00000000000000000000C5 /* Frameworks */,
+				CC00000000000000000000C6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC00000000000000000000D1 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC00000000000000000000C1 /* CodeConnectUITests */,
+			);
+			name = CodeConnectUITests;
+			productName = CodeConnectUITests;
+			productReference = CC00000000000000000000C2 /* CodeConnectUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		CC00000000000000000000E5 /* CodeConnectTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC00000000000000000000ED /* Build configuration list for PBXNativeTarget "CodeConnectTests" */;
+			buildPhases = (
+				CC00000000000000000000E8 /* Sources */,
+				CC00000000000000000000E9 /* Frameworks */,
+				CC00000000000000000000EA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC00000000000000000000EB /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC00000000000000000000E7 /* CodeConnectTests */,
+			);
+			name = CodeConnectTests;
+			productName = CodeConnectTests;
+			productReference = CC00000000000000000000E6 /* CodeConnectTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		CC00000000000000000000A6 /* CodeConnect */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC00000000000000000000B4 /* Build configuration list for PBXNativeTarget "CodeConnect" */;
+			buildPhases = (
+				CC00000000000000000000A7 /* Sources */,
+				CC00000000000000000000A8 /* Frameworks */,
+				CC00000000000000000000A9 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CC00000000000000000000A4 /* CodeConnect */,
+			);
+			name = CodeConnect;
+			packageProductDependencies = (
+				CC00000000000000000000F1 /* SwiftTerm */,
+				CC00000000000000000000F2 /* NIOSSH */,
+				CC00000000000000000000F3 /* NIOCore */,
+				CC00000000000000000000F4 /* NIOPosix */,
+			);
+			productName = CodeConnect;
+			productReference = CC00000000000000000000A5 /* CodeConnect.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CC0000000000000000000203 /* CodeConnectRenderHarness */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC0000000000000000000210 /* Build configuration list for PBXNativeTarget "CodeConnectRenderHarness" */;
+			buildPhases = (
+				CC0000000000000000000205 /* Sources */,
+				CC0000000000000000000206 /* Frameworks */,
+				CC0000000000000000000207 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC0000000000000000000208 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000202 /* CodeConnectRenderHarness */,
+			);
+			name = CodeConnectRenderHarness;
+			productName = CodeConnectRenderHarness;
+			productReference = CC0000000000000000000201 /* CodeConnectRenderHarness.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CC00000000000000000000A1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2630;
+				LastUpgradeCheck = 2630;
+				TargetAttributes = {
+					CC00000000000000000000A6 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					CC00000000000000000000C3 = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = CC00000000000000000000A6;
+					};
+					CC00000000000000000000E5 = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = CC00000000000000000000A6;
+					};
+					CC0000000000000000000203 = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = CC00000000000000000000A6;
+					};
+				};
+			};
+			buildConfigurationList = CC00000000000000000000B1 /* Build configuration list for PBXProject "CodeConnect" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = CC00000000000000000000A2;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				CC00000000000000000000E2 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
+				CC00000000000000000000E3 /* XCRemoteSwiftPackageReference "swift-nio" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = CC00000000000000000000A3 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CC00000000000000000000A6 /* CodeConnect */,
+				CC00000000000000000000E5 /* CodeConnectTests */,
+				CC00000000000000000000C3 /* CodeConnectUITests */,
+				CC0000000000000000000203 /* CodeConnectRenderHarness */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CC00000000000000000000C6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000A9 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000EA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000207 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		CC00000000000000000000C4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000A7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000000000000000000E8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000205 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CC00000000000000000000D1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC00000000000000000000A6 /* CodeConnect */;
+			targetProxy = CC00000000000000000000D2 /* PBXContainerItemProxy */;
+		};
+		CC00000000000000000000EB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC00000000000000000000A6 /* CodeConnect */;
+			targetProxy = CC00000000000000000000EC /* PBXContainerItemProxy */;
+		};
+		CC0000000000000000000208 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC00000000000000000000A6 /* CodeConnect */;
+			targetProxy = CC0000000000000000000204 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		CC00000000000000000000C8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = CodeConnect;
+			};
+			name = Debug;
+		};
+		CC00000000000000000000C9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = CodeConnect;
+			};
+			name = Release;
+		};
+		CC00000000000000000000EE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CodeConnect.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CodeConnect";
+			};
+			name = Debug;
+		};
+		CC00000000000000000000EF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CodeConnect.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CodeConnect";
+			};
+			name = Release;
+		};
+		CC00000000000000000000B2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		CC00000000000000000000B3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		CC00000000000000000000B5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Support/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		CC00000000000000000000B6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Support/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		CC000000000000000000020E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectRenderHarness;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = CodeConnect;
+			};
+			name = Debug;
+		};
+		CC000000000000000000020F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codeconnect.CodeConnectRenderHarness;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = CodeConnect;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CC00000000000000000000B1 /* Build configuration list for PBXProject "CodeConnect" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC00000000000000000000B2 /* Debug */,
+				CC00000000000000000000B3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC00000000000000000000B4 /* Build configuration list for PBXNativeTarget "CodeConnect" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC00000000000000000000B5 /* Debug */,
+				CC00000000000000000000B6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC00000000000000000000C7 /* Build configuration list for PBXNativeTarget "CodeConnectUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC00000000000000000000C8 /* Debug */,
+				CC00000000000000000000C9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC00000000000000000000ED /* Build configuration list for PBXNativeTarget "CodeConnectTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC00000000000000000000EE /* Debug */,
+				CC00000000000000000000EF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC0000000000000000000210 /* Build configuration list for PBXNativeTarget "CodeConnectRenderHarness" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC000000000000000000020E /* Debug */,
+				CC000000000000000000020F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.15.0;
+			};
+		};
+		CC00000000000000000000E2 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio-ssh.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.9.1;
+			};
+		};
+		CC00000000000000000000E3 /* XCRemoteSwiftPackageReference "swift-nio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.83.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CC00000000000000000000F1 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000000000000000000E1 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+		CC00000000000000000000F2 /* NIOSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000000000000000000E2 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;
+			productName = NIOSSH;
+		};
+		CC00000000000000000000F3 /* NIOCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000000000000000000E3 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOCore;
+		};
+		CC00000000000000000000F4 /* NIOPosix */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC00000000000000000000E3 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOPosix;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = CC00000000000000000000A1 /* Project object */;
+}

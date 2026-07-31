@@ -1,0 +1,22 @@
+[package]
+name = "ccsoak"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Chaos gauntlet for a live ccd: kill storms, duplicate hooks, answer races, socket flap, tailer torture."
+
+# Deliberately no dependency the shipped binaries do not already have. A test
+# harness that needs its own stack is a second thing to keep working, and the
+# point of this one is to exercise the *production* protocol types rather than a
+# hand-written approximation of them.
+[dependencies]
+protocol = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+rusqlite = { workspace = true }

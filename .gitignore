@@ -1,0 +1,58 @@
+# ── Rust ─────────────────────────────────────────────────────────────────────
+/mac/target/
+**/*.rs.bk
+*.pdb
+
+# ── Xcode / Swift ────────────────────────────────────────────────────────────
+/ios/.artifacts/
+DerivedData/
+build/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+.swiftpm/
+Packages/
+# Package.resolved IS committed — pinned dependency versions are part of the build.
+
+# ── Secrets and machine-local state ──────────────────────────────────────────
+# CodeConnect's own runtime state lives in ~/.codeconnect (device tokens, pairing
+# codes, the SQLite event log, TLS material). It is outside the repo by design —
+# these patterns exist so a stray copy can never be committed.
+*.p8
+*.p12
+*.pem
+*.key
+*.mobileprovision
+*.certSigningRequest
+.env
+.env.*
+!.env.example
+**/auth.json
+**/token
+**/*-token.txt
+
+# ── Local artefacts ──────────────────────────────────────────────────────────
+.DS_Store
+*.log
+*.tmp
+*.swp
+*~
+.idea/
+.vscode/
+
+# ── Render evidence ──────────────────────────────────────────────────────────
+# Screenshots are regenerated on demand by `ios/scripts/render-screens.sh`.
+# Committing megabytes of PNGs that go stale on the next layout change is not
+# how this repo records anything.
+**/ui-renders/
+
+# ── Internal working documents ───────────────────────────────────────────────
+# Decision logs, design governance and screen specs are written for the people
+# building this, not for anyone reading it. They stay on disk and out of the
+# repository. `docs/` holds only what a reader actually needs.
+/internal/

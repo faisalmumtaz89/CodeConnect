@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["protocol", "cc-hook", "ccd", "cc", "soak"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+
+[workspace.dependencies]
+protocol = { path = "protocol" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "process",
+    "fs",
+] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+# TLS for `wss://`. rustls rather than native-tls: `tailscale cert` writes PEM,
+# which rustls loads directly, whereas Security.framework wants a PKCS#12
+# identity and would drag in an openssl shell-out to build one. `ring` rather
+# than the default aws-lc-rs: no C toolchain, and this is a two-cipher server.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+
+# FSEvents for the transcript tailer. `default-features = false` drops
+# crossbeam-channel; notify's callback feeds a tokio channel directly.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+
+# QR rendering for `cc pair`. `default-features = false` drops the `image`
+# renderer and leaves the crate with no transitive dependencies at all.
+qrcode = { version = "0.14", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

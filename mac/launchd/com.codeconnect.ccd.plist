@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  REFERENCE COPY. The supported way to install this is:
+
+      cc daemon install
+
+  which generates the same document with the paths resolved on *this* machine —
+  the ccd binary, and a PATH built from where tmux, git, tailscale and claude
+  actually are. A template can only encode one guess at those, and launchd's
+  diagnostic for a wrong one is a job that never runs.
+
+      cc daemon status      plist, launchd job and live daemon
+      cc daemon restart     launchctl kickstart -k
+      cc daemon uninstall   bootout and remove the plist
+
+  If you would rather install by hand, substitute __HOME__ and bootstrap it:
+
+      sed "s|__HOME__|$HOME|g" mac/launchd/com.codeconnect.ccd.plist \
+        > ~/Library/LaunchAgents/com.codeconnect.ccd.plist
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codeconnect.ccd.plist
+
+  Notes that are not obvious and cost real debugging time:
+
+  * LaunchAgent, not LaunchDaemon: ccd needs the user's login session for the
+    keychain (APNs .p8) and for the tailnet identity.
+  * launchd starts a process with a minimal environment and *no shell PATH*, so
+    PATH is set explicitly here and every external binary (tmux, tailscale,
+    git, claude) is additionally resolved from an absolute candidate list in
+    code. Both, because the two failures look identical from the outside.
+  * KeepAlive/SuccessfulExit=false restarts ccd if it crashes but respects a
+    clean exit, so `launchctl bootout` does not fight a restart loop.
+  * ThrottleInterval is launchd's floor between restarts. Five seconds stops a
+    crash-looping job from spinning a core; it is also why a `kill -9` can take
+    up to five seconds to recover rather than milliseconds.
+  * The log files below are truncated in place by ccd itself once they pass
+    `log_max_bytes`. launchd holds them open, so rotating by rename would leave
+    it appending to an unlinked inode — the log would stop growing and the disk
+    would keep filling, with nothing to see.
+  * ccd is deliberately NOT the parent of any agent. Sessions live in the
+    `tmux -L codeconnect` server; restarting this agent costs a reconnect.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.codeconnect.ccd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.codeconnect/bin/ccd</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.codeconnect/bin:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>CODECONNECT_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.codeconnect/logs/ccd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.codeconnect/logs/ccd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

@@ -1,0 +1,13 @@
+# Xcode per-user state. The project file and the shared schemes are committed;
+# everything below is machine-local.
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+.DS_Store
+
+# Render-harness output. `scripts/render-screens.sh` writes
+# `.artifacts/ui-renders/<timestamp>/` — dozens of PNGs per pass, regenerable
+# from the catalog in one command. The *catalog* is the committed artefact; the
+# pixels are evidence for one review, and CI uploads them.
+.artifacts/

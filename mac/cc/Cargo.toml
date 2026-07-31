@@ -1,0 +1,19 @@
+[package]
+name = "cc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CodeConnect shim: hosts a real claude session in a private tmux server, attached in place."
+
+[[bin]]
+name = "cc"
+path = "src/main.rs"
+
+# No tokio: the shim execs away within milliseconds and the supervisor is a
+# two-thread blocking loop. An async runtime would be pure startup cost.
+[dependencies]
+protocol = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+qrcode = { workspace = true }

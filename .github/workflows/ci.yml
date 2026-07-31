@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mac:
+    name: Rust (daemon, shim, protocol)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mac/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mac/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        working-directory: mac
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: mac
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: mac
+        run: cargo test --workspace
+
+  ios:
+    name: Swift (app + unit tests)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Newest installed Xcode, never a pinned path. The app targets iOS 17 and
+      # guards `scrollEdgeEffectStyle` with `if #available(iOS 26, *)`, but
+      # `#available` is a *runtime* check — the symbol still has to exist in the
+      # SDK to compile, so an older Xcode fails the build outright.
+      - name: Select the newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          test -n "$newest" || { echo "::error::no Xcode on this runner"; exit 1; }
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+
+      # Only the unit tests. The `*LiveUITests` suites drive the real app
+      # against a running `ccd` and have nothing to talk to on a runner — they
+      # skip cleanly, but running them here would buy nothing and cost several
+      # minutes of simulator boot.
+      - name: Build and test
+        working-directory: ios
+        run: |
+          set -o pipefail
+          # Pick a simulator that actually exists on this image rather than
+          # naming one and hoping. Device names change with every Xcode.
+          device=$(xcrun simctl list devices available \
+            | sed -n 's/^[[:space:]]*\(iPhone[^(]*\)(.*/\1/p' \
+            | sed 's/[[:space:]]*$//' | head -1)
+          test -n "$device" || { echo "::error::no iPhone simulator available"; exit 1; }
+          echo "using simulator: $device"
+          xcodebuild test \
+            -project CodeConnect.xcodeproj \
+            -scheme CodeConnect \
+            -destination "platform=iOS Simulator,name=$device" \
+            -only-testing:CodeConnectTests \
+            CODE_SIGNING_ALLOWED=NO
+
+  hygiene:
+    name: Repo hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every pattern here leaked into source at least once: a tailnet name, a
+      # home directory, an email address, and — found last, and by a human
+      # rather than by this grep — the author's machine named in a code comment
+      # as an example.
+      #
+      # It matches the author's actual identity rather than the *shape* of a
+      # name, deliberately. A shape pattern also flags invented examples like
+      # "Ada's Mac Studio", which are exactly what a comment should use, and a
+      # check that fires on correct code is a check people learn to ignore.
+      # LICENSE is excluded because the copyright line is supposed to say who
+      # holds it.
+      - name: No personal identifiers
+        run: |
+          # This file is excluded because it necessarily contains the pattern it
+          # searches for, and would otherwise always match itself.
+          if grep -rIn --exclude-dir=.git --exclude-dir=internal \
+              --exclude=LICENSE --exclude=ci.yml \
+              -iE "faisal|mumtaz|tailca[0-9]+|/Users/[a-z]+/(Documents|Desktop)|[0-9]+@gmail\.com" . \
+              | grep -v 'faisalmumtaz/CodeConnect'; then
+            echo "::error::personal identifier found — scrub before merging"
+            exit 1
+          fi
+
+      - name: No secret material
+        run: |
+          if grep -rIn --exclude-dir=.git --exclude-dir=internal \
+              -E 'BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY' .; then
+            echo "::error::private key material found"
+            exit 1
+          fi
+
+      # Documents written for the people building this do not ship: they live in
+      # a gitignored `internal/` directory. This catches a citation of one that
+      # survives in a comment, where it is an unresolvable pointer for a reader.
+      #
+      # The milestone pattern is deliberately unbounded on the left. `\bW2b\b`
+      # looks correct and silently exempts every snake_case identifier, because
+      # `_` is a word character — `a_w2b_database_is_migrated` passes it. That
+      # gap hid nine test names that printed on every test run.
+      - name: No references to internal documents
+        run: |
+          if grep -rIn --exclude-dir=.git --exclude-dir=internal --exclude=ci.yml \
+              -iE 'project-spec|fix-plan|audit-[a-z]+\.md|panel-[a-z]+\.md|docs/(research|review)|[_a-z0-9]w[0-9]b?[_ ]' .; then
+            echo "::error::reference to a document that is not in this repository"
+            exit 1
+          fi

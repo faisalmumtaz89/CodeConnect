@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>CodeConnect</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!-- Dark-only: the app has no light variant and never branches on
+	     colorScheme. This pins the UIKit side — keyboards, the camera preview in
+	     the pairing scanner, share sheets, text-selection menus, and anything
+	     hosted through UIViewRepresentable — none of which see SwiftUI's
+	     .preferredColorScheme. The SwiftUI side is pinned by .ccAppearance()
+	     at the app root, and the tokens in DesignKit are absolute sRGB values
+	     rather than dynamic providers, so all three layers agree. -->
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<!-- The daemon serves plain ws:// bound to the tailnet when the tailnet has
+	     no HTTPS certificate available, so ATS has to be relaxed.
+	     REMOVE THIS BLOCK once ccd serves wss:// via `tailscale cert` —
+	     hello_ack advertises `capabilities.tls`, which is the signal to flip.
+
+	     NSAllowsLocalNetworking must NOT be added alongside this key: iOS 10+
+	     *ignores* NSAllowsArbitraryLoads whenever a granular key is present, and
+	     a Tailscale address (100.64/10, CGNAT) is not in any range ATS counts as
+	     local — so adding it silently blocks every connection. Measured. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run `cc pair`. Nothing is recorded or sent anywhere.</string>
+	<!-- Deep-link target: `codeconnect://deck` and
+	     `codeconnect://session/<id>`. The same routes are what a push
+	     notification will open, which is why they exist before the thing that aims
+	     at them. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.codeconnect.CodeConnect</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>codeconnect</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>CodeConnect talks to your own Mac's CodeConnect daemon over your Tailscale network.</string>
+</dict>
+</plist>

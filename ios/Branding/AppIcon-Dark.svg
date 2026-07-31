@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="CodeConnect">
+  <!-- Dark variant: transparent background by design. iOS composites this
+       over its own dark backdrop, per Apple's dark app icon guidance. -->
+  <title>CodeConnect</title>
+
+  <!--
+    CodeConnect app icon — "Graphite / light trails"
+    Master artwork. Full-bleed square, fully opaque, no rounded corners:
+    iOS applies its own corner mask. Do not add transparency to this file.
+
+    Geometry: disc r=284 centred at 512,512, cut by horizontal chords at
+    y=415 and y=609, the three bands displaced -74 / 0 / +74 on x, the whole
+    mark rotated -38 degrees. Furthest point from centre is 358px, well
+    inside the iOS mask, so nothing clips at any size.
+  -->
+
+  <defs>
+    <linearGradient id="cc-bg" x1="0.2" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#17181B"/>
+      <stop offset="0.6" stop-color="#08090B"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+
+    <radialGradient id="cc-bloom" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.12"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <g transform="rotate(-38 512 512)">
+    <path d="M245.08 415 A284 284 0 0 1 778.92 415 Z"
+          fill="#ADB2BB" transform="translate(-74 0)"/>
+    <path d="M245.08 415 A284 284 0 0 0 245.08 609 L778.92 609 A284 284 0 0 0 778.92 415 Z"
+          fill="#767B85"/>
+    <path d="M245.08 609 A284 284 0 0 0 778.92 609 Z"
+          fill="#4E525A" transform="translate(74 0)"/>
+  </g>
+</svg>
