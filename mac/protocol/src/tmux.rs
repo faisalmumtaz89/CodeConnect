@@ -136,6 +136,85 @@ pub fn has_session_argv(socket: &str, name: &str) -> Option<Vec<String>> {
     ])
 }
 
+/// The complete argv for "who holds this name?", or `None` when the server
+/// cannot be addressed.
+///
+/// **Why this exists beside [`has_session_argv`].** `has-session` answers
+/// *whether* a name is taken, never *whose* it is, and tmux reuses names — `cc-1`
+/// is whatever ran most recently. A daemon holding several rows that all recorded
+/// `cc-1` cannot tell them apart from that answer, so one `Present` marked every
+/// one of them running, dead ones included. Measured: a run whose session had
+/// been killed 452ms earlier still read `live` a minute later, and stayed that
+/// way for as long as the name was held.
+///
+/// The identity needed to separate them is already there. The supervisor puts
+/// [`crate::ENV_SESSION_UID`] into the environment it hands `new-session -e`, and
+/// tmux keeps it on the session, so asking for that one variable answers both
+/// questions at once — presence *and* owner — for the same single child.
+pub fn session_owner_argv(socket: &str, name: &str) -> Option<Vec<String>> {
+    if name.is_empty() {
+        return None;
+    }
+    let [flag, value] = server_args(socket)?;
+    Some(vec![
+        flag,
+        value,
+        "show-environment".to_string(),
+        "-t".to_string(),
+        target_session(name),
+        crate::ENV_SESSION_UID.to_string(),
+    ])
+}
+
+/// Who tmux says is holding a name, when it says at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOwner {
+    /// tmux returned the uid stamped at creation. This is proof of identity.
+    Uid(String),
+    /// The session is there and carries no stamp: created before this shipped,
+    /// or by hand. Never evidence about *which* run it is, and so never grounds
+    /// for calling any row dead.
+    Unstamped,
+}
+
+/// What one `show-environment` run proved: presence, and owner where known.
+///
+/// The mapping is tmux's actual wording, measured on 3.7b rather than assumed:
+///
+/// | case | status | stream |
+/// |---|---|---|
+/// | stamped | 0 | stdout `CODECONNECT_SESSION_UID=<uid>` |
+/// | explicitly unset (`-r`) | 0 | stdout `-CODECONNECT_SESSION_UID` |
+/// | session exists, no stamp | 1 | stderr `unknown variable: …` |
+/// | no such session | 1 | stderr `no such session: =cc-9` |
+/// | no server | 1 | stderr `error connecting to … (No such file or directory)` |
+///
+/// The third row is the one that matters and the one easiest to get wrong:
+/// `unknown variable` is tmux confirming the session **exists** and simply has no
+/// such variable. Reading that failure as an absence would invent exactly the
+/// false exit this whole path is written to avoid.
+pub fn owner_from_probe(ok: bool, stdout: &str, stderr: &str) -> (SessionPresence, Option<SessionOwner>) {
+    if ok {
+        let line = stdout.trim();
+        let prefix = format!("{}=", crate::ENV_SESSION_UID);
+        if let Some(uid) = line.strip_prefix(&prefix) {
+            let uid = uid.trim();
+            // A stamp that is present but empty says nothing about identity, and
+            // must not be compared against a row's uid as though it did.
+            if !uid.is_empty() {
+                return (SessionPresence::Present, Some(SessionOwner::Uid(uid.to_string())));
+            }
+        }
+        // `-VAR`, an empty answer, or anything else tmux chose to print: the
+        // session answered, so it is there; it just did not identify itself.
+        return (SessionPresence::Present, Some(SessionOwner::Unstamped));
+    }
+    if stderr.trim().to_ascii_lowercase().contains("unknown variable") {
+        return (SessionPresence::Present, Some(SessionOwner::Unstamped));
+    }
+    (classify_absence(stderr), None)
+}
+
 /// What one `has-session` run proved, read from its status *and* its stderr.
 ///
 /// The status alone is not enough: it is 1 for "there is no such session" and 1
@@ -393,5 +472,76 @@ mod tests {
             crate::time::now_unix_ms()
         );
         assert_eq!(session_presence_on(&label, "cc-1"), SessionPresence::Gone);
+    }
+
+    /// The five answers tmux actually gives, transcribed from a live 3.7b server
+    /// rather than imagined. Each was produced by running the command and
+    /// recording status, stdout and stderr verbatim.
+    #[test]
+    fn owner_probe_maps_tmuxs_own_words() {
+        // Stamped: the case the whole change exists to reach.
+        assert_eq!(
+            owner_from_probe(true, "CODECONNECT_SESSION_UID=UID_X\n", ""),
+            (
+                SessionPresence::Present,
+                Some(SessionOwner::Uid("UID_X".into()))
+            )
+        );
+        // Present but never stamped. tmux fails the command; the session is there.
+        assert_eq!(
+            owner_from_probe(false, "", "unknown variable: CODECONNECT_SESSION_UID\n"),
+            (SessionPresence::Present, Some(SessionOwner::Unstamped))
+        );
+        // Explicitly unset with `set-environment -r`: status 0, `-VAR` on stdout.
+        assert_eq!(
+            owner_from_probe(true, "-CODECONNECT_SESSION_UID\n", ""),
+            (SessionPresence::Present, Some(SessionOwner::Unstamped))
+        );
+        // A name nothing holds.
+        assert_eq!(
+            owner_from_probe(false, "", "no such session: =s9\n"),
+            (SessionPresence::Gone, None)
+        );
+        // No server at all, which tmux words as a connection error.
+        assert_eq!(
+            owner_from_probe(
+                false,
+                "",
+                "error connecting to /private/tmp/tmux-501/b13nosrv (No such file or directory)\n"
+            ),
+            (SessionPresence::Gone, None)
+        );
+    }
+
+    /// An unfamiliar failure is never promoted into an absence — the same
+    /// fail-toward-not-claiming direction the rest of this module takes.
+    #[test]
+    fn an_unrecognised_failure_stays_unknown() {
+        let (presence, owner) = owner_from_probe(false, "", "tmux: protocol version mismatch");
+        assert!(matches!(presence, SessionPresence::Unknown(_)));
+        assert_eq!(owner, None);
+    }
+
+    /// A stamp that is present but blank identifies nobody. Returning it as a uid
+    /// would let an empty string be compared against a row and decide its fate.
+    #[test]
+    fn an_empty_stamp_identifies_nobody() {
+        assert_eq!(
+            owner_from_probe(true, "CODECONNECT_SESSION_UID=\n", ""),
+            (SessionPresence::Present, Some(SessionOwner::Unstamped))
+        );
+    }
+
+    /// The owner probe must be as unable to start a server as `has-session` is.
+    #[test]
+    fn the_owner_probe_addresses_a_server_and_never_starts_one() {
+        let argv = session_owner_argv("codeconnect", "cc-1").expect("addressable");
+        assert_eq!(argv[0], "-L");
+        assert!(argv.contains(&"show-environment".to_string()));
+        // Anchored, or `cc-1` would prefix-match `cc-12`.
+        assert!(argv.contains(&"=cc-1".to_string()));
+        assert!(argv.contains(&crate::ENV_SESSION_UID.to_string()));
+        assert_eq!(session_owner_argv("codeconnect", ""), None);
+        assert_eq!(session_owner_argv("relative/path", "cc-1"), None);
     }
 }
