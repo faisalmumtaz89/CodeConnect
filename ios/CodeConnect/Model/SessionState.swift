@@ -70,6 +70,35 @@ final class SessionState {
     /// overwrite a newer title. Replay makes that a real ordering, not a
     /// hypothetical one: "load all" re-delivers the whole log after the tail.
     private var aiTitleSeq: UInt64 = 0
+    /// The permission mode this run is operating under, tracked for the same
+    /// reason as `aiTitle`: the fleet reads it continuously and it changes about
+    /// once a session.
+    ///
+    /// It is a *log-derived* fact, not a wire field, so it costs no protocol
+    /// change and works against a daemon that predates it — which also means it is
+    /// `nil` until the transcript says otherwise, and `nil` must never be rendered
+    /// as a claim about anything.
+    private(set) var permissionMode: String?
+    private var permissionModeSeq: UInt64 = 0
+
+    /// What to tell the reader when this run will never ask them anything.
+    ///
+    /// `nil` for every mode that can still raise a card, including an unknown one:
+    /// a run whose transcript has not yet said which mode it is in gets no notice
+    /// at all, because "we do not know yet" and "nothing will be sent" are
+    /// different facts and only one of them is worth a line on screen.
+    ///
+    /// **The wording is deliberately about consequence, not configuration.** The
+    /// reader does not need to be taught what `bypassPermissions` means; they need
+    /// to know that waiting for this session to ask them something is waiting for
+    /// nothing. Everything else the app does for this run — the timeline, the
+    /// diff, taking the keyboard — still works, so the line says what stops, not
+    /// that the session is degraded.
+    var silentBecauseOfPermissions: String? {
+        permissionMode == "bypassPermissions"
+            ? "Permissions bypassed — this run decides for itself and will not ask you"
+            : nil
+    }
 
     /// Events that arrived at or below the tail — a replay — held back until the
     /// coalescing window closes. See `ingest`.
@@ -128,6 +157,10 @@ final class SessionState {
             aiTitle = titled.aiTitle
             aiTitleSeq = titled.seq
         }
+        if let moded = cached.events.reversed().first(where: { $0.permissionModeChange != nil }) {
+            permissionMode = moded.permissionModeChange
+            permissionModeSeq = moded.seq
+        }
         rebuildTimeline()
     }
 
@@ -162,6 +195,10 @@ final class SessionState {
             if let title = event.aiTitle {
                 aiTitle = title
                 aiTitleSeq = event.seq
+            }
+            if let mode = event.permissionModeChange {
+                permissionMode = mode
+                permissionModeSeq = event.seq
             }
         }
 
@@ -212,6 +249,8 @@ final class SessionState {
         headTruncated = false
         aiTitle = nil
         aiTitleSeq = 0
+        permissionMode = nil
+        permissionModeSeq = 0
         gap = notice
     }
 
@@ -316,6 +355,10 @@ final class SessionState {
             if let title = event.aiTitle {
                 aiTitle = title
                 aiTitleSeq = event.seq
+            }
+            if let mode = event.permissionModeChange {
+                permissionMode = mode
+                permissionModeSeq = event.seq
             }
         }
         if events.first?.seq == 1 { headTruncated = false }

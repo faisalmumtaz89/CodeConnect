@@ -181,6 +181,19 @@ struct SessionDetailView: View {
                             .onLongPressGesture { CCPasteboard.copy(cwd) }
                             .accessibilityLabel("Working directory, \(cwd)")
                     }
+                    // Stated here rather than left to be inferred from an empty
+                    // screen. `textTertiary`, not a banner and not a warning:
+                    // deciding for itself is a thing the operator chose, and a
+                    // product that shouts about a deliberate setting teaches
+                    // people to ignore the places it shouts.
+                    if let notice = state?.silentBecauseOfPermissions {
+                        Text(notice)
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, CC.space.xxs)
+                            .accessibilityIdentifier("session-permission-notice")
+                    }
                 }
             }
             .padding(.horizontal, CC.space.md)

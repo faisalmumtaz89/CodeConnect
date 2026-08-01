@@ -112,6 +112,21 @@ extension Event {
         return payload["aiTitle"]?.stringValue
     }
 
+    /// The session's permission mode, from a `type: "permission-mode"` transcript
+    /// line — `bypassPermissions`, `acceptEdits`, `default`, `plan`.
+    ///
+    /// Read here rather than from a card because the mode that matters most is the
+    /// one under which **no card is ever raised**. A run started with
+    /// `--dangerously-skip-permissions`, or on a Mac whose settings allow
+    /// everything, will never ask a human anything — so the phone shows a session
+    /// that streams tools, results and turns and simply never needs you. That is
+    /// correct behaviour and it is indistinguishable from a broken link unless the
+    /// app says which one it is looking at.
+    var permissionModeChange: String? {
+        guard case .other(let raw) = kind, raw == "transcript_permission-mode" else { return nil }
+        return payload["permissionMode"]?.stringValue
+    }
+
     /// A user turn's prose. `message.content` is a bare string for typed
     /// prompts and a block array when the CLI attaches context.
     var userText: String? {
