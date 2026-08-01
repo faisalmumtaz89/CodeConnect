@@ -99,7 +99,13 @@ jobs:
       # "Ada's Mac Studio", which are exactly what a comment should use, and a
       # check that fires on correct code is a check people learn to ignore.
       # LICENSE is excluded because the copyright line is supposed to say who
-      # holds it.
+      # holds it, and the repository's own URL is excluded because a CI badge
+      # has to name the repository it reports on. That exclusion is the exact
+      # remote, not a prefix, and it has to stay that way: the exclusion once
+      # named a *different* account than the one this repository lives in, so
+      # the CI badge and the security-advisory link both pointed at a repository
+      # that is not this one — and correcting either of them would then have
+      # failed this very check.
       - name: No personal identifiers
         run: |
           # This file is excluded because it necessarily contains the pattern it
@@ -107,7 +113,7 @@ jobs:
           if grep -rIn --exclude-dir=.git --exclude-dir=internal \
               --exclude=LICENSE --exclude=ci.yml \
               -iE "faisal|mumtaz|tailca[0-9]+|/Users/[a-z]+/(Documents|Desktop)|[0-9]+@gmail\.com" . \
-              | grep -v 'faisalmumtaz/CodeConnect'; then
+              | grep -v 'github.com/faisalmumtaz89/CodeConnect'; then
             echo "::error::personal identifier found — scrub before merging"
             exit 1
           fi

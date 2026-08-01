@@ -1,6 +1,6 @@
 # CodeConnect
 
-[![CI](https://github.com/faisalmumtaz/CodeConnect/actions/workflows/ci.yml/badge.svg)](https://github.com/faisalmumtaz/CodeConnect/actions/workflows/ci.yml)
+[![CI](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml/badge.svg)](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Monitor and approve your terminal coding agents from your iPhone.
