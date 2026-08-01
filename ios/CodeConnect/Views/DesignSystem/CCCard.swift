@@ -268,7 +268,21 @@ struct CCSectionHeader: View {
         // a fifth text edge appearing only at accessibility sizes. Mirrors the
         // dot's own ramp and ceiling, the same pair `dotOffset` uses, so header,
         // dot and row all move together or not at all.
-        .padding(.leading, CCColumn.step(from: columnInset, scaledDot: scaledDot))
+        // **Only when there is something in the gutter to clear.**
+        //
+        // Stepping out unconditionally reserved room for a dot that no screen
+        // draws — 17 production call sites, none passing `dotColor` — so every
+        // section label in the app sat 36pt right of the text it labelled, with
+        // nothing in the gap. Measured on the decision card: body on 16.00,
+        // `EXACT COMMAND` on 52.00, inside one card.
+        //
+        // The rule itself was never wrong, only its premise. A header that hangs
+        // a mark in the gutter still has to clear it, and still has to land on the
+        // same column as the marked rows beneath it. A header with no mark belongs
+        // on its container's own text edge, like everything else in the container.
+        .padding(
+            .leading,
+            dotColor == nil ? 0 : CCColumn.step(from: columnInset, scaledDot: scaledDot))
         .padding(.trailing, CC.space.md)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(count.map { "\(title), \($0)" } ?? title)
@@ -290,9 +304,9 @@ struct CCSectionHeader: View {
         }
         // The dot is a *graphic in the gutter*, not a member of the label row.
         // Drawn as an overlay and offset out of the label's leading edge so it
-        // takes no layout width at all: the label holds the content column on 52
-        // whether or not the band has a dot, and the dot hangs back in the 32
-        // gutter beside it. Two left edges, never three. It rides the
+        // takes no layout width at all: the label holds its column and the dot
+        // hangs back in the gutter beside it, so a band that gains or loses its
+        // dot never moves its own text. It rides the
         // *label's* height rather than the header's, so an action button
         // wrapping below at AX5 cannot drag it down.
         .overlay(alignment: .leading) {

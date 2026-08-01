@@ -134,6 +134,7 @@ struct DeckView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     CCButton("Done", variant: .ghost, size: .sm) { dismiss() }
+                        .ccToolbarButton()
                         .accessibilityIdentifier("deck-done")
                 }
                 .ccPlainToolbarItem()
@@ -307,14 +308,12 @@ struct DeckView: View {
                     .foregroundStyle(CC.text.primary)
                     .contentTransition(.numericText(countsDown: true))
                     .ccAnimation(CC.motion.medium, value: count)
-                // `need you`, not `waiting`: one word per concept, and the word
-                // is the reader's, not the agent's. The noun it counts is named
-                // out loud below, where there is room for it — this is a
-                // toolbar, and the number beside a live stack of cards is not
-                // ambiguous the way the fleet's headline was.
-                Text("need you")
-                    .ccType(CC.type.micro)
-                    .foregroundStyle(CC.text.tertiary)
+                // The words used to be here too — `1 need you` beside a title
+                // reading `Needs you`, which is the same fact twice in one bar and
+                // the third item competing for a width that only fits two. The
+                // title owns the words; this owns the number. VoiceOver still
+                // hears the whole sentence through `accessibilityLabel` below, so
+                // nothing was lost but the repetition.
             }
             if arrivedCount > 0 {
                 Text("+\(arrivedCount) arrived")

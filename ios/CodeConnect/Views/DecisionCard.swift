@@ -102,6 +102,26 @@ struct DecisionCardView: View {
         approval.paneSnapshot.map(PaneOptions.parse) ?? []
     }
 
+    /// The numbered options, but only when they offer something the action bar
+    /// cannot already say.
+    ///
+    /// The rows are real controls — each sends `.option(index:)` — so this is not a
+    /// caption being tidied away. It is that for Claude's ordinary two-item prompt
+    /// the rows *are* Allow and Deny, drawn a second time in a second style, and a
+    /// card that offers four buttons for two outcomes makes the reader work out
+    /// which pair is which before deciding anything.
+    ///
+    /// A longer menu is the opposite case. `Yes, and don't ask again` is a third
+    /// outcome with consequences beyond this card, and Allow cannot express it, so
+    /// there the list is the only way to choose it and it stays.
+    ///
+    /// The test is the count, not the wording. Matching on the words `yes` and `no`
+    /// would make this depend on Claude's phrasing in a language this app does not
+    /// control, and getting that wrong hides a real choice.
+    private var distinctOptions: [PaneOptions.Option] {
+        options.count > 2 ? options : []
+    }
+
     var body: some View {
         ScrollView {
             // Deliberately **not** a `LazyVStack`. The gate used to rely on one:
@@ -112,11 +132,11 @@ struct DecisionCardView: View {
             // command off screen. The gate is a geometry test now, and a stack
             // whose probes only report once a child has been materialised is a
             // hazard this card cannot carry. Eight children do not need laziness.
-            VStack(alignment: .leading, spacing: CC.space.xl) {
+            VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                 header
                 commandBlock
                 ifYouDenyBlock
-                if !options.isEmpty { exactOptions }
+                if !distinctOptions.isEmpty { exactOptions }
                 disclosures
                 verificationLine
                 // The status banner is **not** here any more; it is pinned above
@@ -214,16 +234,21 @@ struct DecisionCardView: View {
             }
 
             if approval.isPending {
-                VStack(alignment: .leading, spacing: CC.space.xxs) {
-                    CCWaitClock(since: approval.requestedAt, now: model.now, prefix: "waiting")
-                    // The promise, stated where the decision is made. Verbatim,
-                    // and it survives every redesign.
-                    Text("Nothing decides this but you. There is no timer on this card.")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.top, CC.space.md)
+                // The promise, stated where the decision is made. Verbatim,
+                // and it survives every redesign.
+                //
+                // The running clock that used to sit above it is gone. It answered
+                // a question this screen does not ask: how long a card has waited
+                // cannot make a command safer or more dangerous, so the only thing
+                // a ticking number adds at the moment of deciding is pressure — on
+                // a card whose next line promises there is no timer. Age is real
+                // triage information and it still exists, on Fleet and on the deck,
+                // where choosing *which* card to open is the actual question.
+                Text("Nothing decides this but you. There is no timer on this card.")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, CC.rhythm.textSurface)
             }
         }
     }
@@ -242,36 +267,74 @@ struct DecisionCardView: View {
     // MARK: Command
 
     private var commandBlock: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
+        // Three relationships, so three spacings — one stack could only ever get
+        // two of them wrong. Label and block are text meeting a surface (12); the
+        // block and the prose beneath it likewise (12); the prose lines are one
+        // thought and sit on text rhythm (8). Written as a single 8pt stack this
+        // read as a command jammed against its own explanation.
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("Exact command")
-            CCMonoBlock(approval.card.primaryText(verification: verification))
+            CCMonoBlock(command)
                 // The gate's first half, measured on the block that carries the
                 // command itself rather than on a marker somewhere beneath it.
                 .background { bottomProbe(CommandBottomKey.self) }
 
-            if let intent = ToolSummary.intent(
-                tool: approval.card.toolName, input: approval.card.toolInput)
-            {
-                Text(intent)
-                    .ccType(CC.type.callout)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            VStack(alignment: .leading, spacing: CC.rhythm.text) {
+                if let intent = describedIntent {
+                    Text(intent)
+                        .ccType(CC.type.callout)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            // Two lines, not three sizes at three colours: the
-            // rationale in `callout` at the risk colour, the provenance in
-            // `monoSmall` `textTertiary`.
-            Text(rationale)
-                .ccType(CC.type.callout)
-                .foregroundStyle(risk.ccTone == .neutral ? CC.text.secondary : risk.ccTone.color)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(assessment.provenance)
-                .ccType(CC.type.monoSmall)
-                .foregroundStyle(CC.text.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                // The gate's second half, and the one HIGH names explicitly.
-                .background { bottomProbe(ProvenanceBottomKey.self) }
+                // Two lines, not three sizes at three colours: the
+                // rationale in `callout` at the risk colour, the provenance in
+                // `monoSmall` `textTertiary`.
+                Text(rationale)
+                    .ccType(CC.type.callout)
+                    .foregroundStyle(
+                        risk.ccTone == .neutral ? CC.text.secondary : risk.ccTone.color
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(assessment.provenance)
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // The gate's second half, and the one HIGH names explicitly.
+                    .background { bottomProbe(ProvenanceBottomKey.self) }
+            }
         }
+    }
+
+    private var command: String {
+        approval.card.primaryText(verification: verification)
+    }
+
+    /// The tool's own description, unless it is the command again in sentence case.
+    ///
+    /// `ToolSummary.intent` hands back whatever the tool supplied, and for a shell
+    /// command that is frequently the command itself — `echo SECONDCARD` printed
+    /// under `echo SECONDCARD`, one line apart. A restatement is not a second
+    /// source; it is the same source taking up the space where a reason should be,
+    /// and on a card whose whole job is *decide this* that is worse than blank.
+    ///
+    /// Compared on letters and digits alone, so punctuation, case and the sentence
+    /// capitalisation tools add cannot smuggle a duplicate past. Anything that adds
+    /// a goal, a destination or a consequence survives, because it will not reduce
+    /// to the same string.
+    private var describedIntent: String? {
+        guard
+            let intent = ToolSummary.intent(
+                tool: approval.card.toolName, input: approval.card.toolInput)
+        else { return nil }
+        return Self.saysSomethingNew(intent, beyond: command) ? intent : nil
+    }
+
+    static func saysSomethingNew(_ intent: String, beyond command: String) -> Bool {
+        func core(_ text: String) -> String {
+            text.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        return core(intent) != core(command)
     }
 
     /// Reports a view's bottom edge in screen coordinates.
@@ -332,7 +395,7 @@ struct DecisionCardView: View {
     /// Absent from the previous build: the consequence of saying no, stated
     /// beside the consequence of saying yes.
     private var ifYouDenyBlock: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("If you deny")
             Text(denyConsequence)
                 .ccType(CC.type.footnote)
@@ -360,12 +423,12 @@ struct DecisionCardView: View {
     /// Claude's own numbered options are the *primary* answer path when a pane
     /// offers them, and they obey the same risk gate as Allow.
     private var exactOptions: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("Claude's exact options")
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
-                    ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
-                        optionRow(option, separator: index < options.count - 1)
+                    ForEach(Array(distinctOptions.enumerated()), id: \.element.id) { index, option in
+                        optionRow(option, separator: index < distinctOptions.count - 1)
                     }
                 }
             }

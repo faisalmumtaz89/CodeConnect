@@ -321,6 +321,50 @@ extension CC {
         static let xxxl: CGFloat = 48
     }
 
+    /// **Vertical rhythm, by what the gap means.**
+    ///
+    /// `CC.space` is a grid: eight legal values and no opinion about which one a
+    /// given gap should be. That is enough to keep every margin on the 4pt grid
+    /// and not nearly enough to keep the app consistent, because the same
+    /// relationship then drifts across screens — measured before this existed,
+    /// text→text was written as 4, 8 *and* 16; surface→surface as 8, 12 *and* 16;
+    /// section→section as 20 *and* 24. Every one of those is a legal margin. No
+    /// two of them are the same decision.
+    ///
+    /// So the rhythm is named by the relationship rather than the size, and a
+    /// screen picks the *meaning* — the number follows. Four values, because a
+    /// fifth is how the drift starts again:
+    ///
+    ///   * `text` — consecutive text runs in one thought.
+    ///   * `textSurface` — text meeting a card, block or field, either direction.
+    ///   * `surfaces` — two surfaces side by side in a stack.
+    ///   * `sections` — one section of a screen to the next.
+    ///
+    /// `CC.space.xxs` (4) survives for *component-internal optical* pairs — a
+    /// title and its own subtitle, a glyph and its baseline — and is deliberately
+    /// absent here: it is not a relationship between two things on a screen.
+    // swiftlint:disable:next type_name
+    enum rhythm {
+        /// Text → text. 8.
+        static let text: CGFloat = CC.space.xs
+        /// Text ↔ card / block / field. 12.
+        static let textSurface: CGFloat = CC.space.sm
+        /// Surface → surface. 16.
+        static let surfaces: CGFloat = CC.space.md
+        /// Section → section. 24.
+        static let sections: CGFloat = CC.space.xl
+        /// Stacked controls inside one cluster. 12.
+        ///
+        /// A fifth name, added deliberately and with an argument, because the two
+        /// places that stack controls disagreed — 8 on the fleet's action group,
+        /// 12 under the decision card's action bar — and neither `surfaces` nor
+        /// `textSurface` describes what that gap is. Two buttons offered as
+        /// alternatives are not two independent surfaces sitting near each other;
+        /// they are one control presenting its options, and spacing them like
+        /// separate cards reads as two unrelated decisions.
+        static let controls: CGFloat = CC.space.sm
+    }
+
     // swiftlint:disable:next type_name
     enum radius {
         static let sm: CGFloat = 6

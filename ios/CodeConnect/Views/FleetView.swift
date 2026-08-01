@@ -355,9 +355,13 @@ struct FleetView: View {
         // centre-36, which is a third vertical edge on a screen that gets
         // exactly two. Deleting it also takes one of the five objects that
         // pulsed in unison; the accessory bar's aggregate is the only one left.
+        // **No count either.** The overview line above the list already says
+        // `3 running`, and a chip reading `3` beside `RUNNING` a few points below
+        // it is the same number twice on one screen. One place owns the aggregate;
+        // the band owns the grouping. The rows are still countable by looking at
+        // them, which is what a band is for.
         CCSectionHeader(
             band.status.label,
-            count: band.rows.count,
             note: observeNote(band),
             noteAction: band.capability?.reason.map { reason in
                 { capabilityReason = CapabilityReason(text: reason) }
@@ -466,7 +470,7 @@ struct FleetView: View {
     /// A shape, a sentence, and a ticking counter. No shimmer: a stalled link
     /// must not look busy.
     private var loadingState: some View {
-        VStack(alignment: .leading, spacing: CC.space.xl) {
+        VStack(alignment: .leading, spacing: CC.rhythm.sections) {
             ForEach(0..<2, id: \.self) { placeholderBand in
                 VStack(alignment: .leading, spacing: CC.space.xs) {
                     CCSkeleton(width: 74, height: 11, radius: CC.radius.sm, relativeTo: .caption)
@@ -1170,7 +1174,7 @@ struct CapabilitySheet: View {
     var body: some View {
         CCSheetChrome("Observe only", onClose: { dismiss() }) {
             ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.lg) {
+                VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     Text(
                         "Answers given on this phone reach an agent only when a supervisor is attached to its tmux session and the daemon says it can deliver them."
                     )
@@ -1226,7 +1230,7 @@ struct LinkHealthSheet: View {
     var body: some View {
         CCSheetChrome("Link health", onClose: { dismiss() }) {
             ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.xl) {
+                VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     hero
                     stats
                     linkSection
@@ -1466,7 +1470,7 @@ struct LinkHealthSheet: View {
     }
 
     private var actions: some View {
-        VStack(spacing: CC.space.xs) {
+        VStack(spacing: CC.rhythm.controls) {
             // Disabled with a reason, never dead: this daemon advertises
             // `push: false`, and saying so is more useful than hiding the
             // control that would prove it.

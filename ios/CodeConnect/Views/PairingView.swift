@@ -217,7 +217,9 @@ struct PairingView: View {
     /// The keyboard path. It never goes away, on any screen, for any reason.
     @ViewBuilder
     private var manualEntry: some View {
-        VStack(alignment: .leading, spacing: CC.space.md) {
+        // 12, matching `macSection`. These are the same relationship — a header
+        // meeting the card it introduces — written 16 here and 12 there, on one screen.
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             // **Flush, and in a card, and the two go together.**
             //
             // The header owns the content column now, so it lands on 52 from
@@ -311,7 +313,7 @@ struct PairingView: View {
     private var settings: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.xl) {
+                VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                     macSection
                     transportSection
                     capabilitiesSection
@@ -364,7 +366,7 @@ struct PairingView: View {
     }
 
     private var macSection: some View {
-        VStack(alignment: .leading, spacing: CC.space.sm) {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             // Flush: the header owns the content column itself now — see
             // `TerminalSettingsView.keySection`. Anything added here is added
             // twice.

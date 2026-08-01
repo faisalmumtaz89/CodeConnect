@@ -281,3 +281,23 @@ private struct CCButtonSurface: View {
         }
     }
 }
+
+extension View {
+    /// A button that lives in a navigation bar, and must not wrap.
+    ///
+    /// `CCButton` lets its label wrap on purpose: at AX5 a two-word verb needs two
+    /// lines, and a clipped verb is a control nobody can trust. A toolbar breaks
+    /// that bargain — it hands its items a *narrow proposal* rather than the width
+    /// they ask for, and the label dutifully accepts it. Measured on device with a
+    /// leading counter and an inline title competing for the same bar: `Done`
+    /// rendered as `Do` / `ne`.
+    ///
+    /// So the fix is opt-in and local to the bar. `fixedSize(horizontal:)` refuses
+    /// the compression rather than absorbing it, which is the honest answer: a
+    /// toolbar with more items than fit should drop one, not fold a word in half.
+    /// Deliberately *not* applied to `CCButton` generally — ordinary controls keep
+    /// their wrapping.
+    func ccToolbarButton() -> some View {
+        lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    }
+}

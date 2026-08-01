@@ -23,7 +23,7 @@ struct TerminalSettingsView: View {
     var body: some View {
         @Bindable var settings = model.settings
         return ScrollView {
-            VStack(alignment: .leading, spacing: CC.space.xl) {
+            VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                 keySection
                 whereToConnect(
                     username: $settings.sshUsername, hostname: $settings.sshHostOverride)
