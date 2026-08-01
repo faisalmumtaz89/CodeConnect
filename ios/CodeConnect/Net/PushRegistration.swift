@@ -125,6 +125,7 @@ enum PushWire {
     /// development — would take the wrong branch every time.
     static var environment: String {
         #if targetEnvironment(simulator)
+            // A simulator has no APNs token worth sending anywhere.
             return "sandbox"
         #else
             guard
@@ -132,9 +133,28 @@ enum PushWire {
                 let raw = try? Data(contentsOf: url),
                 let text = String(data: raw, encoding: .isoLatin1),
                 let range = text.range(of: "<key>aps-environment</key>")
-            else { return "sandbox" }
-            let tail = text[range.upperBound...].prefix(120)
-            return tail.contains("production") ? "production" : "sandbox"
+            else {
+                // **No profile means App Store or TestFlight, which is
+                // production.** Apple re-signs on the way through and strips
+                // `embedded.mobileprovision`, so its absence is not "unknown" —
+                // it is the one case that is certainly not a development build.
+                //
+                // This defaulted to `sandbox`, which is exactly backwards: the
+                // first TestFlight install registered a production token,
+                // reported `sandbox`, and every push came back
+                // `400 BadDeviceToken` from the sandbox host.
+                return "production"
+            }
+            // The value is the next `<string>` after the key, read to its close
+            // rather than from a fixed-width window, so plist whitespace cannot
+            // change the answer.
+            let tail = text[range.upperBound...]
+            guard
+                let open = tail.range(of: "<string>"),
+                let close = tail.range(of: "</string>", range: open.upperBound..<tail.endIndex)
+            else { return "production" }
+            return tail[open.upperBound..<close.lowerBound] == "development"
+                ? "sandbox" : "production"
         #endif
     }
 }

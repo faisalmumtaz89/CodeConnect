@@ -25,6 +25,11 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
 use crate::apns::{coalesce, PushHint, PushSender};
+
+/// How long any single leg of a push may take. Generous for a network round
+/// trip, short enough that a silently-filtered connection is reported rather
+/// than left pending forever.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use crate::apns_token::ProviderToken;
 
 /// Which Apple host to talk to.
@@ -83,6 +88,9 @@ pub trait PushRegistry: Send + Sync {
     /// Apple said this token is dead (`410`), or refused it as malformed
     /// (`400 BadDeviceToken`). Either way it will never work again.
     fn forget(&self, device_id: &str, reason: &str);
+    /// Apple refused the token on the host we chose but the *other* host is
+    /// plausible. Records the correction so the next push goes straight there.
+    fn correct_environment(&self, device_id: &str, environment: ApnsEnvironment);
 }
 
 pub struct ApnsPushSender {
@@ -133,21 +141,36 @@ impl ApnsPushSender {
         registry: Arc<dyn PushRegistry>,
         target: PushTarget,
         payload: String,
+        // Guards the one environment retry below against recursing forever.
+        retried: bool,
     ) -> Result<()> {
         let host = target.environment.host();
         let bearer = token.bearer()?;
-        let stream = tokio::net::TcpStream::connect((host, 443))
-            .await
-            .with_context(|| format!("connecting to {host}"))?;
+        // **Bounded, because an unbounded connect can hang forever and say
+        // nothing.** A third-party network filter that cannot identify a freshly
+        // built binary holds its connections open and silent rather than
+        // refusing them — measured here with Little Snitch against a `cargo
+        // build` output, which produced a delivery that never completed and
+        // never logged. A push is best-effort; a push that hangs is worse than
+        // one that fails, because only the failure is visible.
+        let stream =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((host, 443)))
+                .await
+                .with_context(|| {
+                    format!("connecting to {host} timed out after {CONNECT_TIMEOUT:?}")
+                })?
+                .with_context(|| format!("connecting to {host}"))?;
         let server_name = ServerName::try_from(host).context("APNs host name")?;
         let stream = tls
             .connect(server_name, stream)
             .await
             .with_context(|| format!("TLS handshake with {host}"))?;
 
-        let (mut send_request, connection) = h2::client::handshake(stream)
-            .await
-            .context("HTTP/2 handshake with APNs")?;
+        let (mut send_request, connection) =
+            tokio::time::timeout(CONNECT_TIMEOUT, h2::client::handshake(stream))
+                .await
+                .context("HTTP/2 handshake with APNs timed out")?
+                .context("HTTP/2 handshake with APNs")?;
         // The connection future drives the socket; dropping it strands the
         // stream, so it is spawned and its ending is only interesting on error.
         tokio::spawn(async move {
@@ -173,10 +196,13 @@ impl ApnsPushSender {
         let (response, mut body) = send_request
             .send_request(request, false)
             .context("sending the APNs request")?;
-        body.send_data(payload.into(), true)
+        body.send_data(payload.clone().into(), true)
             .context("sending the APNs payload")?;
 
-        let response = response.await.context("awaiting the APNs response")?;
+        let response = tokio::time::timeout(CONNECT_TIMEOUT, response)
+            .await
+            .context("APNs accepted the request and never answered")?
+            .context("awaiting the APNs response")?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -201,6 +227,42 @@ impl ApnsPushSender {
         // silently dead until the app was relaunched.
         if is_terminal(status.as_u16(), &reason) {
             registry.forget(&target.device_id, &format!("{status}: {reason}"));
+            bail!("APNs refused the push: {status} {reason}")
+        }
+
+        // **`BadDeviceToken` usually means the right token on the wrong host.**
+        // A build's APNs world is decided by how it was *signed*, and the app
+        // has to infer that — an App Store build has no provisioning profile to
+        // read, so it can get it wrong. Rather than leave push silently dead
+        // until someone reads a log, try the other host once and remember the
+        // answer. Measured: a TestFlight install reported `sandbox`, held a
+        // production token, and every notification vanished.
+        if reason.contains("BadDeviceToken") && !retried {
+            let other = match target.environment {
+                ApnsEnvironment::Sandbox => ApnsEnvironment::Production,
+                ApnsEnvironment::Production => ApnsEnvironment::Sandbox,
+            };
+            crate::log_info!(
+                "push: {} refused on {}; trying {}",
+                target.device_id,
+                target.environment.as_str(),
+                other.as_str()
+            );
+            let corrected = PushTarget {
+                environment: other,
+                ..target.clone()
+            };
+            Box::pin(Self::deliver(
+                tls,
+                token,
+                Arc::clone(&registry),
+                corrected,
+                payload,
+                true,
+            ))
+            .await?;
+            registry.correct_environment(&target.device_id, other);
+            return Ok(());
         }
         bail!("APNs refused the push: {status} {reason}")
     }
@@ -225,7 +287,7 @@ impl PushSender for ApnsPushSender {
             let payload = payload.clone();
             let device = target.device_id.clone();
             tokio::spawn(async move {
-                match Self::deliver(tls, token, registry, target, payload).await {
+                match Self::deliver(tls, token, registry, target, payload, false).await {
                     Ok(()) => crate::log_info!("push: delivered to device {device}"),
                     Err(err) => crate::log_warn!("push: {device}: {err:#}"),
                 }
@@ -293,6 +355,19 @@ impl PushRegistry for StoreRegistry {
         crate::log_info!("push: clearing the token for {device_id} — Apple said {reason}");
         if let Err(err) = self.store.clear_push_token(device_id) {
             crate::log_error!("push: could not clear the token for {device_id}: {err:#}");
+        }
+    }
+
+    fn correct_environment(&self, device_id: &str, environment: ApnsEnvironment) {
+        crate::log_info!(
+            "push: {device_id} is actually a {} build; remembering that",
+            environment.as_str()
+        );
+        if let Err(err) = self
+            .store
+            .set_push_environment(device_id, environment.as_str())
+        {
+            crate::log_error!("push: could not record the environment for {device_id}: {err:#}");
         }
     }
 }
@@ -403,6 +478,23 @@ mod tests {
     }
 
     /// The distinction that cost a live registration.
+    /// The failure the first TestFlight install produced.
+    #[test]
+    fn a_bad_device_token_is_an_environment_problem_before_it_is_a_dead_one() {
+        // `400 BadDeviceToken` means "not valid **for this host**", which a
+        // wrong environment produces just as readily as a dead token. It must
+        // not clear the registration, and it must leave room for the other
+        // host to be tried.
+        assert!(!is_terminal(400, "{\"reason\":\"BadDeviceToken\"}"));
+        assert!(is_terminal(410, "{\"reason\":\"Unregistered\"}"));
+        // The two hosts are genuinely different endpoints, so "the other one"
+        // is always well defined.
+        assert_ne!(
+            ApnsEnvironment::Sandbox.host(),
+            ApnsEnvironment::Production.host()
+        );
+    }
+
     #[test]
     fn only_410_is_terminal_for_a_device_token() {
         // Apple returns `400 BadDeviceToken` for a token that is simply on the

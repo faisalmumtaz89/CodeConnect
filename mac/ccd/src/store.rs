@@ -1068,6 +1068,16 @@ impl Store {
         Ok(())
     }
 
+    /// Record the environment Apple actually accepted, leaving the token alone.
+    pub fn set_push_environment(&self, device_id: &str, environment: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE devices SET push_environment = ?2 WHERE device_id = ?1",
+            params![device_id, environment],
+        )?;
+        Ok(())
+    }
+
     /// Apple has said this token is dead. Cleared rather than remembered: the
     /// device row itself stays, because the credential is still valid and the
     /// phone may register again on next launch.
