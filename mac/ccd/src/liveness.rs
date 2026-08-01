@@ -50,6 +50,56 @@ impl std::fmt::Display for Target {
     }
 }
 
+/// What one probe established about a tmux name: whether anything holds it, and
+/// which run that is when tmux can say.
+///
+/// Presence and owner arrive together because they come from the same child. A
+/// second probe to ask "and whose is it?" would be a second point in time, and a
+/// name can change hands between two of those — which is the entire defect this
+/// answers, reintroduced at a smaller scale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    pub presence: SessionPresence,
+    /// `None` whenever presence is not `Present`, and also when a session exists
+    /// but predates the stamp. Absence of an owner is never evidence about a row.
+    pub owner: Option<protocol::tmux::SessionOwner>,
+}
+
+impl Sighting {
+    /// What this sighting says about one particular run.
+    ///
+    /// The asymmetry is deliberate and is the safety property: a name held by a
+    /// *different* uid proves this run's session is gone, while a name held by
+    /// nobody identifiable proves nothing at all.
+    pub fn verdict(&self, uid: &str) -> SessionPresence {
+        match (&self.presence, &self.owner) {
+            (SessionPresence::Present, Some(protocol::tmux::SessionOwner::Uid(holder))) => {
+                if holder == uid {
+                    SessionPresence::Present
+                } else {
+                    // Someone else holds this name. This run is not running, and
+                    // the name being taken is exactly why nothing noticed before.
+                    SessionPresence::Gone
+                }
+            }
+            // A session with no stamp is one this daemon cannot attribute. Leaving
+            // it `Present` is the same answer the product gave before identity
+            // existed, which is the right way to treat a run that predates it.
+            (SessionPresence::Present, _) => SessionPresence::Present,
+            (other, _) => other.clone(),
+        }
+    }
+}
+
+impl From<SessionPresence> for Sighting {
+    fn from(presence: SessionPresence) -> Sighting {
+        Sighting {
+            presence,
+            owner: None,
+        }
+    }
+}
+
 /// A source of proof about whether a tmux session exists.
 ///
 /// A trait with exactly one production implementation, because the *policy*
@@ -59,10 +109,7 @@ impl std::fmt::Display for Target {
 /// on a machine where tmux happens to behave. The seam is here rather than
 /// deeper so everything above it is the code that actually ships.
 pub trait Presence {
-    fn presence(
-        &self,
-        target: &Target,
-    ) -> impl std::future::Future<Output = SessionPresence> + Send;
+    fn presence(&self, target: &Target) -> impl std::future::Future<Output = Sighting> + Send;
 }
 
 /// The real thing: a bounded `tmux has-session` per question.
@@ -93,85 +140,79 @@ impl Prober {
 }
 
 impl Presence for Prober {
-    async fn presence(&self, target: &Target) -> SessionPresence {
+    async fn presence(&self, target: &Target) -> Sighting {
         let Some(tmux) = self.tmux.as_deref() else {
-            return SessionPresence::Unknown("tmux is not installed at a known location".into());
+            return SessionPresence::Unknown("tmux is not installed at a known location".into())
+                .into();
         };
-        let Some(argv) = protocol::tmux::has_session_argv(&target.socket, &target.name) else {
+        let Some(argv) = protocol::tmux::session_owner_argv(&target.socket, &target.name) else {
             return SessionPresence::Unknown(format!(
                 "{:?} is not a tmux server that can be addressed",
                 target.socket
-            ));
+            ))
+            .into();
         };
 
         let mut command = tokio::process::Command::new(tmux);
         command
             .args(&argv)
             .stdin(std::process::Stdio::null())
-            // Nothing is written here by `has-session`, and `/dev/null` cannot
-            // fill up — so there is no second pipe to interleave with the one
-            // below, and no way for the child to block on a reader we do not
-            // have.
-            .stdout(std::process::Stdio::null())
+            // **Both pipes now**, because the answer is split across them:
+            // `show-environment` prints the owner on stdout and says "no such
+            // session" on stderr. `has-session` needed only one, and this file
+            // used to note that a single pipe is the reason nothing can deadlock.
+            // That reasoning still holds and is why `wait_with_output` is used
+            // rather than two sequential reads: it drains both concurrently, so
+            // neither can fill while the other is being read. tmux's answer here
+            // is one short line on one stream, orders of magnitude under a pipe
+            // buffer, but a bound that depends on the child being small is not a
+            // bound.
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // A sweep that is dropped mid-probe — the daemon shutting down —
             // must not leave a tmux client behind.
             .kill_on_drop(true);
 
-        let mut child = match command.spawn() {
+        let child = match command.spawn() {
             Ok(child) => child,
             // The binary was there a moment ago and is not now, or the process
             // is out of descriptors. Emphatically not evidence of an exit.
-            Err(err) => return SessionPresence::Unknown(format!("could not run tmux: {err}")),
-        };
-        let Some(stderr) = child.stderr.take() else {
-            return SessionPresence::Unknown("tmux stderr was not piped".into());
+            Err(err) => {
+                return SessionPresence::Unknown(format!("could not run tmux: {err}")).into()
+            }
         };
 
-        let finished = tokio::time::timeout(self.timeout, async {
-            let message = read_capped(stderr, MAX_STDERR_BYTES).await;
-            // Both safe to await in sequence: stdout is `/dev/null` and stderr
-            // is at EOF (or closed at the cap, which gives the child EPIPE), so
-            // there is nothing left for the child to block on.
-            let status = child.wait().await;
-            (message, status)
-        })
-        .await;
+        // The deadline is the deadline. A tmux client left hanging on an unserved
+        // socket would hold a descriptor for the life of the daemon, and this runs
+        // unattended in the background. Dropping the future drops the child, and
+        // `kill_on_drop` above is what makes that a kill rather than a leak.
+        let finished = tokio::time::timeout(self.timeout, child.wait_with_output()).await;
 
-        let Ok((message, status)) = finished else {
-            // The deadline is the deadline. A tmux client left hanging on an
-            // unserved socket would hold a descriptor for the life of the
-            // daemon, and this runs unattended in the background.
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        let Ok(output) = finished else {
             return SessionPresence::Unknown(format!(
                 "tmux did not answer within {:?}",
                 self.timeout
-            ));
+            ))
+            .into();
         };
-        let Ok(status) = status else {
-            return SessionPresence::Unknown("could not wait for tmux".into());
+        let Ok(output) = output else {
+            return SessionPresence::Unknown("could not wait for tmux".into()).into();
         };
-        let message = String::from_utf8_lossy(&message).into_owned();
-        protocol::tmux::presence_from_probe(status.success(), &message)
+
+        let stdout = String::from_utf8_lossy(&cap(output.stdout)).into_owned();
+        let stderr = String::from_utf8_lossy(&cap(output.stderr)).into_owned();
+        let (presence, owner) =
+            protocol::tmux::owner_from_probe(output.status.success(), &stdout, &stderr);
+        Sighting { presence, owner }
     }
 }
 
-/// Read at most `cap` bytes, then drop the pipe.
-///
-/// The drop is the mechanism: the child takes `EPIPE` on its next write and
-/// finishes, so a bounded read needs no kill handle and no coordination.
-async fn read_capped<R>(pipe: R, cap: usize) -> Vec<u8>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-    let mut buffer = Vec::new();
-    // A failed read costs a less specific message and nothing else — the exit
-    // status still carries the fact that something went wrong, and an
-    // unrecognised message is `Unknown`, which is the safe direction.
-    let _ = pipe.take(cap as u64).read_to_end(&mut buffer).await;
-    buffer
+/// Truncate to the cap. tmux's answer is a single line; anything past this is not
+/// diagnostics, and the cap is what stops a child that has gone wrong from turning
+/// one sweep into an unbounded allocation.
+fn cap(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.truncate(MAX_STDERR_BYTES);
+    bytes
 }
 
 #[cfg(test)]
@@ -199,7 +240,10 @@ mod tests {
             socket: socket.to_string_lossy().into_owned(),
             name: "cc-1".into(),
         };
-        assert_eq!(prober.presence(&target).await, SessionPresence::Gone);
+        assert_eq!(
+            prober.presence(&target).await.presence,
+            SessionPresence::Gone
+        );
         assert!(
             !socket.exists(),
             "the probe started a tmux server at {}",
@@ -240,7 +284,7 @@ mod tests {
             name: name.clone(),
         };
         assert_eq!(
-            prober.presence(&target).await,
+            prober.presence(&target).await.presence,
             SessionPresence::Present,
             "a session that is running must not be reported gone"
         );
@@ -253,7 +297,8 @@ mod tests {
                     socket: socket.clone(),
                     name: format!("{name}-nope"),
                 })
-                .await,
+                .await
+                .presence,
             SessionPresence::Gone
         );
 
@@ -265,7 +310,7 @@ mod tests {
             .status()
             .await;
         assert_eq!(
-            prober.presence(&target).await,
+            prober.presence(&target).await.presence,
             SessionPresence::Gone,
             "and once the server is gone, so is the session"
         );
@@ -282,7 +327,8 @@ mod tests {
                     socket: socket.into(),
                     name: "cc-1".into(),
                 })
-                .await;
+                .await
+                .presence;
             assert!(
                 matches!(presence, SessionPresence::Unknown(_)),
                 "{socket:?} produced {presence:?}"
@@ -293,7 +339,8 @@ mod tests {
                 socket: "codeconnect".into(),
                 name: String::new(),
             })
-            .await;
+            .await
+            .presence;
         assert!(matches!(presence, SessionPresence::Unknown(_)));
     }
 
@@ -312,7 +359,8 @@ mod tests {
                 socket: "codeconnect".into(),
                 name: "cc-1".into(),
             })
-            .await;
+            .await
+            .presence;
         assert!(
             matches!(presence, SessionPresence::Unknown(ref why) if why.contains("not installed")),
             "{presence:?}"
@@ -345,7 +393,8 @@ mod tests {
                 socket: "codeconnect".into(),
                 name: "cc-1".into(),
             })
-            .await;
+            .await
+            .presence;
         assert!(
             matches!(presence, SessionPresence::Unknown(ref why) if why.contains("did not answer")),
             "{presence:?}"
@@ -388,7 +437,8 @@ mod tests {
                     socket: "codeconnect".into(),
                     name: "cc-1".into(),
                 })
-                .await,
+                .await
+                .presence,
             SessionPresence::Gone
         );
         let _ = std::fs::remove_file(&noisy);

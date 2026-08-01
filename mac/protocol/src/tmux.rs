@@ -193,7 +193,11 @@ pub enum SessionOwner {
 /// `unknown variable` is tmux confirming the session **exists** and simply has no
 /// such variable. Reading that failure as an absence would invent exactly the
 /// false exit this whole path is written to avoid.
-pub fn owner_from_probe(ok: bool, stdout: &str, stderr: &str) -> (SessionPresence, Option<SessionOwner>) {
+pub fn owner_from_probe(
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> (SessionPresence, Option<SessionOwner>) {
     if ok {
         let line = stdout.trim();
         let prefix = format!("{}=", crate::ENV_SESSION_UID);
@@ -202,14 +206,21 @@ pub fn owner_from_probe(ok: bool, stdout: &str, stderr: &str) -> (SessionPresenc
             // A stamp that is present but empty says nothing about identity, and
             // must not be compared against a row's uid as though it did.
             if !uid.is_empty() {
-                return (SessionPresence::Present, Some(SessionOwner::Uid(uid.to_string())));
+                return (
+                    SessionPresence::Present,
+                    Some(SessionOwner::Uid(uid.to_string())),
+                );
             }
         }
         // `-VAR`, an empty answer, or anything else tmux chose to print: the
         // session answered, so it is there; it just did not identify itself.
         return (SessionPresence::Present, Some(SessionOwner::Unstamped));
     }
-    if stderr.trim().to_ascii_lowercase().contains("unknown variable") {
+    if stderr
+        .trim()
+        .to_ascii_lowercase()
+        .contains("unknown variable")
+    {
         return (SessionPresence::Present, Some(SessionOwner::Unstamped));
     }
     (classify_absence(stderr), None)

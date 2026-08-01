@@ -409,6 +409,18 @@ struct PendingApproval {
     prompt: Option<PromptFingerprint>,
 }
 
+/// The run tmux says is holding a name, when it named one at all.
+///
+/// `None` covers both "nothing holds it" and "something holds it but cannot say
+/// which run it is" — neither of which identifies a *different* owner, which is
+/// the only thing this is used to report.
+fn holder(sighting: &crate::liveness::Sighting) -> Option<String> {
+    match sighting.owner {
+        Some(protocol::tmux::SessionOwner::Uid(ref uid)) => Some(uid.clone()),
+        _ => None,
+    }
+}
+
 impl Daemon {
     pub fn new(
         config: Config,
@@ -2616,14 +2628,26 @@ impl Daemon {
         // First look. Sequential on purpose: each is a subprocess round-trip of
         // a few milliseconds, and one child at a time is a bound that needs no
         // semaphore to be true.
-        let mut suspect: Vec<crate::liveness::Target> = Vec::new();
+        //
+        // **One probe per distinct name, but a verdict per row.** Presence is still
+        // a property of the server, so six rows that recorded `cc-1` remain one
+        // question and the sweep stays proportional to names rather than to rows.
+        // What changed is the reading: the answer now carries *whose* `cc-1` it is,
+        // so the same single answer says `Present` to the run that holds the name
+        // and `Gone` to the ones that used to.
+        let mut suspect: Vec<(crate::liveness::Target, SessionKey, Option<String>)> = Vec::new();
         for (target, sessions) in &by_target {
-            match prober.presence(target).await {
-                protocol::tmux::SessionPresence::Present => sweep.present += sessions.len(),
-                protocol::tmux::SessionPresence::Gone => suspect.push(target.clone()),
-                protocol::tmux::SessionPresence::Unknown(why) => {
-                    sweep.unknown += sessions.len();
-                    crate::log_debug!("liveness: {target} could not be established: {why}");
+            let sighting = prober.presence(target).await;
+            for session in sessions {
+                match sighting.verdict(&session.uid) {
+                    protocol::tmux::SessionPresence::Present => sweep.present += 1,
+                    protocol::tmux::SessionPresence::Gone => {
+                        suspect.push((target.clone(), session.clone(), holder(&sighting)))
+                    }
+                    protocol::tmux::SessionPresence::Unknown(why) => {
+                        sweep.unknown += 1;
+                        crate::log_debug!("liveness: {target} could not be established: {why}");
+                    }
                 }
             }
         }
@@ -2632,23 +2656,44 @@ impl Daemon {
         // so one look is not enough — a server restarting between the sweep and
         // the answer, or a probe that raced a server's startup, produces exactly
         // one `Gone` for a session that is running.
+        //
+        // Confirmed **per row**, not per name. Two rows sharing a name no longer
+        // share a fate: the one that holds it answers `Present` on every look while
+        // the other answers `Gone` on every look, and a per-name confirmation could
+        // only ever have given both the same verdict.
         for _ in 1..protocol::tmux::EXIT_CONFIRMATIONS {
             if suspect.is_empty() {
                 break;
             }
             tokio::time::sleep(recheck_delay).await;
+            // Still one child per distinct name in this round, however many rows
+            // are suspected under it.
+            let mut looks: std::collections::BTreeMap<
+                crate::liveness::Target,
+                crate::liveness::Sighting,
+            > = std::collections::BTreeMap::new();
+            for (target, _, _) in &suspect {
+                if !looks.contains_key(target) {
+                    looks.insert(target.clone(), prober.presence(target).await);
+                }
+            }
             let mut confirmed = Vec::with_capacity(suspect.len());
-            for target in suspect {
-                let sessions = by_target.get(&target).map_or(0, Vec::len);
-                match prober.presence(&target).await {
-                    protocol::tmux::SessionPresence::Gone => confirmed.push(target),
-                    // It came back, or we lost the ability to look. Either way
-                    // the first observation is no longer evidence of anything.
+            for (target, session, _) in suspect {
+                let sighting = looks.get(&target);
+                match sighting.map(|s| s.verdict(&session.uid)) {
+                    Some(protocol::tmux::SessionPresence::Gone) => {
+                        let held = sighting.and_then(holder);
+                        confirmed.push((target, session, held))
+                    }
+                    // It came back, it changed hands back to this run, or we lost
+                    // the ability to look. Any of those makes the first
+                    // observation no longer evidence of anything.
                     other => {
-                        sweep.unconfirmed += sessions;
+                        sweep.unconfirmed += 1;
                         crate::log_debug!(
-                            "liveness: {target} looked gone and then answered {other:?}; \
-                             leaving it alone"
+                            "liveness: {target} looked gone for {} and then answered {other:?}; \
+                             leaving it alone",
+                            session.uid
                         );
                     }
                 }
@@ -2656,18 +2701,32 @@ impl Daemon {
             suspect = confirmed;
         }
 
-        for target in suspect {
-            let Some(sessions) = by_target.get(&target) else {
-                continue;
-            };
-            for session in sessions {
-                crate::log_info!(
-                    "liveness: {} ({}) is marked exited — tmux says session {} is not on {}",
-                    session.name,
-                    session.uid,
-                    target.name,
-                    target.socket
-                );
+        {
+            for (target, session, held) in &suspect {
+                let session = &session.clone();
+                // Two different facts, and the log must not report the second as
+                // the first. A name nobody holds and a name held by a *newer run*
+                // both mean this run is gone, but only one of them means there is
+                // no such tmux session — and saying so when `cc-1` is plainly on
+                // screen is exactly the kind of claim this daemon does not make.
+                match held {
+                    Some(other) => crate::log_info!(
+                        "liveness: {} ({}) is marked exited — tmux session {} on {} is held by \
+                         {}, so this run is no longer the one running under that name",
+                        session.name,
+                        session.uid,
+                        target.name,
+                        target.socket,
+                        other
+                    ),
+                    None => crate::log_info!(
+                        "liveness: {} ({}) is marked exited — tmux says session {} is not on {}",
+                        session.name,
+                        session.uid,
+                        target.name,
+                        target.socket
+                    ),
+                }
                 self.mark_exited(
                     session,
                     // Nobody watched this run end, so there is no exit status to
@@ -5026,6 +5085,7 @@ mod tests {
         >,
         fallback: protocol::tmux::SessionPresence,
         asked: std::sync::Mutex<Vec<String>>,
+        owners: std::sync::Mutex<HashMap<String, String>>,
     }
 
     impl ScriptedPresence {
@@ -5034,6 +5094,7 @@ mod tests {
                 script: std::sync::Mutex::new(HashMap::new()),
                 fallback: presence,
                 asked: std::sync::Mutex::new(Vec::new()),
+                owners: std::sync::Mutex::new(HashMap::new()),
             }
         }
 
@@ -5046,23 +5107,48 @@ mod tests {
             self
         }
 
+        /// Which run tmux says is holding a name, as `show-environment` would
+        /// report it. A name with no entry answers as an unstamped session — the
+        /// legacy case, and the default every other test in this file exercises.
+        fn held_by(self, name: &str, uid: &str) -> Self {
+            self.owners
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), uid.to_string());
+            self
+        }
+
         fn asked(&self) -> Vec<String> {
             self.asked.lock().unwrap().clone()
         }
     }
 
     impl crate::liveness::Presence for ScriptedPresence {
-        async fn presence(
-            &self,
-            target: &crate::liveness::Target,
-        ) -> protocol::tmux::SessionPresence {
+        async fn presence(&self, target: &crate::liveness::Target) -> crate::liveness::Sighting {
             self.asked.lock().unwrap().push(target.name.clone());
-            let mut script = self.script.lock().unwrap();
-            match script.get_mut(&target.name) {
-                Some(queue) if queue.len() > 1 => queue.pop_front().unwrap(),
-                Some(queue) => queue.front().cloned().unwrap(),
-                None => self.fallback.clone(),
-            }
+            let presence = {
+                let mut script = self.script.lock().unwrap();
+                match script.get_mut(&target.name) {
+                    Some(queue) if queue.len() > 1 => queue.pop_front().unwrap(),
+                    Some(queue) => queue.front().cloned().unwrap(),
+                    None => self.fallback.clone(),
+                }
+            };
+            // Only a session that is there can have an owner, which is exactly
+            // what tmux does: `show-environment` against a name nothing holds
+            // fails with "no such session" and says nothing about identity.
+            let owner = match presence {
+                protocol::tmux::SessionPresence::Present => Some(
+                    self.owners
+                        .lock()
+                        .unwrap()
+                        .get(&target.name)
+                        .map(|uid| protocol::tmux::SessionOwner::Uid(uid.clone()))
+                        .unwrap_or(protocol::tmux::SessionOwner::Unstamped),
+                ),
+                _ => None,
+            };
+            crate::liveness::Sighting { presence, owner }
         }
     }
 
@@ -5099,6 +5185,69 @@ mod tests {
             .into_iter()
             .map(|event| event.kind)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_name_was_taken_by_a_newer_run_is_marked_exited() {
+        // **The second phantom, and the reason `session_uid` exists.** Found on
+        // the owner's machine after the first was fixed:
+        //
+        //   cc-1  01KYZ5E56X…  live  detached   /private/tmp/cc-tfpush   <- dead
+        //   cc-1  01KYZ6CRZA…  live  attached   /private/tmp/cc-fw       <- the real one
+        //   tmux: cc-1: 1 windows
+        //   liveness: 2 session(s) checked over 1 tmux name(s): 2 running
+        //
+        // Reproduced deterministically: a session killed and its name reclaimed
+        // 452ms later left the dead run reading `live` for as long as the name was
+        // held. `has-session` proves *some* session owns `cc-1` — never that every
+        // row recording `cc-1` is alive — and one `Present` was being spent on all
+        // of them.
+        let daemon = test_daemon();
+        let dead = "01KYZ5E56X0D1RT7ZVRYK1ZEF9";
+        let holder = "01KYZ6CRZAVTAJS15640KT0QJW";
+        seed_session(&daemon, dead, "cc-1", Lifecycle::Live);
+        seed_session(&daemon, holder, "cc-1", Lifecycle::Live);
+
+        // One name, present, held by the newer run — exactly what tmux reports.
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Present)
+            .held_by("cc-1", holder);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            lifecycle_of(&daemon, dead),
+            Lifecycle::Exited,
+            "a run whose name is held by somebody else is not running"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, holder),
+            Lifecycle::Live,
+            "and the run that actually holds it must be left alone"
+        );
+        assert_eq!((sweep.present, sweep.unknown), (1, 0));
+        // The exit is reported through the log, like any other, so a phone learns
+        // about it rather than finding a row changed underneath it.
+        assert!(kinds_of(&daemon, dead).contains(&EventKind::SessionEnd));
+        assert!(!kinds_of(&daemon, holder).contains(&EventKind::SessionEnd));
+    }
+
+    #[tokio::test]
+    async fn a_session_that_predates_the_stamp_is_never_called_dead() {
+        // The compatibility case, and the one that could turn this fix into a
+        // worse bug than it repairs. A session created before the daemon started
+        // asking has no `CODECONNECT_SESSION_UID`, so tmux answers "unknown
+        // variable" — the session is *there*, it simply cannot say whose it is.
+        // Read as an absence that would mark a running agent dead.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        // No `held_by`: the fake answers `Present` with no identity, which is what
+        // an unstamped session produces.
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Present);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+        assert_eq!(sweep.present, 1);
+        assert!(!kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
     }
 
     #[tokio::test]
