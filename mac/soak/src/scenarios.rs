@@ -894,8 +894,10 @@ pub async fn concurrent_commits(target: &Target, writers: u32) -> Outcome {
 
     // Strictly successive from the watermark: no reordering, no repeats, and —
     // the failure this exists for — nothing skipped.
-    let mut expected = from + 1;
-    for seq in &received {
+    // Zipped rather than a hand-rolled counter: the sequence *is* the index
+    // offset from the watermark, and saying so lets the compiler keep the two
+    // in step.
+    for (expected, seq) in (from + 1..).zip(received.iter()) {
         if *seq != expected {
             return Outcome::failed(format!(
                 "a socket saw seq {seq} where {expected} was due: an event was published out \
@@ -903,7 +905,6 @@ pub async fn concurrent_commits(target: &Target, writers: u32) -> Outcome {
             ))
             .with_notes(notes);
         }
-        expected += 1;
     }
     if resyncs > 0 {
         return Outcome::failed(format!(

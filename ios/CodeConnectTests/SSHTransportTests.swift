@@ -82,8 +82,25 @@ final class SSHTransportTests: XCTestCase {
 
     /// Trust-on-first-use, and a changed key is a mismatch rather than a
     /// silent overwrite.
+    /// **Skips only where the Keychain genuinely cannot be used.**
+    ///
+    /// Host-key pins live in the Keychain, and a Keychain write needs a
+    /// `keychain-access-group` entitlement — which an unsigned build does not
+    /// have. CI builds with `CODE_SIGNING_ALLOWED=NO`, so `SecItemAdd` fails
+    /// there with `errSecMissingEntitlement` and every pin reads back as nil.
+    /// That is the environment, not the product: signed builds, including every
+    /// run on a real device, store and retrieve normally.
+    ///
+    /// The skip is gated on a *probe* rather than on `#if` or a CI variable, so
+    /// it can only trigger where the Keychain has actually refused. A test that
+    /// skips on a signed build would be a test that stopped running without
+    /// anyone noticing.
     @MainActor
-    func testHostKeyPinningRoundTrip() {
+    func testHostKeyPinningRoundTrip() throws {
+        try XCTSkipUnless(
+            Self.keychainIsWritable(),
+            "the Keychain refused a write — unsigned build, no keychain entitlement")
+
         let host = "pin-test-\(UUID().uuidString.prefix(8))"
         defer { KnownHostKeys.forget(host: host, port: 22) }
 
@@ -97,4 +114,18 @@ final class SSHTransportTests: XCTestCase {
         KnownHostKeys.forget(host: host, port: 22)
         XCTAssertNil(KnownHostKeys.pin(host: host, port: 22), "forgetting a pin really forgets it")
     }
+
+    /// Round-trips one byte through the Keychain. `true` only when a write is
+    /// actually readable back.
+    private static func keychainIsWritable() -> Bool {
+        let account = "cc.keychain-probe.\(UUID().uuidString)"
+        defer { _ = Keychain.delete(account: account) }
+        do {
+            try Keychain.save(Data([0x01]), account: account)
+        } catch {
+            return false
+        }
+        return Keychain.load(account: account) == Data([0x01])
+    }
+
 }

@@ -208,9 +208,10 @@ impl Phone {
 /// Returns the complaint rather than a bool: a gauntlet report that says
 /// "failed" without saying where is a report nobody can act on.
 pub fn check_replay(events: &[Event], after_seq: u64, session_uid: &str) -> Result<()> {
-    let mut expected = after_seq + 1;
+    // Zipped rather than a hand-rolled counter: the expected sequence *is* the
+    // index offset from the watermark.
     let mut seen = std::collections::HashSet::new();
-    for event in events {
+    for (expected, event) in (after_seq + 1..).zip(events.iter()) {
         // A resync marker carries seq 0 by design and is not part of the run.
         if event.kind == protocol::event::EventKind::Resync {
             bail!("the daemon emitted a resync marker during a plain replay");
@@ -231,7 +232,6 @@ pub fn check_replay(events: &[Event], after_seq: u64, session_uid: &str) -> Resu
         if !seen.insert(event.seq) {
             bail!("replay repeated seq {}", event.seq);
         }
-        expected += 1;
     }
     Ok(())
 }

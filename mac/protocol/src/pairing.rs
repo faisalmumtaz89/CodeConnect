@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn alphabet_has_no_confusable_characters() {
-        for confusable in [b'I', b'O', b'0', b'1'] {
+        for confusable in *b"IO01" {
             assert!(
                 !PAIRING_ALPHABET.contains(&confusable),
                 "{} is confusable and must not be generated",
