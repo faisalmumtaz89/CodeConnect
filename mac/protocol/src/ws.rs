@@ -543,8 +543,15 @@ mod tests {
             crate::PROTOCOL_MINOR >= 5,
             "reconciled liveness — `live` meaning proven rather than unrefuted — is minor 5"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 6,
+            "`register_push` — the phone telling the daemon where to send a \
+             notification — is minor 6"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
-        assert_eq!(crate::PROTOCOL_MINOR, 5);
+        // The equality is the point: every bump has to come here and say what it
+        // added, so the list above stays a record rather than a guess.
+        assert_eq!(crate::PROTOCOL_MINOR, 6);
     }
 
     #[test]

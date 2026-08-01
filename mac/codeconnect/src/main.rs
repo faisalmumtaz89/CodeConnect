@@ -346,8 +346,25 @@ fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) 
 mod tests {
     use super::*;
 
+    /// Whether a bare command name resolves on this machine's `PATH`.
+    ///
+    /// Used to skip the two environment assertions below on a machine that has
+    /// no `claude` — a CI runner. They are not weakened: on any machine that
+    /// *has* it, both still run and still assert. Skipping on the strict
+    /// condition "the tool is absent" is the difference between a test that
+    /// cannot run here and a test that quietly stopped running everywhere.
+    fn on_path(name: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+            .unwrap_or(false)
+    }
+
     #[test]
     fn resolves_the_real_claude_on_this_machine() {
+        if !on_path("claude") {
+            eprintln!("skipped: no `claude` on PATH — nothing to resolve");
+            return;
+        }
         let path = resolve_claude_bin(&Config::default()).expect("claude must be installed");
         assert!(path.is_file());
         assert!(
@@ -371,6 +388,10 @@ mod tests {
 
     #[test]
     fn a_missing_override_falls_through_rather_than_failing() {
+        if !on_path("claude") {
+            eprintln!("skipped: no `claude` on PATH — nothing to fall through to");
+            return;
+        }
         let config = Config {
             claude_bin: Some("/nonexistent/claude".into()),
             ..Config::default()
