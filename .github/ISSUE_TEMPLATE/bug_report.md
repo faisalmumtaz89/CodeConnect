@@ -12,11 +12,11 @@ labels: bug
 
 **Environment**
 - macOS version:
-- `cc --version`:
+- `codeconnect --version`:
 - `claude --version`:
 - iPhone / iOS version (if the app is involved):
 
 **Evidence**
-`cc daemon status` output, anything relevant from `~/.codeconnect/logs/`, and a screenshot if it is visual.
+`codeconnect daemon status` output, anything relevant from `~/.codeconnect/logs/`, and a screenshot if it is visual.
 
 <!-- Please redact tokens, hostnames and anything an agent printed to stdout. -->

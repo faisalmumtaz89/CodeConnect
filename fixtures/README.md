@@ -8,7 +8,7 @@ failing silently in production.
 
 | Path | What it is |
 |---|---|
-| `hooks/acceptance-run.jsonl` | Every hook payload from one end-to-end `cc claude` session that went through `cc-hook` -> `ccd` (SessionStart, PreToolUse, PermissionRequest, Notification, PostToolUse, Stop). Daemon-added fields stripped. |
+| `hooks/acceptance-run.jsonl` | Every hook payload from one end-to-end `codeconnect claude` session that went through `cc-hook` -> `ccd` (SessionStart, PreToolUse, PermissionRequest, Notification, PostToolUse, Stop). Daemon-added fields stripped. |
 | `hooks/live-hook-payloads.jsonl` | Deduplicated payloads from the hook-semantics probes, including the `permission_prompt` Notification and multiple PermissionRequest shapes. |
 | `transcript/session-sample.jsonl` | A real session JSONL slice covering `mode`, `permission-mode`, `file-history-snapshot`, `user`, `attachment`, `ai-title`, `assistant` and `system` entries. |
 

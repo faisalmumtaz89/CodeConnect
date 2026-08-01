@@ -15,7 +15,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// what distinguishes a newer daemon from an older one.
     var protocolMinor: UInt32
     var capabilities: Capabilities?
-    /// What `cc devices` calls this phone, once the daemon has said.
+    /// What `codeconnect devices` calls this phone, once the daemon has said.
     var deviceName: String?
     /// Whether the daemon installed the SSH key this app offered. `nil` means it
     /// never said — an older daemon, or a hello that carried no key.
@@ -99,7 +99,7 @@ struct DaemonProfile: Sendable, Hashable {
             return "This iPhone's SSH key is authorised on the Mac."
         case .some(false):
             return
-                "The Mac received this iPhone's SSH key but did not install it. Run `cc pair --ssh` there and scan the code it prints — that is the only path that asks for consent at the terminal."
+                "The Mac received this iPhone's SSH key but did not install it. Run `codeconnect pair --ssh` there and scan the code it prints — that is the only path that asks for consent at the terminal."
         case .none:
             return nil
         }

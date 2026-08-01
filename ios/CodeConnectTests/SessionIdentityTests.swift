@@ -5,7 +5,7 @@ import XCTest
 /// Protocol minor 2: a session has an identity (`session_uid`) as well as a name
 /// (`session_id`), and the app keys everything by the identity.
 ///
-/// The bug all of this exists to prevent, stated once: `cc claude` takes the
+/// The bug all of this exists to prevent, stated once: `codeconnect claude` takes the
 /// lowest free tmux name, so when a run exits the next one is called `cc-1`
 /// again. Keying by that name made one `cc-1` timeline out of two unrelated
 /// agent runs — and made an answer to one of them addressable by the other.

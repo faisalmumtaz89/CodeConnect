@@ -4,16 +4,28 @@
 //! schema embedded in `claude` 2.1.220 and confirmed against live sessions.
 //! Two constraints drive every decision in this file:
 //!
-//! 1. `hookSpecificOutput` is a **union discriminated by `hookEventName`** whose
-//!    members are PreToolUse, UserPromptSubmit, UserPromptExpansion,
-//!    SessionStart, PostToolUse, PostToolBatch and Stop/SubagentStop. There is
-//!    **no PermissionRequest member.** Emitting one fails schema validation and
-//!    Claude then discards the *entire* hook output — so a well-meaning extra
-//!    field silently voids a real decision. Never emit it.
+//! 1. `hookSpecificOutput` is a **union discriminated by `hookEventName`**, and
+//!    `PermissionRequest` *is* a member of it — but with a different inner shape
+//!    from `PreToolUse`. It carries a nested `decision` object
+//!    (`{"behavior": "allow" | "deny", "message": …}`) rather than the flat
+//!    `permissionDecision` string.
+//!
+//!    This file previously asserted the opposite — that no such member existed —
+//!    and emitted a top-level `{"decision": "block"|"approve"}` instead. That
+//!    shape is **silently ignored** on `PermissionRequest`: measured on 2.1.220,
+//!    the local prompt still appeared and waited for the human, so approving or
+//!    denying from the phone did nothing at all. The isolating control: the same
+//!    top-level shape *is* honoured on `PreToolUse`, so the deciding factor was
+//!    the event, not the JSON.
+//!
+//!    Both directions of the nested shape are confirmed against a live 2.1.220
+//!    session: `allow` runs the tool with no prompt ("Allowed by
+//!    PermissionRequest hook"), `deny` blocks it and renders `message` to the
+//!    operator. Anything genuinely not in the union still voids the whole
+//!    output, so the rule "never emit a shape you have not measured" stands.
 //! 2. Only `PreToolUse` renders `permissionDecisionReason` to the operator
 //!    ("Hook PreToolUse:Bash requires confirmation for this command: <reason>").
-//!    `PermissionRequest` renders neither `permissionDecisionReason` nor
-//!    `systemMessage` (measured).
+//!    On `PermissionRequest` the operator-visible string is `decision.message`.
 //!
 //! Emitting nothing is always safe: the tool call proceeds exactly as it would
 //! under plain `claude`. That is the fail-open path cc-hook takes whenever the
@@ -205,25 +217,44 @@ impl HookDecision {
                 Some(serde_json::Value::Object(root).to_string())
             }
 
-            // PermissionRequest: only the generic top-level `decision` field is
-            // schema-valid. `ask` has no representation here, and none is
-            // needed — emitting nothing *is* "let the local prompt appear".
-            (HookEventName::PermissionRequest, Decision::Allow) => {
-                Some(r#"{"decision":"approve"}"#.to_string())
-            }
-            (HookEventName::PermissionRequest, Decision::Deny) => {
-                let mut root = serde_json::Map::new();
-                root.insert("decision".into(), "block".into());
-                root.insert(
-                    "reason".into(),
-                    serde_json::Value::String(
-                        self.reason
-                            .clone()
-                            .unwrap_or_else(|| "Denied via CodeConnect".to_string()),
-                    ),
+            // PermissionRequest: a nested decision object, not the flat
+            // `permissionDecision` string PreToolUse uses.
+            //
+            // `message` is only carried on a deny. On an allow there is nothing
+            // for it to say — the tool simply runs — and the field is omitted
+            // rather than filled with a courtesy string, so the operator only
+            // ever reads text that explains a refusal.
+            (HookEventName::PermissionRequest, decision @ (Decision::Allow | Decision::Deny)) => {
+                let mut nested = serde_json::Map::new();
+                nested.insert(
+                    "behavior".into(),
+                    if decision == Decision::Allow {
+                        "allow"
+                    } else {
+                        "deny"
+                    }
+                    .into(),
                 );
+                if decision == Decision::Deny {
+                    nested.insert(
+                        "message".into(),
+                        serde_json::Value::String(
+                            self.reason
+                                .clone()
+                                .unwrap_or_else(|| "Denied via CodeConnect".to_string()),
+                        ),
+                    );
+                }
+                let mut inner = serde_json::Map::new();
+                inner.insert("hookEventName".into(), "PermissionRequest".into());
+                inner.insert("decision".into(), nested.into());
+                let mut root = serde_json::Map::new();
+                root.insert("hookSpecificOutput".into(), inner.into());
                 Some(serde_json::Value::Object(root).to_string())
             }
+
+            // `ask` has no representation here, and needs none: printing nothing
+            // *is* "let the local prompt appear".
             (HookEventName::PermissionRequest, Decision::Ask) => None,
 
             // Observability-only events never carry a decision.
@@ -266,25 +297,41 @@ mod tests {
     }
 
     #[test]
-    fn permission_request_never_emits_hook_specific_output() {
-        // Regression guard for the schema trap: a PermissionRequest member does
-        // not exist in the union, and an unknown member voids the whole output.
-        for decision in [Decision::Allow, Decision::Deny, Decision::Ask] {
-            let rendered = HookDecision {
-                decision,
-                reason: Some("r".into()),
-            }
-            .render(&HookEventName::PermissionRequest);
-            if let Some(out) = rendered {
-                assert!(
-                    !out.contains("hookSpecificOutput"),
-                    "PermissionRequest output must stay on top-level fields: {out}"
-                );
-                let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-                let d = v["decision"].as_str().unwrap();
-                assert!(d == "approve" || d == "block", "invalid decision {d}");
-            }
+    fn permission_request_emits_the_nested_shape_claude_actually_honours() {
+        // This test used to assert the exact opposite — that PermissionRequest
+        // must *never* emit `hookSpecificOutput` — and so pinned a decision
+        // Claude Code silently discards. Measured on 2.1.220: the nested shape
+        // below enforces in both directions, and the flat top-level shape this
+        // once required is ignored while the local prompt still waits for a
+        // human. Assert the shape that was observed to work.
+        let allow = HookDecision {
+            decision: Decision::Allow,
+            reason: None,
         }
+        .render(&HookEventName::PermissionRequest)
+        .expect("allow must render");
+        let v: serde_json::Value = serde_json::from_str(&allow).unwrap();
+        let inner = &v["hookSpecificOutput"];
+        assert_eq!(inner["hookEventName"], "PermissionRequest");
+        assert_eq!(inner["decision"]["behavior"], "allow");
+        // Nothing to explain when the tool simply runs.
+        assert!(
+            inner["decision"].get("message").is_none(),
+            "allow must not carry a message: {allow}"
+        );
+
+        let deny = HookDecision {
+            decision: Decision::Deny,
+            reason: Some("Denied from iPhone".into()),
+        }
+        .render(&HookEventName::PermissionRequest)
+        .expect("deny must render");
+        let v: serde_json::Value = serde_json::from_str(&deny).unwrap();
+        let inner = &v["hookSpecificOutput"];
+        assert_eq!(inner["hookEventName"], "PermissionRequest");
+        assert_eq!(inner["decision"]["behavior"], "deny");
+        // The operator reads this string, so it has to be the caller's reason.
+        assert_eq!(inner["decision"]["message"], "Denied from iPhone");
     }
 
     #[test]

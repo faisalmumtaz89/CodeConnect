@@ -1,8 +1,8 @@
 #!/bin/bash
-# Run the chaos gauntlet against a real `cc claude` session.
+# Run the chaos gauntlet against a real `codeconnect claude` session.
 #
 # What this script exists to do is start a *genuine* session — not a fixture —
-# and then get out of the way. `cc claude` execs into a tmux client, so it needs
+# and then get out of the way. `codeconnect claude` execs into a tmux client, so it needs
 # a terminal; the trick is to give it one by running it inside a pane on a
 # throwaway tmux server (`-L ccsoak-driver`). The session it creates lives on the
 # `codeconnect` server, so tearing the driver down at the end detaches a client
@@ -47,16 +47,16 @@ soak_bin="$root/target/debug/ccsoak"
 say "daemon"
 # The kill storm needs something to bring ccd back. Installing is idempotent and
 # takes over from a daemon started by hand.
-"$bin/cc" daemon status || true
-if ! "$bin/cc" daemon status | grep -q 'managed  yes'; then
-    "$bin/cc" daemon install
+"$bin/codeconnect" daemon status || true
+if ! "$bin/codeconnect" daemon status | grep -q 'managed  yes'; then
+    "$bin/codeconnect" daemon install
 else
     # Already managed — and therefore still running the binary it was started
     # with. `install.sh` above replaced the file on disk; launchd keeps
     # executing the process it already has. Without this restart the gauntlet
     # attacks the *previous* build and reports passes for code that was never
     # loaded, which ccsoak now also refuses on a protocol-minor mismatch.
-    "$bin/cc" daemon restart
+    "$bin/codeconnect" daemon restart
 fi
 
 session_ref="$existing"
@@ -64,7 +64,7 @@ workdir=""
 if [ -z "$session_ref" ]; then
     say "starting a session"
     # `pwd -P`: mktemp hands back /var/folders/…, which is a symlink to
-    # /private/var/folders/…. `cc claude` records the physical path, so matching
+    # /private/var/folders/…. `codeconnect claude` records the physical path, so matching
     # on the logical one would never find the session it just created.
     workdir="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/ccsoak-work.XXXXXX")" && pwd -P)"
     # A tiny repo so `get_diff` and the transcript have something real to chew
@@ -76,13 +76,13 @@ if [ -z "$session_ref" ]; then
 
     "$tmux_bin" -L "$driver_server" kill-server 2>/dev/null || true
     "$tmux_bin" -L "$driver_server" new-session -d -s driver -x 200 -y 50 \
-        -c "$workdir" "$bin/cc claude; sleep 600"
+        -c "$workdir" "$bin/codeconnect claude; sleep 600"
 
     printf 'waiting for the session to register'
     for _ in $(seq 1 60); do
         # `index` rather than a field comparison: a working directory may
         # contain spaces, and awk would split it across columns.
-        found="$("$bin/cc" ls 2>/dev/null | awk -v d="$workdir" 'index($0, d) {print $1; exit}')"
+        found="$("$bin/codeconnect" ls 2>/dev/null | awk -v d="$workdir" 'index($0, d) {print $1; exit}')"
         if [ -n "$found" ]; then
             session_ref="$found"
             break
@@ -126,7 +126,7 @@ cleanup() {
     if [ "$keep" -eq 1 ]; then
         echo
         echo "left running: session $session_ref${workdir:+ in $workdir}"
-        echo "  attach with: $bin/cc attach $session_ref"
+        echo "  attach with: $bin/codeconnect attach $session_ref"
         return
     fi
     if [ -n "$workdir" ]; then

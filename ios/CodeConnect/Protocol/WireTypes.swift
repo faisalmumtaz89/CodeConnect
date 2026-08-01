@@ -719,7 +719,7 @@ extension SessionDiff: Decodable {
 
 /// How the phone proves it may talk to this daemon.
 enum HelloCredential: Sendable, Hashable {
-    /// A device token from a previous pairing, or the static `cc token`.
+    /// A device token from a previous pairing, or the static `codeconnect token`.
     case token(String)
     /// Single-use, 5-minute code straight off the QR. The daemon answers with a
     /// device token, which is what gets stored.
@@ -736,7 +736,7 @@ enum HelloCredential: Sendable, Hashable {
 /// `sendText` that would type into the wrong agent's TTY.
 enum ClientMessage: Sendable {
     /// `sshPublicKey` is offered on every hello but only ever *acted on* by a
-    /// daemon whose operator ran `cc pair --ssh` — consent lives at the Mac's
+    /// daemon whose operator ran `codeconnect pair --ssh` — consent lives at the Mac's
     /// terminal, not in this message.
     case hello(
         credential: HelloCredential, clientID: String?, clientName: String?,
@@ -753,6 +753,10 @@ enum ClientMessage: Sendable {
     case sendText(session: String, text: String, require: PromptPresence?, submit: Bool)
     case capture(session: String, lines: UInt32?)
     case getDiff(session: String)
+    /// "Push me here." Sent whenever Apple issues a token, not only at
+    /// handshake: permission can be granted mid-session and the token is
+    /// reissued on reinstall and on restore-from-backup.
+    case registerPush(token: String, environment: String)
     case ping
 }
 
@@ -767,6 +771,7 @@ extension ClientMessage: Encodable {
         case clientName = "client_name"
         case sessionID = "session_id"
         case afterSeq = "after_seq"
+        case environment
         case requestID = "request_id"
         case payloadHash = "payload_hash"
         case decision
@@ -828,6 +833,10 @@ extension ClientMessage: Encodable {
             try c.encode("capture", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encodeIfPresent(lines, forKey: .lines)
+        case .registerPush(let token, let environment):
+            try c.encode("register_push", forKey: .type)
+            try c.encode(token, forKey: .token)
+            try c.encode(environment, forKey: .environment)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -851,7 +860,7 @@ struct HelloAck: Sendable, Hashable {
     /// credential; the code that bought it is spent.
     var deviceToken: String?
     var deviceID: String?
-    /// What `cc devices` lists this phone as, and what `cc revoke` takes. May
+    /// What `codeconnect devices` lists this phone as, and what `codeconnect revoke` takes. May
     /// differ from the requested name when that one was taken.
     var deviceName: String?
     /// Whether the offered SSH key was actually installed. Reported even when

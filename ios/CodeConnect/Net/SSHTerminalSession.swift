@@ -400,7 +400,7 @@ final class SSHTerminalSession {
         if text.contains("authenticationFailed") || text.contains("allAuthenticationOptionsFailed")
         {
             return
-                "The Mac refused this iPhone's key. Run `cc pair --ssh` at the Mac and scan the QR it prints — only that adds this phone to authorized_keys."
+                "The Mac refused this iPhone's key. Run `codeconnect pair --ssh` at the Mac and scan the QR it prints — only that adds this phone to authorized_keys."
         }
         if text.contains("connectTimeout") || text.contains("connectionTimeout") {
             return "The Mac did not answer in time."
@@ -424,7 +424,7 @@ enum SSHTerminalError: Error, CustomStringConvertible {
             return "The Mac's SSH host key is not the one this iPhone pinned."
         case .noAcceptableAuthMethod:
             return
-                "The Mac would not accept this iPhone's key. Run `cc pair --ssh` at the Mac and scan the QR it prints — only that adds this phone to authorized_keys."
+                "The Mac would not accept this iPhone's key. Run `codeconnect pair --ssh` at the Mac and scan the QR it prints — only that adds this phone to authorized_keys."
         }
     }
 }
@@ -524,7 +524,7 @@ private final class TerminalDataHandler: ChannelDuplexHandler {
             return "tmux detached. The agent is still running on the Mac."
         case .some(let code):
             return
-                "tmux exited with status \(code). If the session has ended, `cc attach` on the Mac will say so."
+                "tmux exited with status \(code). If the session has ended, `codeconnect attach` on the Mac will say so."
         }
     }
 }

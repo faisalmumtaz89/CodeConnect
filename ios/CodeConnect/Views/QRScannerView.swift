@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 import VisionKit
 
-/// Camera scanner for the `cc pair` QR code.
+/// Camera scanner for the `codeconnect pair` QR code.
 ///
 /// `DataScannerViewController` only, with no AVFoundation fallback, and that is
 /// a considered choice rather than a gap: it requires an A12 or newer chip,

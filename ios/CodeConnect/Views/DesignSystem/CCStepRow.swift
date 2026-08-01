@@ -5,7 +5,7 @@ import SwiftUI
 // =============================================================================
 
 /// One step of a procedure the *app cannot do for you*: switching on Remote
-/// Login, running `cc pair` at the Mac, authorising a key.
+/// Login, running `codeconnect pair` at the Mac, authorising a key.
 ///
 /// That framing is the reason this is a component rather than a stack of
 /// `Text`s. Every screen that uses it is a screen where CodeConnect is asking
@@ -267,7 +267,7 @@ extension CCStepRow where Detail == EmptyView {
                         index: 3,
                         title: "Then authorise this iPhone",
                         message: "Run this at the Mac and scan the QR it prints.",
-                        command: "cc pair --ssh")
+                        command: "codeconnect pair --ssh")
                 }
             }
         }

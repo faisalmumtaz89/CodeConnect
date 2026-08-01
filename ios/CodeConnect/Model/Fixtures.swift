@@ -243,6 +243,25 @@
                 "payload":{"tool_use_id":"toolu_fixture_running","tool_name":"Bash",\
                 "tool_input":{"command":"echo soak"}}}}
                 """,
+                // **Three tools, three different label widths.** One tool row
+                // cannot show a ragged column, so with a single `Bash` the one
+                // place the commands have to share a left edge was unreachable
+                // from a fixture — and a state nobody can reach is a state
+                // nobody has looked at. `Read` and `MultiEdit` bracket `Bash`
+                // on either side, which is what makes the column visible in a
+                // render and assertable in a test.
+                """
+                {"type":"event","event":{"seq":15,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_read","tool_name":"Read",\
+                "tool_input":{"file_path":"/Users/dev/app/README.md"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":16,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_multi","tool_name":"MultiEdit",\
+                "tool_input":{"file_path":"/Users/dev/app/Sources/Router.swift"}}}}
+                """,
             ]
         }
 

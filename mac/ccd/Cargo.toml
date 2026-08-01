@@ -21,6 +21,10 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+h2 = { workspace = true }
+http = { workspace = true }
+ring = { workspace = true }
+rustls-native-certs = { workspace = true }
 notify = { workspace = true }
 
 [dev-dependencies]

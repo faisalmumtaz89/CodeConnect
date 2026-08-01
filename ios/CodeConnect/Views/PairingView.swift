@@ -9,8 +9,8 @@ import UIKit
 /// in one place and this one links to it, rather than restating connection,
 /// transport and capability rows in a second style.
 ///
-/// Both ways in are kept: scanning the QR `cc pair` prints is the fast path and
-/// the one that can hand back a device token; typing an address and a `cc token`
+/// Both ways in are kept: scanning the QR `codeconnect pair` prints is the fast path and
+/// the one that can hand back a device token; typing an address and a `codeconnect token`
 /// still works, because a camera that will not focus at 2am must never be the
 /// only way to reach your own Mac.
 struct PairingView: View {
@@ -96,7 +96,7 @@ struct PairingView: View {
 
         CCCard(padding: 0) {
             VStack(spacing: 0) {
-                CCStepRow(index: 1, title: "At the Mac", command: "cc pair")
+                CCStepRow(index: 1, title: "At the Mac", command: "codeconnect pair")
                 CCHairline()
                 CCStepRow(
                     index: 2,
@@ -159,7 +159,7 @@ struct PairingView: View {
                 .transition(.opacity)
         }
 
-        Text("The code is single-use and expires five minutes after cc pair prints it.")
+        Text("The code is single-use and expires five minutes after codeconnect pair prints it.")
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -295,10 +295,10 @@ struct PairingView: View {
 
     private var manualEntryBlockedReason: CCDisabledReason? {
         if address.trimmingCharacters(in: .whitespaces).isEmpty {
-            return CCDisabledReason("An address is needed — the one `cc pair` printed.")
+            return CCDisabledReason("An address is needed — the one `codeconnect pair` printed.")
         }
         if token.trimmingCharacters(in: .whitespaces).isEmpty {
-            return CCDisabledReason("A pairing code or a `cc token` is needed.")
+            return CCDisabledReason("A pairing code or a `codeconnect token` is needed.")
         }
         return nil
     }
@@ -566,7 +566,7 @@ struct PairingView: View {
             }
 
             Text(
-                "Removes the token from the Keychain and deletes cached events. The SSH key stays until you remove it under Terminal and SSH; revoke it at the Mac with `cc ssh-revoke`."
+                "Removes the token from the Keychain and deletes cached events. The SSH key stays until you remove it under Terminal and SSH; revoke it at the Mac with `codeconnect ssh-revoke`."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -619,7 +619,7 @@ struct PairingView: View {
     private func save() {
         guard let credential = PairingCredentialInput.classify(token) else {
             validationError =
-                "That is neither an eight-character pairing code nor a `cc token`."
+                "That is neither an eight-character pairing code nor a `codeconnect token`."
             return
         }
         guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
@@ -676,7 +676,7 @@ struct PairingScanSheet: View {
                     glyph: "camera.metering.unknown",
                     title: "No scanner on this device",
                     message:
-                        "This device cannot run the code scanner. Close this and pair with an address and a `cc token` instead.",
+                        "This device cannot run the code scanner. Close this and pair with an address and a `codeconnect token` instead.",
                     detail: nil,
                     primaryTitle: "Pair by hand",
                     primary: onManualEntry,
@@ -722,7 +722,7 @@ struct PairingScanSheet: View {
             .ignoresSafeArea()
         }
         .overlay(alignment: .bottom) { torchButton }
-        .accessibilityLabel("Point the camera at the QR code printed by cc pair on your Mac.")
+        .accessibilityLabel("Point the camera at the QR code printed by codeconnect pair on your Mac.")
     }
 
     private func unavailable(

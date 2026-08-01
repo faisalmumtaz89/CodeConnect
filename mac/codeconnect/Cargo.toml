@@ -1,5 +1,5 @@
 [package]
-name = "cc"
+name = "codeconnect"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "CodeConnect shim: hosts a real claude session in a private tmux server, attached in place."
 
 [[bin]]
-name = "cc"
+name = "codeconnect"
 path = "src/main.rs"
 
 # No tokio: the shim execs away within milliseconds and the supervisor is a

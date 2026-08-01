@@ -56,7 +56,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run `cc pair`. Nothing is recorded or sent anywhere.</string>
+	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run `codeconnect pair`. Nothing is recorded or sent anywhere.</string>
 	<!-- Deep-link target: `codeconnect://deck` and
 	     `codeconnect://session/<id>`. The same routes are what a push
 	     notification will open, which is why they exist before the thing that aims
@@ -65,7 +65,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.codeconnect.CodeConnect</string>
+			<string>com.codeconnect.remote</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLSchemes</key>

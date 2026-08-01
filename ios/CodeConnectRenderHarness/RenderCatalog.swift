@@ -257,6 +257,27 @@ enum RenderCatalog {
                 try driver.require(app.buttons["open-diff"], "the session detail")
             }),
 
+        // **A column of tool rows, which nothing else reaches.** The `deck`
+        // fixture's first session has a single approval and no tool calls, so
+        // the one place tool rows stack — where their commands have to share a
+        // left edge, and where their 44pt targets are paid for — was never
+        // photographed. `stacked` puts `Bash`, `Read` and `MultiEdit` on one
+        // run precisely because their labels are three different widths.
+        RenderScenario(
+            name: "session-tool-rows",
+            purpose: "a column of tool calls, with the labels at three widths",
+            // Deep-linked rather than tapped. At AX5 the Running band is far
+            // below the fold, so a tap-driven route reached this at reading
+            // size and failed the pass at AX5 — and a scenario that only
+            // renders at one size is exactly the coverage gap this catalogue
+            // exists to close.
+            arguments: [
+                "-CC_FIXTURE", "stacked", "-CC_DEEPLINK", "codeconnect://session/fx-5",
+            ],
+            reach: { app, driver in
+                try driver.require(app.buttons["open-diff"], "the session detail")
+            }),
+
         RenderScenario(
             name: "diff-sample",
             purpose: "the diff grid, every part of it at once",

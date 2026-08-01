@@ -358,6 +358,73 @@ final class RiskAndDeckTests: XCTestCase {
     /// trip over. An `.infinity` in this state trapped a `Text` interpolation
     /// on the card and crash-looped the app; it would also have made
     /// "unmeasured" indistinguishable from "very far down the document".
+    /// **The bug the real device found and every simulator run missed.**
+    ///
+    /// The four geometry facts arrive as four separate `onPreferenceChange`
+    /// callbacks, in whatever order SwiftUI delivers them. `actionBarHeight`
+    /// defaulted to `0` — a legitimate value meaning "covers nothing" — so a
+    /// frame in which the viewport had been reported and the bar had not
+    /// computed `visibleBottom` as the *whole* scroll view, which extends
+    /// underneath the pinned bar. A command hidden behind that bar measured as
+    /// visible, and because the flags are deliberately sticky, that single
+    /// frame opened the gate permanently.
+    ///
+    /// Measured on an iPhone Air at AX5: a MEDIUM `Write` with 13 characters of
+    /// its path on screen and `Allow` drawn as the enabled white primary. At
+    /// MEDIUM there is no hold and no Face ID, so this gate was the only thing
+    /// in the way. HIGH survived only because it also needs the provenance.
+    ///
+    /// "Not measured yet" and "measures zero" must therefore be different
+    /// values, exactly as they already are for every edge on this probe.
+    @MainActor
+    func testTheBarsHeightArrivingLateCannotOpenTheGate() {
+        var probe = ReadGateProbe()
+        // The scroll view is 800pt tall; the bar covers the bottom 140pt; the
+        // command block ends at 760pt — behind the bar, unreadable.
+        probe.viewportBottom = 800
+
+        XCTAssertNil(
+            probe.visibleBottom,
+            "the bar has not reported yet, so how much of the viewport is readable is unknown")
+
+        var gate = ReadGate()
+        if let visible = probe.visibleBottom,
+            ReadGate.isVisible(bottom: 760, visibleBottom: visible) {
+            gate.hasSeenCommand = true
+        }
+        XCTAssertFalse(
+            gate.hasSeenCommand,
+            "a command behind a bar that has not been measured has not been read")
+
+        // The bar reports, and the same command is still unreadable.
+        probe.actionBarHeight = 140
+        XCTAssertEqual(probe.visibleBottom, 660)
+        XCTAssertFalse(
+            ReadGate.isVisible(bottom: 760, visibleBottom: 660),
+            "760 is behind the bar; nobody has read it")
+        XCTAssertFalse(gate.isOpen(at: .low))
+        XCTAssertFalse(gate.isOpen(at: .medium))
+
+        // **The values the device actually reported**, captured at the instant
+        // the flag latched: the bar said it was 1pt tall on an early layout
+        // pass, so the readable region came out 167pt too generous and a
+        // command 4pt inside it counted as read.
+        var transient = ReadGateProbe()
+        transient.viewportBottom = 853
+        transient.actionBarHeight = 1
+        XCTAssertNil(
+            transient.visibleBottom,
+            "a bar shorter than one tappable control has not been laid out")
+
+        var settled = ReadGateProbe()
+        settled.viewportBottom = 853
+        settled.actionBarHeight = 168
+        XCTAssertEqual(settled.visibleBottom, 685)
+        XCTAssertFalse(
+            ReadGate.isVisible(bottom: 848, visibleBottom: 685),
+            "the command the device showed ends behind the bar")
+    }
+
     func testUnmeasuredGeometryLeavesTheGateShut() {
         XCTAssertFalse(
             ReadGate.isVisible(bottom: nil, visibleBottom: 600),

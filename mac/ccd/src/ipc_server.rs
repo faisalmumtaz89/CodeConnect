@@ -34,7 +34,7 @@ pub async fn serve(daemon: Arc<Daemon>, socket_path: PathBuf) -> Result<()> {
 
     // One permit per live connection. Not a defence against a hostile peer —
     // the socket is `0600`, so reaching it means being this account — but
-    // against a runaway: a shell loop spawning `cc ls`, or a hook storm, used
+    // against a runaway: a shell loop spawning `codeconnect ls`, or a hook storm, used
     // to spawn a task and hold a descriptor per attempt with no ceiling at all,
     // and exhausting the descriptor budget here takes the *tailnet* listener
     // down with it.
@@ -84,7 +84,16 @@ async fn reclaim_socket(path: &Path) -> Result<()> {
             path.display()
         ),
         Err(_) => {
-            crate::log_warn!("removing stale socket {}", path.display());
+            // Not a warning. Reaching here means the connect *failed*, which is
+            // to say nothing is listening — so the file is a leftover and
+            // removing it is the only correct action, never a fault. It is the
+            // ordinary state after a `kill -9`, and this product's central
+            // claim is that a `kill -9` costs nothing but a reconnect: a daemon
+            // that warns every time it makes good on that promise is teaching
+            // its operator to skim past warnings. Measured on the owner's
+            // machine: 90 of these in one error log, one per restart, against
+            // 105 starts.
+            crate::log_info!("removing stale socket {}", path.display());
             std::fs::remove_file(path)
                 .with_context(|| format!("removing stale socket {}", path.display()))?;
             Ok(())
@@ -104,7 +113,7 @@ type Inflight =
 async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     // Bounded, and the bound is the point. This used to be an unbounded
-    // channel, so a client that stopped reading — a `cc ls` suspended with
+    // channel, so a client that stopped reading — a `codeconnect ls` suspended with
     // ctrl-Z, a supervisor whose process is stopped — let the daemon buffer
     // frames on its behalf until memory ran out, with nothing anywhere saying
     // so. Bounded turns that into backpressure the *reader* feels: the read
@@ -223,7 +232,7 @@ async fn read_loop(
             }
             ClientFrame::ListSessions => {
                 // An unreadable database is reported, not rendered as an empty
-                // fleet. `cc ls` printing nothing is the operator's evidence
+                // fleet. `codeconnect ls` printing nothing is the operator's evidence
                 // that no sessions exist, and it must not also be what a failed
                 // query looks like.
                 let frame = match daemon.sessions().await {
@@ -237,6 +246,75 @@ async fn read_loop(
                 };
                 let _ = tx.send(frame).await;
             }
+            ClientFrame::PruneSessions { dry_run } => {
+                // Counted before the prune, so the two halves of the report
+                // describe the same moment: what went, and what was left behind
+                // and why.
+                let (kept_live, kept_unknown) = match daemon.sessions().await {
+                    Ok(sessions) => (
+                        sessions
+                            .iter()
+                            .filter(|s| {
+                                matches!(
+                                    s.lifecycle,
+                                    protocol::event::Lifecycle::Live
+                                        | protocol::event::Lifecycle::Spawning
+                                )
+                            })
+                            .count(),
+                        sessions
+                            .iter()
+                            .filter(|s| s.lifecycle == protocol::event::Lifecycle::Unknown)
+                            .count(),
+                    ),
+                    Err(err) => {
+                        crate::log_error!("prune: could not read the session list: {err:#}");
+                        (0, 0)
+                    }
+                };
+                // Counted after the prune, so it describes what is left rather
+                // than what was there — and reported however the prune went,
+                // because an orphan is invisible everywhere else.
+                let frame = match daemon.prune_ended_sessions(dry_run).await {
+                    Ok(removed) => DaemonFrame::Pruned {
+                        // Counted *after*, unlike the two above, and that is the
+                        // point: an ended run still present once the prune has
+                        // run is one the prune deliberately held back. On a dry
+                        // run everything is still there, so subtract what would
+                        // have gone rather than reporting the whole set as held.
+                        kept_held: match daemon.sessions().await {
+                            Ok(sessions) => sessions
+                                .iter()
+                                .filter(|s| s.lifecycle == protocol::event::Lifecycle::Exited)
+                                .count()
+                                .saturating_sub(if dry_run { removed.len() } else { 0 }),
+                            Err(_) => 0,
+                        },
+                        orphan_events: daemon.db.orphan_event_count().await.unwrap_or_default(),
+                        removed: removed
+                            .into_iter()
+                            .map(|row| protocol::ipc::PrunedSummary {
+                                session_uid: row.session_uid,
+                                session_id: row.session_id,
+                                cwd: row.cwd,
+                                created_at: row.created_at,
+                                updated_at: row.updated_at,
+                                events: row.events,
+                            })
+                            .collect(),
+                        kept_live,
+                        kept_unknown,
+                        dry_run,
+                    },
+                    // A failed prune is an error, never an empty removal list:
+                    // "nothing needed removing" and "the delete failed" must
+                    // not print the same way.
+                    Err(err) => DaemonFrame::Error {
+                        message: format!("could not prune ended sessions: {err:#}"),
+                    },
+                };
+                let _ = tx.send(frame).await;
+            }
             ClientFrame::CreatePairing {
                 ttl_secs,
                 allow_ssh,
@@ -244,7 +322,7 @@ async fn read_loop(
                 // The socket is 0600, so reaching this point already means the
                 // caller is the owner of this account — the same person who
                 // would be typing at the keyboard. That is what makes
-                // `cc pair --ssh` count as consent.
+                // `codeconnect pair --ssh` count as consent.
                 let ttl = if ttl_secs == 0 {
                     daemon.config.pairing_ttl_secs
                 } else {

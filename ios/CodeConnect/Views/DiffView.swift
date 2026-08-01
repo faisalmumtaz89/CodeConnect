@@ -64,7 +64,7 @@ struct DiffSheet: View {
             "Diff · `\(model.displayName(for: key))`",
             onClose: { dismiss() },
             closeLabel: "Done",
-            trailing: { refreshButton }
+            trailing: { DiffRefreshButton(isLoading: state.isLoading) { start(force: true) } }
         ) {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -87,37 +87,6 @@ struct DiffSheet: View {
                 start(force: true)
             }
         }
-    }
-
-    // MARK: Chrome
-
-    /// The bordered circle, drawn by us rather than by the platform's toolbar.
-    ///
-    /// The circle is a `@ScaledMetric`, not a constant: `CCIcon` grows with
-    /// Dynamic Type, and a growing glyph inside a fixed 28pt circle escapes it —
-    /// measured at `accessibility-extra-large`, where the arrow overflowed the
-    /// border entirely and the ring vanished.
-    private var refreshButton: some View {
-        Button {
-            start(force: true)
-        } label: {
-            CCIcon("arrow.clockwise", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
-                .foregroundStyle(state.isLoading ? CC.text.disabled : CC.text.primary)
-                .ccGlyphContainer(CC.size.glyph, relativeTo: .footnote)
-                .ccHitTarget()
-        }
-        .buttonStyle(.plain)
-        .disabled(state.isLoading || refreshBlockedReason != nil)
-        .accessibilityLabel("Ask the Mac for a fresh diff")
-        // The visible reason for this control lives in the content beneath it —
-        // the ticking wait notice while it is loading, the link's own account of
-        // itself when the link is what stopped it. A header row has nowhere to
-        // draw a sentence, so the sentence is drawn where there is room for it.
-        .accessibilityHint(refreshBlockedReason ?? "")
-    }
-
-    private var refreshBlockedReason: String? {
-        model.linkHealth.disabledReason
     }
 
     // MARK: States
@@ -311,8 +280,8 @@ struct DiffSheet: View {
 /// `-CC_FIXTURE` seam the app already ships: none of it exists in a release
 /// build.
 ///
-///     xcrun simctl launch <udid> com.codeconnect.CodeConnect -cc.debug.diff sample
-///     xcrun simctl launch <udid> com.codeconnect.CodeConnect -cc.debug.diff truncated
+///     xcrun simctl launch <udid> com.codeconnect.remote -cc.debug.diff sample
+///     xcrun simctl launch <udid> com.codeconnect.remote -cc.debug.diff truncated
 enum DiffDesignState {
     static var sample: (raw: SessionDiff, parsed: UnifiedDiff)? {
         #if DEBUG
@@ -451,6 +420,105 @@ private struct DiffSkeleton: View {
 }
 
 // MARK: - Document
+
+/// **The refresh control, clocked by itself.**
+///
+/// The bordered circle, drawn by us rather than by the platform's toolbar.
+///
+/// The circle is a `@ScaledMetric`, not a constant: `CCIcon` grows with Dynamic
+/// Type, and a growing glyph inside a fixed 28pt circle escapes it — measured at
+/// `accessibility-extra-large`, where the arrow overflowed the border entirely
+/// and the ring vanished.
+///
+/// **It is a view rather than a `@ViewBuilder` property because of where it is
+/// evaluated.** `CCSheetChrome` holds `trailing` as an escaping closure and
+/// calls it from *its* body, so a `model.linkHealth` read inside that closure
+/// became `CCSheetChrome`'s dependency — and `CCSheetChrome` also calls
+/// `content()`, which is the whole diff. One toolbar button asking whether the
+/// link can carry a refresh therefore rebuilt every hunk on the sheet once a
+/// second: measured on the fixture diff, sitting untouched, **1.09 document
+/// bodies per second**. Constructing this view reads nothing; the read happens
+/// in its own body, where it costs one glyph.
+///
+/// The control still disables itself the moment the link cannot carry the
+/// request, and still states the reason. That is the point of it.
+private struct DiffRefreshButton: View {
+    let isLoading: Bool
+    let refresh: () -> Void
+
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button(action: refresh) {
+            CCIcon("arrow.clockwise", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
+                .foregroundStyle(isLoading ? CC.text.disabled : CC.text.primary)
+                .ccGlyphContainer(CC.size.glyph, relativeTo: .footnote)
+                .ccHitTarget()
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading || blockedReason != nil)
+        .accessibilityLabel("Ask the Mac for a fresh diff")
+        // The visible reason for this control lives in the content beneath it —
+        // the ticking wait notice while it is loading, the link's own account of
+        // itself when the link is what stopped it. A header row has nowhere to
+        // draw a sentence, so the sentence is drawn where there is room for it.
+        .accessibilityHint(blockedReason ?? "")
+    }
+
+    private var blockedReason: String? { model.linkHealth.disabledReason }
+}
+
+/// **The provenance line, clocked by itself.**
+///
+/// `Captured on the Mac 4m ago · git diff HEAD` is the difference between
+/// reading a diff and reading a *capture of* one, so it has to stay true — and
+/// it turns `danger` on a stale link, which is `linkHealth`, which is derived
+/// from `AppModel.now`. Read from `DiffDocumentView.body`, that put a one-second
+/// heartbeat under the whole document: measured on the sample diff, sitting
+/// untouched, **1.11 document bodies per second**, each of which re-walks every
+/// hunk the sheet is drawing.
+///
+/// One line of `monoSmall` ticks now, and the diff behind it does not.
+private struct DiffProvenanceLine: View {
+    let capturedAt: Date
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        Text(ageLine)
+            .ccType(CC.type.monoSmall)
+            // The age turns `danger` on a stale link: the capture is
+            // still true, but nothing newer is coming.
+            .foregroundStyle(
+                model.linkHealth.level == .stale ? CC.color.danger : CC.text.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            // The full sentence is still what is read out; only the
+            // drawn one shortens. See `ageLine`.
+            .accessibilityLabel(DiffDocumentView.fullAgeLine(captured: capturedAge))
+    }
+
+    private var capturedAge: String { Format.age(since: capturedAt, now: model.now) }
+
+    /// **The provenance line, shortened at accessibility sizes — not dropped.**
+    ///
+    /// The full sentence is 41 characters, which at AX5 is *three* lines of
+    /// `monoSmall` on a 402pt sheet: 120pt of an 874pt screen spent restating a
+    /// constant. `git diff HEAD` is the same command on every diff this product
+    /// has ever drawn — the loading state says it, the empty states say it, and
+    /// nothing about it varies — while the **age** is the whole reason the line
+    /// exists.
+    ///
+    /// So at accessibility sizes the constant goes and the measurement stays,
+    /// which is the same trade the landscape layout already makes ("the point
+    /// is the code and not the provenance"). VoiceOver is given the full
+    /// sentence either way — a screen reader has no height budget.
+    private var ageLine: String {
+        typeSize.isAccessibilitySize
+            ? "Captured \(capturedAge) ago"
+            : DiffDocumentView.fullAgeLine(captured: capturedAge)
+    }
+}
 
 struct DiffDocumentView: View {
     let key: String
@@ -760,16 +828,7 @@ struct DiffDocumentView: View {
             // The stamp collapses to one line in landscape, where the point is
             // the code and not the provenance.
             if !isLandscape {
-                Text(ageLine)
-                    .ccType(CC.type.monoSmall)
-                    // The age turns `danger` on a stale link: the capture is
-                    // still true, but nothing newer is coming.
-                    .foregroundStyle(
-                        model.linkHealth.level == .stale ? CC.color.danger : CC.text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    // The full sentence is still what is read out; only the
-                    // drawn one shortens. See `ageLine`.
-                    .accessibilityLabel(Self.fullAgeLine(captured: capturedAge))
+                DiffProvenanceLine(capturedAt: raw.capturedDate ?? fetchedAt)
             }
 
             // The daemon's own note, verbatim, when it had one and there is a
@@ -876,32 +935,22 @@ struct DiffDocumentView: View {
         }
     }
 
-    private var capturedAge: String {
-        Format.age(since: raw.capturedDate ?? fetchedAt, now: model.now)
-    }
-
     static func fullAgeLine(captured age: String) -> String {
         "Captured on the Mac \(age) ago · git diff HEAD"
     }
 
-    /// **The provenance line, shortened at accessibility sizes — not dropped.**
+    /// The empty state's copy of the same sentence — a different composition
+    /// (centred, never `danger`, no accessibility override) rather than the same
+    /// one restyled, which is why it is not `DiffProvenanceLine`.
     ///
-    /// The full sentence is 41 characters, which at AX5 is *three* lines of
-    /// `monoSmall` on a 402pt sheet: 120pt of an 874pt screen spent restating a
-    /// constant. `git diff HEAD` is the same command on every diff this product
-    /// has ever drawn — the loading state says it, the empty states say it, and
-    /// nothing about it varies — while the **age** is the whole reason the line
-    /// exists, because it is the difference between reading a diff and reading a
-    /// *capture of* one.
-    ///
-    /// So at accessibility sizes the constant goes and the measurement stays,
-    /// which is the same trade the landscape layout already makes ("the point
-    /// is the code and not the provenance"). VoiceOver is given the full
-    /// sentence either way — a screen reader has no height budget.
+    /// It reads the clock directly and keeps ticking, and that is correct here:
+    /// there is no document behind it to pay for the second. This branch draws
+    /// four elements and only exists when the worktree was clean.
     private var ageLine: String {
-        typeSize.isAccessibilitySize
-            ? "Captured \(capturedAge) ago"
-            : Self.fullAgeLine(captured: capturedAge)
+        let captured = Format.age(since: raw.capturedDate ?? fetchedAt, now: model.now)
+        return typeSize.isAccessibilitySize
+            ? "Captured \(captured) ago"
+            : Self.fullAgeLine(captured: captured)
     }
 
     // MARK: File chips

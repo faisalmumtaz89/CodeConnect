@@ -101,7 +101,7 @@ struct TerminalTabView: View {
         case .needsSetup(let guidance):
             SSHSetupCard(guidance: guidance) { connect() }
         case .hostKeyChanged(let change):
-            HostKeyChangedCard(change: change, now: model.now) { session.trustNewHostKey() }
+            HostKeyChangedCard(change: change) { session.trustNewHostKey() }
         case .attached:
             terminal(live: true)
         case .ended(let reason, let wasAttached):
@@ -719,7 +719,7 @@ struct TerminalTabView: View {
 /// `-CC_FIXTURE` and `-CC_BIOMETRICS` seams the app already ships (see the
 /// README's "Test seams"): none of this exists in a release build.
 ///
-///     xcrun simctl launch <udid> com.codeconnect.CodeConnect \
+///     xcrun simctl launch <udid> com.codeconnect.remote \
 ///       -cc.debug.terminalState hostKeyChanged
 enum TerminalDesignState {
     /// - Parameters:
@@ -1153,11 +1153,26 @@ struct SSHSetupCard: View {
 /// so the component does it for them and shows its work.
 struct HostKeyChangedCard: View {
     let change: SSHTerminalSession.HostKeyChange
-    var now: Date = Date()
     let trustNew: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var confirming = false
+
+    /// **This card's own clock.**
+    ///
+    /// `PINNED 3D AGO` changes once an hour at most. It used to be handed
+    /// `AppModel.now`, which advances every second, so the whole alarm — two
+    /// diffed 47-character fingerprints, a wrapped command, a hold control — was
+    /// rebuilt once a second on the app's most serious screen, to redraw a
+    /// string that had not moved since the key was pinned.
+    ///
+    /// Read, not merely written. See `AgeTick.renderTime` for why that sentence
+    /// is here.
+    @State private var lastTick = Date()
+
+    private var pinnedClock: AgeClock { AgeClock(since: change.pinnedAt, scale: .age) }
+
+    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
 
     /// **The spine, on the screen that most needs one.**
     ///
@@ -1246,8 +1261,14 @@ struct HostKeyChangedCard: View {
                 // Inset on the card's own edge rather than the text column: a
                 // full-width control belongs to its container, which is why the
                 // pairing screen's primary spans the page and not the prose.
+                // **Neutral, not red.** Trusting a changed key destroys nothing,
+                // and red in this app means exactly one thing: this erases
+                // something. The warning lives where it belongs — the banner
+                // above, the fingerprint diff, and the confirmation that
+                // follows — none of which this button needs to repeat in the
+                // one colour reserved for `Forget this iPhone's SSH key`.
                 CCButton(
-                    "I checked — trust the new key", variant: .destructive, size: .lg,
+                    "I checked — trust the new key", variant: .secondary, size: .lg,
                     fullWidth: true
                 ) {
                     confirming = true
@@ -1283,6 +1304,7 @@ struct HostKeyChangedCard: View {
         } message: {
             Text("Only do this if you verified the fingerprint at the Mac itself.")
         }
+        .task(id: pinnedClock) { await AgeTick.follow(pinnedClock) { lastTick = $0 } }
     }
 
     /// The shield is a *gutter mark*, not a word in the headline: it takes the

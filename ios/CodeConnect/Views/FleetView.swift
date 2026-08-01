@@ -29,6 +29,10 @@ struct SessionRoute: Hashable {
 ///    "cached".
 struct FleetView: View {
     @Environment(AppModel.self) private var model
+    /// The widest tool label on screen, so every command beside one starts on
+    /// the same edge. Settles on the first pass and then stops changing, so it
+    /// costs one extra layout and nothing after that.
+    @State private var toolColumn: CGFloat = 0
     @State private var path: [SessionRoute] = []
     @State private var showSettings = false
     @State private var showLinkDetail = false
@@ -40,9 +44,6 @@ struct FleetView: View {
     @State private var showEnded = false
     /// The band's own observe-only reason, set when its header note is tapped.
     @State private var capabilityReason: CapabilityReason?
-    /// When the link entered `connecting`, so the banner can hold off for the
-    /// two seconds an ordinary reconnect is allowed to finish in.
-    @State private var connectingSince: Date?
     /// Whether the scroll header's title has travelled far enough for the
     /// inline one to take over, so the screen never shows its name twice.
     ///
@@ -72,8 +73,9 @@ struct FleetView: View {
     private static let scrollSpace = "cc.fleet.scroll"
 
     var body: some View {
-        // One sort per body: `model.fleet` re-sorts on every access, and the
-        // one-second tick means body runs often.
+        // One sort per body: `model.fleet` re-sorts on every access. Nothing on
+        // this screen ticks it any more — see `FleetRowView.now` — so a body
+        // pass now means the fleet itself changed.
         let rows = model.fleet
         // Hoisted for the same reason, and for a sharper one: `model.deck`
         // flat-maps `pendingApprovals` across every session, which walks every
@@ -109,6 +111,7 @@ struct FleetView: View {
             }
             .background(CC.color.bg)
             .scrollIndicators(.hidden)
+            .ccCollectsToolColumn(into: $toolColumn)
             .refreshable { model.refreshFleet() }
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
@@ -120,7 +123,7 @@ struct FleetView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    CCFreshnessPill(health: model.linkHealth) { showLinkDetail = true }
+                    LinkPill { showLinkDetail = true }
                 }
                 .ccPlainToolbarItem()
                 ToolbarItem(placement: .principal) {
@@ -173,9 +176,6 @@ struct FleetView: View {
                     .environment(model)
             }
             .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
-            .onChange(of: model.linkHealth.level) { _, level in
-                connectingSince = level == .connecting ? (connectingSince ?? model.now) : nil
-            }
             .onAppear {
                 appearedAt = Date()
                 consumeDeepLink()
@@ -262,7 +262,9 @@ struct FleetView: View {
 
     @ViewBuilder
     private func content(_ rows: [FleetRow]) -> some View {
-        banner
+        // Its own view, and deliberately: it reads the link's age, and read from
+        // here that read belonged to the whole fleet.
+        FleetBanner { showSettings = true }
 
         if rows.isEmpty {
             if model.hasLiveFleet {
@@ -279,91 +281,6 @@ struct FleetView: View {
                 }
             }
         }
-    }
-
-    // MARK: Banner
-
-    /// Every candidate, handed to the slot. **The slot picks** — that is what
-    /// keeps "rejected beats offline beats stale beats cached" in one place
-    /// instead of in an `if` ladder on every screen.
-    @ViewBuilder
-    private var banner: some View {
-        let candidates = bannerCandidates
-        if candidates.contains(where: { $0 != nil }) {
-            CCBannerSlot(candidates)
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.xl)
-        }
-    }
-
-    /// **The link and the cache are not alternatives, so they do not compete.**
-    ///
-    /// The ladder is right and the composition was wrong. `offline` outranks
-    /// `cached`, so on a cold launch off the disk the screen rendered `OFFLINE
-    /// — Could not connect to the server… retrying in 7s.` and the cached
-    /// notice never drew at all: **no cache age anywhere on the screen**, not in
-    /// the banner, not in the pill, not on a row — while two wait clocks read
-    /// `2m10s` and `5m40s` in `warning` and kept incrementing off data read from
-    /// a file. A reader at 2am sees an amber `5m40s` and cannot tell it from a
-    /// live one.
-    ///
-    /// The two facts are merged into one candidate before the slot sees them,
-    /// rather than letting `cached` survive as a second banner: "one banner,
-    /// ever" is the rule the slot exists to enforce, and a compound state is
-    /// still one state. The link keeps the classification — it is the one with
-    /// a `Retry` — and the cache stamp leads the message, because *how old this
-    /// is* is what decides how much of the screen to believe. The clocks are
-    /// untouched: the age of the card is still true, it was the age of the
-    /// observation that was missing.
-    private var bannerCandidates: [CCBannerItem?] {
-        let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
-        guard let link, let stamp = cachedStamp else { return [link, cachedBannerItem] }
-        return [
-            CCBannerItem(
-                link.priority,
-                title: link.title,
-                message: FleetFreshness.message(stamp: stamp, linkDetail: link.message),
-                // The louder of the two. A neutral `Offline` over stale numbers
-                // undersells what the reader is looking at; a `danger` link
-                // stays `danger`.
-                tone: link.tone == .neutral || link.tone == .info ? .warning : link.tone,
-                icon: link.icon,
-                actionTitle: link.actionTitle,
-                action: link.action)
-        ]
-    }
-
-    /// The sentence that says how old the fleet on screen is, or `nil` when it
-    /// came off the wire. Shared by the standalone cached banner and by the
-    /// compound one, so the two cannot state the age differently.
-    private var cachedStamp: String? {
-        FleetFreshness.stamp(
-            cachedAt: model.fleetCachedAt, hasLiveFleet: model.hasLiveFleet, now: model.now)
-    }
-
-    private var linkBannerItem: CCBannerItem? {
-        // A banner that flashes on every ordinary reconnect is noise; the link
-        // gets two seconds to sort itself out before the screen says anything.
-        if model.linkHealth.level == .connecting {
-            guard let since = connectingSince, model.now.timeIntervalSince(since) >= 2 else {
-                return nil
-            }
-        }
-        return model.linkHealth.ccBannerItem(
-            onRetry: { model.connection.retryNow() },
-            onSettings: { showSettings = true })
-    }
-
-    private var cachedBannerItem: CCBannerItem? {
-        guard let cachedAt = model.fleetCachedAt, !model.hasLiveFleet else { return nil }
-        return CCBannerItem(
-            .cached,
-            title: "Last known state, \(Format.age(since: cachedAt, now: model.now)) old",
-            message: "Nothing live has arrived this launch.",
-            tone: .warning,
-            icon: "clock.arrow.circlepath",
-            actionTitle: "Retry",
-            action: { model.connection.retryNow() })
     }
 
     // MARK: Bands
@@ -395,7 +312,6 @@ struct FleetView: View {
                     ForEach(Array(band.rows.enumerated()), id: \.element.id) { index, row in
                         FleetRowView(
                             row: row,
-                            now: model.now,
                             waitingSince: waitingSince(row),
                             blocked: blockedCard(row),
                             showsCapability: showsCapability(row, in: band),
@@ -539,7 +455,7 @@ struct FleetView: View {
             title: "No agents running",
             message: "Start one on the Mac:"
         ) {
-            CCMonoBlock("cc claude")
+            CCMonoBlock("codeconnect claude")
                 .frame(maxWidth: 280)
                 .padding(.top, CC.space.xxs)
         }
@@ -569,10 +485,8 @@ struct FleetView: View {
                 .id(placeholderBand)
             }
 
-            CCWaitingNotice(elapsed: model.now.timeIntervalSince(appearedAt)) {
-                model.connection.retryNow()
-            }
-            .padding(.horizontal, CC.space.md)
+            FleetWaitingNotice(since: appearedAt)
+                .padding(.horizontal, CC.space.md)
         }
     }
 
@@ -587,16 +501,14 @@ struct FleetView: View {
     @ViewBuilder
     private func deckBar(_ pending: [ApprovalItem], waiting: Int) -> some View {
         if let top = pending.first {
-            DeckAccessoryBar(
+            // The bar counts a wait in seconds, so it is one of the few things
+            // here that has earned a tick. It owns that read rather than
+            // charging it to the list above it.
+            FleetDeckBar(
                 count: waiting,
                 topPlace: place(for: top),
                 topCommand: command(for: top),
-                waitingSince: top.requestedAt,
-                now: model.now,
-                // The link's own per-level sentence. A hard-coded "Link stale"
-                // reported a *rejected token* as a stale link, which sends the
-                // reader to the wrong screen.
-                blockedReason: model.linkHealth.disabledReason
+                waitingSince: top.requestedAt
             ) {
                 deckStartsAt = nil
                 showDeck = true
@@ -746,9 +658,168 @@ struct BlockedCard: Equatable {
 /// line comes back only for a run that needs disambiguating from a namesake, a
 /// session whose capability disagrees with its band, or a run holding more than
 /// one decision — a third line has to carry something the two above it do not.
+// MARK: - The three views that are allowed to read the clock
+
+/// **The one thing on this screen that has to change every second.**
+///
+/// How long ago the Mac last spoke is the screen's whole warrant, so the pill
+/// ticks — and it is also the smallest thing on the screen. Read from
+/// `FleetView.body`, that second was charged to the entire 45-session list,
+/// which was rebuilt and re-sorted to redraw two characters in the toolbar. The
+/// read now lives with the only view whose output depends on it.
+private struct LinkPill: View {
+    @Environment(AppModel.self) private var model
+    let action: () -> Void
+
+    var body: some View {
+        CCFreshnessPill(health: model.linkHealth, action: action)
+    }
+}
+
+/// **The banner, clocked by itself.**
+///
+/// It reads `linkHealth` to decide what to say and whether to say anything, and
+/// `linkHealth` is derived from `now` — so hoisting this read into
+/// `FleetView.body` put a one-second heartbeat under the whole fleet. The
+/// ladder, the two-second grace on a reconnect, and the compound cached message
+/// are unchanged; only the owner of the read moved.
+private struct FleetBanner: View {
+    @Environment(AppModel.self) private var model
+    let onSettings: () -> Void
+    /// When the link entered `connecting`, so the banner can hold off for the
+    /// two seconds an ordinary reconnect is allowed to finish in.
+    @State private var connectingSince: Date?
+
+    var body: some View {
+        Group {
+            let candidates = bannerCandidates
+            if candidates.contains(where: { $0 != nil }) {
+                CCBannerSlot(candidates)
+                    .padding(.horizontal, CC.space.md)
+                    .padding(.bottom, CC.space.xl)
+            }
+        }
+        .onChange(of: model.linkHealth.level) { _, level in
+            connectingSince = level == .connecting ? (connectingSince ?? model.now) : nil
+        }
+    }
+
+    /// **The link and the cache are not alternatives, so they do not compete.**
+    ///
+    /// The ladder is right and the composition was wrong. `offline` outranks
+    /// `cached`, so on a cold launch off the disk the screen rendered `OFFLINE
+    /// — Could not connect to the server… retrying in 7s.` and the cached
+    /// notice never drew at all: **no cache age anywhere on the screen**, not in
+    /// the banner, not in the pill, not on a row — while two wait clocks read
+    /// `2m10s` and `5m40s` in `warning` and kept incrementing off data read from
+    /// a file. A reader at 2am sees an amber `5m40s` and cannot tell it from a
+    /// live one.
+    ///
+    /// The two facts are merged into one candidate before the slot sees them,
+    /// rather than letting `cached` survive as a second banner: "one banner,
+    /// ever" is the rule the slot exists to enforce, and a compound state is
+    /// still one state. The link keeps the classification — it is the one with
+    /// a `Retry` — and the cache stamp leads the message, because *how old this
+    /// is* is what decides how much of the screen to believe. The clocks are
+    /// untouched: the age of the card is still true, it was the age of the
+    /// observation that was missing.
+    private var bannerCandidates: [CCBannerItem?] {
+        let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
+        guard let link, let stamp = cachedStamp else { return [link, cachedBannerItem] }
+        return [
+            CCBannerItem(
+                link.priority,
+                title: link.title,
+                message: FleetFreshness.message(stamp: stamp, linkDetail: link.message),
+                // The louder of the two. A neutral `Offline` over stale numbers
+                // undersells what the reader is looking at; a `danger` link
+                // stays `danger`.
+                tone: link.tone == .neutral || link.tone == .info ? .warning : link.tone,
+                icon: link.icon,
+                actionTitle: link.actionTitle,
+                action: link.action)
+        ]
+    }
+
+    /// The sentence that says how old the fleet on screen is, or `nil` when it
+    /// came off the wire. Shared by the standalone cached banner and by the
+    /// compound one, so the two cannot state the age differently.
+    private var cachedStamp: String? {
+        FleetFreshness.stamp(
+            cachedAt: model.fleetCachedAt, hasLiveFleet: model.hasLiveFleet, now: model.now)
+    }
+
+    private var linkBannerItem: CCBannerItem? {
+        // A banner that flashes on every ordinary reconnect is noise; the link
+        // gets two seconds to sort itself out before the screen says anything.
+        if model.linkHealth.level == .connecting {
+            guard let since = connectingSince, model.now.timeIntervalSince(since) >= 2 else {
+                return nil
+            }
+        }
+        return model.linkHealth.ccBannerItem(
+            onRetry: { model.connection.retryNow() },
+            onSettings: onSettings)
+    }
+
+    private var cachedBannerItem: CCBannerItem? {
+        guard let cachedAt = model.fleetCachedAt, !model.hasLiveFleet else { return nil }
+        return CCBannerItem(
+            .cached,
+            title: "Last known state, \(Format.age(since: cachedAt, now: model.now)) old",
+            message: "Nothing live has arrived this launch.",
+            tone: .warning,
+            icon: "clock.arrow.circlepath",
+            actionTitle: "Retry",
+            action: { model.connection.retryNow() })
+    }
+}
+
+/// The accessory bar, clocked by itself.
+///
+/// It prints the oldest wait in seconds and quotes the link's own reason for
+/// disabling `Review`, so it genuinely does change every second while a card is
+/// waiting. That is one view at the bottom of the screen; it was costing a
+/// rebuild of every row above it.
+private struct FleetDeckBar: View {
+    @Environment(AppModel.self) private var model
+    let count: Int
+    let topPlace: String
+    let topCommand: String
+    let waitingSince: Date
+    let onOpen: () -> Void
+
+    var body: some View {
+        DeckAccessoryBar(
+            count: count,
+            topPlace: topPlace,
+            topCommand: topCommand,
+            waitingSince: waitingSince,
+            now: model.now,
+            // The link's own per-level sentence. A hard-coded "Link stale"
+            // reported a *rejected token* as a stale link, which sends the
+            // reader to the wrong screen.
+            blockedReason: model.linkHealth.disabledReason,
+            open: onOpen)
+    }
+}
+
+/// The loading state's elapsed counter. An honest counter with a scale beats a
+/// spinner, and it is the only thing in that state that moves — so it is the
+/// only thing that needs the clock.
+private struct FleetWaitingNotice: View {
+    @Environment(AppModel.self) private var model
+    let since: Date
+
+    var body: some View {
+        CCWaitingNotice(elapsed: model.now.timeIntervalSince(since)) {
+            model.connection.retryNow()
+        }
+    }
+}
+
 struct FleetRowView: View {
     let row: FleetRow
-    let now: Date
     /// When the oldest still-unanswered card in this run was raised. The clock
     /// measures the *oldest* wait; the line below names the card that will be
     /// answered first. They are different questions and both are honest.
@@ -762,8 +833,55 @@ struct FleetRowView: View {
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// The shared width every tool label is drawn into, so the commands beside
+    /// them share one left edge. Zero until the first pass has measured.
+    @Environment(\.ccToolColumn) private var toolColumn
+
+    /// **This row's own clock, ticking at the rate this row can actually show.**
+    ///
+    /// It used to be handed `AppModel.now`, which advances every second. Because
+    /// `now` was a stored property, every row in the fleet became a new value
+    /// once a second and re-rendered — and because `FleetView.body` read the
+    /// same clock to build them, the whole 45-session list was rebuilt and
+    /// re-sorted first. All of it to redraw strings like `21h` that change once
+    /// an hour. Measured on the owner's fleet, untouched: 14.2ms of main-thread
+    /// work per second, in one burst, against an 8.3ms frame.
+    ///
+    /// Nothing here is slower or less true. A row that is *waiting on a human*
+    /// still ticks every second, because `CCWaitClock` prints seconds and that
+    /// number really is changing. A row that last spoke 21 hours ago sleeps for
+    /// an hour, because that is when its string stops being true.
+    ///
+    @State private var lastTick = Date()
+
+    /// The clock this row renders with.
+    ///
+    /// Two things are load-bearing and both were learned by measurement:
+    ///
+    /// **`lastTick` is read, not just written.** A `@State` the body never looks
+    /// at does not invalidate the view — the tick fired on schedule 31 times and
+    /// the rows never redrew a single age. The read is the dependency.
+    ///
+    /// **The value returned is `Date()`, not the stored tick.** A row that has
+    /// slept for an hour holds an hour-old stamp, and when a fleet refresh then
+    /// moves its `updated_at` the row would measure a three-minute-old fact
+    /// against that stale clock and print `0s` — the app claiming something is
+    /// newer than it is, which is the one failure this screen exists to prevent.
+    ///
+    /// Both rules live in `AgeTick.renderTime`, where they are pinned by test,
+    /// rather than in the three views that would otherwise each restate them.
+    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
 
     private var isBlockedOrFailed: Bool { row.status == .blocked || row.status == .failed }
+
+    /// The one age this row draws, and the resolution it draws it at. Its
+    /// spoken age is bucketed no finer than its printed one, so keeping the
+    /// printed one true keeps VoiceOver true with it.
+    private var clock: AgeClock {
+        isBlockedOrFailed
+            ? AgeClock(since: waitingSince, scale: .clock)
+            : AgeClock(since: row.lastEventAt ?? row.summary.updatedDate, scale: .age)
+    }
 
     var body: some View {
         CCRow(
@@ -814,6 +932,10 @@ struct FleetRowView: View {
         }
         .accessibilityAction(named: "Open diff", onOpenDiff)
         .accessibilityAction(named: "Mark reviewed", onMarkReviewed)
+        // Restarted whenever the timestamp this row is counting from changes —
+        // a new event, or a blocked row's oldest card being answered — because
+        // the old deadline was computed from the old anchor.
+        .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
     }
 
     /// **The dot is gone from the Blocked band**, where it was a fourth encoding
@@ -918,6 +1040,9 @@ struct FleetRowView: View {
                 .ccType(CC.type.footnote)
                 .foregroundStyle(tone)
                 .lineLimit(1)
+                // One left edge for every command in the list — see
+                // `CCToolColumn`. Off at accessibility sizes, where these stack.
+                .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
                 .layoutPriority(1)
             if let argument = card.argument {
                 CCMonoBlock(inline: argument, truncation: truncation)
@@ -1432,4 +1557,6 @@ struct LinkHealthSheet: View {
         }
     }
 }
+
+
 

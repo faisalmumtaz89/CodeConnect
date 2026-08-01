@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "cc-hook", "ccd", "cc", "soak"]
+members = ["protocol", "cc-hook", "ccd", "codeconnect", "soak"]
 
 [workspace.package]
 version = "0.1.0"
@@ -37,11 +37,29 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
 
+# APNs, and only APNs, needs these two.
+#
+# `h2` because Apple's push endpoint speaks **HTTP/2 only** — there is no 1.1
+# fallback to degrade to — and because a full HTTP client stack would be a large
+# dependency for one POST to one host. `h2` rides the `tokio-rustls` connection
+# this workspace already builds for `wss://`; the ALPN token is the only new
+# thing on the wire.
+h2 = "0.4"
+http = "1"
+# The provider token is an ES256 JWT over Apple's P-256 `.p8`. `ring` is already
+# here underneath rustls, so signing costs no new crate — and `rustls-pemfile`
+# already parses the PKCS#8 PEM the `.p8` is written in.
+ring = "0.17"
+# The platform trust store for the APNs connection: Apple presents a public
+# chain, so the system roots are exactly right and vendoring a root set would be
+# a second thing to keep current.
+rustls-native-certs = "0.8"
+
 # FSEvents for the transcript tailer. `default-features = false` drops
 # crossbeam-channel; notify's callback feeds a tokio channel directly.
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
-# QR rendering for `cc pair`. `default-features = false` drops the `image`
+# QR rendering for `codeconnect pair`. `default-features = false` drops the `image`
 # renderer and leaves the crate with no transitive dependencies at all.
 qrcode = { version = "0.14", default-features = false }
 

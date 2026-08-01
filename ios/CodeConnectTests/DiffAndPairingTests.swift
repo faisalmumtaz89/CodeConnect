@@ -371,7 +371,7 @@ final class DiffAndPairingTests: XCTestCase {
     }
 }
 
-/// The manual pairing field takes either credential, because `cc pair` tells the
+/// The manual pairing field takes either credential, because `codeconnect pair` tells the
 /// user they may type the code by hand — and it prints it hyphenated.
 final class CredentialInputTests: XCTestCase {
     func testHyphenatedPairingCodeIsRecognised() {

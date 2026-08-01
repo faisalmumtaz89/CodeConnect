@@ -5,7 +5,7 @@ import UIKit
 /// setting does at the Mac.
 ///
 /// The public key lives here with a copy button because there are two ways it
-/// gets authorised — `cc pair --ssh`, which does it for you, and pasting it into
+/// gets authorised — `codeconnect pair --ssh`, which does it for you, and pasting it into
 /// `~/.ssh/authorized_keys` by hand — and the second one has to be possible or
 /// the terminal is hostage to a daemon feature. That is why `Copy public key` is
 /// a 52pt primary-weight control rather than a row: it is the action this screen
@@ -64,7 +64,7 @@ struct TerminalSettingsView: View {
             Button("Keep it", role: .cancel) {}
         } message: {
             Text(
-                "The terminal will stop working until the new key is authorised at the Mac with `cc pair --ssh`."
+                "The terminal will stop working until the new key is authorised at the Mac with `codeconnect pair --ssh`."
             )
         }
         .confirmationDialog(
@@ -166,7 +166,7 @@ struct TerminalSettingsView: View {
             }
 
             Text(
-                "The private half never leaves this device. `cc pair --ssh` at the Mac is the only thing that files the public half in authorized_keys, and it says so at the terminal before it does."
+                "The private half never leaves this device. `codeconnect pair --ssh` at the Mac is the only thing that files the public half in authorized_keys, and it says so at the terminal before it does."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -190,7 +190,7 @@ struct TerminalSettingsView: View {
             CCBanner(
                 "Older daemon",
                 message:
-                    "This daemon predates `cc pair --ssh`. Pasting the key into ~/.ssh/authorized_keys works either way.",
+                    "This daemon predates `codeconnect pair --ssh`. Pasting the key into ~/.ssh/authorized_keys works either way.",
                 tone: .info)
         }
     }
@@ -323,23 +323,7 @@ struct TerminalSettingsView: View {
     /// an age is a fact you are meant to read, so it takes a colour that clears
     /// AA.
     private func pinnedRow(_ entry: (host: String, pin: KnownHostKeys.Pin)) -> some View {
-        CCFactRow(
-            entry.host,
-            labelStyle: .identifier,
-            age: "pinned \(Format.age(since: entry.pin.addedAt, now: model.now)) ago",
-            // The separator is the caller's, so it stays full card width while
-            // the row's text takes the content column. A rule inset on one side
-            // and flush on the other is an asymmetry nothing else in the app
-            // has, and the text stays on the two left edges every screen holds
-            // rather than inventing a third.
-            separator: false,
-            // Named rather than trailing: `value` and `detail` are both single
-            // closures, so a bare trailing closure cannot say which slot it is.
-            detail: {
-                CCIdentity.fingerprint(
-                    entry.pin.fingerprint, comparedTo: nil, name: "Pinned key for \(entry.host)")
-            }
-        )
+        PinnedHostRow(host: entry.host, pin: entry.pin)
     }
 
     // MARK: - Forget this key
@@ -353,7 +337,7 @@ struct TerminalSettingsView: View {
             }
 
             Text(
-                "Generates a new key next time. The old one stays in the Mac's authorized_keys until you run `cc ssh-revoke` there — this app cannot remove it for you."
+                "Generates a new key next time. The old one stays in the Mac's authorized_keys until you run `codeconnect ssh-revoke` there — this app cannot remove it for you."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -377,5 +361,58 @@ struct TerminalSettingsView: View {
                 "No account name could be read from your sessions' working directories, so this one has to be filled in."
         }
         return "Leave blank to use the account name read from your sessions' working directories."
+    }
+}
+
+// MARK: - Pinned host key
+
+/// **One pinned host key, clocked by itself.**
+///
+/// Host, fingerprint, age — all three monospace.
+///
+/// A `CCFactRow` in the `.identifier` label style: the row *is* the host, so the
+/// hostname carries the emphasis and the age sits quietly at the trailing edge.
+/// The fingerprint goes in the `detail` slot rather than the value column,
+/// because a *truncated* fingerprint is worse than no fingerprint — the whole
+/// purpose of the string is to be compared character by character with what the
+/// Mac prints, and `CCFingerprint` is the component that knows that.
+///
+/// The age moved from `textDisabled` to the row's `monoSmall` `textTertiary` on
+/// the way: `textDisabled` is reserved for genuinely inactive text, and an age
+/// is a fact you are meant to read, so it takes a colour that clears AA.
+///
+/// It reads `AppModel.now` no longer. `pinned 3d ago` changes once an hour at
+/// most, and reading the clock for it from `TerminalSettingsView.body` rebuilt
+/// the whole screen — every card, every field, every fingerprint — once a second
+/// for a string that had not moved since the key was pinned.
+private struct PinnedHostRow: View {
+    let host: String
+    let pin: KnownHostKeys.Pin
+
+    /// Read, not merely written: a `@State` the body never looks at does not
+    /// invalidate the view. See `AgeTick.renderTime`.
+    @State private var lastTick = Date()
+
+    private var clock: AgeClock { AgeClock(since: pin.addedAt, scale: .age) }
+
+    var body: some View {
+        CCFactRow(
+            host,
+            labelStyle: .identifier,
+            age: "pinned \(Format.age(since: pin.addedAt, now: AgeTick.renderTime(lastTick: lastTick))) ago",
+            // The separator is the caller's, so it stays full card width while
+            // the row's text takes the content column. A rule inset on one side
+            // and flush on the other is an asymmetry nothing else in the app
+            // has, and the text stays on the two left edges every screen holds
+            // rather than inventing a third.
+            separator: false,
+            // Named rather than trailing: `value` and `detail` are both single
+            // closures, so a bare trailing closure cannot say which slot it is.
+            detail: {
+                CCIdentity.fingerprint(
+                    pin.fingerprint, comparedTo: nil, name: "Pinned key for \(host)")
+            }
+        )
+        .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
     }
 }

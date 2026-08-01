@@ -56,7 +56,7 @@ use crate::apns::{PushHint, PushSender};
 use crate::db::Db;
 use crate::store::{
     AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    SessionRow, Store, TextClaim,
+    PrunedSession, SessionRow, Store, TextClaim,
 };
 use protocol::config::Config;
 
@@ -78,6 +78,24 @@ const LOCAL_RESOLVE_MISSES: u32 = 2;
 /// supervisor below this ignores the `expect` field, so an approval sent to one
 /// would be typed against a screen nobody checked.
 const SUPERVISOR_MINOR_PROMPT_IDENTITY: u32 = 3;
+
+/// How long a single `tmux has-session` may take before the sweep gives up on
+/// it. A client that reaches a live server answers in single-digit
+/// milliseconds; this is the ceiling for one that hangs connecting to a socket
+/// nobody is serving, and the child is killed when it expires.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The gap between the [`protocol::tmux::EXIT_CONFIRMATIONS`] looks an exit
+/// needs.
+///
+/// The same two seconds the supervisor waits between its own polls, and for the
+/// same reason: a tmux server restarting, or a probe that lost a race with a
+/// server's startup, produces one `Gone` for a session that is perfectly alive.
+/// Held *inside* one sweep rather than across two, so a daemon that has just
+/// started reconciles the fleet in seconds instead of leaving the operator
+/// looking at ghosts until the next tick — and so the evidence for an exit
+/// never depends on in-memory state surviving a restart.
+const LIVENESS_RECHECK_DELAY: Duration = Duration::from_secs(2);
 
 /// How long, and how often, to look for the prompt a card was raised for.
 ///
@@ -119,7 +137,7 @@ pub struct Daemon {
     /// Revocation used to reach an open socket only when that socket next did
     /// something — a message, or the 30-second keepalive. A phone sitting idle
     /// on a subscription kept receiving the event log for up to half a minute
-    /// after the operator revoked it, which is not what `cc revoke` means. This
+    /// after the operator revoked it, which is not what `codeconnect revoke` means. This
     /// is the push half: every connection selects on it and closes immediately
     /// when its own id arrives, and the periodic lookup stays as the backstop
     /// for a connection that was not listening when the message went out.
@@ -139,14 +157,26 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// Signals the tailer that a run's transcript path is known: `(uid, path)`.
-    transcript_tx: mpsc::UnboundedSender<(String, String)>,
+    /// Held for the duration of a liveness sweep, so two never overlap.
+    ///
+    /// Taken with `try_lock`, which makes a slow sweep skip the next tick
+    /// rather than queue behind itself. That is the whole bound on how much
+    /// work this can be doing at once: one sweep, and one child inside it.
+    liveness_sweep: Mutex<()>,
+    /// Tells the tailer which transcripts to follow, and when to let one go.
+    ///
+    /// It carried only the first half until a run's *end* became something the
+    /// daemon could establish on its own. A tailer that is never told a session
+    /// finished keeps polling its transcript and holding a watch on its working
+    /// directory for the life of the process, which on a machine with a
+    /// history is hundreds of files nobody will ever write to again.
+    transcript_tx: mpsc::UnboundedSender<crate::tailer::TailCommand>,
 }
 
 /// How a `hello` was (or was not) authenticated.
 #[derive(Debug)]
 pub enum AuthOutcome {
-    /// The static bearer token from `cc token`.
+    /// The static bearer token from `codeconnect token`.
     Static,
     /// A per-device token minted by an earlier pairing.
     Device(Box<DeviceRow>),
@@ -163,12 +193,65 @@ pub enum AuthOutcome {
     Rejected(String),
 }
 
-/// What `cc revoke` / `cc ssh-revoke` did.
+/// What `codeconnect revoke` / `codeconnect ssh-revoke` did.
 #[derive(Debug)]
 pub struct RevokeOutcome {
     pub device: DeviceSummary,
     pub token_revoked: bool,
     pub ssh_key_removed: bool,
+}
+
+/// What one liveness sweep established, counted in *sessions* rather than in
+/// questions asked.
+///
+/// Five numbers rather than a verdict, and the split between the last three is
+/// the whole point: "proven gone", "we could not tell" and "it looked gone once
+/// and then did not" are three different facts, and a sweep that folded them
+/// together would be unable to say whether a quiet fleet was healthy or
+/// unreadable. The startup banner reads this out, so the operator can see the
+/// difference between a daemon that checked and a daemon that could not.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LivenessSweep {
+    /// Sessions considered: everything not already `Exited`.
+    pub examined: usize,
+    /// Distinct `(socket, name)` pairs actually asked about.
+    pub targets: usize,
+    /// Left alone with positive proof that they are running.
+    pub present: usize,
+    /// Proven gone, and now `Exited`.
+    pub gone: usize,
+    /// Left alone because nothing could be established about them.
+    pub unknown: usize,
+    /// Looked gone once and did not confirm. Left alone.
+    pub unconfirmed: usize,
+    pub elapsed: Duration,
+}
+
+impl LivenessSweep {
+    /// The sentence the operator reads. Derived from the numbers rather than
+    /// written alongside them, so it cannot claim something they contradict.
+    pub fn summary(&self) -> String {
+        if self.examined == 0 {
+            return "no session needed checking".to_string();
+        }
+        let mut parts = vec![format!("{} running", self.present)];
+        if self.gone > 0 {
+            parts.push(format!("{} proven gone and marked exited", self.gone));
+        }
+        if self.unconfirmed > 0 {
+            parts.push(format!("{} unconfirmed and left alone", self.unconfirmed));
+        }
+        if self.unknown > 0 {
+            parts.push(format!("{} could not be established", self.unknown));
+        }
+        format!(
+            "{} session(s) checked over {} tmux name(s) in {:?}: {}",
+            self.examined,
+            self.targets,
+            self.elapsed,
+            parts.join(", ")
+        )
+    }
 }
 
 #[derive(Default)]
@@ -332,7 +415,7 @@ impl Daemon {
         store: Arc<Store>,
         push: Arc<dyn PushSender>,
         endpoint: Endpoint,
-        transcript_tx: mpsc::UnboundedSender<(String, String)>,
+        transcript_tx: mpsc::UnboundedSender<crate::tailer::TailCommand>,
     ) -> Arc<Daemon> {
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (revocations_tx, _) = broadcast::channel(REVOCATION_CAPACITY);
@@ -349,6 +432,7 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Mutex::new(Inner::default()),
             publish_gates: Mutex::new(HashMap::new()),
+            liveness_sweep: Mutex::new(()),
             transcript_tx,
         })
     }
@@ -529,8 +613,8 @@ impl Daemon {
         }
     }
 
-    /// The daemon's own account of itself, for `cc daemon status` and for
-    /// `cc daemon install` deciding whether it is about to fight a process
+    /// The daemon's own account of itself, for `codeconnect daemon status` and for
+    /// `codeconnect daemon install` deciding whether it is about to fight a process
     /// somebody started by hand.
     pub async fn info(&self) -> protocol::ipc::DaemonInfo {
         protocol::ipc::DaemonInfo {
@@ -1138,7 +1222,7 @@ impl Daemon {
     ///
     /// Three cases, in decreasing order of confidence:
     ///
-    /// 1. **The hook carries a uid.** `cc claude` minted it at spawn and passed
+    /// 1. **The hook carries a uid.** `codeconnect claude` minted it at spawn and passed
     ///    it into the generated settings, so this is exact.
     /// 2. **No uid, but a live run answers to the name.** A session started
     ///    before this daemon was upgraded posts from a settings file that
@@ -1199,7 +1283,10 @@ impl Daemon {
                 .and_then(|r| r.transcript_path.clone())
                 .is_some_and(|known| &known == path);
             if !already {
-                let _ = self.transcript_tx.send((uid.clone(), path.clone()));
+                let _ = self.transcript_tx.send(crate::tailer::TailCommand::Follow {
+                    session_uid: uid.clone(),
+                    path: path.clone(),
+                });
             }
         }
         Ok(SessionKey::new(uid, session_id))
@@ -2232,7 +2319,36 @@ impl Daemon {
                 return;
             }
         };
-        let session = row.key();
+        self.mark_exited(&row.key(), exit_code, None).await;
+    }
+
+    /// Record that a run has ended: the durable lifecycle change, then the fact.
+    ///
+    /// The single place either half happens, because there are now two ways an
+    /// end is *established* — a supervisor reporting its own exit, and the
+    /// liveness sweep proving the tmux session is gone — and exactly one way it
+    /// is recorded. A second copy of this would be a second chance for one path
+    /// to update the row without emitting the event, which is the shape of the
+    /// original defect seen from the other side: the phone would learn about the
+    /// end by the row mutating underneath it rather than through the log.
+    ///
+    /// `reason` is `Some` only when the end was *derived* rather than reported.
+    /// It rides alongside the existing `exit_code` rather than replacing
+    /// anything, so a client that has never heard of it renders exactly what it
+    /// rendered before; what it buys is that the log never implies somebody
+    /// watched an exit that was in fact inferred from an absent tmux session.
+    ///
+    /// The `source_event_id` makes this idempotent per run. A run ends once, and
+    /// the two paths can genuinely race — the sweep can prove a session gone in
+    /// the same second its supervisor reconnects to say so. Without the id that
+    /// race produces two `SessionEnd` events for one death; with it the second
+    /// is deduplicated by the log's own rule and the first account stands.
+    async fn mark_exited(
+        &self,
+        session: &SessionKey,
+        exit_code: Option<i32>,
+        reason: Option<&str>,
+    ) {
         if let Err(err) = self
             .db
             .set_lifecycle(session.uid.clone(), Lifecycle::Exited)
@@ -2240,15 +2356,24 @@ impl Daemon {
         {
             crate::log_error!("failed to mark {} exited: {err:#}", session.name);
         }
-        let pending = PendingEvent::new(
-            &session,
-            EventKind::SessionEnd,
-            serde_json::json!({"exit_code": exit_code}),
-            Source::Daemon,
-        );
+        let payload = match reason {
+            Some(reason) => serde_json::json!({"exit_code": exit_code, "reason": reason}),
+            None => serde_json::json!({"exit_code": exit_code}),
+        };
+        let pending = PendingEvent::new(session, EventKind::SessionEnd, payload, Source::Daemon)
+            .with_source_event_id(format!("exit:{}", session.uid));
         if let Err(err) = self.ingest(pending).await {
             crate::log_error!("failed to record exit: {err:#}");
         }
+        // Sent *after* the event, so the order on the wire is the order things
+        // happened: everything the tailer has already read is in the log ahead
+        // of the end, and its own final read lands after it. A run that has
+        // ended writes nothing more, and a tail nobody stops is a `stat` per
+        // poll — plus a filesystem watch on a working directory that is usually
+        // deleted — for the rest of the daemon's life.
+        let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
+            session_uid: session.uid.clone(),
+        });
     }
 
     /// Ask the supervisor for something, and be precise about failure.
@@ -2366,6 +2491,245 @@ impl Daemon {
             });
         }
         Ok(out)
+    }
+
+    // ---------------------------------------------------- liveness sweep
+
+    /// Reconcile every session's `lifecycle` against tmux, and act on proof only.
+    ///
+    /// **The defect this exists to close.** Until this ran, `Lifecycle::Exited`
+    /// had exactly one writer: a supervisor telling the daemon its own session
+    /// had ended. That covers the case where everything is working and nothing
+    /// else. If `ccd` was down when the agent died, if the supervisor was killed
+    /// (`pkill cc`, a crashed terminal, a `kill -9` storm), or if the Mac slept
+    /// through the exit, nobody ever said so — and the row stayed `live`
+    /// *permanently*, because nothing else looked. Measured on the owner's
+    /// machine: 26 of 45 sessions reported as running, on a Mac with no tmux
+    /// server at all. The periodic sweeper that already existed reconciled
+    /// approvals and never liveness, so the fleet's central claim — this agent
+    /// is running — was the one thing nothing ever checked.
+    ///
+    /// **What counts as proof.** Only tmux's own words, through
+    /// [`protocol::tmux`], which is the same classifier the supervisor reads.
+    /// Three answers and three different actions:
+    ///
+    ///   * **Present** — left alone. It is running.
+    ///   * **Gone**, confirmed [`protocol::tmux::EXIT_CONFIRMATIONS`] times —
+    ///     marked `Exited`, with the same `SessionEnd` a reported exit produces,
+    ///     so the phone learns through the log rather than by a row changing
+    ///     under it.
+    ///   * **Unknown** — left alone, and *not* counted toward anything. tmux
+    ///     missing, a socket we cannot address, a message we do not recognise, a
+    ///     child that timed out: none of those is evidence of an exit, and
+    ///     marking a live session dead is the same class of lie as the bug this
+    ///     fixes, told in the opposite direction. `unknown` is a state the
+    ///     product supports precisely so this can decline to guess.
+    ///
+    /// **Why it is bounded.** One question per distinct `(socket, name)` rather
+    /// than one per row — presence is a property of the tmux server, so six dead
+    /// runs that reused the name `cc-1` are one question — and the questions are
+    /// asked one after another, so a fleet of hundreds costs one child at a time
+    /// rather than hundreds at once. Every step is an `await`, and the database
+    /// work goes through [`crate::db`] onto the blocking pool, so no part of
+    /// this occupies a runtime worker. Two sweeps never overlap.
+    ///
+    /// **What it deliberately does not do.** A name reused by a session that is
+    /// currently running answers `Present`, and every row claiming that name is
+    /// left alone — including the dead ones. That is the honest answer: tmux
+    /// knows there is a session called `cc-1`, not whose it is. Those rows are
+    /// what `codeconnect sessions prune` and the fleet's `session_uid` are for.
+    pub async fn reconcile_liveness(&self) -> LivenessSweep {
+        let prober = crate::liveness::Prober::new(LIVENESS_PROBE_TIMEOUT);
+        if !prober.is_available() {
+            // Said once, rather than once per session: with no tmux there is
+            // nothing to ask, every answer would be `Unknown`, and the fleet is
+            // left exactly as it was.
+            crate::log_warn!(
+                "liveness: tmux is not installed at a known location, so no session's state can \
+                 be established; the fleet is left as it is"
+            );
+            return LivenessSweep::default();
+        }
+        self.reconcile_liveness_with(&prober, LIVENESS_RECHECK_DELAY)
+            .await
+    }
+
+    /// The sweep, against any source of proof.
+    ///
+    /// Split from [`Daemon::reconcile_liveness`] so the *policy* — which rows
+    /// are candidates, how many confirmations an exit takes, what is left alone
+    /// — is exercised without a tmux server. A test that needed one could only
+    /// fail on a machine where tmux happened to misbehave, and the behaviour
+    /// that matters here is what the daemon does with an answer, not how it
+    /// obtains one.
+    async fn reconcile_liveness_with<P: crate::liveness::Presence>(
+        &self,
+        prober: &P,
+        recheck_delay: Duration,
+    ) -> LivenessSweep {
+        // A sweep already running holds this. Skipping is the right
+        // backpressure: the next tick will do the same work, and queueing would
+        // let a slow machine accumulate sweeps that all reach the same answer.
+        let Ok(_running) = self.liveness_sweep.try_lock() else {
+            crate::log_debug!("liveness: a sweep is already running; skipping this one");
+            return LivenessSweep::default();
+        };
+        let started = std::time::Instant::now();
+
+        let rows = match self.db.list_sessions().await {
+            Ok(rows) => rows,
+            Err(err) => {
+                // An unreadable session list is not an empty fleet, and must
+                // never be treated as one.
+                crate::log_error!(
+                    "liveness: could not read the session list ({err:#}); no session's state was \
+                     reconciled"
+                );
+                return LivenessSweep::default();
+            }
+        };
+
+        // Everything that has not already reached a terminal state. `Unknown` is
+        // included deliberately: it means an earlier attempt could not tell, and
+        // this is the attempt that might.
+        let mut by_target: std::collections::BTreeMap<crate::liveness::Target, Vec<SessionKey>> =
+            std::collections::BTreeMap::new();
+        let mut sweep = LivenessSweep::default();
+        for row in rows {
+            if row.lifecycle == Lifecycle::Exited {
+                continue;
+            }
+            sweep.examined += 1;
+            by_target
+                .entry(crate::liveness::Target {
+                    socket: row.tmux_socket.clone(),
+                    name: row.tmux_session.clone(),
+                })
+                .or_default()
+                .push(row.key());
+        }
+        sweep.targets = by_target.len();
+        if by_target.is_empty() {
+            return sweep;
+        }
+
+        // First look. Sequential on purpose: each is a subprocess round-trip of
+        // a few milliseconds, and one child at a time is a bound that needs no
+        // semaphore to be true.
+        let mut suspect: Vec<crate::liveness::Target> = Vec::new();
+        for (target, sessions) in &by_target {
+            match prober.presence(target).await {
+                protocol::tmux::SessionPresence::Present => sweep.present += sessions.len(),
+                protocol::tmux::SessionPresence::Gone => suspect.push(target.clone()),
+                protocol::tmux::SessionPresence::Unknown(why) => {
+                    sweep.unknown += sessions.len();
+                    crate::log_debug!("liveness: {target} could not be established: {why}");
+                }
+            }
+        }
+
+        // The confirmations. A reported exit is durable and cannot be withdrawn,
+        // so one look is not enough — a server restarting between the sweep and
+        // the answer, or a probe that raced a server's startup, produces exactly
+        // one `Gone` for a session that is running.
+        for _ in 1..protocol::tmux::EXIT_CONFIRMATIONS {
+            if suspect.is_empty() {
+                break;
+            }
+            tokio::time::sleep(recheck_delay).await;
+            let mut confirmed = Vec::with_capacity(suspect.len());
+            for target in suspect {
+                let sessions = by_target.get(&target).map_or(0, Vec::len);
+                match prober.presence(&target).await {
+                    protocol::tmux::SessionPresence::Gone => confirmed.push(target),
+                    // It came back, or we lost the ability to look. Either way
+                    // the first observation is no longer evidence of anything.
+                    other => {
+                        sweep.unconfirmed += sessions;
+                        crate::log_debug!(
+                            "liveness: {target} looked gone and then answered {other:?}; \
+                             leaving it alone"
+                        );
+                    }
+                }
+            }
+            suspect = confirmed;
+        }
+
+        for target in suspect {
+            let Some(sessions) = by_target.get(&target) else {
+                continue;
+            };
+            for session in sessions {
+                crate::log_info!(
+                    "liveness: {} ({}) is marked exited — tmux says session {} is not on {}",
+                    session.name,
+                    session.uid,
+                    target.name,
+                    target.socket
+                );
+                self.mark_exited(
+                    session,
+                    // Nobody watched this run end, so there is no exit status to
+                    // report. Saying `null` is the honest answer; inventing a 0
+                    // would claim it finished cleanly.
+                    None,
+                    Some(&format!(
+                        "no tmux session {:?} on server {:?}; the daemon never saw this run end \
+                         and established it had by asking tmux",
+                        target.name, target.socket
+                    )),
+                )
+                .await;
+                sweep.gone += 1;
+            }
+        }
+
+        sweep.elapsed = started.elapsed();
+        sweep
+    }
+
+    /// Remove ended runs from the log, at an operator's explicit request.
+    ///
+    /// The counterpart to reconciliation rather than an afterthought to it. A
+    /// real machine accumulates ended sessions exactly the way the owner's did
+    /// — 45 rows, most of them from soak runs and long-dead experiments — and
+    /// without a supported way to clear them the only options are living with
+    /// the clutter or deleting `events.db`, which throws away the history of
+    /// the sessions that *are* running along with it.
+    ///
+    /// Never automatic, and never on a timer. The event log is the source of
+    /// truth, and a daemon that pruned it on its own judgement would be
+    /// deciding which of somebody's agent history was worth keeping.
+    ///
+    /// **What it refuses to touch.** Anything not `Exited` — the store enforces
+    /// that — plus two things only this process knows: a run with a supervisor
+    /// attached right now, and a run with an approval still open. Either would
+    /// mean the daemon holds live state for a session it had just erased the
+    /// record of. Both should be impossible for a row marked `Exited`, which is
+    /// exactly why they are checked: if one ever happens, it is a bug, and
+    /// deleting the evidence of it is the worst possible response.
+    pub async fn prune_ended_sessions(&self, dry_run: bool) -> Result<Vec<PrunedSession>> {
+        let protect: Vec<String> = {
+            let inner = self.inner.lock().await;
+            inner
+                .supervisors
+                .keys()
+                .cloned()
+                .chain(inner.pending.keys().map(|(uid, _)| uid.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        let removed = self.db.prune_exited_sessions(protect, dry_run).await?;
+        if !removed.is_empty() && !dry_run {
+            crate::log_info!(
+                "prune: removed {} ended session(s) and {} event(s) at the operator's request",
+                removed.len(),
+                removed.iter().map(|row| row.events).sum::<u64>()
+            );
+        }
+        Ok(removed)
     }
 
     /// Expire approvals nobody answered, so `blocked_on` reflects reality.
@@ -2673,6 +3037,22 @@ impl Daemon {
         Ok((code, expires_at))
     }
 
+    /// Store where a device wants its pushes sent.
+    pub async fn register_push(
+        &self,
+        device_id: &str,
+        token: &str,
+        environment: &str,
+    ) -> Result<()> {
+        self.db
+            .set_push_token(
+                device_id.to_string(),
+                token.to_string(),
+                environment.to_string(),
+            )
+            .await
+    }
+
     /// Authenticate a `hello`.
     ///
     /// A token wins over a pairing code when both are offered: re-pairing an
@@ -2869,7 +3249,7 @@ impl Daemon {
     /// The consent gate for `~/.ssh/authorized_keys`.
     ///
     /// A key is installed only when the operator minted this code with
-    /// `cc pair --ssh`. A key offered against a code without that flag is
+    /// `codeconnect pair --ssh`. A key offered against a code without that flag is
     /// logged and dropped: the phone asking is not consent, and pairing still
     /// succeeds so the app can fall back to another SSH credential.
     async fn maybe_install_ssh_key(
@@ -2885,7 +3265,7 @@ impl Daemon {
         if !allow_ssh {
             crate::log_warn!(
                 "device {device_id} offered an SSH key but this code was not created with \
-                 `cc pair --ssh`; the key was NOT installed"
+                 `codeconnect pair --ssh`; the key was NOT installed"
             );
             return false;
         }
@@ -2954,7 +3334,7 @@ impl Daemon {
         let device = match self.db.find_device(needle.to_string()).await? {
             DeviceLookup::Found(device) => *device,
             DeviceLookup::NotFound => {
-                anyhow::bail!("no device matches {needle:?}; `cc devices` lists them")
+                anyhow::bail!("no device matches {needle:?}; `codeconnect devices` lists them")
             }
             DeviceLookup::Ambiguous(ids) => anyhow::bail!(
                 "{needle:?} matches {} devices ({}); name one exactly",
@@ -3058,7 +3438,7 @@ fn note_tool_result(inner: &mut Inner, event: &Event) {
 /// macOS sets `XPC_SERVICE_NAME` for every process, not only for launchd jobs:
 /// a program started from a shell inherits the literal string `"0"`, which is
 /// the documented "this is not an XPC service" sentinel. Reporting that as a
-/// label would make `cc daemon status` say a hand-started daemon is "managed by
+/// label would make `codeconnect daemon status` say a hand-started daemon is "managed by
 /// a different job (0)" — a sentence that sends the operator looking for a
 /// job that does not exist.
 ///
@@ -3166,11 +3546,24 @@ mod tests {
     }
 
     fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (daemon, rx) = daemon_watching_tails(store, config);
         // Kept alive: dropping the receiver would make every transcript
-        // registration fail, which is not what any of these tests is about.
+        // registration fail, which is not what most of these tests is about.
         Box::leak(Box::new(rx));
-        Daemon::new(
+        daemon
+    }
+
+    /// The same, keeping the tailer's end of the channel so a test can see what
+    /// the daemon asked it to do.
+    fn daemon_watching_tails(
+        store: Arc<Store>,
+        config: Config,
+    ) -> (
+        Arc<Daemon>,
+        mpsc::UnboundedReceiver<crate::tailer::TailCommand>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let daemon = Daemon::new(
             config,
             store,
             Arc::new(crate::apns::LoggingPushSender::new()),
@@ -3180,7 +3573,8 @@ mod tests {
                 tls: false,
             },
             tx,
-        )
+        );
+        (daemon, rx)
     }
 
     const STATIC_TOKEN: &str = "static-token-for-tests";
@@ -3385,7 +3779,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ssh_only_revoke_leaves_the_connection_alive() {
-        // The narrower tool must not also cut the phone off; `cc revoke` is for
+        // The narrower tool must not also cut the phone off; `codeconnect revoke` is for
         // that, and conflating them would make dropping shell access far more
         // disruptive than the operator asked for.
         let home = crate::ssh_keys::test_home::FakeHome::new("state-sshonly");
@@ -3658,7 +4052,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ssh_only_revoke_still_reports_a_key_it_could_not_remove() {
-        // The mirror image. `cc ssh-revoke` withdraws nothing *but* the key, so
+        // The mirror image. `codeconnect ssh-revoke` withdraws nothing *but* the key, so
         // a failure to remove it is the whole operation failing, and swallowing
         // it would report a revocation that did not happen.
         use std::os::unix::fs::PermissionsExt;
@@ -4129,7 +4523,7 @@ mod tests {
     fn the_launchd_sentinel_is_not_mistaken_for_a_job() {
         // Guards a sentence, and the debugging it would cause: macOS hands a
         // shell-started process `XPC_SERVICE_NAME=0`, and reporting that as a
-        // label makes `cc daemon status` claim a hand-started daemon belongs to
+        // label makes `codeconnect daemon status` claim a hand-started daemon belongs to
         // "a different job (0)".
         //
         // `HOME` is process-global and these tests run in threads, but no other
@@ -4611,6 +5005,399 @@ mod tests {
                 .unwrap()
                 .lifecycle,
             Lifecycle::Exited,
+        );
+    }
+
+    // -------------------------------------------------- liveness sweep
+
+    /// A liveness oracle that answers from a script instead of from tmux.
+    ///
+    /// The sweep's *policy* is what these tests are about — which rows are
+    /// candidates, how much evidence an exit takes, what is left alone — and a
+    /// test that drove it through a real tmux server could only fail on a
+    /// machine where tmux happened to misbehave. Reading tmux is tested against
+    /// the real binary in [`crate::liveness`] and [`protocol::tmux`]; what
+    /// happens to an answer is tested here.
+    struct ScriptedPresence {
+        /// Answers per tmux name, consumed in order. The last one repeats, so
+        /// "gone, then gone for ever" is one entry and "gone, then not" is two.
+        script: std::sync::Mutex<
+            HashMap<String, std::collections::VecDeque<protocol::tmux::SessionPresence>>,
+        >,
+        fallback: protocol::tmux::SessionPresence,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedPresence {
+        fn always(presence: protocol::tmux::SessionPresence) -> ScriptedPresence {
+            ScriptedPresence {
+                script: std::sync::Mutex::new(HashMap::new()),
+                fallback: presence,
+                asked: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A name whose answers change between looks.
+        fn then(self, name: &str, answers: Vec<protocol::tmux::SessionPresence>) -> Self {
+            self.script
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), answers.into());
+            self
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::liveness::Presence for ScriptedPresence {
+        async fn presence(
+            &self,
+            target: &crate::liveness::Target,
+        ) -> protocol::tmux::SessionPresence {
+            self.asked.lock().unwrap().push(target.name.clone());
+            let mut script = self.script.lock().unwrap();
+            match script.get_mut(&target.name) {
+                Some(queue) if queue.len() > 1 => queue.pop_front().unwrap(),
+                Some(queue) => queue.front().cloned().unwrap(),
+                None => self.fallback.clone(),
+            }
+        }
+    }
+
+    /// A session row with no supervisor and no events — exactly the shape a
+    /// restart inherits from the process before it.
+    fn seed_session(daemon: &Arc<Daemon>, uid: &str, name: &str, lifecycle: Lifecycle) {
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .unwrap();
+    }
+
+    fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
+        daemon.store.get_session(uid).unwrap().unwrap().lifecycle
+    }
+
+    fn kinds_of(daemon: &Arc<Daemon>, uid: &str) -> Vec<EventKind> {
+        daemon
+            .store
+            .events_after(uid, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_live_session_whose_tmux_session_is_gone_is_marked_exited_by_a_sweep() {
+        // **The regression test.** Found on the owner's machine: 45 sessions,
+        // 26 of them reported `live`, and `tmux -L codeconnect ls` saying "no
+        // server running" — so every one of those 26 was dead and the fleet was
+        // confidently reporting otherwise. The cause was that `session_exited`
+        // was the *only* thing that could ever write `Exited`, and it runs only
+        // when a supervisor reports an exit. A daemon that was down at the
+        // moment of death, a supervisor that was killed, a Mac that slept: in
+        // every one of those the row stayed `live` for ever, because nothing
+        // ever looked.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Exited,
+            "a session tmux says is not there must not keep reporting as running"
+        );
+        assert_eq!(sweep.examined, 1);
+        assert_eq!(sweep.gone, 1);
+        assert_eq!(sweep.unknown, 0);
+        assert_eq!(sweep.unconfirmed, 0);
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_presence_cannot_be_determined_is_left_exactly_as_it_was() {
+        // The other half, and the one that matters more: silently marking a
+        // live session dead is the same class of lie as the bug being fixed,
+        // told in the opposite direction. tmux missing, a socket that cannot be
+        // addressed, a message we do not recognise, a child that timed out —
+        // none of those is evidence that an agent exited, and `unknown` is a
+        // state the product supports precisely so this can decline to guess.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let other = "01K1B3XZZZC0DE5FGH7JKMNPQR";
+        seed_session(&daemon, other, "cc-2", Lifecycle::Unknown);
+
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Unknown(
+            "too many open files".into(),
+        ));
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+        assert_eq!(
+            lifecycle_of(&daemon, other),
+            Lifecycle::Unknown,
+            "an unknown session stays unknown; it is not evidence of an exit either"
+        );
+        assert_eq!(sweep.unknown, 2);
+        assert_eq!(sweep.gone, 0);
+        // And nothing was written to the log at all: a sweep that established
+        // nothing must leave no trace of a fact it did not observe.
+        assert!(kinds_of(&daemon, TEST_UID).is_empty());
+        assert!(kinds_of(&daemon, other).is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_look_is_never_enough_to_report_a_death() {
+        // The supervisor's rule, reused rather than reinvented: a reported exit
+        // is durable and cannot be withdrawn, so it takes
+        // `EXIT_CONFIRMATIONS` looks. A tmux server restarting between the
+        // sweep and its answer, or a probe that raced a server's startup,
+        // produces exactly one `Gone` for a session that is running.
+        const _: () = assert!(protocol::tmux::EXIT_CONFIRMATIONS >= 2);
+
+        for second_look in [
+            protocol::tmux::SessionPresence::Present,
+            protocol::tmux::SessionPresence::Unknown("lost server".into()),
+        ] {
+            let daemon = test_daemon();
+            seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+            let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone).then(
+                "cc-1",
+                vec![protocol::tmux::SessionPresence::Gone, second_look.clone()],
+            );
+
+            let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+            assert_eq!(
+                lifecycle_of(&daemon, TEST_UID),
+                Lifecycle::Live,
+                "one `Gone` followed by {second_look:?} is not proof of an exit"
+            );
+            assert_eq!(sweep.gone, 0);
+            assert_eq!(sweep.unconfirmed, 1);
+            assert_eq!(
+                tmux.asked().len(),
+                protocol::tmux::EXIT_CONFIRMATIONS as usize,
+                "the sweep must actually take a second look"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_that_is_really_running_is_left_alone() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Present);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+        assert_eq!(sweep.present, 1);
+        assert_eq!(sweep.gone, 0);
+        assert!(kinds_of(&daemon, TEST_UID).is_empty());
+        // One look is all a running session costs — the confirmations exist to
+        // make an *exit* expensive, not to re-ask about a healthy fleet.
+        assert_eq!(tmux.asked(), vec!["cc-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_phone_learns_through_the_event_log_and_not_by_the_row_changing_under_it() {
+        // The rule the whole daemon is built on: the log is how a client finds
+        // out. A sweep that silently rewrote `lifecycle` would leave a phone
+        // holding a session card that says "Running" until something unrelated
+        // made it re-list the fleet — and there would be nothing in the
+        // timeline saying the agent had ended.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let mut events = daemon.events_tx.subscribe();
+
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        let event = events.try_recv().expect("the end must be broadcast");
+        assert_eq!(event.kind, EventKind::SessionEnd);
+        assert_eq!(event.session_uid, TEST_UID);
+        assert_eq!(event.seq, 1);
+        // The same envelope a reported exit produces, so no client needs to
+        // learn a new shape — and `exit_code: null` because nobody watched this
+        // run end. Inventing a 0 would claim it finished cleanly.
+        assert!(event.payload.get("exit_code").is_some_and(|c| c.is_null()));
+        // …with the one addition that keeps the log honest about *how* the end
+        // was established.
+        let reason = event.payload["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains("tmux"), "{reason}");
+        assert!(kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
+    }
+
+    #[tokio::test]
+    async fn a_session_already_known_to_have_ended_is_never_asked_about_again() {
+        // Both a cost argument and a correctness one. A machine accumulates
+        // ended sessions for ever, and re-probing them would make every sweep
+        // slower than the last; re-marking them would append a second
+        // `SessionEnd` to a run that has already ended once.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Exited);
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+        assert_eq!(sweep.examined, 0);
+        assert_eq!(sweep.targets, 0);
+        assert!(tmux.asked().is_empty(), "{:?}", tmux.asked());
+        assert!(kinds_of(&daemon, TEST_UID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_question_settles_every_row_that_shares_a_tmux_name() {
+        // The bound. Presence is a property of the tmux *server*, not of a
+        // database row, so six dead runs that all reused the name `cc-1` are
+        // one question — which is what keeps a sweep proportional to the number
+        // of distinct names rather than to a machine's whole history.
+        let daemon = test_daemon();
+        let uids: Vec<String> = (0..6)
+            .map(|i| format!("01K1B3XQ8ZC0DE5FGH7JKMNP{i:02}"))
+            .collect();
+        for uid in &uids {
+            assert!(protocol::uid::is_well_formed(uid));
+            seed_session(&daemon, uid, "cc-1", Lifecycle::Live);
+        }
+
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(sweep.examined, 6);
+        assert_eq!(sweep.targets, 1, "six rows, one tmux name, one question");
+        assert_eq!(sweep.gone, 6);
+        assert_eq!(
+            tmux.asked().len(),
+            protocol::tmux::EXIT_CONFIRMATIONS as usize,
+            "the confirmations are per question, not per row"
+        );
+        for uid in &uids {
+            assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
+            assert!(kinds_of(&daemon, uid).contains(&EventKind::SessionEnd));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proven_end_and_a_reported_one_are_one_death_not_two() {
+        // The two paths can genuinely race: a sweep can prove a session gone in
+        // the same second its supervisor reconnects to say so. A run ends once,
+        // and the log has to say so once.
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+
+        let ends = kinds_of(&daemon, TEST_UID)
+            .iter()
+            .filter(|kind| **kind == EventKind::SessionEnd)
+            .count();
+        assert_eq!(ends, 1, "one death, one `SessionEnd`");
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
+    }
+
+    #[tokio::test]
+    async fn a_second_sweep_over_a_settled_fleet_asks_nothing_and_changes_nothing() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        assert_eq!(
+            daemon
+                .reconcile_liveness_with(&tmux, Duration::ZERO)
+                .await
+                .gone,
+            1
+        );
+
+        let again = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        let sweep = daemon.reconcile_liveness_with(&again, Duration::ZERO).await;
+        assert_eq!(sweep, LivenessSweep::default());
+        assert!(again.asked().is_empty());
+        assert_eq!(kinds_of(&daemon, TEST_UID).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn proving_a_session_gone_also_stops_the_daemon_reading_its_transcript() {
+        // The same root cause seen from the filesystem. Nothing could tell the
+        // tailer a run had finished, because until the sweep existed the daemon
+        // could not establish that on its own — so every ended session's
+        // transcript stayed on the poll list and its working directory stayed
+        // watched, for the life of the process and again after every restart.
+        // Measured on the owner's Mac: 1,282 `fsevents could not watch` lines
+        // in one error log, against directories deleted days earlier.
+        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        let command = tails.try_recv().expect("the tailer must be told to stop");
+        assert_eq!(
+            command,
+            crate::tailer::TailCommand::Stop {
+                session_uid: TEST_UID.to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reported_exit_stops_the_tail_too_rather_than_only_a_proven_one() {
+        // Both paths run through one `mark_exited`, which is what makes this
+        // true by construction rather than by two people remembering.
+        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        assert_eq!(
+            tails.try_recv().expect("the tailer must be told to stop"),
+            crate::tailer::TailCommand::Stop {
+                session_uid: TEST_UID.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_could_not_see_never_reads_as_a_healthy_fleet() {
+        // The same rule the startup log-integrity banner follows: the sentence
+        // is derived from the numbers, so it cannot say everything is fine on
+        // the line after reporting that nothing could be established.
+        let blind = LivenessSweep {
+            examined: 26,
+            targets: 26,
+            unknown: 26,
+            ..LivenessSweep::default()
+        };
+        let summary = blind.summary();
+        assert!(summary.contains("could not be established"), "{summary}");
+        assert!(summary.contains("0 running"), "{summary}");
+
+        let healthy = LivenessSweep {
+            examined: 3,
+            targets: 3,
+            present: 3,
+            ..LivenessSweep::default()
+        };
+        assert!(
+            !healthy.summary().contains("could not"),
+            "{}",
+            healthy.summary()
+        );
+        assert_eq!(
+            LivenessSweep::default().summary(),
+            "no session needed checking"
         );
     }
 

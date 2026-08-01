@@ -8,7 +8,7 @@ import XCTest
 ///   xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
 ///     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
 ///     -only-testing:CodeConnectUITests/LiveDaemonUITests \
-///     TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(cc token)"
+///     TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(codeconnect token)"
 final class LiveDaemonUITests: XCTestCase {
 
     private var host: String { ProcessInfo.processInfo.environment["CC_HOST"] ?? "" }
@@ -359,11 +359,11 @@ final class LiveDaemonUITests: XCTestCase {
     }
 }
 
-/// QR pairing against a real `cc pair`.
+/// QR pairing against a real `codeconnect pair`.
 ///
 /// Run it with a *fresh* code — they are single-use and expire in five minutes:
 ///
-///   CODE=$(cc pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+///   CODE=$(codeconnect pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
 ///   xcodebuild test … TEST_RUNNER_CC_PAIR_CODE=$CODE TEST_RUNNER_CC_PAIR_HOST=<host>
 final class PairingLiveUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }

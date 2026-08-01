@@ -191,7 +191,7 @@ enum CCMeasured {
 /// Backtick markup, resolved.
 ///
 /// **Backticks are markup, and markup never renders.** Strings arrive from the
-/// wire, from `CCDisabledReason`s and from screen copy carrying `` `cc pair
+/// wire, from `CCDisabledReason`s and from screen copy carrying `` `codeconnect pair
 /// --ssh` `` or `` `ios/CodeConnect/Net/Sender.swift` `` — and those spans are
 /// commands and paths, which this product sets in monospace *always*, in prose
 /// as much as anywhere else. Drawn as plain text they were doubly wrong: an
@@ -585,7 +585,7 @@ private struct CCDisabledModifier: ViewModifier {
                     .foregroundStyle(CC.color.warning)
                     // `CCProse`, not `Text`: a blocked reason is the one string
                     // in the kit most likely to name the command that would
-                    // unblock it — `cc pair --ssh`, `cc token` — and those
+                    // unblock it — `codeconnect pair --ssh`, `codeconnect token` — and those
                     // arrive backticked from the call site.
                     CCProse(reason.text, style: CC.type.footnote, color: CC.color.warning)
                         .fixedSize(horizontal: false, vertical: true)

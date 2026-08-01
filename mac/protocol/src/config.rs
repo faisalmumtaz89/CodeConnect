@@ -47,6 +47,9 @@ fn default_local_resolve_grace_ms() -> u64 {
 fn default_local_resolve_poll_ms() -> u64 {
     2_000
 }
+fn default_liveness_sweep_secs() -> u64 {
+    60
+}
 fn default_diff_max_bytes() -> usize {
     crate::ws::MAX_DIFF_BYTES
 }
@@ -111,11 +114,21 @@ pub struct Config {
 
     /// Which hook event carries the gate. `none` disables holding entirely.
     ///
-    /// NOTE (claude 2.1.220): the `PermissionRequest` hook fires but its return
-    /// value does **not** decide the permission — measured against that build.
-    /// It is still the correct trigger (it fires exactly when a human is needed
-    /// and carries `permission_suggestions`), which is why answers are applied
-    /// by send-keys rather than by the hook's return value.
+    /// NOTE (claude 2.1.220): this previously read "the `PermissionRequest`
+    /// hook fires but its return value does **not** decide the permission —
+    /// measured against that build", and the send-keys answer path exists
+    /// because of it. That measurement was real but the conclusion was wrong:
+    /// the return value was being emitted in the wrong schema. `PermissionRequest`
+    /// takes a *nested* `hookSpecificOutput.decision.behavior`, not the flat
+    /// top-level `decision` that `PreToolUse` accepts. With the correct shape,
+    /// re-measured against 2.1.220, the return value decides the permission in
+    /// both directions and no local prompt appears at all.
+    ///
+    /// So answers no longer *have* to be typed into the pane. Moving them onto
+    /// the hook's return value is what would make "approvals ride structured
+    /// channels, never parsed terminal bytes" true of the approval path as well
+    /// — but it is a behavioural change (the local prompt is delayed while the
+    /// gate is held), so it is gated on `hold_ms` rather than switched on here.
     #[serde(default = "default_gate_hook")]
     pub gate_hook: String,
 
@@ -129,6 +142,25 @@ pub struct Config {
     pub gate_timeout_ms: u64,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
+
+    /// Where the Apple `.p8` push key lives, and who it belongs to.
+    ///
+    /// All four are absent by default and push stays a logging stub until every
+    /// one is present: a half-configured sender would advertise `push: live` in
+    /// `hello_ack` and then fail on every send, which is worse than saying
+    /// plainly that push is off. None can be guessed — the key id and team id
+    /// come from the developer account and the topic is the app's bundle id.
+    ///
+    /// The key is a **private key**. Keep it outside the repository;
+    /// `~/.codeconnect/secrets/` is created `0700` for exactly this.
+    #[serde(default)]
+    pub apns_key_path: Option<String>,
+    #[serde(default)]
+    pub apns_key_id: Option<String>,
+    #[serde(default)]
+    pub apns_team_id: Option<String>,
+    #[serde(default)]
+    pub apns_topic: Option<String>,
 
     /// Opt in to PreToolUse `ask` when the daemon is unreachable. Off by
     /// default: it is the only channel that renders our reason to the local
@@ -181,6 +213,22 @@ pub struct Config {
     #[serde(default = "default_local_resolve_poll_ms")]
     pub local_resolve_poll_ms: u64,
 
+    /// How often the daemon proves each session's `lifecycle` against tmux.
+    ///
+    /// This is the backstop for the case a supervisor cannot report: the daemon
+    /// was down when the agent died, the supervisor was killed, or the Mac
+    /// slept. Without it a row that nobody reported the end of stayed `live` for
+    /// ever, and the fleet confidently showed agents that had been gone for
+    /// days.
+    ///
+    /// A sweep costs one short-lived `tmux has-session` per *distinct tmux
+    /// name*, one at a time, so a minute is unnoticeable even on a machine with
+    /// a long history. `0` turns it off, which leaves only the startup pass —
+    /// and turning it off entirely restores the defect, so it is spelled as a
+    /// deliberate choice rather than offered as a tuning knob.
+    #[serde(default = "default_liveness_sweep_secs")]
+    pub liveness_sweep_secs: u64,
+
     #[serde(default = "default_diff_max_bytes")]
     pub diff_max_bytes: usize,
     #[serde(default = "default_diff_timeout_ms")]
@@ -208,7 +256,7 @@ pub struct Config {
     #[serde(default = "default_log_rotate_secs")]
     pub log_rotate_secs: u64,
 
-    /// Show tmux's status bar inside the session. Off by default: `cc claude`
+    /// Show tmux's status bar inside the session. Off by default: `codeconnect claude`
     /// is meant to be visually indistinguishable from plain `claude`, and a
     /// status line is the one thing that gives the hosting away.
     pub tmux_status: bool,
@@ -258,7 +306,7 @@ pub struct Config {
     /// Frames one IPC connection may have queued for writing.
     ///
     /// The writer used to be fed by an unbounded channel, so a client that
-    /// stopped reading — a `cc ls` suspended with ctrl-Z is enough — let the
+    /// stopped reading — a `codeconnect ls` suspended with ctrl-Z is enough — let the
     /// daemon buffer without limit on its behalf.
     #[serde(default = "default_ipc_write_queue")]
     pub ipc_write_queue: usize,
@@ -284,6 +332,10 @@ impl Default for Config {
             ws_loopback: true,
             gate_hook: default_gate_hook(),
             hold_ms: 0,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
             gate_timeout_ms: default_gate_timeout_ms(),
             connect_timeout_ms: default_connect_timeout_ms(),
             unreachable_ask: false,
@@ -302,6 +354,7 @@ impl Default for Config {
             local_resolve: true,
             local_resolve_grace_ms: default_local_resolve_grace_ms(),
             local_resolve_poll_ms: default_local_resolve_poll_ms(),
+            liveness_sweep_secs: default_liveness_sweep_secs(),
             diff_max_bytes: default_diff_max_bytes(),
             diff_timeout_ms: default_diff_timeout_ms(),
             git_bin: None,
@@ -376,6 +429,13 @@ impl Config {
         // an hour-long "temporary" code is a standing invitation.
         self.pairing_ttl_secs = self.pairing_ttl_secs.clamp(30, 3_600);
         self.local_resolve_poll_ms = self.local_resolve_poll_ms.clamp(250, 60_000);
+        // Zero is meaningful — it disables the sweep — so only a non-zero value
+        // is clamped. The floor is above the confirmation delay a single sweep
+        // spends inside itself, so a sweep can never be asked to start before
+        // the previous one has had time to finish deciding.
+        if self.liveness_sweep_secs != 0 {
+            self.liveness_sweep_secs = self.liveness_sweep_secs.clamp(10, 86_400);
+        }
         // Below the grace period the detector fires before the TUI has drawn
         // the prompt it is looking for, and resolves every approval as local.
         self.local_resolve_grace_ms = self.local_resolve_grace_ms.max(1_000);

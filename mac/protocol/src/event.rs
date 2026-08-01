@@ -147,7 +147,7 @@ pub struct Event {
     /// value here means the record predates the migration entirely.
     #[serde(default)]
     pub session_uid: String,
-    /// The tmux session name (e.g. `cc-1`) — for display and for `cc attach`.
+    /// The tmux session name (e.g. `cc-1`) — for display and for `codeconnect attach`.
     /// **Not** an identity: it is reassigned when a session exits.
     pub session_id: String,
     /// RFC3339 UTC, millisecond precision.
@@ -271,7 +271,7 @@ pub struct SessionSummary {
     /// tells them apart.
     #[serde(default)]
     pub session_uid: String,
-    /// The tmux session name. Display and `cc attach` only.
+    /// The tmux session name. Display and `codeconnect attach` only.
     pub session_id: String,
     pub tmux_session: String,
     pub cwd: String,

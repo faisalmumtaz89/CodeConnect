@@ -551,11 +551,11 @@ import SwiftUI
                             "Disabled ghost", variant: .ghost, size: .md, fullWidth: true,
                             disabledReason: CCDisabledReason("Nothing to undo."), action: {})
                         CCButton(
-                            "Deny", icon: "xmark", variant: .destructive, size: .lg,
+                            "Deny", icon: "xmark", variant: .secondary, size: .lg,
                             fullWidth: true, action: { lastAction = "deny" })
                         HStack(spacing: CC.space.xs) {
                             CCButton(
-                                "Deny", variant: .destructive, size: .lg, fullWidth: true,
+                                "Deny", variant: .secondary, size: .lg, fullWidth: true,
                                 action: { lastAction = "deny" })
                             CCButton(
                                 "Allow", variant: .primary, size: .lg, fullWidth: true,
@@ -942,7 +942,7 @@ import SwiftUI
                                 .ccType(CC.type.callout)
                                 .foregroundStyle(CC.text.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                            CCMonoBlock("cc claude --resume", isSmall: true)
+                            CCMonoBlock("codeconnect claude --resume", isSmall: true)
                         }
                     }
                 }
@@ -1365,7 +1365,7 @@ import SwiftUI
                                 index: 3,
                                 title: "Then authorise this iPhone",
                                 message: "Run this at the Mac and scan the QR it prints.",
-                                command: "cc pair --ssh")
+                                command: "codeconnect pair --ssh")
                         }
                     }
                 }
@@ -1389,7 +1389,7 @@ import SwiftUI
                             actionTitle: "Pair a Mac",
                             action: { lastAction = "pair" },
                             detail: {
-                                CCMonoBlock("cc claude")
+                                CCMonoBlock("codeconnect claude")
                                     .frame(maxWidth: 280)
                             })
                     }
@@ -1432,7 +1432,7 @@ import SwiftUI
                         "In `ios/CodeConnect/Net/Sender.swift` lines 12–28",
                         style: CC.type.footnote, color: CC.text.secondary)
                     CCProse(
-                        "The terminal will stop working until the new key is authorised at the Mac with `cc pair --ssh`.",
+                        "The terminal will stop working until the new key is authorised at the Mac with `codeconnect pair --ssh`.",
                         style: CC.type.body, color: CC.text.primary)
                     CCProse(
                         "Send to CodeConnect · `cc-tests`", style: CC.type.headline,
@@ -1478,7 +1478,7 @@ import SwiftUI
                             }
                         } allow: {
                             CCButton(
-                                "Hold to allow", variant: .destructive, size: .lg,
+                                "Hold to allow", variant: .primary, size: .lg,
                                 fullWidth: true
                             ) { lastAction = "allow" }
                         }
@@ -1941,7 +1941,7 @@ import SwiftUI
                         CCActionBar {
                             HStack(spacing: CC.space.xs) {
                                 CCButton(
-                                    "Deny", variant: .destructive, size: .lg, fullWidth: true,
+                                    "Deny", variant: .secondary, size: .lg, fullWidth: true,
                                     action: {})
                             }
                             CCHoldButton("Hold to allow", action: {})

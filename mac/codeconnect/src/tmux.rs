@@ -10,39 +10,12 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-/// launchd hands a process a minimal environment with no shell PATH, so the
-/// binary is located explicitly rather than through `which`.
-const TMUX_CANDIDATES: &[&str] = &[
-    "/opt/homebrew/bin/tmux",
-    "/usr/local/bin/tmux",
-    "/usr/bin/tmux",
-    "/opt/local/bin/tmux",
-];
+use protocol::tmux::target_session;
+pub use protocol::tmux::{search_path, SessionPresence};
 
 pub fn tmux_bin() -> Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CODECONNECT_TMUX") {
-        let path = PathBuf::from(explicit);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    for candidate in TMUX_CANDIDATES {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Some(found) = search_path("tmux") {
-        return Ok(found);
-    }
-    bail!("tmux not found; install it or set CODECONNECT_TMUX")
-}
-
-pub fn search_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+    protocol::tmux::tmux_bin()
+        .ok_or_else(|| anyhow::anyhow!("tmux not found; install it or set CODECONNECT_TMUX"))
 }
 
 fn base() -> Result<Command> {
@@ -51,42 +24,22 @@ fn base() -> Result<Command> {
     Ok(command)
 }
 
-/// What a tmux invocation actually did — status *and* stderr, both kept.
+/// Run a tmux command and capture stdout. `Ok(None)` when tmux exits non-zero.
 ///
-/// The status alone is not enough. `has-session` exits non-zero for "there is
-/// no such session" and for "the server could not be reached", and those are
-/// opposite facts: one means the agent is gone, the other means we could not
-/// look. Only tmux's own message separates them.
-struct TmuxOutput {
-    ok: bool,
-    stdout: String,
-    stderr: String,
-}
-
-fn run_raw(args: &[&str]) -> Result<TmuxOutput> {
+/// Correct only for subcommands where non-zero genuinely means "nothing to
+/// report" — listing sessions when no server is running. Anything that has to
+/// distinguish *absent* from *unknown* must use [`session_presence`] instead,
+/// which is why this collapses the two and that one does not.
+fn run(args: &[&str]) -> Result<Option<String>> {
     let output = base()?
         .args(args)
         .stdin(Stdio::null())
         .output()
         .context("running tmux")?;
-    Ok(TmuxOutput {
-        ok: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-/// Run a tmux command and capture stdout. `Ok(None)` when tmux exits non-zero.
-///
-/// Correct only for subcommands where non-zero genuinely means "nothing to
-/// report" — listing sessions when no server is running. Anything that has to
-/// distinguish *absent* from *unknown* must use [`session_presence`] instead.
-fn run(args: &[&str]) -> Result<Option<String>> {
-    let output = run_raw(args)?;
-    if !output.ok {
+    if !output.status.success() {
         return Ok(None);
     }
-    Ok(Some(output.stdout))
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
 pub fn list_sessions() -> Result<Vec<String>> {
@@ -101,61 +54,14 @@ pub fn list_sessions() -> Result<Vec<String>> {
         .collect())
 }
 
-/// Whether a session exists, or whether we could not tell.
+/// Whether a session exists on the private server, or whether we could not tell.
 ///
-/// Three states, because the two-state version was a lie. `has-session` exiting
-/// non-zero used to mean "gone" unconditionally, and the supervisor turned that
-/// straight into a `SessionEnd` event — so a tmux binary that could not be
-/// reached, a socket whose permissions had changed, a machine that had run out
-/// of file descriptors, or a server briefly restarting all produced a *reported
-/// agent exit*. The event log's rule is that the daemon never claims what it
-/// does not know, and "tmux returned 1" is not knowledge of an exit.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SessionPresence {
-    Present,
-    /// tmux said, in its own words, that there is no such session.
-    Gone,
-    /// We could not establish either. Never treated as an exit.
-    Unknown(String),
-}
-
+/// Delegated rather than reimplemented. `ccd` asks the same question about the
+/// same sessions on its liveness sweep, and two independent readings of tmux's
+/// stderr would be two chances for one of them to promote "we could not look"
+/// into a reported exit. See [`protocol::tmux`].
 pub fn session_presence(name: &str) -> SessionPresence {
-    match run_raw(&["has-session", "-t", &target_session(name)]) {
-        Ok(output) if output.ok => SessionPresence::Present,
-        Ok(output) => classify_absence(&output.stderr),
-        // tmux could not even be run: the binary moved, or the process is out
-        // of descriptors. Certainly not evidence that an agent exited.
-        Err(err) => SessionPresence::Unknown(format!("{err:#}")),
-    }
-}
-
-/// Read tmux's own words for a definite "no such session".
-///
-/// Matched against the messages tmux emits rather than against the exit code,
-/// because the exit code is 1 for every one of them. The list is tmux's actual
-/// wording across the versions this ships against; anything unrecognised is
-/// `Unknown`, which is the fail-toward-not-claiming direction — an unfamiliar
-/// message must not be promoted into a reported exit.
-fn classify_absence(stderr: &str) -> SessionPresence {
-    let message = stderr.trim().to_ascii_lowercase();
-    const GONE: &[&str] = &[
-        // `has-session -t cc-1` with the server up and no such session.
-        "can't find session",
-        "session not found",
-        "no such session",
-        // The server itself is not running, so no session exists on it. tmux
-        // words this several ways depending on version and platform.
-        "no server running",
-        "failed to connect to server: connection refused",
-        "no such file or directory",
-    ];
-    if GONE.iter().any(|needle| message.contains(needle)) {
-        return SessionPresence::Gone;
-    }
-    if message.is_empty() {
-        return SessionPresence::Unknown("tmux failed without saying why".into());
-    }
-    SessionPresence::Unknown(stderr.trim().to_string())
+    protocol::tmux::session_presence_on(protocol::TMUX_SOCKET_NAME, name)
 }
 
 /// Whether a session exists. An indeterminate answer is an error, not a `false`.
@@ -229,7 +135,7 @@ pub fn new_session(
     //
     // `set-option -t` takes a *pane* target on tmux 3.x, so this needs the
     // colon form. Reported rather than swallowed: a silent failure here is a
-    // visible difference from plain `claude`, which is the one thing `cc claude`
+    // visible difference from plain `claude`, which is the one thing `codeconnect claude`
     // promises not to be.
     if !status_bar && run(&["set-option", "-t", &target_pane(name), "status", "off"])?.is_none() {
         eprintln!("codeconnect: could not hide the tmux status bar for {name}");
@@ -311,12 +217,6 @@ pub fn exec_attach(name: &str) -> Result<std::convert::Infallible> {
     Err(error).context("exec tmux attach-session")
 }
 
-/// Exact session target. tmux prefix-matches names unless they are anchored
-/// with `=`; without this, `cc-1` would happily attach to `cc-12`.
-fn target_session(name: &str) -> String {
-    format!("={name}")
-}
-
 /// Exact *pane* target — the session's current pane.
 ///
 /// The trailing colon is required and is not a stylistic choice. Measured on
@@ -356,51 +256,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tmux_saying_there_is_no_such_session_is_the_only_thing_read_as_gone() {
-        // The defect this replaces: *any* non-zero exit from `has-session` was
-        // read as absence, and the supervisor turned absence into a durable
-        // `SessionEnd`. tmux exits 1 for "no such session" and also for every
-        // way it can fail to look — so a moved binary, an unreachable socket, a
-        // process out of descriptors, or a server mid-restart all produced a
-        // reported agent exit for a session that was still running.
-        for gone in [
-            "can't find session: cc-1",
-            "no server running on /private/tmp/tmux-501/codeconnect",
-            "session not found: cc-1",
-            "no such session",
-            "failed to connect to server: Connection refused",
-            "error connecting to /tmp/tmux-501/codeconnect (No such file or directory)",
-        ] {
-            assert_eq!(
-                classify_absence(gone),
-                SessionPresence::Gone,
-                "{gone:?} is tmux saying the session is not there"
-            );
-        }
-
-        for unknown in [
-            "permission denied",
-            "lost server",
-            "server exited unexpectedly",
-            "open terminal failed: not a terminal",
-            "too many open files",
-        ] {
-            assert!(
-                matches!(classify_absence(unknown), SessionPresence::Unknown(_)),
-                "{unknown:?} must never be promoted into a reported exit"
-            );
-        }
-    }
-
-    #[test]
-    fn a_silent_failure_is_unknown_rather_than_gone() {
-        // The worst case for the old code: tmux exits non-zero and says
-        // nothing. There is no evidence of an exit here at all.
-        assert!(matches!(classify_absence(""), SessionPresence::Unknown(_)));
-        assert!(matches!(
-            classify_absence("   \n  "),
-            SessionPresence::Unknown(_)
-        ));
+    fn the_shim_and_the_daemon_read_tmux_through_the_same_classifier() {
+        // The wording table itself is tested in `protocol::tmux`, which is the
+        // point: there is one of it now. What this asserts is that the shim did
+        // not keep a private copy — a second reading of tmux's stderr is a
+        // second chance for one side to promote "we could not look" into a
+        // reported exit, and the two sides ask about the *same sessions*.
+        assert_eq!(
+            session_presence("cc-nonexistent-probe"),
+            protocol::tmux::session_presence_on(protocol::TMUX_SOCKET_NAME, "cc-nonexistent-probe"),
+        );
     }
 
     #[test]
@@ -412,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn targets_are_anchored_and_pane_targets_carry_the_colon() {
+    fn pane_targets_carry_the_colon_as_well_as_the_anchor() {
         // Both halves matter: without `=`, `cc-1` prefix-matches `cc-12`;
         // without the trailing `:`, a pane target is not found at all.
         assert_eq!(target_session("cc-1"), "=cc-1");

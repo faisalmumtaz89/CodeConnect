@@ -4,16 +4,16 @@ import XCTest
 ///
 /// Everything here needs a daemon that has more than one run under one tmux
 /// name, which is the state a Mac reaches on its own the moment a `cc-1` exits
-/// and the next `cc claude` takes the name back:
+/// and the next `codeconnect claude` takes the name back:
 ///
-///   cc claude                      # in some directory; note the uid from `cc ls`
+///   codeconnect claude                      # in some directory; note the uid from `codeconnect ls`
 ///   tmux -L codeconnect kill-session -t cc-1
-///   cc claude                      # same directory, same name, new uid
+///   codeconnect claude                      # same directory, same name, new uid
 ///
 ///   xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
 ///     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
 ///     -only-testing:CodeConnectUITests/SessionIdentityLiveUITests \
-///     TEST_RUNNER_CC_HOST=127.0.0.1 TEST_RUNNER_CC_TOKEN="$(cc token)"
+///     TEST_RUNNER_CC_HOST=127.0.0.1 TEST_RUNNER_CC_TOKEN="$(codeconnect token)"
 final class SessionIdentityLiveUITests: XCTestCase {
 
     private var host: String { ProcessInfo.processInfo.environment["CC_HOST"] ?? "" }

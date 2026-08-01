@@ -2,6 +2,9 @@ import SwiftUI
 
 @main
 struct CodeConnectApp: App {
+    /// Apple delivers the APNs token to a `UIApplicationDelegate` and SwiftUI's
+    /// `App` has none, so one is adopted for that single callback.
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 

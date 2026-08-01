@@ -29,14 +29,14 @@ Terminal bytes are read for exactly one purpose: confirming that the prompt we a
                                 │      └──────▲───────┘            │
                                 │             │ Claude Code hooks  │
                                 │   ┌─────────┴──────────┐         │
-                                │   │  claude, in tmux   │◄── cc claude
+                                │   │  claude, in tmux   │◄── codeconnect claude
                                 │   └────────────────────┘         │
                                 └──────────────────────────────────┘
 ```
 
 **`ccd`** is the daemon. It ingests hook events and transcript lines, assigns each a monotonic sequence number per session, and writes them to SQLite before anything is published. The log is the source of truth: reconnection, backfill, deduplication and crash recovery are all one mechanism — ask for everything after sequence *N*.
 
-**`cc`** launches an agent inside a private tmux server and generates the settings that wire Claude Code's hooks. The terminal is unchanged; the session survives a closed tab, and a per-session supervisor connects *outward* to the daemon.
+**`codeconnect`** launches an agent inside a private tmux server and generates the settings that wire Claude Code's hooks. The terminal is unchanged; the session survives a closed tab, and a per-session supervisor connects *outward* to the daemon.
 
 **`cc-hook`** is what the hooks actually invoke. It is tiny, and it fails safe: if the daemon cannot be reached, the decision returns to the keyboard rather than being answered or silently allowed.
 
@@ -45,6 +45,13 @@ Terminal bytes are read for exactly one purpose: confirming that the prompt we a
 Because the daemon is not in any agent's process-parent chain, killing it does not touch a running session. Restarting it re-attaches and backfills.
 
 ## Approving something, safely
+
+There are two ways an answer can reach the agent, and the daemon advertises which one is live as `answer_path`:
+
+- **`hook_return`** — the decision is returned through the hook that asked for it, carrying Claude's own `tool_use_id`. Nothing is typed, and no pane is read: the question and the answer share one connection, so there is nothing to re-identify. Set `hold_ms` in `~/.codeconnect/config.json` to enable it. The cost is that the Mac's own prompt is held open while the phone is asked, and if nobody answers within the hold the local prompt appears as usual.
+- **`send_keys`** — the default (`hold_ms: 0`). The hook has already returned by the time you answer, so the thing waiting is the Mac's own prompt, and the answer is typed into it.
+
+Everything below is about the second path, where the answer arrives after the fact and the prompt has to be re-identified before anything is typed.
 
 An approval is only as trustworthy as the answer to "is this still the thing on screen?" Four mechanisms answer it:
 

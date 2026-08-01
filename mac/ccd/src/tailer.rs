@@ -23,12 +23,12 @@
 //! when a session starts, and a rewrite that swaps the inode would leave a
 //! file watch pointing at bytes nobody will write to again.
 //!
-//! Cursors are keyed by `session_uid`, so `cc claude --resume` in a reused name
+//! Cursors are keyed by `session_uid`, so `codeconnect claude --resume` in a reused name
 //! is a *new* run that reads the transcript into its own log rather than one
 //! that finds a cursor claiming the file is already consumed. It costs one
 //! backfill; the alternative was a timeline with its first half missing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -77,29 +77,58 @@ struct Tail {
     path: String,
 }
 
-pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<(String, String)>) {
+/// What the daemon asks the tailer to do.
+///
+/// This used to be a bare `(session_uid, path)` — follow this, and never
+/// anything else, because there was no way to say a run had finished. The cost
+/// was measured on the owner's machine: 1,282 `fsevents could not watch` lines
+/// in one error log, every one of them a *deleted* working directory belonging
+/// to a session that had ended days earlier, re-armed and re-failed on every
+/// single daemon start. A tail nobody can end is a `stat` per session per poll,
+/// for ever, on behalf of agents that are gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailCommand {
+    /// This run's transcript is at `path`; follow it.
+    Follow { session_uid: String, path: String },
+    /// This run has ended. Read whatever it wrote last, then let it go.
+    Stop { session_uid: String },
+}
+
+pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailCommand>) {
     let mut tails: Tails = HashMap::new();
 
     // Restart path: everything we already knew is re-tailed from its cursor, so
     // a `kill -9` costs at most the events written while we were dead.
+    //
+    // Everything *still running*, that is. A run that has ended has nothing
+    // left to write, and re-arming a watch on its working directory — usually
+    // deleted by now — is filesystem work and a warning per session on behalf
+    // of an agent that is gone. The liveness sweep runs before this task is
+    // even spawned, so by the time this list is read the ended runs are
+    // already marked as such.
+    let mut final_reads = Vec::new();
     match daemon.db.list_sessions().await {
         Ok(rows) => {
-            for row in rows {
-                if let Some(path) = row.transcript_path.clone() {
-                    tails.insert(
-                        row.session_uid.clone(),
-                        Tail {
-                            session: row.key(),
-                            path,
-                        },
-                    );
-                }
-            }
+            let (resumed, ended) = tails_to_resume(rows);
+            tails = resumed;
+            final_reads = ended;
         }
         Err(err) => crate::log_error!("tailer could not list sessions: {err:#}"),
     }
-    if !tails.is_empty() {
-        crate::log_info!("tailer resuming {} transcript(s)", tails.len());
+    if !tails.is_empty() || !final_reads.is_empty() {
+        crate::log_info!(
+            "tailer resuming {} transcript(s); {} ended run(s) read once and released",
+            tails.len(),
+            final_reads.len()
+        );
+    }
+    // Read once, then let go. A run that ended while this daemon was down can
+    // still have transcript bytes nobody consumed, and they are only reachable
+    // from here — nothing else will ever look at that file again.
+    for tail in final_reads {
+        if let Err(err) = poll_once(&daemon, &tail.session, &tail.path).await {
+            crate::log_debug!("tail {}: final read failed: {err:#}", tail.session.name);
+        }
     }
 
     let (nudge_tx, mut nudge_rx) = mpsc::unbounded_channel::<()>();
@@ -120,9 +149,9 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<(String, S
 
     loop {
         tokio::select! {
-            registration = rx.recv() => {
-                match registration {
-                    Some((session_uid, path)) => {
+            command = rx.recv() => {
+                match command {
+                    Some(TailCommand::Follow { session_uid, path }) => {
                         if tails.get(&session_uid).map(|t| t.path.as_str()) == Some(path.as_str()) {
                             continue;
                         }
@@ -148,6 +177,32 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<(String, S
                         }
                         tails.insert(session_uid, Tail { session, path });
                     }
+                    Some(TailCommand::Stop { session_uid }) => {
+                        let Some(tail) = tails.remove(&session_uid) else {
+                            continue;
+                        };
+                        // One last read *before* letting go. A run can write its
+                        // final transcript lines between the previous poll and
+                        // the moment its end is established, and dropping the
+                        // tail without reading them would lose the tail-end of
+                        // the session permanently — the log's whole promise is
+                        // that ending costs nothing. A transcript whose file is
+                        // already gone scans to nothing, silently, so this is
+                        // free for a run that ended days ago.
+                        if let Err(err) = poll_once(&daemon, &tail.session, &tail.path).await {
+                            crate::log_debug!(
+                                "tail {}: final read failed: {err:#}", tail.session.name
+                            );
+                        }
+                        if let Some(watcher) = watcher.as_mut() {
+                            watcher.release_parent_of(&tail.path);
+                        }
+                        crate::log_debug!(
+                            "stopped tailing {} for {} ({session_uid})",
+                            tail.path,
+                            tail.session.name
+                        );
+                    }
                     None => return,
                 }
             }
@@ -162,6 +217,47 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<(String, S
             }
         }
     }
+}
+
+/// What a starting tailer should follow, and what it should read once and drop.
+///
+/// Split out of `run` because the decision is the whole point and the loop
+/// around it is not testable. Two rules, and the second was learned the hard
+/// way:
+///
+/// 1. **A run that has ended is not *followed*.** Without this, every session
+///    the machine had ever recorded a transcript path for was re-tailed on
+///    every start — polled on every tick, and its working directory re-watched.
+///    Measured on the owner's Mac: 1,282 `could not watch` failures in one error
+///    log, against directories deleted days earlier.
+///
+/// 2. **…but it is still *read*, once.** The first rule alone was a data-loss
+///    bug, and the soak gauntlet caught it: a run can end with transcript bytes
+///    the tailer had not yet consumed, and skipping it outright meant those
+///    lines were never ingested and never would be. The event log's promise is
+///    that a `kill -9` costs nothing but a reconnect; silently abandoning the
+///    tail-end of a session's transcript is not nothing. One final scan costs a
+///    `stat` — free for a run whose file is already deleted, and free again for
+///    one whose cursor is already at the end — and then the run is let go for
+///    good, which is what keeps rule 1's benefit.
+fn tails_to_resume(rows: Vec<crate::store::SessionRow>) -> (Tails, Vec<Tail>) {
+    let mut tails = Tails::new();
+    let mut final_reads = Vec::new();
+    for row in rows {
+        let Some(path) = row.transcript_path.clone() else {
+            continue;
+        };
+        let tail = Tail {
+            session: row.key(),
+            path,
+        };
+        if row.lifecycle == protocol::event::Lifecycle::Exited {
+            final_reads.push(tail);
+            continue;
+        }
+        tails.insert(row.session_uid.clone(), tail);
+    }
+    (tails, final_reads)
 }
 
 async fn poll_all(daemon: &Arc<Daemon>, tails: &Tails) {
@@ -179,7 +275,16 @@ async fn poll_all(daemon: &Arc<Daemon>, tails: &Tails) {
 /// be as imprecise as FSEvents wants to be without costing correctness.
 struct DirWatcher {
     watcher: notify::RecommendedWatcher,
-    watched: HashSet<PathBuf>,
+    /// Watched directories, and how many tails still need each.
+    ///
+    /// Counted rather than a set, because a directory is shared: Claude keeps
+    /// every project's transcripts in one folder, so several live sessions
+    /// routinely watch the same path. Unwatching when the *first* of them ends
+    /// would silently drop the others back to the 250ms poll — a latency
+    /// regression with no symptom anyone could trace. Counting is what makes
+    /// releasing safe, and releasing is what stops a long-lived daemon
+    /// accumulating one kernel watch per session it has ever seen.
+    watched: HashMap<PathBuf, usize>,
 }
 
 impl DirWatcher {
@@ -194,7 +299,7 @@ impl DirWatcher {
         match watcher {
             Ok(watcher) => Some(DirWatcher {
                 watcher,
-                watched: HashSet::new(),
+                watched: HashMap::new(),
             }),
             Err(err) => {
                 // The poll alone is still correct, so this is a lost
@@ -209,16 +314,43 @@ impl DirWatcher {
         let Some(dir) = Path::new(path).parent().map(Path::to_path_buf) else {
             return;
         };
-        if !self.watched.insert(dir.clone()) {
+        if let Some(holders) = self.watched.get_mut(&dir) {
+            *holders += 1;
             return;
         }
         match self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
-            Ok(()) => crate::log_debug!("fsevents watching {}", dir.display()),
-            Err(err) => {
-                self.watched.remove(&dir);
-                crate::log_warn!("fsevents could not watch {}: {err}", dir.display());
+            Ok(()) => {
+                self.watched.insert(dir.clone(), 1);
+                crate::log_debug!("fsevents watching {}", dir.display());
             }
+            // Logged at debug, not warning. The commonest cause by far is a
+            // working directory that no longer exists, which is an ordinary
+            // fact about a finished session rather than a fault — and at
+            // warning level it produced 1,282 lines in one error log, drowning
+            // the entries that did need reading. The poll is still the
+            // correctness floor either way, so a lost watch costs latency and
+            // nothing else.
+            Err(err) => crate::log_debug!("fsevents could not watch {}: {err}", dir.display()),
         }
+    }
+
+    /// Give up one hold on a directory, and unwatch it when the last one goes.
+    fn release_parent_of(&mut self, path: &str) {
+        let Some(dir) = Path::new(path).parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(holders) = self.watched.get_mut(&dir) else {
+            return;
+        };
+        *holders -= 1;
+        if *holders > 0 {
+            return;
+        }
+        self.watched.remove(&dir);
+        // A failure here means the watch is already gone, which is the state we
+        // were asking for.
+        let _ = self.watcher.unwatch(&dir);
+        crate::log_debug!("fsevents released {}", dir.display());
     }
 }
 
@@ -582,6 +714,195 @@ mod tests {
             protocol::time::now_unix_ms()
         ));
         (base.with_extension("db"), base.with_extension("jsonl"))
+    }
+
+    /// A watcher with nowhere to send nudges, for exercising the bookkeeping.
+    fn dir_watcher() -> DirWatcher {
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Kept alive: a closed receiver would make every send fail, which is
+        // not what these assertions are about.
+        Box::leak(Box::new(rx));
+        DirWatcher::new(tx).expect("a watcher must be constructible")
+    }
+
+    #[test]
+    fn a_directory_is_watched_once_and_released_only_by_its_last_holder() {
+        // Claude keeps every project's transcripts in one folder, so several
+        // live sessions routinely watch the same path. Unwatching when the
+        // first of them ends would silently drop the others back to the 250ms
+        // poll — a latency regression with no symptom anyone could trace back
+        // to this.
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-tail-watch-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.jsonl");
+        let second = dir.join("b.jsonl");
+
+        let mut watcher = dir_watcher();
+        watcher.watch_parent_of(first.to_str().unwrap());
+        watcher.watch_parent_of(second.to_str().unwrap());
+        assert_eq!(
+            watcher.watched.get(&dir).copied(),
+            Some(2),
+            "two sessions, one directory, one watch"
+        );
+
+        watcher.release_parent_of(first.to_str().unwrap());
+        assert_eq!(
+            watcher.watched.get(&dir).copied(),
+            Some(1),
+            "the surviving session must keep its watch"
+        );
+        watcher.release_parent_of(second.to_str().unwrap());
+        assert!(
+            !watcher.watched.contains_key(&dir),
+            "the last holder releasing must unwatch, or a long-lived daemon \
+             accumulates a kernel watch per session it has ever seen"
+        );
+
+        // Releasing something never held, or twice, is a no-op rather than an
+        // underflow — a `usize` going below zero here would panic the tailer.
+        watcher.release_parent_of(second.to_str().unwrap());
+        watcher.release_parent_of("/nonexistent/never/watched.jsonl");
+        assert!(watcher.watched.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_watch_that_cannot_be_armed_is_not_recorded_as_held() {
+        // The owner's machine: 1,282 attempts to watch working directories
+        // that had been deleted, re-armed on every daemon start. A failure must
+        // leave no hold behind, or a later release would decrement a
+        // directory that was never watched.
+        let mut watcher = dir_watcher();
+        watcher.watch_parent_of("/nonexistent/codeconnect/deleted/transcript.jsonl");
+        assert!(
+            watcher.watched.is_empty(),
+            "a failed watch must not be recorded as held"
+        );
+    }
+
+    #[test]
+    fn a_starting_tailer_resumes_the_living_and_leaves_the_ended_alone() {
+        // The regression. Every session with a transcript path was re-tailed at
+        // startup regardless of whether the run had finished, so a machine with
+        // a history polled hundreds of files nobody would ever write to again
+        // and re-armed a filesystem watch on each of their working directories
+        // — usually deleted, so each one failed and logged. On the owner's Mac
+        // that was 1,282 warning lines per error log, recurring on every start.
+        let row = |uid: &str, lifecycle, transcript: Option<&str>| crate::store::SessionRow {
+            session_uid: uid.into(),
+            session_id: "cc-1".into(),
+            tmux_session: "cc-1".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: transcript.map(str::to_string),
+            lifecycle,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        use protocol::event::Lifecycle;
+        let (tails, final_reads) = tails_to_resume(vec![
+            row("live-uid", Lifecycle::Live, Some("/tmp/live.jsonl")),
+            row("dead-uid", Lifecycle::Exited, Some("/tmp/dead.jsonl")),
+            row("unsure-uid", Lifecycle::Unknown, Some("/tmp/unsure.jsonl")),
+            row("spawning-uid", Lifecycle::Spawning, Some("/tmp/new.jsonl")),
+            row("nopath-uid", Lifecycle::Live, None),
+        ]);
+
+        assert!(tails.contains_key("live-uid"));
+        assert!(
+            !tails.contains_key("dead-uid"),
+            "a run that has ended writes nothing more and must not be followed"
+        );
+        // `unknown` is emphatically *not* the same as ended: the daemon could
+        // not establish what happened, so the transcript may still be growing.
+        assert!(tails.contains_key("unsure-uid"));
+        assert!(tails.contains_key("spawning-uid"));
+        assert!(!tails.contains_key("nopath-uid"));
+        assert_eq!(tails.len(), 3);
+
+        // …but the ended run is *read once*, not dropped on the floor. Skipping
+        // it outright was a data-loss bug — a run can end with transcript bytes
+        // nobody consumed, and nothing else will ever look at that file again.
+        // The soak gauntlet caught it; this is the unit test that should have.
+        assert_eq!(final_reads.len(), 1);
+        assert_eq!(final_reads[0].session.uid, "dead-uid");
+        assert_eq!(final_reads[0].path, "/tmp/dead.jsonl");
+    }
+
+    #[test]
+    fn a_run_that_ended_with_unread_transcript_still_gets_its_last_lines() {
+        // The property the split above exists for, asserted against a real
+        // file: a session ends, its lifecycle is already terminal by the time a
+        // new daemon starts, and the bytes it wrote before dying are still in
+        // the transcript with the cursor behind them. Those lines are reachable
+        // from exactly one place — the final read — and the event log's promise
+        // that a `kill -9` costs nothing depends on it happening.
+        let (db_path, transcript) = temp_paths();
+        let store = Store::open(&db_path).unwrap();
+        let run = session();
+        append(
+            &transcript,
+            &[
+                r#"{"type":"user","uuid":"tail-end-1"}"#,
+                r#"{"type":"assistant","uuid":"tail-end-2"}"#,
+            ],
+        );
+
+        let ended = Tail {
+            session: run.clone(),
+            path: transcript.to_string_lossy().into_owned(),
+        };
+        // Exactly what the startup path does with a `final_reads` entry.
+        let scan = scan_file(&store, &ended.session, &ended.path)
+            .unwrap()
+            .expect("an ended run with unread bytes must still have a scan to do");
+        assert_eq!(scan.events.len(), 2, "both lines must be recovered");
+        commit(&store, &run, &scan);
+        assert_eq!(store.count_events(&run.uid).unwrap(), 2);
+
+        // And a second start finds nothing left, so the read is idempotent
+        // rather than a way to re-ingest a transcript on every restart.
+        assert!(scan_file(&store, &run, &ended.path).unwrap().is_none());
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn a_final_read_of_a_deleted_transcript_costs_nothing_and_says_nothing() {
+        // The common case on a machine with a history: the working directory is
+        // long gone. It has to be silent — 41 ended runs on the owner's Mac,
+        // and a warning each would be the log spam this whole change removes,
+        // reintroduced from the other side.
+        let (db_path, transcript) = temp_paths();
+        let store = Store::open(&db_path).unwrap();
+        let run = session();
+        assert!(!transcript.exists());
+        assert!(scan_file(&store, &run, transcript.to_str().unwrap())
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn the_tail_commands_are_distinguishable_and_name_a_run_by_identity() {
+        // Both variants carry a `session_uid` and never a tmux name: `cc-1` is
+        // whichever run currently holds the number, and stopping the wrong
+        // one's tail would leave a live agent's transcript unread.
+        let follow = TailCommand::Follow {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            path: "/tmp/t.jsonl".into(),
+        };
+        let stop = TailCommand::Stop {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+        };
+        assert_ne!(follow, stop);
     }
 
     fn append(path: &Path, lines: &[&str]) {

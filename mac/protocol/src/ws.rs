@@ -47,7 +47,7 @@ pub enum ClientMessage {
         ///
         /// Offering it is always allowed; *installing* it is not. The daemon
         /// appends it to `~/.ssh/authorized_keys` only when the operator ran
-        /// `cc pair --ssh`, because consent to hand out shell access has to be
+        /// `codeconnect pair --ssh`, because consent to hand out shell access has to be
         /// given at the Mac's keyboard and cannot be requested by the peer that
         /// benefits from it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +126,24 @@ pub enum ClientMessage {
     GetDiff {
         session_id: String,
     },
+    /// "Push me here." Sent after the phone has been granted notification
+    /// permission and Apple has issued a token.
+    ///
+    /// Separate from `hello` on purpose: permission can be granted, revoked or
+    /// re-granted at any point in a session's life, and the token itself is
+    /// reissued on reinstall and on restore-from-backup. Tying it to the
+    /// handshake would mean a phone that gained permission mid-session could
+    /// not say so until it reconnected.
+    RegisterPush {
+        /// APNs device token, lowercase hex.
+        token: String,
+        /// `sandbox` or `production`. A development build's token is not valid
+        /// on the production host and the failure looks like a corrupt token,
+        /// so the phone — which is the only party that knows how it was signed
+        /// — says which.
+        #[serde(default)]
+        environment: Option<String>,
+    },
     Ping,
 }
 
@@ -151,8 +169,8 @@ pub enum ServerMessage {
         device_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_id: Option<String>,
-        /// The name this device is listed under by `cc devices` and revoked by
-        /// with `cc revoke <name>`. May differ from the requested `client_name`
+        /// The name this device is listed under by `codeconnect devices` and revoked by
+        /// with `codeconnect revoke <name>`. May differ from the requested `client_name`
         /// when that name was already taken.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_name: Option<String>,
@@ -521,8 +539,12 @@ mod tests {
             crate::PROTOCOL_MINOR >= 4,
             "the additive error codes and truncation payloads are minor 4"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 5,
+            "reconciled liveness — `live` meaning proven rather than unrefuted — is minor 5"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
-        assert_eq!(crate::PROTOCOL_MINOR, 4);
+        assert_eq!(crate::PROTOCOL_MINOR, 5);
     }
 
     #[test]

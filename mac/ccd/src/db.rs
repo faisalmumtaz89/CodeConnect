@@ -38,7 +38,7 @@ use protocol::ws::AnswerOutcome;
 
 use crate::store::{
     AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    SessionRow, Store, TailCursor, TextClaim,
+    PrunedSession, SessionRow, Store, TailCursor, TextClaim,
 };
 
 #[derive(Clone)]
@@ -121,6 +121,7 @@ db_ops! {
     fn device_by_token_hash(token_hash: String) -> Option<DeviceRow>;
     fn device_is_active(device_id: String) -> bool;
     fn recover_text_mutations(at: String) -> usize;
+    fn orphan_event_count() -> u64;
 }
 
 // The operations whose signatures do not fit the macro's one shape: more than
@@ -155,6 +156,18 @@ impl Db {
 
     pub async fn set_lifecycle(&self, session_uid: String, lifecycle: Lifecycle) -> Result<()> {
         self.run(move |store| store.set_lifecycle(&session_uid, lifecycle))
+            .await
+    }
+
+    /// Remove ended runs. Potentially thousands of row deletions across seven
+    /// tables in one transaction, which is precisely the shape of work that
+    /// must not run on a runtime worker.
+    pub async fn prune_exited_sessions(
+        &self,
+        protect: Vec<String>,
+        dry_run: bool,
+    ) -> Result<Vec<PrunedSession>> {
+        self.run(move |store| store.prune_exited_sessions(&protect, dry_run))
             .await
     }
 
@@ -286,6 +299,16 @@ impl Db {
 
     pub async fn unique_device_name(&self, requested: String) -> Result<String> {
         self.run(move |store| store.unique_device_name(&requested))
+            .await
+    }
+
+    pub async fn set_push_token(
+        &self,
+        device_id: String,
+        token: String,
+        environment: String,
+    ) -> Result<()> {
+        self.run(move |store| store.set_push_token(&device_id, &token, &environment))
             .await
     }
 

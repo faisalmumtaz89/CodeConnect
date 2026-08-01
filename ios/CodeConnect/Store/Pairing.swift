@@ -156,7 +156,7 @@ struct DaemonEndpoint: Codable, Sendable, Hashable {
 
 // MARK: - QR payload
 
-/// The JSON `cc pair` renders as a QR code.
+/// The JSON `codeconnect pair` renders as a QR code.
 ///
 /// Locked shape: `{"v":1,"host":"<MagicDNS-or-tailnet-ip>","port":8787,"code":"<8 chars>"}`.
 /// Parsing is strict about the version and permissive about nothing else: a
@@ -227,11 +227,11 @@ struct PairingQRPayload: Sendable, Hashable {
 
 /// What the user typed into the manual pairing field.
 ///
-/// `cc pair` prints both a QR *and* a human-readable code, and tells the user
+/// `codeconnect pair` prints both a QR *and* a human-readable code, and tells the user
 /// they may "enter it by hand" — so the manual field has to accept a pairing
-/// code as well as a static `cc token`. The two are unmistakable by shape, which
+/// code as well as a static `codeconnect token`. The two are unmistakable by shape, which
 /// is better than a segmented control the user has to get right: a token is 32+
-/// hex characters, a code is eight alphanumerics that `cc pair` prints
+/// hex characters, a code is eight alphanumerics that `codeconnect pair` prints
 /// hyphenated for reading.
 enum PairingCredentialInput {
     /// Nil when the text is neither shape. Refusing beats guessing: a

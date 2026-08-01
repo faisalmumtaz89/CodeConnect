@@ -7,11 +7,14 @@
 //! lives in SQLite or is re-derived when a supervisor re-registers.
 
 mod apns;
+mod apns_sender;
+mod apns_token;
 mod db;
 #[cfg(test)]
 mod fixture_replay;
 mod git;
 mod ipc_server;
+mod liveness;
 mod log;
 mod logrotate;
 mod secret;
@@ -30,7 +33,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::apns::LoggingPushSender;
 use crate::state::{Daemon, Endpoint};
 use crate::store::Store;
 use protocol::config::Config;
@@ -62,7 +64,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(&protocol::db_path())?);
     let token = Arc::new(load_or_create_token(&protocol::token_path())?);
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
-    let push = Arc::new(LoggingPushSender::new());
+    let push = crate::apns_sender::build(&config, Arc::clone(&store));
 
     let bind = resolve_bind(&config).await;
     tls::install_crypto_provider();
@@ -144,6 +146,55 @@ async fn main() -> Result<()> {
         })
     };
 
+    // The backstop for every way a session can end without anybody being left
+    // to say so: the daemon down at the moment of death, a supervisor killed, a
+    // Mac that slept through it. Every session this process inherited was last
+    // seen by a *previous* one, and the ones whose agents died meanwhile are
+    // indistinguishable in the database from the ones still running — so the
+    // first pass runs immediately, and the ticker takes over from there.
+    //
+    // **Concurrently with the listeners, not before them.** It is the only task
+    // here that shells out, and it deliberately waits between the confirmations
+    // an exit needs — up to two seconds. Holding the sockets shut for that long
+    // would put a two-second hole in the hook path on every restart, and this
+    // daemon's central promise is that `kill -9` costs nothing but a reconnect.
+    // Nothing is lost by publishing late: a client connected during the sweep
+    // learns each end through the ordinary event path, which is the whole point
+    // of emitting `SessionEnd` rather than mutating the row.
+    let liveness = {
+        let daemon = Arc::clone(&daemon);
+        let period = daemon.config.liveness_sweep_secs;
+        tokio::spawn(async move {
+            report_liveness(&daemon.reconcile_liveness().await);
+            if period == 0 {
+                crate::log_warn!(
+                    "liveness_sweep_secs is 0: session state will not be reconciled after \
+                     startup, so a session that ends while nothing is watching will keep \
+                     reporting as running"
+                );
+                std::future::pending::<()>().await;
+                return;
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(period));
+            // Delay rather than burst: a Mac that has just woken must not fire
+            // every missed tick at once, and each tick's work is identical
+            // anyway — catching up buys nothing and costs a spawn storm.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick is immediate, and the pass above already did it.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let sweep = daemon.reconcile_liveness().await;
+                // Only when it changed something or could not see. A quiet
+                // fleet must not write a line a minute into the log it shares
+                // with everything else.
+                if sweep.gone > 0 || sweep.unknown > 0 || sweep.unconfirmed > 0 {
+                    report_liveness(&sweep);
+                }
+            }
+        })
+    };
+
     // launchd holds the log files open, so nothing outside this process can
     // rotate them without leaving launchd appending to an unlinked inode.
     let rotate = {
@@ -164,6 +215,7 @@ async fn main() -> Result<()> {
         result = tail => Stop::Task(format!("tailer exited: {result:?}")),
         result = sweeper => Stop::Task(format!("sweeper exited: {result:?}")),
         result = local_watch => Stop::Task(format!("local resolver exited: {result:?}")),
+        result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
         () = shutdown_signal() => Stop::Signal,
     };
@@ -269,6 +321,23 @@ fn sidecar(db: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = db.as_os_str().to_os_string();
     name.push(suffix);
     std::path::PathBuf::from(name)
+}
+
+/// Say what a liveness sweep established.
+///
+/// A sweep that proved nothing is as worth reporting as one that marked rows
+/// exited: "26 sessions could not be established" and "26 sessions are running"
+/// look identical in a fleet listing and are opposite facts about the daemon's
+/// health. Which level it is logged at follows from that — a sweep that could
+/// not see is a warning, a sweep that found deaths is news, a quiet one is not
+/// worth a line.
+fn report_liveness(sweep: &state::LivenessSweep) {
+    let summary = sweep.summary();
+    if sweep.unknown > 0 {
+        crate::log_warn!("liveness: {summary}");
+    } else {
+        crate::log_info!("liveness: {summary}");
+    }
 }
 
 /// Say, at startup, whether the log is internally consistent.

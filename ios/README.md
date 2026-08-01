@@ -7,7 +7,7 @@ protocol defined in `mac/protocol/src/ws.rs`.
 
 A run has two names and they do different jobs (see "Session identity" in
 `mac/README.md`). `session_id` is the tmux name — `cc-1` — and it is **reused**:
-`cc claude` takes the lowest free number, so the next run is called `cc-1` again.
+`codeconnect claude` takes the lowest free number, so the next run is called `cc-1` again.
 `session_uid` is a ULID minted once at spawn and never reused.
 
 This app keys **everything** by `SessionSummary.sessionKey` / `Event.sessionKey`,
@@ -66,10 +66,10 @@ xcodebuild -project CodeConnect.xcodeproj -scheme CodeConnect \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-Pair by scanning the QR that `cc pair` prints on the Mac. `cc pair --ssh` also
+Pair by scanning the QR that `codeconnect pair` prints on the Mac. `codeconnect pair --ssh` also
 authorises this iPhone's SSH key — that flag is the only thing that installs it,
 and the Mac says so at the terminal before it does. Manual entry takes either the
-eight-character code from the same output or the static `cc token`.
+eight-character code from the same output or the static `codeconnect token`.
 
 ## Layout
 
@@ -109,12 +109,12 @@ Against a live `ccd`, the environment has to reach the **test runner**, not
 ```sh
 # `CC_SSH_USER` only matters when your sessions' working directories are not
 # under /Users, where the account name cannot be read.
-TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(cc token)" \
+TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(codeconnect token)" \
 TEST_RUNNER_CC_SSH_USER="$(whoami)" \
 xcodebuild test … -only-testing:CodeConnectUITests/LiveDaemonUITests
 
 # Pairing needs a fresh code — they are single-use and expire in five minutes.
-CODE=$(cc pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+CODE=$(codeconnect pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
 TEST_RUNNER_CC_PAIR_CODE=$CODE TEST_RUNNER_CC_PAIR_HOST=100.x.y.z \
 xcodebuild test … -only-testing:CodeConnectUITests/PairingLiveUITests
 ```
@@ -598,7 +598,7 @@ backtick in a value is never silently eaten.
 `CCSheetChrome`'s title and subtitle, `CCButton`'s label, `CCBanner`'s message,
 `CCEmptyState`'s message, `CCField`'s hint and error, `ccDisabled`'s reason and
 the gallery's own captions all resolve it. Strings that already carry backticks
-— the comment sheet's ``In `…/Sender.swift` lines 12–28``, `cc pair --ssh`, `cc
+— the comment sheet's ``In `…/Sender.swift` lines 12–28``, `codeconnect pair --ssh`, `cc
 token` — became correct without their call sites being touched.
 
 ### A value nobody measured

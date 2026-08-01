@@ -71,8 +71,8 @@ struct CCEmptyState<Detail: View>: View {
 
             if let message {
                 // `CCProse`: an empty state is where the product explains how to
-                // leave it, and the way out is usually a command — `cc token`,
-                // `cc pair --ssh`. Set as plain text those arrived wearing their
+                // leave it, and the way out is usually a command — `codeconnect token`,
+                // `codeconnect pair --ssh`. Set as plain text those arrived wearing their
                 // own backticks on the scanner-unsupported screen.
                 CCProse(message, style: CC.type.callout, color: CC.text.secondary)
                     .multilineTextAlignment(.center)
@@ -128,7 +128,7 @@ struct CCEmptyState<Detail: View>: View {
         // An empty state is a **centred** composition — mark, title, measure-
         // bounded message — so it has no leading gutter, and a nested surface in
         // the `detail` slot must not step out to a column or hang its border
-        // into one. `cc claude` inside a 280pt block sits on the screen's centre
+        // into one. `codeconnect claude` inside a 280pt block sits on the screen's centre
         // line; 12pt of hang would put it 6pt off it.
         .ccCentredContent()
         .accessibilityElement(children: .contain)

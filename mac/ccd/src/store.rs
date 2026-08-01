@@ -48,7 +48,7 @@
 //! async handle the daemon uses: it hands each call to `spawn_blocking`, which
 //! is where the waiting is allowed to happen. This type stays synchronous
 //! because that is what a blocking pool wants to call, and because the tests
-//! below — and the sync `cc`-facing paths — have no runtime to defer to.
+//! below — and the sync `codeconnect`-facing paths — have no runtime to defer to.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -220,6 +220,41 @@ pub struct AnswerClaim {
     pub started_at: String,
 }
 
+/// Everything a run owns, besides its own row in `sessions`.
+///
+/// One list, in one place, because pruning a session has to remove all of it:
+/// a table left off leaves rows keyed to a `session_uid` that no longer exists,
+/// and the ones here are exactly the tables that decide whether an answer may
+/// be typed. An orphaned `answer_claims` row would outlive its run and be
+/// recovered as an indeterminate answer for a session nobody can name.
+/// [`Store::prune_exited_sessions`] deletes from every one of them, and
+/// `every_session_scoped_table_is_pruned` reads the schema back to prove the
+/// list has not fallen behind it.
+const SESSION_SCOPED_TABLES: &[&str] = &[
+    "events",
+    "answers",
+    "pending_approvals",
+    "answer_claims",
+    "text_mutations",
+    "tail_cursors",
+];
+
+/// One run removed by `codeconnect sessions prune`, and what went with it.
+///
+/// Returned rather than counted, because deleting an operator's history is
+/// exactly the operation that has to be able to say what it did — a bare
+/// "removed 18 sessions" is not something anybody can check afterwards, and by
+/// then the evidence is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunedSession {
+    pub session_uid: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub events: u64,
+}
+
 /// What claiming a `send_text` mutation found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextClaim {
@@ -281,6 +316,12 @@ impl Store {
             migrate_to_session_uids(&mut conn)?;
         }
         create_schema(&conn)?;
+        // Additive, and applied after `create_schema` for the reason the note
+        // above gives in reverse: `CREATE TABLE IF NOT EXISTS` will not widen a
+        // table that already exists, so a database written before push existed
+        // keeps its old `devices` shape and every push statement fails on a
+        // missing column.
+        add_missing_columns(&conn)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
@@ -604,6 +645,138 @@ impl Store {
         Ok(out)
     }
 
+    /// Delete every run that has **ended**, and everything filed under it.
+    ///
+    /// The event log is the source of truth, so nothing here happens on a timer
+    /// or a size threshold: a machine that quietly discarded an operator's
+    /// history to save disk would be deciding, on their behalf, which of their
+    /// agents' work was worth keeping. This runs when a human asks and never
+    /// otherwise.
+    ///
+    /// What makes it safe to run at all is that it is defined *only* over
+    /// `Exited`. `Live` is left alone because the agent may be working, and —
+    /// more sharply — `Unknown` is left alone because "we could not establish
+    /// what happened to this" is the one state where deletion destroys the
+    /// evidence somebody would need to find out. `protect` is the caller's
+    /// additional veto, for runs the daemon can see are still in use whatever
+    /// the row says.
+    ///
+    /// Three things make this hard to get wrong:
+    ///   * One `BEGIN IMMEDIATE` around the whole sweep, so a session cannot
+    ///     come back to life between being chosen and being deleted.
+    ///   * The final `DELETE` re-states `lifecycle = 'exited'` in its own
+    ///     `WHERE` and insists it removed exactly one row. A bug in the
+    ///     candidate query above therefore aborts the transaction rather than
+    ///     removing a live agent's history.
+    ///   * Every table keyed by `session_uid` is named in one list, and a test
+    ///     reads the schema back to prove the list is complete — so a table
+    ///     added later leaves orphans loudly rather than silently.
+    pub fn prune_exited_sessions(
+        &self,
+        protect: &[String],
+        dry_run: bool,
+    ) -> Result<Vec<PrunedSession>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let candidates: Vec<(String, String, String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT session_uid, session_id, cwd, created_at, updated_at
+                   FROM sessions WHERE lifecycle = ?1
+                  ORDER BY created_at ASC, session_uid ASC",
+            )?;
+            let rows = stmt.query_map(params![lifecycle_str(Lifecycle::Exited)], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut removed = Vec::new();
+        for (session_uid, session_id, cwd, created_at, updated_at) in candidates {
+            if protect.iter().any(|held| held == &session_uid) {
+                continue;
+            }
+            let events: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM events WHERE session_uid = ?1",
+                params![session_uid],
+                |row| row.get::<_, i64>(0),
+            )? as u64;
+
+            if !dry_run {
+                for table in SESSION_SCOPED_TABLES {
+                    tx.execute(
+                        // The table names are a compile-time list in this file;
+                        // nothing a caller supplies reaches the statement text.
+                        &format!("DELETE FROM {table} WHERE session_uid = ?1"),
+                        params![session_uid],
+                    )?;
+                }
+                let gone = tx.execute(
+                    "DELETE FROM sessions WHERE session_uid = ?1 AND lifecycle = ?2",
+                    params![session_uid, lifecycle_str(Lifecycle::Exited)],
+                )?;
+                // Belt and braces over the query above. If this ever removes
+                // anything other than exactly the one ended run it named, the
+                // whole transaction is abandoned rather than half-applied.
+                anyhow::ensure!(
+                    gone == 1,
+                    "refusing to prune {session_uid}: the delete matched {gone} rows rather than \
+                     the one ended session it named"
+                );
+            }
+
+            removed.push(PrunedSession {
+                session_uid,
+                session_id,
+                cwd,
+                created_at,
+                updated_at,
+                events,
+            });
+        }
+
+        if dry_run {
+            // Nothing was written, and dropping the transaction rather than
+            // committing it is what says so.
+            return Ok(removed);
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Events filed under a `session_uid` that has no row in `sessions`.
+    ///
+    /// Found while verifying the prune against the owner's real database: 24
+    /// events, one answer and one tail cursor belonging to three runs
+    /// (`cc-audit`, `cc-clean`, `cc-gone`) with no session row at all. They
+    /// predate any prune — the same counts are in a backup taken beforehand —
+    /// and nothing reaches them: they are absent from the fleet, from
+    /// `codeconnect sessions`, and from the prune itself, which is defined over
+    /// `sessions` rows and correctly does not invent one.
+    ///
+    /// There is no foreign key to prevent this (SQLite does not enforce one
+    /// unless asked, and adding it to an existing log is a migration with real
+    /// risk), so this counts them instead. **Counting, not deleting**: data
+    /// whose provenance is not understood is exactly the data an automatic
+    /// cleanup must not touch. Reported so the operator can see that it exists,
+    /// which is more than was true before.
+    pub fn orphan_event_count(&self) -> Result<u64> {
+        let conn = self.read();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events
+              WHERE session_uid NOT IN (SELECT session_uid FROM sessions)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
     pub fn set_lifecycle(&self, session_uid: &str, lifecycle: Lifecycle) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -728,7 +901,7 @@ impl Store {
 
     /// Record a freshly minted code. Expired codes are swept in the same
     /// statement batch so the table cannot grow without bound on a machine
-    /// where the operator repeatedly runs `cc pair` and never scans.
+    /// where the operator repeatedly runs `codeconnect pair` and never scans.
     pub fn create_pairing_code(
         &self,
         code_hash: &str,
@@ -879,6 +1052,49 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(count == 1)
+    }
+
+    /// Record where a device wants its pushes sent.
+    ///
+    /// Keyed on the device, so re-registering replaces rather than accumulates:
+    /// APNs reissues a token on reinstall and on restore-from-backup, and a
+    /// stale one left beside it would be pushed to forever.
+    pub fn set_push_token(&self, device_id: &str, token: &str, environment: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE devices SET push_token = ?2, push_environment = ?3 WHERE device_id = ?1",
+            params![device_id, token, environment],
+        )?;
+        Ok(())
+    }
+
+    /// Apple has said this token is dead. Cleared rather than remembered: the
+    /// device row itself stays, because the credential is still valid and the
+    /// phone may register again on next launch.
+    pub fn clear_push_token(&self, device_id: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE devices SET push_token = NULL, push_environment = NULL WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every device that can currently receive a push.
+    ///
+    /// Revoked devices are excluded here rather than at the call site: a
+    /// revoked phone must stop receiving notifications at the same instant it
+    /// stops being able to connect, or revocation leaks the fact that an agent
+    /// is waiting to a device that is no longer trusted.
+    pub fn push_targets(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT device_id, push_token, COALESCE(push_environment, 'sandbox')
+               FROM devices
+              WHERE push_token IS NOT NULL AND push_token <> '' AND revoked_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn touch_device(&self, device_id: &str, at: &str) -> Result<()> {
@@ -1348,7 +1564,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS sessions(
-            -- The run's identity: a ULID minted by `cc claude` at spawn, or
+            -- The run's identity: a ULID minted by `codeconnect claude` at spawn, or
             -- synthesised by the daemon for a session it adopts. Never reused.
             session_uid       TEXT PRIMARY KEY,
             -- The tmux session name. NOT unique: `cc-1` belongs to whichever
@@ -1485,7 +1701,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             last_seen_at      TEXT,
             revoked_at        TEXT,
             ssh_key_installed INTEGER NOT NULL DEFAULT 0,
-            ssh_fingerprint   TEXT
+            ssh_fingerprint   TEXT,
+            -- APNs. Null until the phone has been granted notification
+            -- permission *and* Apple has issued a token; "registered for push"
+            -- and "asked and refused" are both absent here, deliberately, so
+            -- nothing infers consent from a row that merely exists.
+            push_token        TEXT,
+            push_environment  TEXT
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS devices_name ON devices(name);
@@ -1505,6 +1727,28 @@ fn needs_session_uid_migration(conn: &Connection) -> Result<bool> {
         return Ok(false);
     }
     Ok(!column_exists(conn, "sessions", "session_uid")?)
+}
+
+/// Columns added to an existing table after the fact.
+///
+/// Every entry must be nullable or carry a default: SQLite cannot add a `NOT
+/// NULL` column without one, and a migration that fails leaves a daemon that
+/// cannot open its own database.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    const ADDITIONS: &[(&str, &str, &str)] = &[
+        ("devices", "push_token", "TEXT"),
+        ("devices", "push_environment", "TEXT"),
+    ];
+    for (table, column, kind) in ADDITIONS {
+        if table_exists(conn, table)? && !column_exists(conn, table, column)? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+                [],
+            )?;
+            crate::log_info!("schema: added {table}.{column}");
+        }
+    }
+    Ok(())
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
@@ -1861,6 +2105,285 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    // ----------------------------------------------------------- pruning
+
+    /// Seed one run in a given state, with `events` facts filed under it.
+    fn seed_run(store: &Store, session: &SessionKey, lifecycle: Lifecycle, events: u32) {
+        let mut row = session_row(session);
+        row.lifecycle = lifecycle;
+        store.upsert_session(&row).unwrap();
+        for i in 0..events {
+            store
+                .append_event(&pending(
+                    session,
+                    EventKind::ToolCall,
+                    Some(&format!("{}-{i}", session.uid)),
+                ))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn pruning_removes_ended_runs_and_everything_filed_under_them() {
+        let (store, _path) = temp_store();
+        let dead = key("AA", "cc-1");
+        seed_run(&store, &dead, Lifecycle::Exited, 5);
+
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_uid, dead.uid);
+        assert_eq!(
+            removed[0].events, 5,
+            "the report has to say what went, because afterwards there is nothing to check"
+        );
+        assert!(store.get_session(&dead.uid).unwrap().is_none());
+        assert_eq!(store.count_events(&dead.uid).unwrap(), 0);
+    }
+
+    #[test]
+    fn pruning_refuses_to_touch_anything_that_has_not_ended() {
+        // The safety property. `live` is obvious; `unknown` is the sharp one —
+        // it means the daemon could not establish what happened to this run,
+        // and that is precisely when the record is the only evidence there is.
+        let (store, _path) = temp_store();
+        let live = key("AA", "cc-1");
+        let unsure = key("BB", "cc-2");
+        let spawning = key("CC", "cc-3");
+        let dead = key("DD", "cc-4");
+        seed_run(&store, &live, Lifecycle::Live, 2);
+        seed_run(&store, &unsure, Lifecycle::Unknown, 2);
+        seed_run(&store, &spawning, Lifecycle::Spawning, 2);
+        seed_run(&store, &dead, Lifecycle::Exited, 2);
+
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_uid, dead.uid);
+        for survivor in [&live, &unsure, &spawning] {
+            assert!(
+                store.get_session(&survivor.uid).unwrap().is_some(),
+                "{} was removed and should not have been",
+                survivor.uid
+            );
+            assert_eq!(store.count_events(&survivor.uid).unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn a_protected_run_survives_even_though_its_row_says_it_ended() {
+        // The daemon's veto, for runs it still holds live state for — a
+        // supervisor attached, an approval open. Both should be impossible for
+        // a row marked `Exited`, which is exactly why it is checked: if one
+        // ever happens it is a bug, and deleting the evidence is the worst
+        // available response to a bug.
+        let (store, _path) = temp_store();
+        let held = key("AA", "cc-1");
+        let free = key("BB", "cc-2");
+        seed_run(&store, &held, Lifecycle::Exited, 3);
+        seed_run(&store, &free, Lifecycle::Exited, 3);
+
+        let removed = store
+            .prune_exited_sessions(std::slice::from_ref(&held.uid), false)
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_uid, free.uid);
+        assert!(store.get_session(&held.uid).unwrap().is_some());
+        assert_eq!(store.count_events(&held.uid).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_dry_run_reports_exactly_what_would_go_and_removes_none_of_it() {
+        // The rehearsal has to be trustworthy in both directions: it must
+        // report the same set the real thing would remove, and it must leave
+        // every byte of it in place.
+        let (store, _path) = temp_store();
+        let dead = key("AA", "cc-1");
+        let live = key("BB", "cc-2");
+        seed_run(&store, &dead, Lifecycle::Exited, 4);
+        seed_run(&store, &live, Lifecycle::Live, 4);
+
+        let rehearsal = store.prune_exited_sessions(&[], true).unwrap();
+        assert_eq!(rehearsal.len(), 1);
+        assert_eq!(rehearsal[0].events, 4);
+        assert!(store.get_session(&dead.uid).unwrap().is_some());
+        assert_eq!(store.count_events(&dead.uid).unwrap(), 4);
+
+        let real = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(real, rehearsal, "the rehearsal must predict the deletion");
+        assert!(store.get_session(&dead.uid).unwrap().is_none());
+    }
+
+    #[test]
+    fn pruning_leaves_no_row_behind_in_any_table_keyed_by_a_run() {
+        // An orphan here is not tidiness. `answer_claims` outliving its run
+        // would be recovered at the next startup as an indeterminate answer for
+        // a session nobody can name, and `pending_approvals` would restore a
+        // card for a run that no longer exists.
+        let (store, _path) = temp_store();
+        let dead = key("AA", "cc-1");
+        seed_run(&store, &dead, Lifecycle::Exited, 2);
+
+        let outcome = AnswerOutcome {
+            request_id: "toolu_1".into(),
+            session_id: dead.name.clone(),
+            decision: AnswerDecision::Allow,
+            resolved_by: ResolvedBy::Phone,
+            applied_via: AnswerPath::SendKeys,
+            resolved_at: protocol::time::now_rfc3339(),
+            detail: None,
+            inferred: false,
+            indeterminate: false,
+        };
+        store
+            .record_answer(&dead.uid, "toolu_1", "hash", &outcome)
+            .unwrap();
+        store
+            .upsert_pending_approval(&PendingApprovalRow {
+                session_uid: dead.uid.clone(),
+                session_id: dead.name.clone(),
+                request_id: "toolu_2".into(),
+                card: "{}".into(),
+                generation: 1,
+                created_ms: 0,
+            })
+            .unwrap();
+        store
+            .claim_answer(&AnswerClaim {
+                session_uid: dead.uid.clone(),
+                session_id: dead.name.clone(),
+                request_id: "toolu_3".into(),
+                payload_hash: "hash".into(),
+                decision: "\"allow\"".into(),
+                started_at: protocol::time::now_rfc3339(),
+            })
+            .unwrap();
+        store
+            .claim_text_mutation(&dead.uid, "toolu_4", "hash", &protocol::time::now_rfc3339())
+            .unwrap();
+        // The cursor is only written alongside a transcript batch, which is the
+        // invariant that keeps consuming lines and recording that they were
+        // consumed in one transaction.
+        store
+            .append_batch_with_cursor(
+                &dead.uid,
+                &[pending(&dead, EventKind::AgentMessage, Some("tail-1"))],
+                &TailCursor {
+                    path: "/tmp/t.jsonl".into(),
+                    dev: 1,
+                    ino: 1,
+                    offset: 1,
+                    last_line_start: 0,
+                    last_line_sha: "x".into(),
+                },
+            )
+            .unwrap();
+        assert!(store.load_cursor(&dead.uid).unwrap().is_some());
+
+        store.prune_exited_sessions(&[], false).unwrap();
+
+        let conn = store.read();
+        for table in SESSION_SCOPED_TABLES {
+            let left: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                    params![dead.uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "{table} kept rows for a run that was removed");
+        }
+    }
+
+    #[test]
+    fn every_session_scoped_table_is_named_in_the_prune_list() {
+        // Read back off the schema, so a table added later cannot silently
+        // start leaving orphans. The failure mode this prevents is invisible by
+        // nature: nothing breaks at the moment of the prune, and the stale rows
+        // surface much later as a recovered claim for a session that is gone.
+        let (store, _path) = temp_store();
+        let conn = store.read();
+        let mut tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap();
+        let names: Vec<String> = tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(tables);
+
+        for name in names {
+            if name == "sessions" || name.starts_with("sqlite_") {
+                continue;
+            }
+            let mut info = conn.prepare(&format!("PRAGMA table_info({name})")).unwrap();
+            let has_uid = info
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .any(|column| column.as_deref() == Ok("session_uid"));
+            drop(info);
+            if has_uid {
+                assert!(
+                    SESSION_SCOPED_TABLES.contains(&name.as_str()),
+                    "{name} is keyed by session_uid but is not pruned with its session"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn events_with_no_session_row_are_counted_and_never_swept_up() {
+        // Found on the owner's real database while verifying the prune: 24
+        // events, one answer and one tail cursor belonging to three runs with
+        // no `sessions` row. They predate any prune — the same counts appear in
+        // a backup taken beforehand — and nothing in the product reaches them.
+        // The prune must neither miss that they exist nor take it upon itself
+        // to delete data whose provenance nobody understands.
+        let (store, _path) = temp_store();
+        let ghost = key("AA", "cc-gone");
+        store
+            .append_event(&pending(&ghost, EventKind::ToolCall, Some("orphan-1")))
+            .unwrap();
+        let dead = key("BB", "cc-1");
+        seed_run(&store, &dead, Lifecycle::Exited, 2);
+
+        assert_eq!(store.orphan_event_count().unwrap(), 1);
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(removed.len(), 1, "only the run with a row is a candidate");
+        assert_eq!(
+            store.orphan_event_count().unwrap(),
+            1,
+            "an orphan must survive a prune rather than be quietly swept up"
+        );
+        assert_eq!(store.count_events(&ghost.uid).unwrap(), 1);
+    }
+
+    #[test]
+    fn pruning_an_empty_or_all_live_log_is_a_no_op_rather_than_an_error() {
+        let (store, _path) = temp_store();
+        assert!(store.prune_exited_sessions(&[], false).unwrap().is_empty());
+        seed_run(&store, &key("AA", "cc-1"), Lifecycle::Live, 1);
+        assert!(store.prune_exited_sessions(&[], false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_run_that_ends_later_is_prunable_and_the_survivors_keep_their_own_log() {
+        // Name reuse, which is the case a machine with a long history is full
+        // of: several dead `cc-1`s and one that is still going. Removing the
+        // dead ones must not disturb the live one's sequence.
+        let (store, _path) = temp_store();
+        let live = key("AA", "cc-1");
+        seed_run(&store, &live, Lifecycle::Live, 3);
+        for tag in ["BB", "CC", "DD"] {
+            seed_run(&store, &key(tag, "cc-1"), Lifecycle::Exited, 2);
+        }
+
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(removed.len(), 3);
+        assert_eq!(store.max_seq(&live.uid).unwrap(), 3);
+        assert_eq!(store.count_events(&live.uid).unwrap(), 3);
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
     }
 
     #[test]
@@ -2519,7 +3042,7 @@ mod tests {
 
     #[test]
     fn a_new_run_of_an_old_name_starts_with_no_cursor() {
-        // `cc claude --resume` in a reused name points a *new* run at the same
+        // `codeconnect claude --resume` in a reused name points a *new* run at the same
         // transcript. It must re-read that transcript into its own log rather
         // than inheriting a cursor that says "already consumed".
         let (store, _path) = temp_store();

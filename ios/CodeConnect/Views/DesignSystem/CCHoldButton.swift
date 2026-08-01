@@ -21,12 +21,31 @@ import SwiftUI
 ///    commit — so the hold can be completed without looking, which at 2am is
 ///    how it will actually be used.
 ///
-/// Fill is transparent, border is `danger`. Releasing early rewinds. Nothing is
-/// submitted on a partial hold and nothing is remembered between attempts.
+/// **Colour is not the friction — the hold is.** This used to draw itself in
+/// `danger`, which painted the *approve* control red on the one screen where
+/// approving is the ordinary thing to do. Red means destructive, and holding a
+/// button is not destruction; it is a deliberate act. The hold, the ring and the
+/// escalating haptics already say "this one is serious" without borrowing the
+/// colour reserved for `Unpair and erase cache`.
+///
+/// `emphasis` therefore decides the chrome and never the risk: `.primary` is the
+/// filled white affirmative used for approvals, `.outline` the transparent
+/// bordered form. Releasing early rewinds. Nothing is submitted on a partial
+/// hold and nothing is remembered between attempts.
 struct CCHoldButton: View {
     let title: String
-    var icon: String? = "exclamationmark.triangle.fill"
-    var tone: CCTone = .danger
+    /// **No default glyph.** This defaulted to `exclamationmark.triangle.fill`,
+    /// which put a warning sign on the affirmative control — the same restating
+    /// of risk in the chrome that the colour was doing. The class badge, the
+    /// rationale and the hold itself already say it three times; a fourth on the
+    /// button the reader is about to press is noise, not caution.
+    var icon: String?
+    /// Kept for the outline form's label and ring. Defaults to `.neutral`: a
+    /// hold button is not an error.
+    var tone: CCTone = .neutral
+    /// Filled-white or transparent-bordered. See the note above: this is chrome,
+    /// not a risk signal.
+    var emphasis: CCHoldEmphasis = .primary
     var duration: Double = CC.duration.hold
     var isLoading: Bool = false
     var fullWidth: Bool = true
@@ -52,8 +71,9 @@ struct CCHoldButton: View {
 
     init(
         _ title: String,
-        icon: String? = "exclamationmark.triangle.fill",
-        tone: CCTone = .danger,
+        icon: String? = nil,
+        tone: CCTone = .neutral,
+        emphasis: CCHoldEmphasis = .primary,
         duration: Double = CC.duration.hold,
         isLoading: Bool = false,
         fullWidth: Bool = true,
@@ -63,6 +83,7 @@ struct CCHoldButton: View {
         self.title = title
         self.icon = icon
         self.tone = tone
+        self.emphasis = emphasis
         self.duration = duration
         self.isLoading = isLoading
         self.fullWidth = fullWidth
@@ -158,7 +179,7 @@ struct CCHoldButton: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .foregroundStyle(isEnabled ? tone.color : CC.text.disabled)
+        .foregroundStyle(labelColor)
         .padding(.horizontal, CC.space.lg)
         .padding(.vertical, CC.space.xs)
     }
@@ -172,22 +193,46 @@ struct CCHoldButton: View {
                 .inset(by: CC.stroke.ring / 2)
                 .trim(from: 0, to: progress)
                 .stroke(
-                    tone.color,
+                    inkColor,
                     style: StrokeStyle(lineWidth: CC.stroke.ring, lineCap: .round)
                 )
                 .allowsHitTesting(false)
         }
     }
 
-    /// Transparent, deliberately. The ring is the only progress signal; a filling
-    /// background would read as the decision already having been taken.
+    /// The ring is the only progress signal; a filling background would read as
+    /// the decision already having been taken. `.primary` is filled because it
+    /// is the affirmative control and has to carry the same weight as the tap
+    /// `Allow` it replaces — the *ring*, not the fill, still shows progress.
     private var fill: Color {
-        isEnabled ? .clear : CC.color.surface
+        guard isEnabled else { return CC.color.surface }
+        switch emphasis {
+        case .primary: return isHolding ? CC.color.accentPressed : CC.color.accent
+        case .outline: return .clear
+        }
     }
 
     private var border: Color {
-        isEnabled ? tone.color.opacity(isHolding ? 0.75 : 0.45) : CC.color.border
+        guard isEnabled else { return CC.color.border }
+        switch emphasis {
+        case .primary: return .clear
+        case .outline: return tone.color.opacity(isHolding ? 0.75 : 0.45)
+        }
     }
+
+    /// What the label is drawn in.
+    private var labelColor: Color {
+        guard isEnabled else { return CC.text.disabled }
+        switch emphasis {
+        // On a near-white fill the label and ring have to be the background
+        // colour, exactly as `CCButton`'s primary does it.
+        case .primary: return CC.color.bg
+        case .outline: return tone.color
+        }
+    }
+
+    /// The progress ring, which must read against whatever the fill is.
+    private var inkColor: Color { labelColor }
 
     private var formattedDuration: String {
         String(format: "%.1f", duration)
@@ -275,4 +320,16 @@ struct CCHoldButton: View {
         CCHaptic.commit.fire()
         action()
     }
+}
+
+
+/// Whether a hold button is drawn filled or outlined.
+///
+/// Deliberately not a `CCTone`: the two are different questions, and conflating
+/// them is how the approve control ended up red.
+enum CCHoldEmphasis: Sendable, Hashable {
+    /// Filled white. The affirmative action.
+    case primary
+    /// Transparent with a toned border. A subordinate hold.
+    case outline
 }

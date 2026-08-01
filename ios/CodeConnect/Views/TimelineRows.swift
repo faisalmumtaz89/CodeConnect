@@ -5,9 +5,22 @@ import SwiftUI
 /// The vertical rhythm — 8pt inside a turn, 20pt between turns — is owned by the
 /// list, not by the rows, so a row cannot invent its own spacing and pull the
 /// whole column out of true.
+///
+/// **No clock reaches this row.**
+///
+/// It used to take a `now` that `SessionDetailView` read from `AppModel.now`,
+/// which advances every second. One of the five kinds of row draws an age; the
+/// other four never look at the clock at all — but `now` was a stored property,
+/// so every row in the timeline became a new value once a second, and this type
+/// holds a closure, which is enough to stop SwiftUI proving two of its values
+/// equal. Every realized row therefore re-evaluated its body once a second.
+/// Measured on a 400-event timeline, untouched: **456 row bodies per second**,
+/// and a `LazyVStack` scrolled to its tail has realized all of them.
+///
+/// The one row that draws an age owns its own clock now — see `ApprovalRow` —
+/// so nothing here has a reason to change when only the time has.
 struct TimelineRow: View {
     let item: TimelineItem
-    let now: Date
     /// Needed to read a card's risk: whether the daemon classifies decides
     /// whether an absent `risk_class` means "medium" or "this daemon never
     /// said".
@@ -24,7 +37,7 @@ struct TimelineRow: View {
             ToolRow(tool: tool)
         case .approval(let approval):
             ApprovalRow(
-                approval: approval, risk: approval.assessment(profile: profile).effective, now: now
+                approval: approval, risk: approval.assessment(profile: profile).effective
             ) { onOpenApproval(approval) }
         case .notice(let notice):
             NoticeRow(notice: notice, date: item.date)
@@ -169,6 +182,9 @@ struct ToolRow: View {
     @State private var didAutoExpand: Bool
 
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// The shared width every tool label on this screen is drawn into, so the
+    /// commands beside them share one left edge. See `CCToolColumn`.
+    @Environment(\.ccToolColumn) private var toolColumn
 
     init(tool: ToolItem) {
         self.tool = tool
@@ -238,6 +254,11 @@ struct ToolRow: View {
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.primary)
                     .lineLimit(1)
+                    // The glyph above is already pinned to the gutter so a
+                    // column of tool rows lines up; this is the same argument
+                    // applied to the name, so the commands beside them line up
+                    // too. See `CCToolColumn`.
+                    .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
                 if let argument = tool.argument {
                     Text(argument.firstLine)
                         .ccType(CC.type.monoSmall)
@@ -249,7 +270,21 @@ struct ToolRow: View {
             }
             statusView
         }
-        .frame(minHeight: CC.size.controlSm)
+        // **36 is the band; 44 is the target.** `DESIGN-SCREENS.md` specifies
+        // this row as "one semantic line, 36pt tall, 44pt hit area" and the
+        // same document's rule is "44×44pt minimum, no exceptions" — the 36 was
+        // built and the 44 was not, which made this the only tappable thing in
+        // the app under the floor. Measured: 370×36, `hittable=Y`.
+        //
+        // It escaped because this row hand-rolls a `Button` rather than going
+        // through `CCButton`, whose `init` enforces the rule. `CCDisclosure` is
+        // the same three-modifier chain done correctly, and its own doc comment
+        // names these very rows as its use case.
+        //
+        // Conditional because a row with nothing to expand is not a control —
+        // `allowsHitTesting(hasDetail)` above already says so — and this kit
+        // pays density "only where a control exists".
+        .frame(minHeight: hasDetail ? CC.size.hitTarget : CC.size.controlSm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -318,13 +353,40 @@ private struct CCToolRowStyle: ButtonStyle {
 struct ApprovalRow: View {
     let approval: ApprovalItem
     let risk: RiskClass
-    let now: Date
     let onOpen: () -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+    /// See `CCToolColumn` — one left edge for every command on this screen.
+    @Environment(\.ccToolColumn) private var toolColumn
 
     /// Mirrors `CCStatusDot`'s own ramp and ceiling, so the gutter the dot hangs
     /// in is always exactly the dot plus one 8pt gap.
     @ScaledMetric(relativeTo: .footnote) private var scaledDot: CGFloat =
         CCStatusDot.Size.cardHeader.rawValue
+
+    /// **This row's own clock, ticking at the rate this row can actually show.**
+    ///
+    /// The same mechanism the fleet's rows use, for the same reason — see
+    /// `FleetRowView.now`. Both of the rules that make it safe live in
+    /// `AgeTick.renderTime`: the tick has to be *read* during render or nothing
+    /// invalidates, and what is rendered is the wall clock rather than the stamp
+    /// this row fell asleep holding.
+    @State private var lastTick = Date()
+
+    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
+
+    /// The one age this row draws, and the resolution it draws it at.
+    ///
+    /// A **pending** card is the timeline's one honest per-second tick:
+    /// `CCWaitClock` prints seconds all the way to an hour, and how long an
+    /// agent has been held is the number this row exists to carry. A
+    /// **resolved** card prints a coarsening age, so it sleeps until that age
+    /// stops being true — an hour at a time, once it is hours old.
+    private var clock: AgeClock {
+        if let outcome = approval.outcome {
+            return AgeClock(since: outcome.resolvedDate, scale: .age)
+        }
+        return AgeClock(since: approval.requestedAt, scale: .clock)
+    }
 
     var body: some View {
         CCCard(
@@ -340,6 +402,11 @@ struct ApprovalRow: View {
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(approval.isPending ? [.isButton] : [])
         .accessibilityAction { if approval.isPending { onOpen() } }
+        // Restarted whenever the timestamp this row counts from changes — a card
+        // being answered moves it from `requestedAt` to `resolvedDate` and from
+        // seconds to a coarsening age — because the old deadline was computed
+        // from the old anchor and the old resolution.
+        .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
     }
 
     /// The dot **hangs in the gutter**, the way `CCSectionHeader`'s does: drawn
@@ -388,6 +455,7 @@ struct ApprovalRow: View {
             Text(approval.card.toolName)
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
+                .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
                 .layoutPriority(1)
             if let argument = ToolSummary.principalArgument(
                 tool: approval.card.toolName, input: approval.card.toolInput)

@@ -10,14 +10,14 @@ Include what you did, what happened, and what you expected. A proof of concept h
 
 ## What the software can do
 
-- **`ccd`** runs as your user under launchd. It reads Claude Code's hook payloads and session transcripts, and it can write keystrokes into a tmux pane you started with `cc`.
-- **`cc pair --ssh`** appends a public key to `~/.ssh/authorized_keys`, tagged `# codeconnect:<device>`. **Only** with the explicit `--ssh` flag, only for the key sent during that pairing, and removable with `cc ssh-revoke <device>`.
+- **`ccd`** runs as your user under launchd. It reads Claude Code's hook payloads and session transcripts, and it can write keystrokes into a tmux pane you started with `codeconnect`.
+- **`codeconnect pair --ssh`** appends a public key to `~/.ssh/authorized_keys`, tagged `# codeconnect:<device>`. **Only** with the explicit `--ssh` flag, only for the key sent during that pairing, and removable with `codeconnect ssh-revoke <device>`.
 - CodeConnect never enables Remote Login, Tailscale SSH, or any other system service. It tells you the command and lets you run it.
 
 ## Trust boundaries
 
 - **Everything is local by default.** The daemon binds to your Tailscale interface and loopback. There is no cloud relay, no account, and no telemetry.
-- **The phone is a client, not an authority.** It holds a per-device token issued at pairing, stored hashed. Tokens are listed with `cc devices` and revoked with `cc revoke <device>` — revocation closes open connections rather than waiting for the next reconnect.
+- **The phone is a client, not an authority.** It holds a per-device token issued at pairing, stored hashed. Tokens are listed with `codeconnect devices` and revoked with `codeconnect revoke <device>` — revocation closes open connections rather than waiting for the next reconnect.
 - **Pairing codes are single-use and expire in 5 minutes.**
 - **Push notifications are not implemented yet.** Nothing is sent to Apple today; the sender is a logging stub. The *design* is that a push is a doorbell carrying no command text, no diffs and no paths — the app reconnects and asks the event log what is true. Until that ships, be aware the internal hint currently carries the agent's own notification text and tool name, which routinely name files and commands. It is inert, but it is one provider key away from being live and wrong, so treat "push is safe to enable" as false until this line changes.
 - **Approvals are gated on evidence.** An answer from the phone carries the request ID and a hash of the exact text that was displayed. It is also bound to a prompt *generation* and a fingerprint of the prompt block as it appeared on screen, both re-checked against the **visible pane** immediately before a keystroke is sent. If the prompt has changed, or if identity cannot be established at all, the answer is refused rather than applied to something else.
@@ -32,7 +32,7 @@ A valid device token can:
 - **Answer live approvals**, once it has the displayed text to hash.
 - **Submit arbitrary text to a session.** Against an agent running in a permissive mode, that is functionally close to command execution on your Mac.
 
-It cannot use the local IPC administration socket, start or kill sessions, or install an SSH key — that last one requires a fresh pairing code created with `cc pair --ssh` at your keyboard.
+It cannot use the local IPC administration socket, start or kill sessions, or install an SSH key — that last one requires a fresh pairing code created with `codeconnect pair --ssh` at your keyboard.
 
 **The static bootstrap token is weaker than a device token.** It is a permanent global credential, stored in plaintext because it has to be readable before pairing exists, it cannot be revoked individually, and connections already open with it deliberately survive deletion of the file. Pair a device, then delete it. It exists to bootstrap the first pairing, not to be a long-lived credential.
 
@@ -44,4 +44,4 @@ It cannot use the local IPC administration socket, start or kill sessions, or in
 
 ## Transport
 
-`wss://` with a certificate from `tailscale cert` when your tailnet has HTTPS certificates enabled, `ws://` bound to the tailnet interface otherwise. Both require a valid device token. The QR payload carries the MagicDNS hostname deliberately: a certificate cannot validate against a bare tailnet IP.
+`wss://` with a certificate from `tailscale cert` when your tailnet has HTTPS certificates enabled, `ws://` bound to the tailnet interface otherwise. Both require a credential — a device token, or the static bootstrap token described above, which authenticates just as well and is exactly why it should be deleted once a device is paired. The QR payload carries the MagicDNS hostname deliberately: a certificate cannot validate against a bare tailnet IP.

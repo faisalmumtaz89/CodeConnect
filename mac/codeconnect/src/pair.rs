@@ -1,4 +1,4 @@
-//! `cc pair`, `cc devices`, `cc revoke`, `cc ssh-revoke`.
+//! `codeconnect pair`, `codeconnect devices`, `codeconnect revoke`, `codeconnect ssh-revoke`.
 //!
 //! ## Why the QR is drawn with explicit colours
 //!
@@ -44,7 +44,7 @@ pub fn pair(args: &[String]) -> Result<()> {
     for arg in args {
         match arg.as_str() {
             "--ssh" => allow_ssh = true,
-            other => bail!("unknown option {other:?}; usage: cc pair [--ssh]"),
+            other => bail!("unknown option {other:?}; usage: codeconnect pair [--ssh]"),
         }
     }
 
@@ -101,7 +101,7 @@ pub fn pair(args: &[String]) -> Result<()> {
         println!("  --ssh: if the app offers an ed25519 public key while redeeming");
         println!("         this code, it will be appended to ~/.ssh/authorized_keys");
         println!("         and that device will be able to open a shell on this Mac.");
-        println!("         Remove it later with `cc ssh-revoke <device>`.");
+        println!("         Remove it later with `codeconnect ssh-revoke <device>`.");
         println!();
     }
     println!(
@@ -112,25 +112,46 @@ pub fn pair(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn devices() -> Result<()> {
+pub fn devices(args: &[String]) -> Result<()> {
+    // `codeconnect devices` takes no arguments, but the obvious guess for revoking is
+    // `codeconnect devices revoke <id>` — it mirrors `codeconnect sessions prune`. Discarding the
+    // extra words would print the device table, which reads as success, and the
+    // device would still be connectable. A revocation that looks done and is
+    // not is the one failure this command must never produce.
+    if let Some(first) = args.first() {
+        if first == "revoke" {
+            bail!(
+                "`codeconnect devices` only lists; to revoke, run: codeconnect revoke <device>{}",
+                args.get(1)
+                    .map(|id| format!(" (here: codeconnect revoke {id})"))
+                    .unwrap_or_default()
+            );
+        }
+        bail!("unexpected argument {first:?}; usage: codeconnect devices");
+    }
+
     let reply = daemon::request(&ClientFrame::ListDevices)?;
     let DaemonFrame::Devices { devices } = reply else {
         bail!("unexpected reply from ccd: {reply:?}");
     };
     if devices.is_empty() {
-        println!("no paired devices; run `cc pair` to add one");
+        println!("no paired devices; run `codeconnect pair` to add one");
         return Ok(());
     }
 
+    // Wide enough for the name the app registers itself under plus the `-N`
+    // the daemon appends when a second device claims it. At 18 the two read as
+    // "CodeConnect iPhone" and "CodeConnect iPhon…", which is a poor thing to
+    // choose between when the choice is which credential to revoke.
     println!(
-        "{:<14} {:<18} {:<10} {:<5} LAST SEEN",
+        "{:<14} {:<24} {:<10} {:<5} LAST SEEN",
         "DEVICE", "NAME", "STATUS", "SSH"
     );
     for device in &devices {
         println!(
-            "{:<14} {:<18} {:<10} {:<5} {}",
+            "{:<14} {:<24} {:<10} {:<5} {}",
             device.device_id,
-            truncate(&device.name, 18),
+            truncate(&device.name, 24),
             if device.is_active() {
                 "active"
             } else {
@@ -157,7 +178,7 @@ pub fn devices() -> Result<()> {
 pub fn revoke(args: &[String], ssh_only: bool) -> Result<()> {
     let Some(device) = args.first() else {
         bail!(
-            "usage: cc {} <device>   (`cc devices` lists them)",
+            "usage: cc {} <device>   (`codeconnect devices` lists them)",
             if ssh_only { "ssh-revoke" } else { "revoke" }
         );
     };
@@ -225,6 +246,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listing_devices_refuses_a_revoke_that_would_silently_do_nothing() {
+        // `codeconnect devices revoke <id>` is the natural guess, because `codeconnect sessions
+        // prune` is spelled that way. It used to print the device table and
+        // exit 0, so an operator revoking a lost phone got a success-shaped
+        // answer while the token stayed live. It must fail, and it must say
+        // where the real command is.
+        let err = devices(&["revoke".into(), "db1dd87a50a5".into()])
+            .expect_err("a revoke spelled this way must not report success");
+        let message = err.to_string();
+        assert!(
+            message.contains("codeconnect revoke db1dd87a50a5"),
+            "the error has to carry the command that works: {message}"
+        );
+
+        // Bare `codeconnect devices` still lists, so only unexpected words are refused.
+        let err = devices(&["--all".into()]).expect_err("unknown argument must not be ignored");
+        assert!(
+            err.to_string().contains("usage: codeconnect devices"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn the_pairing_payload_encodes_as_a_qr_that_fits_a_terminal() {
         // A long MagicDNS name is the worst realistic case. If this needs a
         // version so large the code stops fitting an 80-column terminal, the
@@ -273,8 +317,14 @@ mod tests {
 
     #[test]
     fn names_are_truncated_without_breaking_the_table() {
-        assert_eq!(truncate("iPhone", 18), "iPhone");
-        assert_eq!(truncate(&"x".repeat(30), 18).chars().count(), 18);
+        assert_eq!(truncate("iPhone", 24), "iPhone");
+        assert_eq!(truncate(&"x".repeat(30), 24).chars().count(), 24);
+        // The real case this width exists for: two devices whose names differ
+        // only in a suffix must not both truncate to the same string.
+        assert_ne!(
+            truncate("CodeConnect iPhone", 24),
+            truncate("CodeConnect iPhone-2", 24)
+        );
         // Multi-byte names must not panic or be cut mid-character.
         assert_eq!(truncate(&"é".repeat(30), 5).chars().count(), 5);
     }

@@ -7,7 +7,7 @@ harness that is not shipped.
 |---|---|
 | `protocol` | Shared wire types: event envelope, unix-socket frames, WebSocket protocol, session identity, config. |
 | `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
-| `cc` | The shim: `cc claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
+| `codeconnect` | The shim: `codeconnect claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
 | `soak` | Not shipped. The chaos gauntlet — see [Soaking it](#soaking-it). |
 
@@ -17,37 +17,37 @@ harness that is not shipped.
 ./install.sh                      # build + install to ~/.codeconnect/bin
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
-cc daemon install                 # run ccd under launchd, restart it on crash
-cc claude                         # in any project directory
+codeconnect daemon install                 # run ccd under launchd, restart it on crash
+codeconnect claude                         # in any project directory
 ```
 
-`cc claude` passes every argument through to the real `claude`, so
-`cc claude --permission-mode default --resume` works exactly as expected.
+`codeconnect claude` passes every argument through to the real `claude`, so
+`codeconnect claude --permission-mode default --resume` works exactly as expected.
 
 ```sh
-cc ls                    # sessions, identities and link state
-cc attach cc-1           # re-attach after closing the tab
+codeconnect ls                    # sessions, identities and link state
+codeconnect attach cc-1           # re-attach after closing the tab
 
-cc daemon install        # write the LaunchAgent and start it
-cc daemon status         # plist, launchd job and live daemon, side by side
-cc daemon restart        # launchctl kickstart -k
-cc daemon uninstall      # stop it and remove the LaunchAgent
+codeconnect daemon install        # write the LaunchAgent and start it
+codeconnect daemon status         # plist, launchd job and live daemon, side by side
+codeconnect daemon restart        # launchctl kickstart -k
+codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
-cc pair                  # QR code that pairs a phone (single use, 5 minutes)
-cc pair --ssh            # …and let that one pairing install the app's SSH key
-cc devices               # paired devices
-cc revoke <device>       # revoke a device's token and its SSH key
-cc ssh-revoke <device>   # remove only that device's SSH key
-cc token                 # the static fallback token
+codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
+codeconnect pair --ssh            # …and let that one pairing install the app's SSH key
+codeconnect devices               # paired devices
+codeconnect revoke <device>       # revoke a device's token and its SSH key
+codeconnect ssh-revoke <device>   # remove only that device's SSH key
+codeconnect token                 # the static fallback token
 ```
 
 ## Session identity
 
 A session has two names and they do different jobs.
 
-`session_id` is the tmux name — `cc-1` — and it is **reused**. `cc claude` takes
+`session_id` is the tmux name — `cc-1` — and it is **reused**. `codeconnect claude` takes
 the lowest free number, so when a session exits the next one is called `cc-1`
-again. That is deliberate: the name is what a human types into `cc attach`.
+again. That is deliberate: the name is what a human types into `codeconnect attach`.
 
 `session_uid` is a [ULID](https://github.com/ulid/spec) minted once at spawn and
 never reused. It is what the event log, the tail cursors and the answers ledger
@@ -72,7 +72,7 @@ forever, and ranking on it would put that ghost above the run that is really
 there. A client on `protocol_minor >= 2` should send the uid and key its own
 store by it.
 
-`cc ls` shows both.
+`codeconnect ls` shows both.
 
 ## Prompt identity
 
@@ -200,7 +200,7 @@ unrecognised entry is not damage.
 
 ## The LaunchAgent
 
-`cc daemon install` writes `~/Library/LaunchAgents/com.codeconnect.ccd.plist`
+`codeconnect daemon install` writes `~/Library/LaunchAgents/com.codeconnect.ccd.plist`
 with `RunAtLoad`, `KeepAlive{SuccessfulExit: false}` and a five-second
 `ThrottleInterval`, then bootstraps it. Measured over three soak runs (15 kills):
 `kill -9` on the daemon is recovered in 0.4–4.7s — the spread is
@@ -222,11 +222,11 @@ the only situation where both could open the event log at once, which is the one
 state the schema migration must never run from. Nothing is lost either way — the
 sessions are in tmux and the log is in SQLite.
 
-`--no-takeover` refuses instead of stopping anything; `cc daemon restart` picks
+`--no-takeover` refuses instead of stopping anything; `codeconnect daemon restart` picks
 up new binaries without rewriting the plist. A daemon too old to answer
 `daemon_info` is identified through `lsof` on its socket rather than guessed at.
 
-`cc daemon uninstall` removes the plist only once `launchctl bootout` has
+`codeconnect daemon uninstall` removes the plist only once `launchctl bootout` has
 actually succeeded. An unrecognised failure there means the job may still be
 loaded, and deleting its definition would leave a daemon that nothing can
 manage, restart or stop.
@@ -274,7 +274,7 @@ turn the loopback listener off.
 
 ## Pairing
 
-`cc pair` asks the daemon for a single-use 8-character code (5-minute TTL,
+`codeconnect pair` asks the daemon for a single-use 8-character code (5-minute TTL,
 stored hashed) and prints it as a QR alongside the JSON the app decodes:
 
 ```json
@@ -292,10 +292,10 @@ camera fails has no ambiguous characters. The QR is drawn with explicit
 black-on-white ANSI so it scans under a dark terminal theme, where art that
 relies on the default foreground colour comes out inverted.
 
-The static `cc token` credential stays valid alongside device tokens. Deleting
+The static `codeconnect token` credential stays valid alongside device tokens. Deleting
 `~/.codeconnect/token` is the only thing that retires it.
 
-`cc revoke` takes effect on connections that are **already open**, and takes
+`codeconnect revoke` takes effect on connections that are **already open**, and takes
 effect *immediately*. Three mechanisms, in order of how fast they act:
 
 1. **A cancellation is published the instant the token is revoked.** Every open
@@ -327,7 +327,7 @@ a read-only directory, a full disk — returned a failure *before the token was
 ever revoked*: the operator saw an error and the phone kept a working
 credential. The two grants are independent. A key that survives is reported as
 `ssh_key_removed=false` and logged as `REVOCATION INCOMPLETE` with the line to
-delete by hand. (`cc ssh-revoke` is the exception: it withdraws nothing else, so
+delete by hand. (`codeconnect ssh-revoke` is the exception: it withdraws nothing else, so
 a failure there *is* the operation failing and is reported as an error.)
 
 The static token has no revocation record — delete the file and restart to
@@ -345,7 +345,7 @@ nothing about *why* it was refused: every failure gets the same opaque message,
 because telling a caller it is being rate-limited hands it the pacing
 information it needs.
 
-### `cc pair --ssh`
+### `codeconnect pair --ssh`
 
 Only a code minted with `--ssh` lets the app's `ssh_pubkey` be appended to
 `~/.ssh/authorized_keys`. The consent is bound to that one five-minute code, not
@@ -358,7 +358,7 @@ algorithm, which rejects the whole authorized_keys options grammar
 (`command="…"`, `from="…"`), and the base64 is decoded and structurally checked.
 Multi-line input is refused outright rather than sanitised. Entries are written
 atomically (temp file + `rename`, following a symlink to its target) and tagged
-twice — a marker comment and the key's comment field — so `cc ssh-revoke`
+twice — a marker comment and the key's comment field — so `codeconnect ssh-revoke`
 removes exactly ours and nothing else.
 
 The temporary carries **128 random bits** and is created with `O_CREAT|O_EXCL`.
@@ -497,7 +497,7 @@ terminal tab ──exec──> tmux -L codeconnect (session cc-1) ──> real c
                               │                            generated --settings
                               │                                   │ hooks
                               │                                   ▼
-                     cc supervise (detached,                   cc-hook
+                     codeconnect supervise (detached,                   cc-hook
                       own process group,                          │
                       PPID 1 once the tab closes)                 │ unix socket
                               │                                   │
@@ -633,7 +633,7 @@ harness's answer storm opens twenty deliberately, because pipelining them down
 one socket would not test the race it exists to test.
 
 **Queues.** Each IPC connection's writer is fed by a bounded channel. A client
-that stops reading — a `cc ls` suspended with ctrl-Z, a supervisor whose process
+that stops reading — a `codeconnect ls` suspended with ctrl-Z, a supervisor whose process
 is stopped — used to have the daemon buffer frames on its behalf without limit.
 Now the read loop simply stops taking new work from a peer that is not consuming
 its replies. Requests *to* a supervisor use `try_send` instead of waiting, so a
@@ -716,7 +716,7 @@ parallel threads, so that guard is the only supported way to run one.
   recorded before session uids existed are keyed by name, so a name that held
   two runs becomes *one* migrated run — the log never recorded where one stopped
   and the next began. The guarantee starts from the migration forwards.
-* **`cc claude --resume` in a reused name re-reads the transcript.** The new run
+* **`codeconnect claude --resume` in a reused name re-reads the transcript.** The new run
   has its own cursor, so it ingests the file into its own log rather than
   finding a cursor that says the bytes are consumed. That costs one backfill and
   is the honest reading: the resumed history genuinely belongs to the new run.
@@ -726,7 +726,7 @@ parallel threads, so that guard is the only supported way to run one.
   `request_id` open at once is refused with an instruction rather than guessed.
 * **Sessions started before this build cannot be answered from the phone.**
   Their supervisors report `protocol_minor` 0 and cannot check a prompt
-  fingerprint, so approvals are shown but not actuated. `cc claude` again (or
+  fingerprint, so approvals are shown but not actuated. `codeconnect claude` again (or
   re-attaching a restarted session) clears it; it is logged once at
   registration.
 * **A card is briefly not remotely actuatable after it appears.** The prompt is

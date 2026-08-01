@@ -17,10 +17,10 @@ echo "building release binaries…"
 # harness, and there is no reason for `./install.sh` to spend a minute of LTO on
 # something that never ships.
 cargo build --release --manifest-path "$here/Cargo.toml" \
-    --bin cc --bin ccd --bin cc-hook
+    --bin codeconnect --bin ccd --bin cc-hook
 
 mkdir -p "$bin"
-for binary in cc ccd cc-hook; do
+for binary in codeconnect ccd cc-hook; do
     rm -f "$bin/$binary"
     cp "$here/target/release/$binary" "$bin/$binary"
     codesign --force --sign - "$bin/$binary" 2>/dev/null || true
@@ -34,9 +34,9 @@ echo "installed to $bin"
 echo
 echo "next:"
 echo "  export PATH=\"$bin:\$PATH\""
-echo "  cc daemon install          # run ccd under launchd (restarts on crash)"
-echo "  cc claude                  # run a session in the current directory"
-echo "  cc pair                    # QR code to pair the phone (add --ssh to"
+echo "  codeconnect daemon install   # run ccd under launchd (restarts on crash)"
+echo "  codeconnect claude          # run a session in the current directory"
+echo "  codeconnect pair            # QR code to pair the phone (add --ssh to"
 echo "                             # also install the app's SSH key)"
 echo
-echo "already installed? \`cc daemon restart\` picks up these binaries."
+echo "already installed? \`codeconnect daemon restart\` picks up these binaries."

@@ -19,6 +19,9 @@ struct SessionDetailView: View {
     }
 
     @Environment(AppModel.self) private var model
+    /// The widest tool label in this timeline, so every command beside one
+    /// starts on the same edge. See `CCToolColumn`.
+    @State private var toolColumn: CGFloat = 0
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
     @State private var composeResult: ComposeAttempt?
@@ -32,7 +35,6 @@ struct SessionDetailView: View {
     @State private var showLinkDetail = false
     @State private var newSinceLeaving = 0
     @State private var appearedAt = Date()
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff, the terminal — is scoped to this one key, so a
@@ -94,7 +96,7 @@ struct SessionDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 // Interactive everywhere. A control that looks tappable and is
                 // not is worse than no control.
-                CCFreshnessPill(health: model.linkHealth) { showLinkDetail = true }
+                SessionLinkPill { showLinkDetail = true }
             }
             .ccPlainToolbarItem()
         }
@@ -102,7 +104,16 @@ struct SessionDetailView: View {
             // The compose bar types into Claude's prompt. In the terminal you
             // are already typing at the TTY, so a second text field there would
             // be two ways to say the same thing with different consequences.
-            if surface == .timeline { composeBar }
+            if surface == .timeline {
+                SessionComposeBar(
+                    text: $composeText,
+                    result: composeResult,
+                    sending: sending,
+                    displayName: displayName,
+                    summary: summary,
+                    onWhy: { showLinkDetail = true },
+                    onSend: send)
+            }
         }
         .sheet(item: $openApproval) { approval in
             DecisionCardSheet(approval: approval)
@@ -153,9 +164,7 @@ struct SessionDetailView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: CC.space.xs)
-                        Text(freshness)
-                            .ccType(CC.type.monoSmall)
-                            .foregroundStyle(CC.text.tertiary)
+                        SessionFreshness(lastEventAt: state?.lastEventAt)
                     }
                     CCIdentity(name: identityName, tail: identityTail)
                     // `textDisabled` is permitted here — one of its few allowed
@@ -193,7 +202,9 @@ struct SessionDetailView: View {
 
     /// The shortest *verified* distinguishing suffix, computed by the model.
     /// Read from `identityLabels` rather than from `model.fleet`, which re-sorts
-    /// the whole fleet on every access and this view's body runs once a second.
+    /// the whole fleet on every access. Nothing ticks this body any more — see
+    /// the four small views at the foot of this file — so a body pass now means
+    /// the session itself changed, and that is the only time this is paid.
     private var identity: (name: String, tail: String?) {
         let label = AppModel.identityLabels(for: model.summaries)[key] ?? displayName
         let parts = label.components(separatedBy: " · ")
@@ -203,11 +214,6 @@ struct SessionDetailView: View {
     private var identityName: String { identity.name }
 
     private var identityTail: String? { identity.tail }
-
-    private var freshness: String {
-        guard let last = state?.lastEventAt else { return "no events" }
-        return Format.age(since: last, now: model.now)
-    }
 
     // MARK: Toolbar
 
@@ -274,7 +280,7 @@ struct SessionDetailView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    banner(state)
+                    SessionBanner(state: state) { showLinkDetail = true }
 
                     if state.headTruncated {
                         // At its position in time — the very top — rather than
@@ -294,7 +300,7 @@ struct SessionDetailView: View {
 
                     ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
                         TimelineRow(
-                            item: item, now: model.now, profile: model.daemonProfile
+                            item: item, profile: model.daemonProfile
                         ) { approval in
                             openApproval = approval
                         }
@@ -319,6 +325,7 @@ struct SessionDetailView: View {
                 .padding(.bottom, CC.space.lg)
             }
             .scrollIndicators(.hidden)
+            .ccCollectsToolColumn(into: $toolColumn)
             .background(CC.color.bg)
             .simultaneousGesture(
                 DragGesture().onChanged { value in
@@ -390,34 +397,6 @@ struct SessionDetailView: View {
         .background(CC.color.bg)
     }
 
-    /// One banner, chosen by the ladder. The sequence gap and the truncated head
-    /// are **not** candidates: both have a position in time and are drawn there
-    /// as `CCGapMarker`s instead.
-    @ViewBuilder
-    private func banner(_ state: SessionState) -> some View {
-        let candidates: [CCBannerItem?] = [
-            model.linkHealth.ccBannerItem(
-                onRetry: { model.connection.retryNow() },
-                onSettings: { showLinkDetail = true }),
-            cachedBanner(state),
-        ]
-        if candidates.contains(where: { $0 != nil }) {
-            CCBannerSlot(candidates)
-                .padding(.top, CC.space.sm)
-                .padding(.bottom, CC.space.xs)
-        }
-    }
-
-    private func cachedBanner(_ state: SessionState) -> CCBannerItem? {
-        guard let cachedAt = state.loadedFromCacheAt, !state.hasLiveData else { return nil }
-        return CCBannerItem(
-            .cached,
-            title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",
-            message: "Nothing live has arrived for this session yet.",
-            tone: .warning,
-            icon: "clock.arrow.circlepath")
-    }
-
     @ViewBuilder
     private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
         if !following {
@@ -456,9 +435,150 @@ struct SessionDetailView: View {
 
     // MARK: Compose
 
-    /// `surfaceRaised` and a 1pt top rule — never `.bar`, whose material over
-    /// `#000` resolves to a flat mid-grey smear belonging to no palette.
-    private var composeBar: some View {
+    private func send() {
+        let text = composeText
+        sending = true
+        composeResult = nil
+        composeResultClearTask?.cancel()
+        Task {
+            let result = await model.send(text: text, to: key)
+            sending = false
+            withAnimation(CC.motion.micro) { composeResult = result }
+            if case .sent = result {
+                // Never optimistic: the field clears only on `.sent`.
+                composeText = ""
+                following = true
+                newSinceLeaving = 0
+            }
+            composeResultClearTask = Task {
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                withAnimation(CC.motion.medium) { composeResult = nil }
+            }
+        }
+    }
+}
+
+// MARK: - The four views that are allowed to read the clock
+
+/// **The age in the identity block, clocked by itself.**
+///
+/// It is one string — `21h` — and reading it from `SessionDetailView.body` put a
+/// one-second heartbeat under the entire timeline. It sleeps until its own
+/// string stops being true: a second while the run is seconds old, a minute
+/// while it is minutes old, an hour after that.
+private struct SessionFreshness: View {
+    let lastEventAt: Date?
+
+    /// Read, not merely written — see `ApprovalRow.lastTick`. A `@State` the
+    /// body never looks at does not invalidate the view, and an age that never
+    /// invalidates is an age that has quietly stopped being true.
+    @State private var lastTick = Date()
+
+    /// The wall clock, not the stored tick: a view waking from an hour's sleep
+    /// must measure against the real clock, never against the stamp it fell
+    /// asleep holding. Both rules are pinned by test in `AgeTick.renderTime`.
+    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
+
+    /// Nil when this run has no events at all. There is no age to keep true, so
+    /// there is nothing to wake for.
+    private var clock: AgeClock? {
+        lastEventAt.map { AgeClock(since: $0, scale: .age) }
+    }
+
+    var body: some View {
+        Text(lastEventAt.map { Format.age(since: $0, now: now) } ?? "no events")
+            .ccType(CC.type.monoSmall)
+            .foregroundStyle(CC.text.tertiary)
+            .task(id: clock) {
+                guard let clock else { return }
+                await AgeTick.follow(clock) { lastTick = $0 }
+            }
+    }
+}
+
+/// **The one thing in this toolbar that has to change every second.**
+///
+/// The fleet's `LinkPill`, on the pushed screen, and it is here for the reason
+/// stated there: how long ago the Mac last spoke is what licenses everything
+/// else on the screen, `linkHealth` is derived from `now`, and read from
+/// `SessionDetailView.body` that second was charged to a 400-event timeline to
+/// redraw two characters. The read now lives with the only view whose output
+/// depends on it.
+private struct SessionLinkPill: View {
+    @Environment(AppModel.self) private var model
+    let action: () -> Void
+
+    var body: some View {
+        CCFreshnessPill(health: model.linkHealth, action: action)
+    }
+}
+
+/// **The banner, clocked by itself.**
+///
+/// One banner, chosen by the ladder. The sequence gap and the truncated head are
+/// **not** candidates: both have a position in time and are drawn there as
+/// `CCGapMarker`s instead.
+///
+/// It reads `linkHealth`, which is derived from `now`, and it has to: a link
+/// that goes stale must say so without being touched. That is a hairline and two
+/// lines of text ticking, rather than the whole timeline behind it.
+private struct SessionBanner: View {
+    @Environment(AppModel.self) private var model
+    let state: SessionState
+    let onSettings: () -> Void
+
+    var body: some View {
+        let candidates: [CCBannerItem?] = [
+            model.linkHealth.ccBannerItem(
+                onRetry: { model.connection.retryNow() },
+                onSettings: onSettings),
+            cachedBanner,
+        ]
+        if candidates.contains(where: { $0 != nil }) {
+            CCBannerSlot(candidates)
+                .padding(.top, CC.space.sm)
+                .padding(.bottom, CC.space.xs)
+        }
+    }
+
+    private var cachedBanner: CCBannerItem? {
+        guard let cachedAt = state.loadedFromCacheAt, !state.hasLiveData else { return nil }
+        return CCBannerItem(
+            .cached,
+            title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",
+            message: "Nothing live has arrived for this session yet.",
+            tone: .warning,
+            icon: "clock.arrow.circlepath")
+    }
+}
+
+/// **The compose bar, clocked by itself.**
+///
+/// `surfaceRaised` and a 1pt top rule — never `.bar`, whose material over `#000`
+/// resolves to a flat mid-grey smear belonging to no palette.
+///
+/// It owns the `linkHealth` read for the same reason the banner does, and this
+/// one is a safety property rather than a cosmetic one: **a link that has gone
+/// stale must disable `Send` and say why, on its own, with nobody touching the
+/// screen.** So this view genuinely ticks. What changed is that it ticks alone —
+/// the timeline above it used to be rebuilt to keep this sentence true.
+///
+/// The text and the send result stay bound to `SessionDetailView`, so a half
+/// typed message still survives a trip to the Terminal surface and back.
+private struct SessionComposeBar: View {
+    @Binding var text: String
+    let result: ComposeAttempt?
+    let sending: Bool
+    let displayName: String
+    let summary: SessionSummary?
+    let onWhy: () -> Void
+    let onSend: () -> Void
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
         VStack(spacing: 0) {
             CCHairline()
             VStack(alignment: .leading, spacing: CC.space.sm) {
@@ -467,15 +587,15 @@ struct SessionDetailView: View {
                 // The reason goes *above* the field and is visible text, not an
                 // accessibility hint — that rule made concrete in the app's
                 // highest-traffic control.
-                if let composeResult {
-                    feedbackLine(composeResult)
+                if let result {
+                    feedbackLine(result)
                 } else if let reason = sendBlockedReason {
                     ComposeNote(
                         text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
                 } else if isObserveOnly {
                     ComposeNote(
                         text: "Observe only — answers are given at the Mac.",
-                        tone: .neutral, glyph: nil, action: ("Why?", { showLinkDetail = true }))
+                        tone: .neutral, glyph: nil, action: ("Why?", onWhy))
                 }
 
                 // Side by side normally; stacked once Dynamic Type reaches the
@@ -494,7 +614,7 @@ struct SessionDetailView: View {
                     // paying for. `CCField`'s label is optional for this;
                     // VoiceOver still gets a name, from the override below.
                     CCField(
-                        text: $composeText,
+                        text: $text,
                         placeholder: placeholder,
                         // `.vertical` so the system dictation key is available —
                         // dictation is a first-class input here.
@@ -502,12 +622,18 @@ struct SessionDetailView: View {
                         lineLimit: typeSize.isAccessibilitySize ? 1...3 : 1...5)
                     .accessibilityLabel("Message for \(displayName)")
 
+                    // `.lg`, to match the field it stands beside. `CCField`
+                    // pins itself to `CC.size.controlLg` (52); a `.md` button is
+                    // `controlMd` (44), so the two were bottom-aligned and 8pt
+                    // apart at the top — visible as a short button next to a
+                    // tall field, and the larger target is the better one for
+                    // the app's most-used control anyway.
                     CCButton(
-                        "Send", icon: "arrow.up", variant: .primary, size: .md,
+                        "Send", icon: "arrow.up", variant: .primary, size: .lg,
                         fullWidth: typeSize.isAccessibilitySize,
                         haptic: nil
                     ) {
-                        send()
+                        onSend()
                     }
                     .disabled(isSendDisabled)
                     .accessibilityHint(sendBlockedReason ?? "Types this into the agent's prompt")
@@ -562,10 +688,10 @@ struct SessionDetailView: View {
     ]
 
     private func insert(_ template: String) {
-        composeText =
-            composeText.isEmpty
+        text =
+            text.isEmpty
             ? template
-            : composeText.trimmingCharacters(in: .whitespacesAndNewlines) + " " + template
+            : text.trimmingCharacters(in: .whitespacesAndNewlines) + " " + template
     }
 
     @ViewBuilder
@@ -592,7 +718,7 @@ struct SessionDetailView: View {
     }
 
     private var isSendDisabled: Bool {
-        composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || sendBlockedReason != nil || sending
     }
 
@@ -609,29 +735,6 @@ struct SessionDetailView: View {
             return reason
         }
         return nil
-    }
-
-    private func send() {
-        let text = composeText
-        sending = true
-        composeResult = nil
-        composeResultClearTask?.cancel()
-        Task {
-            let result = await model.send(text: text, to: key)
-            sending = false
-            withAnimation(CC.motion.micro) { composeResult = result }
-            if case .sent = result {
-                // Never optimistic: the field clears only on `.sent`.
-                composeText = ""
-                following = true
-                newSinceLeaving = 0
-            }
-            composeResultClearTask = Task {
-                try? await Task.sleep(for: .seconds(4))
-                guard !Task.isCancelled else { return }
-                withAnimation(CC.motion.medium) { composeResult = nil }
-            }
-        }
     }
 }
 

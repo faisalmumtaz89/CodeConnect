@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
 
     let info = env::daemon_info().map_err(|err| {
         anyhow::anyhow!(
-            "ccd is not answering {} ({err:#}). Start it with `cc daemon install`.",
+            "ccd is not answering {} ({err:#}). Start it with `codeconnect daemon install`.",
             protocol::socket_path().display()
         )
     })?;
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     if info.protocol_minor < protocol::PROTOCOL_MINOR {
         bail!(
             "the running daemon speaks protocol minor {} and this harness was built against {}. \
-             It is an older ccd still in memory — `cc daemon restart` picks up the new binaries.",
+             It is an older ccd still in memory — `codeconnect daemon restart` picks up the new binaries.",
             info.protocol_minor,
             protocol::PROTOCOL_MINOR
         );
@@ -315,7 +315,7 @@ ccsoak — chaos gauntlet against the running ccd
   commitorder   (g) N concurrent commits on one session; assert no socket ever
                     skips a seq
 
-The kill scenarios need the LaunchAgent installed (`cc daemon install`), because
+The kill scenarios need the LaunchAgent installed (`codeconnect daemon install`), because
 something has to bring the daemon back."
     );
 }

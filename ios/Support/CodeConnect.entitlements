@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Development. A build signed with this entitlement gets a token that is
+	     only valid on api.sandbox.push.apple.com; a TestFlight or App Store
+	     build is re-signed to `production` automatically and its token is only
+	     valid on api.push.apple.com. The app reports which one it holds when it
+	     registers, because the daemon cannot tell from the token itself. -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

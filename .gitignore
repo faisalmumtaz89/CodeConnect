@@ -56,3 +56,12 @@ Packages/
 # building this, not for anyone reading it. They stay on disk and out of the
 # repository. `docs/` holds only what a reader actually needs.
 /internal/
+
+# ── Agent tooling state ──────────────────────────────────────────────────────
+# Machine-local runtime state, not project content: the lock file records a
+# session id, a pid and a process start time from whichever machine last ran a
+# scheduled task. Local settings are personal by definition. Anything here that
+# is genuinely meant to be shared — agent or skill definitions — has to be added
+# deliberately, which is the intended asymmetry.
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

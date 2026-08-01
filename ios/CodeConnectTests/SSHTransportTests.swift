@@ -54,7 +54,7 @@ final class SSHTransportTests: XCTestCase {
         let guidance = try XCTUnwrap(
             SSHSetupGuidance.forOutcome(outcome, host: "127.0.0.1", port: port))
         XCTAssertTrue(guidance.steps.contains { $0.command == "tailscale up --ssh" })
-        XCTAssertTrue(guidance.steps.contains { $0.command == "cc pair --ssh" })
+        XCTAssertTrue(guidance.steps.contains { $0.command == "codeconnect pair --ssh" })
         XCTAssertTrue(
             guidance.steps.contains { $0.title.contains("Remote Login") },
             "the macOS path is offered too, and neither is performed by the app")

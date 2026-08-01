@@ -6,7 +6,7 @@ import XCTest
 ///
 ///   xcodebuild test -project CodeConnect.xcodeproj -scheme CodeConnect \
 ///     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-///     TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(cc token)"
+///     TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(codeconnect token)"
 ///
 /// `testAnswerBlockedApproval` needs an approval already pending on the daemon;
 /// it skips (rather than fails) when the fleet is clear, so the suite stays

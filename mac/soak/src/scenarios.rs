@@ -10,7 +10,7 @@
 //! the only way to truncate and rewrite a JSONL file without corrupting a real
 //! agent's history, and the daemon cannot tell the difference: a synthetic
 //! session is adopted through exactly the hook path a real one uses. The other
-//! five drive the live `cc claude` session.
+//! five drive the live `codeconnect claude` session.
 
 use std::time::{Duration, Instant};
 
@@ -949,7 +949,7 @@ pub fn choose_target(reference: Option<&str>) -> Result<SessionSummary> {
         Some(session) => Ok(session),
         None => bail!(
             "no attached session to soak against; start one with \
-             `cc claude` (or soak/run.sh, which starts its own)"
+             `codeconnect claude` (or soak/run.sh, which starts its own)"
         ),
     }
 }

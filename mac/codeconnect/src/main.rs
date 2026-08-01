@@ -1,6 +1,6 @@
-//! `cc` — the CodeConnect shim.
+//! `codeconnect` — the CodeConnect shim.
 //!
-//! `cc claude [args…]` hosts a real `claude` inside the private tmux server and
+//! `codeconnect claude [args…]` hosts a real `claude` inside the private tmux server and
 //! then **execs** the tmux client, so the terminal tab is showing the session
 //! itself rather than a wrapper around it. Nothing is proxied, no PTY is
 //! allocated, and every keystroke goes straight to Claude's TTY.
@@ -12,6 +12,7 @@
 mod daemon;
 mod launchd;
 mod pair;
+mod sessions;
 mod settings;
 mod supervisor;
 mod tmux;
@@ -33,21 +34,35 @@ fn main() -> Result<()> {
         "claude" => start_claude(rest),
         "attach" => attach(rest),
         "ls" | "list" => list(),
+        "sessions" => sessions::command(rest),
         "token" => token(),
         "pair" => pair::pair(rest),
-        "devices" => pair::devices(),
+        "devices" => pair::devices(rest),
         "revoke" => pair::revoke(rest, false),
         "ssh-revoke" => pair::revoke(rest, true),
         "daemon" => launchd::command(rest),
-        // Hidden: spawned by `cc claude`, never typed by a human.
+        // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
         "--version" | "version" => {
-            println!("cc {}", env!("CARGO_PKG_VERSION"));
+            println!("codeconnect {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => {
+        "help" | "--help" | "-h" => {
             usage();
             Ok(())
+        }
+        // Anything else is a mistake, and a mistake exits non-zero.
+        //
+        // This binary was called `cc` until the collision was measured: `cc` is
+        // the traditional name of the C compiler, the install prepends its
+        // directory to PATH, and so `cc file.c -o out` reached *this* program,
+        // printed usage, and **exited 0** — which a Makefile or a configure
+        // script reads as a successful compile of nothing. The rename removed
+        // the collision; exiting non-zero stays, because a command nobody
+        // recognised is not a command that succeeded.
+        other => {
+            usage();
+            anyhow::bail!("unknown command {other:?}");
         }
     }
 }
@@ -57,22 +72,24 @@ fn usage() {
         "\
 cc — CodeConnect shim
 
-  cc claude [args…]      run claude in the private tmux server, attached here
-  cc attach <name>       re-attach a session (e.g. after closing the tab)
-  cc ls                  list sessions
+  codeconnect claude [args…]      run claude in the private tmux server, attached here
+  codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
+  codeconnect ls                  list what tmux is running (works with ccd down)
+  codeconnect sessions            list what the event log knows, with lifecycle
+  codeconnect sessions prune      remove ended sessions and their events (--dry-run first)
 
-  cc daemon install      install and start the ccd LaunchAgent
-  cc daemon status       plist, launchd job and live daemon
-  cc daemon restart      restart the managed daemon
-  cc daemon uninstall    stop it and remove the LaunchAgent
+  codeconnect daemon install      install and start the ccd LaunchAgent
+  codeconnect daemon status       plist, launchd job and live daemon
+  codeconnect daemon restart      restart the managed daemon
+  codeconnect daemon uninstall    stop it and remove the LaunchAgent
 
-  cc pair [--ssh]        show a QR code that pairs a phone (single use, 5 min)
-  cc devices             list paired devices
-  cc revoke <device>     revoke a device's token and its SSH key
-  cc ssh-revoke <device> remove only that device's SSH key
-  cc token               print the static fallback token
+  codeconnect pair [--ssh]        show a QR code that pairs a phone (single use, 5 min)
+  codeconnect devices             list paired devices
+  codeconnect revoke <device>     revoke a device's token and its SSH key
+  codeconnect ssh-revoke <device> remove only that device's SSH key
+  codeconnect token               print the static fallback token
 
-`cc pair --ssh` also lets that one pairing install the app's ed25519 public
+`codeconnect pair --ssh` also lets that one pairing install the app's ed25519 public
 key into ~/.ssh/authorized_keys. Without the flag an offered key is refused.
 "
     );
@@ -127,7 +144,7 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
 
-    eprintln!("codeconnect: session {session_id} (detach with ctrl-b d, reattach with `cc attach {session_id}`)");
+    eprintln!("codeconnect: session {session_id} (detach with ctrl-b d, reattach with `codeconnect attach {session_id}`)");
     tmux::exec_attach(&session_id)?;
     unreachable!("exec replaces the process")
 }
@@ -135,7 +152,7 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 /// Launch the supervisor so it outlives this process *and* the terminal tab.
 ///
 /// `process_group(0)` puts it in its own process group, so the SIGHUP/SIGINT
-/// that reach the tab's foreground group never reach it. When `cc` execs into
+/// that reach the tab's foreground group never reach it. When `codeconnect` execs into
 /// the tmux client and that client later dies, the supervisor is reparented to
 /// launchd and keeps running. This is the standard daemonisation shape, and it
 /// is reachable from safe Rust.
@@ -147,7 +164,7 @@ fn spawn_supervisor(
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let current = std::env::current_exe().context("locating the cc binary")?;
+    let current = std::env::current_exe().context("locating the codeconnect binary")?;
     // Named by uid, not by tmux name: the name is reused, and two runs sharing
     // one supervisor log makes the file useless exactly when it is needed.
     let log_path = protocol::logs_dir().join(format!("supervisor-{session_id}-{session_uid}.out"));
@@ -229,7 +246,7 @@ fn attach(args: &[String]) -> Result<()> {
         }
     };
     if !tmux::has_session(name)? {
-        bail!("no session named {name}; `cc ls` shows what is running");
+        bail!("no session named {name}; `codeconnect ls` shows what is running");
     }
     tmux::exec_attach(name)?;
     unreachable!("exec replaces the process")
@@ -242,7 +259,7 @@ fn list() -> Result<()> {
         return Ok(());
     }
     // The daemon knows more (identity, link state, blocked approvals) but must
-    // never be required: `cc ls` has to work when ccd is down.
+    // never be required: `codeconnect ls` has to work when ccd is down.
     let known = daemon_sessions().unwrap_or_default();
     println!("{:<10} {:<28} {:<10} CWD", "SESSION", "UID", "LINK");
     for name in sessions {
@@ -281,11 +298,11 @@ fn token() -> Result<()> {
     Ok(())
 }
 
-/// Find the real `claude`, never `cc` itself.
+/// Find the real `claude`, never `codeconnect` itself.
 ///
 /// launchd-safe: an explicit candidate list first, `PATH` only as a fallback,
 /// and a guard against resolving to this binary (which a shell alias like
-/// `alias claude=cc claude` would otherwise cause, producing an infinite spawn
+/// `alias claude=codeconnect claude` would otherwise cause, producing an infinite spawn
 /// loop that is very confusing from the inside).
 fn resolve_claude_bin(config: &Config) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -334,7 +351,7 @@ mod tests {
         let path = resolve_claude_bin(&Config::default()).expect("claude must be installed");
         assert!(path.is_file());
         assert!(
-            !path.ends_with("cc"),
+            !path.ends_with("codeconnect"),
             "must never resolve to the shim itself: {}",
             path.display()
         );

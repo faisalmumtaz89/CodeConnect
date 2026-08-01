@@ -8,7 +8,7 @@ Monitor and approve your terminal coding agents from your iPhone.
 Your agents keep working while you walk away. CodeConnect shows you every session on your Mac, tells you the moment one is blocked, and lets you read the command and approve or deny it from your phone — without ever pretending to know something it doesn't.
 
 ```
-$ cc claude                 # your normal Claude Code session, now observable
+$ codeconnect claude                 # your normal Claude Code session, now observable
 ```
 
 That's the whole setup. The session looks and behaves exactly as it did before; it just also appears on your phone.
@@ -29,15 +29,20 @@ iPhone (SwiftUI)  ──WSS over Tailscale──▶  ccd (Rust daemon, launchd)
       ▲                                          │
       └──────── APNs (a doorbell, not data) ──────┘
                                                   │ unix socket
-                                    cc claude ────┘  (tmux-hosted session)
+                                    codeconnect claude ────┘  (tmux-hosted session)
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
-- **`cc`** — launches an agent inside a private tmux server and wires Claude Code's hooks. Your terminal experience is unchanged.
+- **`codeconnect`** — launches an agent inside a private tmux server and wires Claude Code's hooks. Your terminal experience is unchanged.
 - **`cc-hook`** — tiny binary the hooks call. Fails safe: if the daemon is unreachable, the decision goes back to the local keyboard.
 - **The phone** — a client of the event log, not a source of truth.
 
-Approvals ride structured channels only (hooks, and later ACP / Codex's app-server). Terminal bytes are never parsed for meaning — three independent projects tried and abandoned it, and Claude Code's transcript contains no approval events at all.
+Approval **requests** ride structured channels only (hooks, and later ACP / Codex's app-server). Terminal bytes are never parsed to *derive* a fact — three independent projects tried and abandoned it, and Claude Code's transcript contains no approval events at all. The event log is the only source of truth.
+
+Your **answer** travels one of two ways, and the daemon tells the app which one is live:
+
+- **`hook_return`** — the decision goes back through the hook that asked, bound to Claude's own tool-call id. Nothing is typed anywhere. Enable it by setting `hold_ms` in `~/.codeconnect/config.json`; the trade is that the Mac's own prompt is held while your phone is asked.
+- **`send_keys`** (default) — the answer is typed into the live prompt, because with `hold_ms: 0` the hook has already returned and the local prompt is what is waiting. Here the visible pane *is* read, to prove the prompt on screen is still the one the card was made for, and a keystroke is refused outright if it cannot be. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the four identity checks.
 
 ## Getting started
 
@@ -45,9 +50,9 @@ Approvals ride structured channels only (hooks, and later ACP / Codex's app-serv
 cd mac && ./install.sh
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
-cc daemon install     # run ccd under launchd (restarts on crash)
-cc pair               # QR code to pair the phone (--ssh also authorises the app's SSH key)
-cc claude             # start a session in the current directory
+codeconnect daemon install     # run ccd under launchd (restarts on crash)
+codeconnect pair               # QR code to pair the phone (--ssh also authorises the app's SSH key)
+codeconnect claude             # start a session in the current directory
 ```
 
 The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same [Tailscale](https://tailscale.com) tailnet.
@@ -60,7 +65,7 @@ For the live terminal, enable Remote Login (System Settings → General → Shar
 
 | Path | What |
 |---|---|
-| `mac/` | Rust workspace: `ccd`, `cc`, `cc-hook`, shared `protocol`, and the chaos soak harness |
+| `mac/` | Rust workspace: `ccd`, `codeconnect`, `cc-hook`, shared `protocol`, and the chaos soak harness |
 | `ios/` | SwiftUI app and its dark-only design system |
 | `docs/` | How the system works |
 | `fixtures/` | Recorded hook payloads and transcripts, replayed by tests |

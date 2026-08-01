@@ -295,7 +295,7 @@ where
     // Which device this connection belongs to, if any.
     //
     // Load-bearing for revocation: `hello` happens once and a phone then holds
-    // the socket open for hours. Without re-checking, `cc revoke` would take
+    // the socket open for hours. Without re-checking, `codeconnect revoke` would take
     // effect only on the *next* connection — leaving a revoked device able to
     // keep answering approvals and typing into the session's TTY, which is the
     // opposite of what the operator just asked for.
@@ -431,7 +431,8 @@ where
                     return Ok(());
                 }
 
-                handle_message(&daemon, &mut sink, &mut watermarks, parsed).await?;
+                handle_message(&daemon, &mut sink, &mut watermarks, device_id.as_deref(), parsed)
+                    .await?;
             }
 
             broadcast = events.recv() => {
@@ -484,7 +485,7 @@ where
                 }
             }
 
-            // The push half of revocation. Without it, `cc revoke` reached an
+            // The push half of revocation. Without it, `codeconnect revoke` reached an
             // idle phone only at the next keepalive — up to 30 seconds during
             // which a device the operator had just cut off was still receiving
             // the live event log.
@@ -574,6 +575,10 @@ async fn handle_message<S>(
     daemon: &Arc<Daemon>,
     sink: &mut S,
     watermarks: &mut HashMap<String, u64>,
+    // The authenticated device, when there is one. A client on the static
+    // bootstrap token has no device row, so it has nowhere to register a push
+    // token — see `RegisterPush`.
+    device_id: Option<&str>,
     message: ClientMessage,
 ) -> Result<()>
 where
@@ -584,6 +589,48 @@ where
         // A second hello is harmless; treat it as a no-op rather than an error.
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
+        ClientMessage::RegisterPush { token, environment } => {
+            // Normalised on the way in, so the column only ever holds one of
+            // two spellings and a later reader cannot be surprised by "prod".
+            let environment = crate::apns_sender::ApnsEnvironment::parse(
+                environment.as_deref().unwrap_or_default(),
+            )
+            .as_str()
+            .to_string();
+            let Some(device_id) = device_id else {
+                // Refused, and said out loud. A push token belongs to a device
+                // row so that revoking the device stops its notifications; the
+                // static token has no row, so accepting this would create a
+                // notification stream nothing could ever switch off.
+                send(
+                    sink,
+                    &ServerMessage::Error {
+                        code: "no_device".into(),
+                        message: "push registration needs a paired device; \
+                              this connection is on the bootstrap token"
+                            .into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            match daemon.register_push(device_id, &token, &environment).await {
+                Ok(()) => crate::log_info!(
+                    "push: device {device_id} registered for {environment} notifications"
+                ),
+                Err(err) => {
+                    crate::log_error!("push: could not register {device_id}: {err:#}");
+                    send(
+                        sink,
+                        &ServerMessage::Error {
+                            code: "push_registration_failed".into(),
+                            message: format!("could not store the push token: {err}"),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
         // A failed read is reported as a failure. `unwrap_or_default` turned a
         // database error into an empty fleet — a phone showing "no sessions"
         // when the truth is "we could not look" is the daemon claiming
@@ -1092,7 +1139,7 @@ mod tests {
     #[tokio::test]
     async fn revoking_publishes_a_cancellation_the_same_instant() {
         // Revocation used to reach an idle socket only at its next keepalive,
-        // up to 30 seconds later. `cc revoke` does not mean "in a while".
+        // up to 30 seconds later. `codeconnect revoke` does not mean "in a while".
         let (daemon, device_id) = daemon_with_a_device();
         let mut cancellations = daemon.revocations_tx.subscribe();
 
@@ -1107,7 +1154,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ssh_only_revoke_publishes_nothing() {
-        // `cc ssh-revoke` deliberately keeps the phone paired. Closing its
+        // `codeconnect ssh-revoke` deliberately keeps the phone paired. Closing its
         // sockets would be a different operation from the one asked for.
         let (daemon, device_id) = daemon_with_a_device();
         let mut cancellations = daemon.revocations_tx.subscribe();
@@ -1308,7 +1355,7 @@ mod tests {
         // Before the cancellation broadcast, revocation reached a socket only
         // when that socket next did something — a message, or the 30-second
         // keepalive. A phone sitting on a subscription kept receiving the event
-        // log for up to half a minute after `cc revoke`.
+        // log for up to half a minute after `codeconnect revoke`.
         let (server, device_id) = live_server(protocol::config::Config::default()).await;
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))

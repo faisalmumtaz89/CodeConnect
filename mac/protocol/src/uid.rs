@@ -2,7 +2,7 @@
 //!
 //! ## Why this exists
 //!
-//! `cc-1` is a *tmux session name*. `cc claude` picks the lowest free one, so
+//! `cc-1` is a *tmux session name*. `codeconnect claude` picks the lowest free one, so
 //! when a session dies the next one is called `cc-1` again. That name was
 //! originally the event log's primary key too, which meant a new session
 //! inherited the dead one's log and continued its `seq` numbering. Two concrete
@@ -16,7 +16,7 @@
 //!     duplicate — an answer nobody gave.
 //!
 //! The fix is to separate the two jobs the name was doing. `session_id` stays
-//! the human-facing tmux name (display, `cc attach`, `send-keys` targeting);
+//! the human-facing tmux name (display, `codeconnect attach`, `send-keys` targeting);
 //! `session_uid` is minted once at spawn, never reused, and is what the log,
 //! the tail cursors and the answers ledger are keyed by.
 //!

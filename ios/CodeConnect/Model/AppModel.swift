@@ -164,6 +164,46 @@ final class AppModel {
 
     // MARK: - Lifecycle
 
+    /// Asking iOS for notification permission, and telling the daemon where to
+    /// push once Apple issues a token.
+    private let pushRegistrar = PushRegistration()
+    /// What the user actually decided, so the UI can say so rather than imply
+    /// it. `nil` until asked.
+    private(set) var pushAuthorized: Bool?
+    /// Why registration failed, when it did — usually an App ID without the
+    /// Push Notifications capability. Reported, never swallowed.
+    private(set) var pushFailure: String?
+
+    /// Ask once the phone is paired: a token is worthless before there is a
+    /// device row to store it against, and a permission prompt on the pairing
+    /// screen is a prompt with no context.
+    func enablePush() {
+        pushRegistrar.onAuthorization = { [weak self] granted in
+            self?.pushAuthorized = granted
+        }
+        pushRegistrar.onToken = { [weak self] token, environment in
+            guard let self else { return }
+            Task {
+                do {
+                    try await self.connection.send(
+                        .registerPush(token: token, environment: environment))
+                } catch {
+                    self.pushFailure = error.localizedDescription
+                }
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: PushWire.failureNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            // The `String` is lifted out here, on the posting side of the
+            // boundary: carrying the `Notification` itself across is what the
+            // concurrency checker objects to, and it is right to.
+            let reason = note.object as? String
+            MainActor.assumeIsolated { self?.pushFailure = reason }
+        }
+        pushRegistrar.requestAndRegister()
+    }
+
     func bootstrap() {
         var pairedByCode = false
         #if DEBUG
@@ -184,13 +224,19 @@ final class AppModel {
         // would spend the single-use code twice.
         if !pairedByCode, let endpoint = pairing.endpoint {
             connect(to: endpoint)
+            // A phone that paired before push existed would otherwise never
+            // register: `adopt(deviceToken:)` only fires on a *new* pairing.
+            // Re-registering is cheap and necessary anyway — APNs reissues the
+            // token on reinstall and on restore-from-backup, and the daemon
+            // keys on the device so this replaces rather than accumulates.
+            enablePush()
         }
     }
 
     /// Start the connection, offering the SSH public key.
     ///
     /// The key is only *offered*; a daemon acts on it only when its operator ran
-    /// `cc pair --ssh`. It is not minted here — `existingIdentity` deliberately
+    /// `codeconnect pair --ssh`. It is not minted here — `existingIdentity` deliberately
     /// does not create one — so a user who never opens the terminal never
     /// generates a key they did not ask for.
     private func connect(to endpoint: DaemonEndpoint) {
@@ -203,6 +249,10 @@ final class AppModel {
         guard let endpoint = pendingPairing ?? pairing.endpoint else { return }
         pairing.adopt(deviceToken: deviceToken, from: endpoint)
         pendingPairing = nil
+        // Only now. A push token has nowhere to live until the device row that
+        // owns it exists, and asking for notification permission on the pairing
+        // screen is a system prompt with no context behind it.
+        enablePush()
     }
 
     #if DEBUG
@@ -370,7 +420,7 @@ final class AppModel {
     /// arrives in `hello_ack` and *that* is what gets saved.
     ///
     /// The SSH public key is minted here, because scanning a QR is the moment
-    /// the user has decided to trust this Mac — and `cc pair --ssh` on the other
+    /// the user has decided to trust this Mac — and `codeconnect pair --ssh` on the other
     /// end can only file a key that was offered.
     func pair(withQR payload: PairingQRPayload) {
         let endpoint = payload.endpoint
@@ -574,7 +624,7 @@ final class AppModel {
         summaries.first { $0.sessionKey == key }
     }
 
-    /// What to call this run on screen. The tmux name, which is what `cc attach`
+    /// What to call this run on screen. The tmux name, which is what `codeconnect attach`
     /// takes and what the Mac's terminal is showing — never the uid, which is an
     /// identifier and not a name anybody uses.
     func displayName(for key: String) -> String {
@@ -651,16 +701,34 @@ final class AppModel {
         switch message {
         case .sessions(let list):
             markFleetLive()
-            summaries = list
+            // **Assigned only when it differs.** The fleet is re-asked every 15
+            // seconds because `link` and `blocked_on` can change without an
+            // event, and on a quiet fleet the answer is usually the one we
+            // already have — measured against the owner's daemon, four
+            // consecutive replies fifteen seconds apart were byte-identical.
+            // `@Observable` fires on the *assignment*, not on a change, so
+            // storing an equal array rebuilt and re-sorted all 45 rows and
+            // re-rendered every visible one to redraw exactly what was already
+            // on screen. `SessionSummary` is `Hashable` on every wire field, so
+            // this comparison is the whole fact.
+            if summaries != list { summaries = list }
             Task { [cache] in await cache.saveFleet(list) }
             // Anything the daemon does not list is not something this app can
             // claim to know about. Dropping those states is what stops a
             // session read from a cold cache — or one left over from the old
             // name keying — contributing a card to the Deck that no daemon
             // would accept an answer for.
+            //
+            // Guarded for the same reason: `filter` always returns a new
+            // dictionary, and assigning one that dropped nothing is an
+            // invalidation carrying no news.
             let live = Set(list.map(\.sessionKey))
-            states = states.filter { live.contains($0.key) }
-            diffs = diffs.filter { live.contains($0.key) }
+            if states.contains(where: { !live.contains($0.key) }) {
+                states = states.filter { live.contains($0.key) }
+            }
+            if diffs.contains(where: { !live.contains($0.key) }) {
+                diffs = diffs.filter { live.contains($0.key) }
+            }
             for summary in list {
                 let sessionState = state(for: summary.sessionKey)
                 if sessionState.lastSeq >= summary.lastSeq {

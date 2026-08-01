@@ -33,7 +33,7 @@ enum DeviceIdentity {
 /// lives in the Keychain with `ThisDeviceOnly` accessibility, so it is excluded
 /// from encrypted backups and iCloud Keychain. Only the *public* half is ever
 /// transmitted, and even then the daemon files it in `authorized_keys` only when
-/// its operator ran `cc pair --ssh` — consent happens at the Mac's terminal, not
+/// its operator ran `codeconnect pair --ssh` — consent happens at the Mac's terminal, not
 /// here.
 ///
 /// Encoding is done by hand rather than borrowed from the SSH library, for two
@@ -163,7 +163,7 @@ enum SSHIdentityStore {
     }
 
     /// Forget the key pair. The copy in the Mac's `authorized_keys` is not this
-    /// app's to remove — `cc ssh-revoke <device>` is — so the UI that calls this
+    /// app's to remove — `codeconnect ssh-revoke <device>` is — so the UI that calls this
     /// has to say so.
     static func reset() {
         Keychain.delete(account: account)

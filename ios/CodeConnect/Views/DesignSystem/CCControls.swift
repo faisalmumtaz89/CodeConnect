@@ -143,7 +143,7 @@ struct CCField: View {
                     .foregroundStyle(tone.color)
             }
             // `CCProse`: a field's error and its hint are where the app names
-            // the command that produces a valid value — `cc pair`, `cc token` —
+            // the command that produces a valid value — `codeconnect pair`, `codeconnect token` —
             // and those arrive backticked from the call site.
             CCProse(
                 string, style: CC.type.footnote,

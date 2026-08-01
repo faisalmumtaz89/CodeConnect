@@ -53,7 +53,7 @@ impl Phone {
                     bail!(
                         "the daemon reports protocol minor {protocol_minor}; this harness was \
                          built against {}. Is an older ccd still running? \
-                         `cc daemon restart` picks up new binaries.",
+                         `codeconnect daemon restart` picks up new binaries.",
                         protocol::PROTOCOL_MINOR
                     );
                 }

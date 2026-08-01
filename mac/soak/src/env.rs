@@ -80,7 +80,7 @@ pub fn wait_for_daemon(timeout: Duration) -> Result<(DaemonInfo, Duration)> {
         if start.elapsed() > timeout {
             bail!(
                 "ccd did not come back within {}s — is the LaunchAgent installed? \
-                 (`cc daemon status`)",
+                 (`codeconnect daemon status`)",
                 timeout.as_secs()
             );
         }

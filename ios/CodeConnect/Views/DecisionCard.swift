@@ -20,11 +20,21 @@ import SwiftUI
 ///     filled white primary.
 ///   * **MEDIUM** — the same gate, and a fill morph and haptic at the moment it
 ///     opens, because at MEDIUM the reader usually had to scroll for it.
-///   * **HIGH** — a 1.2-second hold *and* Face ID (passcode fallback), **and the
-///     hierarchy inverts**: Deny becomes the filled white primary and Allow
-///     becomes the bordered hold-target. The safe action gets the weight exactly
-///     when the stakes are highest. This is a deliberate, teachable
-///     inconsistency and it is the most important styling in the app.
+///   * **HIGH** — a 1.2-second hold *and* Face ID (passcode fallback). The
+///     controls look exactly as they do at LOW: Allow is the filled white
+///     affirmative, Deny the bordered alternative. What changes is the *effort*,
+///     not the colour.
+///
+/// **Risk changes friction, never chrome.** An earlier version inverted the
+/// hierarchy at HIGH — Deny took the white fill, Allow was drawn in `danger` —
+/// on the reasoning that the safe action should carry the weight when the stakes
+/// are highest. It reads well and it is wrong twice: it moves the primary
+/// treatment onto something that is not the primary action, and it spends `red`
+/// on approving, which is not destruction. Red belongs to `Unpair and erase
+/// cache`, `Forget this iPhone's SSH key`, and to failures. A reader who learns
+/// that red means "destroys something" is then told, on the busiest screen, that
+/// it also means "the ordinary affirmative, but carefully" — and the signal is
+/// gone from both.
 ///
 /// Deny is never gated by any of it. Denying is the safe direction, and a
 /// product whose promise is "silence never decides anything" cannot put friction
@@ -558,7 +568,8 @@ struct DecisionCardView: View {
                 // what the command block has to clear to count as read. The
                 // banner is part of that: a command hidden behind a Face ID
                 // notice has not been seen either.
-                Color.clear.preference(key: ActionBarHeightKey.self, value: proxy.size.height)
+                Color.clear.preference(
+                    key: ActionBarHeightKey.self, value: CGFloat?.some(proxy.size.height))
             }
         }
         .ccAnimation(CC.motion.small, value: statusBanner != nil)
@@ -672,13 +683,22 @@ struct DecisionCardView: View {
         }
     }
 
-    /// **HIGH inverts the hierarchy.** Deny becomes the filled white primary;
-    /// Allow becomes the bordered hold-target.
+    /// **Deny is always the same control.** It used to become the filled white
+    /// primary at HIGH while Allow was drawn in `danger` — an inverted hierarchy
+    /// plus a red approve button, on the one screen where approving is the
+    /// ordinary thing to do. Both were wrong for the same reason: risk is
+    /// already stated by the class badge, the rationale and the hold, and
+    /// restating it in the *chrome* spends the two strongest signals the kit has
+    /// — a white fill and the colour red — on something that is neither the
+    /// primary action nor destructive.
+    ///
+    /// Red is reserved for destroying something (`Unpair and erase cache`,
+    /// `Forget this iPhone's SSH key`) and for reporting a failure.
     @ViewBuilder
     private var denyButton: some View {
         CCButton(
             "Deny",
-            variant: risk == .high ? .primary : .secondary,
+            variant: .secondary,
             size: .lg,
             fullWidth: true,
             isLoading: inFlight == "deny"
@@ -698,7 +718,9 @@ struct DecisionCardView: View {
         if risk == .high {
             CCHoldButton(
                 "Hold to allow",
-                tone: .danger,
+                // Filled white, like the tap `Allow` it replaces. What makes
+                // HIGH different is the 1.2s hold and Face ID, not the colour.
+                emphasis: .primary,
                 isLoading: inFlight == "allow",
                 disabledReason: CCDisabledReason(blockedReason)
             ) {
@@ -743,7 +765,9 @@ struct DecisionCardView: View {
                 Spacer(minLength: CC.space.xs)
                 CCButton(
                     "Deny and send",
-                    variant: .destructive,
+                    // Denying is the safe direction. It was drawn `destructive`,
+                    // which said the opposite in the loudest colour available.
+                    variant: .secondary,
                     size: .md,
                     isLoading: inFlight == "deny-reason",
                     // Only a *stated* reason goes here. An empty field is not a
@@ -964,13 +988,42 @@ final class ReadGateProbe {
     /// more than once, and the spare instance reports zero — zero height means
     /// "covers nothing" and is harmless, where a zero *edge* would have meant
     /// "the document ends at the top of the screen" and shut the gate forever.
-    var actionBarHeight: CGFloat = 0
+    ///
+    /// Optional for the same reason every edge here is: **"not measured yet"
+    /// and "measures zero" are different facts.** This defaulted to `0`, and the
+    /// four geometry reports arrive as four separate `onPreferenceChange`
+    /// callbacks in whatever order SwiftUI delivers them. A frame with the
+    /// viewport reported and the bar not yet reported therefore computed the
+    /// readable region as the *whole* scroll view — which extends underneath
+    /// the bar — so a command hidden behind it measured as visible. The flags
+    /// are deliberately sticky, so that one frame opened the gate for good.
+    ///
+    /// A real device found it and every simulator run missed it: an iPhone Air
+    /// at AX5 showed a MEDIUM `Write` with 13 characters of its path on screen
+    /// and `Allow` drawn as the enabled white primary.
+    var actionBarHeight: CGFloat?
 
     /// Where the readable part of the document ends, or `nil` when the layout
-    /// has not happened yet.
+    /// has not happened yet — which includes "the bar has not said how much of
+    /// the viewport it covers" and "the bar reported a size it cannot really
+    /// have".
+    ///
+    /// **That last clause is the bug a real device found.** Measured on an
+    /// iPhone Air at AX5, the bar reported `1.0` on an early layout pass:
+    /// `cmd=848.0 vis=852.0 vp=853.0 bar=1.0`. The command sat 4pt inside a
+    /// readable region that was wrong by 167pt, the flags are deliberately
+    /// sticky, and so that single pass opened the gate for good — leaving
+    /// `Allow` enabled over a path whose last line was behind the bar.
+    ///
+    /// The floor is not a tuned constant: the bar always carries at least one
+    /// tappable control, and `CC.size.hitTarget` is this product's rule for the
+    /// smallest a tappable thing may be. A bar shorter than one control has not
+    /// been laid out yet, whatever number it just reported.
     var visibleBottom: CGFloat? {
         guard let viewportBottom, viewportBottom.isFinite else { return nil }
-        return viewportBottom - max(0, actionBarHeight)
+        guard let actionBarHeight, actionBarHeight.isFinite else { return nil }
+        guard actionBarHeight >= CC.size.hitTarget else { return nil }
+        return viewportBottom - actionBarHeight
     }
 }
 
@@ -1006,12 +1059,14 @@ private struct ViewportBottomKey: ReadGateEdgeKey {}
 /// the spare instance reports zero. Zero height is discarded by `max` and
 /// simply means "covers nothing"; zero *edge* would have meant "the document
 /// ends at the top of the screen" and shut the gate permanently.
+/// `nil` is "the bar has not reported", **not** zero. Defaulting to zero let the
+/// gate compute a readable region that included everything behind the bar, on
+/// any frame where this key had not arrived yet — see `ReadGateProbe`.
 private struct ActionBarHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        guard next.isFinite else { return }
-        value = max(value, next)
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        guard let next = nextValue(), next.isFinite else { return }
+        value = value.map { max($0, next) } ?? next
     }
 }
 

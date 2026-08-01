@@ -3,16 +3,16 @@
 <!--
   REFERENCE COPY. The supported way to install this is:
 
-      cc daemon install
+      codeconnect daemon install
 
   which generates the same document with the paths resolved on *this* machine —
   the ccd binary, and a PATH built from where tmux, git, tailscale and claude
   actually are. A template can only encode one guess at those, and launchd's
   diagnostic for a wrong one is a job that never runs.
 
-      cc daemon status      plist, launchd job and live daemon
-      cc daemon restart     launchctl kickstart -k
-      cc daemon uninstall   bootout and remove the plist
+      codeconnect daemon status      plist, launchd job and live daemon
+      codeconnect daemon restart     launchctl kickstart -k
+      codeconnect daemon uninstall   bootout and remove the plist
 
   If you would rather install by hand, substitute __HOME__ and bootstrap it:
 

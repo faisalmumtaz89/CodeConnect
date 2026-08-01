@@ -5,7 +5,7 @@
 //!
 //! 1. **Nothing happens without consent given at the Mac's keyboard.** The
 //!    caller only reaches [`install`] when the pairing code was minted by
-//!    `cc pair --ssh`. The phone can *offer* a key in any hello it likes; it
+//!    `codeconnect pair --ssh`. The phone can *offer* a key in any hello it likes; it
 //!    can never ask for one to be installed.
 //! 2. **Only a bare ed25519 key is accepted.** The first field must be exactly
 //!    `ssh-ed25519`, which rejects the entire options grammar — `command="…"`,
@@ -53,8 +53,8 @@ pub struct Installed {
 ///
 /// [`install`] and [`remove`] each read the whole file, filter it in memory and
 /// rename a replacement over it. Two of those interleaving is a lost update:
-/// a pairing that redeems `cc pair --ssh` at the same moment as a
-/// `cc ssh-revoke` can both read the pre-change file, and whichever renames
+/// a pairing that redeems `codeconnect pair --ssh` at the same moment as a
+/// `codeconnect ssh-revoke` can both read the pre-change file, and whichever renames
 /// last silently undoes the other — including resurrecting a key the operator
 /// was just told had been removed. They run on different tasks of one tokio
 /// runtime (the WebSocket server and the unix socket server), so this is a
@@ -188,7 +188,7 @@ pub fn install(device_id: &str, device_name: &str, key: &PublicKey) -> Result<In
     // it at the time.
     crate::log_warn!(
         "SSH ACCESS GRANTED: appended an ed25519 key for device {device_id} ({device_name}) \
-         to {} — fingerprint {} — revoke with `cc ssh-revoke {device_id}`",
+         to {} — fingerprint {} — revoke with `codeconnect ssh-revoke {device_id}`",
         path.display(),
         key.fingerprint
     );
@@ -200,7 +200,7 @@ pub fn install(device_id: &str, device_name: &str, key: &PublicKey) -> Result<In
 
 /// Remove this device's entry. Returns false when there was nothing to remove.
 ///
-/// Never creates the file: a `cc ssh-revoke` on a machine that never granted
+/// Never creates the file: a `codeconnect ssh-revoke` on a machine that never granted
 /// access must leave the filesystem exactly as it found it.
 pub fn remove(device_id: &str) -> Result<bool> {
     let _guard = lock_file();

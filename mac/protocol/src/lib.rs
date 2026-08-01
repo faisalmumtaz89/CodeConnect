@@ -7,6 +7,11 @@
 //!   * [`ipc`]   — unix-socket frames (hook posts + supervisor registration).
 //!   * [`ws`]    — the tailnet WebSocket protocol the iPhone speaks.
 //!
+//! [`tmux`] is here for the same reason, even though it is not a wire type: two
+//! processes ask tmux whether a session is still alive, and a machine where they
+//! answered that differently would report exits that never happened. The
+//! question is shared vocabulary; only the way each crate runs a child is not.
+//!
 //! Everything is plain serde JSON. Unknown fields are tolerated on decode and
 //! unknown event kinds round-trip as [`event::EventKind::Other`], so a newer
 //! daemon can add facts without breaking an older client (additive-only rule).
@@ -23,6 +28,7 @@ pub mod pairing;
 pub mod risk;
 pub mod secret;
 pub mod time;
+pub mod tmux;
 pub mod uid;
 pub mod ws;
 
@@ -66,14 +72,28 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         `transcript_line_too_long` and `transcript_line_unreadable`. `Error`
 ///         is not a new kind, so an older client renders them as it already
 ///         renders any error.
-pub const PROTOCOL_MINOR: u32 = 4;
+///   * `5` — **`lifecycle` is reconciled rather than merely remembered.** Up to
+///     minor 4 the only thing that could ever set [`event::Lifecycle::Exited`]
+///     was a supervisor reporting its own exit, so a session whose supervisor
+///     was killed, or that died while `ccd` was down, stayed `live` in the fleet
+///     for ever. A client had no way to know that, and rendered "Running" for
+///     agents that had been gone for days. From minor 5 the daemon proves
+///     liveness against tmux at startup and on a sweep, so `live` means it has
+///     positive evidence rather than an absence of news. Additive on the wire:
+///       - a `session_end` the daemon *derived* that way carries a `reason`
+///         string alongside the existing `exit_code`, so the log says how the
+///         end was established rather than implying somebody watched it happen.
+///         The envelope and the kind are unchanged.
+///       - nothing is ever marked exited on ambiguous evidence, so
+///         [`event::Lifecycle::Unknown`] remains a state a client must render.
+pub const PROTOCOL_MINOR: u32 = 6;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";
 
 /// Session names are `cc-<n>`; the prefix is also the tmux session prefix.
 ///
-/// The name is reused: `cc claude` picks the lowest free number, so a `cc-1`
+/// The name is reused: `codeconnect claude` picks the lowest free number, so a `cc-1`
 /// that exits frees the name for the next session. That is deliberate — it is
 /// what keeps names short and typeable — and it is exactly why the *identity*
 /// of a run is [`uid`], not this.
@@ -87,7 +107,7 @@ pub const ENV_SESSION: &str = "CODECONNECT_SESSION";
 /// and with the same fallback role as [`ENV_SESSION`].
 pub const ENV_SESSION_UID: &str = "CODECONNECT_SESSION_UID";
 
-/// The LaunchAgent label. One constant so `cc daemon install`, `cc daemon
+/// The LaunchAgent label. One constant so `codeconnect daemon install`, `codeconnect daemon
 /// status` and the daemon's own "am I launchd-managed?" check can never disagree
 /// about which job they are talking about.
 pub const LAUNCHD_LABEL: &str = "com.codeconnect.ccd";
@@ -141,7 +161,7 @@ pub fn logs_dir() -> PathBuf {
 /// looks when it rotates its own log.
 ///
 /// Both halves of that sentence are why these are functions here rather than
-/// strings in two files: `cc daemon install` writes the path into the plist and
+/// strings in two files: `codeconnect daemon install` writes the path into the plist and
 /// `ccd` truncates the same path when it grows past the cap. If they ever
 /// disagreed the log would grow without bound and nothing would say so.
 pub fn daemon_stdout_log() -> PathBuf {

@@ -180,6 +180,6 @@ struct SSHSetupGuidance: Sendable, Equatable {
             title: "Then authorise this iPhone",
             body:
                 "Run this at the Mac and scan the QR it prints. Only `--ssh` lets the daemon add this phone's public key to authorized_keys, and it says so before it does.",
-            command: "cc pair --ssh"),
+            command: "codeconnect pair --ssh"),
     ]
 }

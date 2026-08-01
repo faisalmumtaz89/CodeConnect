@@ -105,7 +105,7 @@ final class DaemonConnection {
     // MARK: Private
 
     private var endpoint: DaemonEndpoint?
-    /// Offered on every hello. Only a daemon whose operator ran `cc pair --ssh`
+    /// Offered on every hello. Only a daemon whose operator ran `codeconnect pair --ssh`
     /// does anything with it.
     private var sshPublicKey: String?
     /// True while the ladder is trying the scheme the pairing does *not* prefer.

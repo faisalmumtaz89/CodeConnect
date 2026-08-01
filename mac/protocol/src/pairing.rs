@@ -95,7 +95,7 @@ pub fn format_for_display(code: &str) -> String {
     format!("{}-{}", &code[..4], &code[4..])
 }
 
-/// A paired device, as `cc devices` lists it and `cc revoke` names it.
+/// A paired device, as `codeconnect devices` lists it and `codeconnect revoke` names it.
 ///
 /// The token itself is never in this struct: the daemon stores only its hash,
 /// so a leaked database backup cannot be replayed as a credential.

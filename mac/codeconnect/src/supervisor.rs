@@ -1,6 +1,6 @@
 //! Per-session supervisor.
 //!
-//! One of these runs per `cc claude`, spawned detached in its own process group
+//! One of these runs per `codeconnect claude`, spawned detached in its own process group
 //! and **connecting out** to `ccd`. That direction is the whole point: the
 //! daemon never owns a session, so `kill -9 ccd` costs a reconnect and nothing
 //! else, and closing the terminal tab cannot take the supervisor with it.
@@ -24,26 +24,29 @@ use protocol::ipc::{
     ClientFrame, DaemonFrame, PromptFingerprint, PromptPresence, RegisterSession,
     SupervisorRequest, SupervisorResult,
 };
+use protocol::tmux::EXIT_CONFIRMATIONS;
 
 use crate::tmux;
 
 const HEARTBEAT: Duration = Duration::from_secs(5);
-const LIVENESS_POLL: Duration = Duration::from_secs(2);
 
-/// Consecutive "no such session" observations before an exit is reported.
+/// How often this session's own liveness is checked.
 ///
-/// Two, at a 2-second poll, so a real exit is reported within about four
-/// seconds — fast enough that the fleet view is not stale, and slow enough that
-/// a tmux server restarting between polls does not produce a `SessionEnd` for a
-/// session that is still running. A reported exit is a durable fact and cannot
-/// be withdrawn, which is what makes a second look worth the two seconds.
-const EXIT_CONFIRMATIONS: u32 = 2;
+/// Two seconds, and with [`EXIT_CONFIRMATIONS`] that puts a real exit in the
+/// fleet within about four — fast enough that the view is not stale, and slow
+/// enough that a tmux server restarting between polls cannot produce a
+/// `SessionEnd` for a session that is still running. A reported exit is a
+/// durable fact and cannot be withdrawn, which is what makes the second look
+/// worth the two seconds. How much evidence an exit takes is shared with the
+/// daemon's fleet sweep, which needs a second look for the same reason at a
+/// much longer interval.
+const LIVENESS_POLL: Duration = Duration::from_secs(2);
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(10);
 
 pub struct SupervisorArgs {
     pub session_id: String,
-    /// The run's identity, minted by `cc claude`. `None` only for a supervisor
+    /// The run's identity, minted by `codeconnect claude`. `None` only for a supervisor
     /// left over from a build that predates it — the daemon then resolves the
     /// name, which is the behaviour that keeps an in-place upgrade seamless.
     pub session_uid: Option<String>,
