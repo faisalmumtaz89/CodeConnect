@@ -22,7 +22,7 @@ enum AnswerAttempt: Sendable {
     }
 }
 
-enum ComposeAttempt: Sendable {
+enum ComposeAttempt: Sendable, Equatable {
     case sent(matched: String)
     case refused(String)
     case failed(String)

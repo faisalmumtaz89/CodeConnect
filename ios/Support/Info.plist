@@ -85,5 +85,13 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CodeConnect talks to your own Mac's CodeConnect daemon over your Tailscale network.</string>
+	<!-- Dictation in the compose bar. Recognition is Apple's own: fully
+	     on-device on iOS 26 (SpeechAnalyzer); on earlier versions
+	     SFSpeechRecognizer, pinned to on-device wherever the locale supports
+	     it. The strings promise only what the code enforces. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>CodeConnect listens only while you dictate a message in the compose bar, to transcribe it on this phone. Nothing is recorded or kept.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Apple's speech recognizer turns your dictation into text for the compose bar, on-device wherever your language supports it.</string>
 </dict>
 </plist>

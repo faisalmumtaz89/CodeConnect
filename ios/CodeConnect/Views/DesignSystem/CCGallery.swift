@@ -121,6 +121,7 @@ import SwiftUI
                 freshnessSection
             case .controls:
                 fieldSection
+                voiceButtonSection
                 segmentedSection
                 monoSection
                 hunkHeaderSection
@@ -1120,6 +1121,56 @@ import SwiftUI
                         axis: .vertical, lineLimit: 1...5)
                 }
             }
+        }
+
+        // MARK: Voice button
+
+        private var voiceButtonSection: some View {
+            section("CCVoiceButton") {
+                VStack(alignment: .leading, spacing: CC.space.md) {
+                    Text(
+                        "The compose bar's one control: a 44pt circle whose face is the state. Mic on an empty field, send once a character exists, stop while recording — a stray tap can end a recording but can never send one."
+                    )
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: CC.space.md) {
+                        VStack(spacing: CC.space.xxs) {
+                            CCVoiceButton(phase: .dictate) {}
+                            caption("DICTATE")
+                        }
+                        VStack(spacing: CC.space.xxs) {
+                            CCVoiceButton(phase: .send) {}
+                            caption("SEND")
+                        }
+                        VStack(spacing: CC.space.xxs) {
+                            CCVoiceButton(phase: .stop) {}
+                            caption("STOP")
+                        }
+                        VStack(spacing: CC.space.xxs) {
+                            CCVoiceButton(phase: .sending) {}
+                            caption("SENDING")
+                        }
+                        VStack(spacing: CC.space.xxs) {
+                            CCVoiceButton(phase: .sent) {}
+                            caption("SENT")
+                        }
+                    }
+                    Text("BLOCKED - DISABLED RECIPE, REASON IN THE NOTE ABOVE")
+                        .ccType(CC.type.micro)
+                        .foregroundStyle(CC.text.tertiary)
+                    HStack(spacing: CC.space.md) {
+                        CCVoiceButton(phase: .dictate, blockedReason: "Link stale.") {}
+                        CCVoiceButton(phase: .send, blockedReason: "Link stale.") {}
+                    }
+                }
+            }
+        }
+
+        private func caption(_ text: String) -> some View {
+            Text(text)
+                .ccType(CC.type.micro)
+                .foregroundStyle(CC.text.tertiary)
         }
 
         // MARK: Segmented

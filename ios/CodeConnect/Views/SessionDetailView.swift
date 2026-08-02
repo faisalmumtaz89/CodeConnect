@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
@@ -590,73 +591,220 @@ private struct SessionComposeBar: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.openURL) private var openURL
+
+    @State private var dictation = DictationController()
+    @FocusState private var focused: Bool
+    /// The 0.9s the checkmark holds the circle's face after a confirmed send.
+    @State private var sentFlash = false
+    /// When Stop handed text back. The send face ignores taps for 300ms after,
+    /// so the finger that just ended a recording cannot also fire the send.
+    @State private var stoppedAt: Date?
 
     var body: some View {
         VStack(spacing: 0) {
             CCHairline()
             VStack(alignment: .leading, spacing: CC.space.sm) {
-                templateChips
-
-                // The reason goes *above* the field and is visible text, not an
-                // accessibility hint — that rule made concrete in the app's
+                // The reason goes *above* the composer and is visible text, not
+                // an accessibility hint — that rule made concrete in the app's
                 // highest-traffic control.
-                if let result {
-                    feedbackLine(result)
-                } else if let reason = sendBlockedReason {
-                    ComposeNote(
-                        text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
-                } else if isObserveOnly {
-                    ComposeNote(
-                        text: "Observe only - answers are given at the Mac.",
-                        tone: .neutral, glyph: nil, action: ("Why?", onWhy))
-                }
-
-                // Side by side normally; stacked once Dynamic Type reaches the
-                // accessibility range. Measured at AX5: side by side, the field
-                // keeps ~55% of the width, the placeholder wraps to five lines
-                // and the send button's label breaks as "Sen / d". Stacked, both
-                // get the full measure and neither wraps.
-                CCAdaptiveStack(
-                    horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs,
-                    verticalAlignment: .bottom
-                ) {
-                    // No label. The placeholder — `Say something to this agent`
-                    // — already names the field, and a `MESSAGE` caption above
-                    // it repeats that in 11pt while costing ~22pt of the
-                    // compose bar's height, which is height the timeline is
-                    // paying for. `CCField`'s label is optional for this;
-                    // VoiceOver still gets a name, from the override below.
-                    CCField(
-                        text: $text,
-                        placeholder: placeholder,
-                        // `.vertical` so the system dictation key is available —
-                        // dictation is a first-class input here.
-                        axis: .vertical,
-                        lineLimit: typeSize.isAccessibilitySize ? 1...3 : 1...5)
-                    .accessibilityLabel("Message for \(displayName)")
-
-                    // `.lg`, to match the field it stands beside. `CCField`
-                    // pins itself to `CC.size.controlLg` (52); a `.md` button is
-                    // `controlMd` (44), so the two were bottom-aligned and 8pt
-                    // apart at the top — visible as a short button next to a
-                    // tall field, and the larger target is the better one for
-                    // the app's most-used control anyway.
-                    CCButton(
-                        "Send", icon: "arrow.up", variant: .primary, size: .lg,
-                        fullWidth: typeSize.isAccessibilitySize,
-                        haptic: nil
-                    ) {
-                        onSend()
-                    }
-                    .disabled(isSendDisabled)
-                    .accessibilityHint(sendBlockedReason ?? "Types this into the agent's prompt")
-                }
+                standingNote
+                composer
             }
             .padding(.horizontal, CC.space.md)
             .padding(.top, CC.space.sm)
             .padding(.bottom, CC.space.sm)
         }
         .background(CC.color.surfaceRaised)
+        .onChange(of: result) { _, newValue in
+            guard case .sent = newValue else { return }
+            sentFlash = true
+            Task {
+                try? await Task.sleep(for: .seconds(0.9))
+                withAnimation(CC.motion.micro) { sentFlash = false }
+            }
+        }
+        // Typing is the user's next act as much as retrying the mic is; a
+        // stale mic-failure note must not stand over a hand-typed message.
+        .onChange(of: text) { _, _ in dictation.clearFailure() }
+        // A hot mic must not outlive the composer that started it.
+        .onDisappear { dictation.cancel() }
+    }
+
+    // MARK: The one card
+
+    /// Chips, field and button stopped being three stacked strips: one
+    /// `surface` card, input on top, controls along the bottom edge. The focus
+    /// ring wraps the whole instrument — and so does recording, because while
+    /// the mic is hot the card *is* the transcript.
+    ///
+    /// One 44pt circle does the whole job — mic when the field is empty, send
+    /// once a single character exists — so the row never grows a second button
+    /// for a thumb to arbitrate at 2am. At AX sizes nothing here stacks: the
+    /// circle is fixed, the chips wrap inside their strip, and the field
+    /// already owns the full measure.
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: CC.space.xs) {
+            if dictation.isRecording {
+                transcript
+            } else {
+                field
+            }
+            HStack(alignment: .center, spacing: CC.space.xs) {
+                if dictation.isRecording {
+                    RecordingStrip(
+                        startedAt: dictation.startedAt ?? .now, level: dictation.level)
+                } else {
+                    templateChips
+                }
+                Spacer(minLength: 0)
+                if dictation.isRecording {
+                    cancelButton
+                }
+                CCVoiceButton(phase: phase, blockedReason: sendBlockedReason) { act() }
+            }
+        }
+        .padding(CC.space.sm)
+        .ccSurface(
+            fill: CC.color.surface, radius: CC.radius.xl,
+            border: (focused || dictation.isRecording)
+                ? CC.color.borderFocus : CC.color.border)
+        .ccAnimation(CC.motion.micro, value: focused)
+        .ccAnimation(CC.motion.small, value: dictation.isRecording)
+    }
+
+    private var field: some View {
+        TextField(
+            "", text: $text,
+            prompt: Text(placeholder).foregroundStyle(CC.text.tertiary),
+            // `.vertical` keeps the system keyboard's dictation key available
+            // too — the mic in the circle is the first-class door, not the
+            // only one.
+            axis: .vertical
+        )
+        .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
+        .ccType(CC.type.body)
+        .foregroundStyle(CC.text.primary)
+        .focused($focused)
+        .accessibilityLabel("Message for \(displayName)")
+    }
+
+    /// What the recognizer heard, streaming. Committed words at full strength;
+    /// the current hypothesis in `textTertiary`, solidifying as the engine
+    /// commits — uncertainty rendered as state, never hidden.
+    @ViewBuilder
+    private var transcript: some View {
+        if dictation.transcript.isEmpty {
+            Text("Listening…")
+                .ccType(CC.type.body)
+                .foregroundStyle(CC.text.tertiary)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Listening")
+        } else {
+            (Text(dictation.finalizedText)
+                + Text(
+                    dictation.finalizedText.isEmpty || dictation.volatileText.isEmpty
+                        ? "" : " ")
+                + Text(dictation.volatileText).foregroundStyle(CC.text.tertiary))
+                .ccType(CC.type.body)
+                .foregroundStyle(CC.text.primary)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Transcript: \(dictation.transcript)")
+        }
+    }
+
+    // MARK: The circle's state
+
+    private var phase: CCVoiceButtonPhase {
+        if dictation.isRecording { return .stop }
+        if sending { return .sending }
+        if sentFlash { return .sent }
+        return text.isEmpty ? .dictate : .send
+    }
+
+    private func act() {
+        switch phase {
+        case .dictate:
+            // `.light`, the mode-change weight — starting a recording is not a
+            // keystroke and not a decision.
+            CCHaptic.light.fire()
+            Task { await dictation.start() }
+        case .stop:
+            CCHaptic.light.fire()
+            let heard = dictation.stop()
+            if !heard.isEmpty {
+                // Staged, never sent: the transcript lands in the editable
+                // field and takes the same deliberate tap as typed text.
+                text = heard
+                focused = true
+            }
+            stoppedAt = .now
+        case .send:
+            if let stoppedAt, Date.now.timeIntervalSince(stoppedAt) < 0.3 { return }
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            // Deliberately silent: Send fires dozens of times a day, and the
+            // haptic that matters is the daemon's own confirm.
+            onSend()
+        case .sending, .sent:
+            break
+        }
+    }
+
+    /// Discards the recording *and* the transcript. Ghost weight — the circle
+    /// beside it keeps the decision.
+    private var cancelButton: some View {
+        Button {
+            // Silent, like every dismissal: buzzing on a discard trains the
+            // user to ignore the haptic that matters.
+            dictation.cancel()
+        } label: {
+            CCIcon("xmark", size: CC.size.iconSm, weight: .semibold, relativeTo: .body)
+                .foregroundStyle(CC.text.secondary)
+                .frame(width: CC.size.controlSm, height: CC.size.controlSm)
+                .background {
+                    Circle().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
+                }
+        }
+        .ccHitTarget()
+        .accessibilityLabel("Cancel dictation")
+        .accessibilityHint("Discards the transcript")
+    }
+
+    // MARK: The line above
+
+    @ViewBuilder
+    private var standingNote: some View {
+        if let result {
+            feedbackLine(result)
+        } else if case .failed(let reason, let needsSettings) = dictation.phase {
+            micFailureNote(reason: reason, needsSettings: needsSettings)
+        } else if let reason = sendBlockedReason {
+            ComposeNote(
+                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+        } else if isObserveOnly {
+            ComposeNote(
+                text: "Observe only - answers are given at the Mac.",
+                tone: .neutral, glyph: nil, action: ("Why?", onWhy))
+        }
+    }
+
+    /// Built outside the `@ViewBuilder` so the optional action tuple is typed
+    /// here, once — inline, the builder's type inference chokes on it.
+    private func micFailureNote(reason: String, needsSettings: Bool) -> ComposeNote {
+        guard needsSettings else {
+            return ComposeNote(
+                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+        }
+        return ComposeNote(
+            text: reason, tone: .warning, glyph: "exclamationmark.circle.fill",
+            action: (title: "Settings", perform: { openSettings() }))
+    }
+
+    private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 
     /// Tapping a chip **inserts** the template. It never sends: a one-tap send
@@ -730,11 +878,6 @@ private struct SessionComposeBar: View {
         ).canAct
     }
 
-    private var isSendDisabled: Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || sendBlockedReason != nil || sending
-    }
-
     /// Text only lands if the composer is actually on screen at the Mac, so the
     /// reasons a send cannot work are the same reasons an answer cannot.
     private var sendBlockedReason: String? {
@@ -748,6 +891,66 @@ private struct SessionComposeBar: View {
             return reason
         }
         return nil
+    }
+}
+
+// MARK: - Recording strip
+
+/// The compose bar while the mic is hot: a pulsing `danger` dot — the one
+/// universal meaning of a red dot — the elapsed time in mono, and a level
+/// meter. The meter is not decoration: movement is the proof the mic actually
+/// hears you, which at 2am in a quiet room is the difference between "it's
+/// working" and "is it working?".
+private struct RecordingStrip: View {
+    let startedAt: Date
+    let level: Float
+
+    var body: some View {
+        HStack(spacing: CC.space.xs) {
+            CCStatusDot(
+                color: CC.color.danger, pulses: true, accessibilityText: "Recording")
+            // Ticks alone, like every clock reader on this screen: a periodic
+            // TimelineView mounted only while the strip exists.
+            TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                Text(Self.elapsed(from: startedAt, to: context.date))
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.secondary)
+            }
+            LevelMeter(level: level)
+        }
+    }
+
+    private static func elapsed(from: Date, to: Date) -> String {
+        let seconds = max(0, Int(to.timeIntervalSince(from)))
+        return "\(seconds / 60):" + String(format: "%02d", seconds % 60)
+    }
+}
+
+/// Sixteen 2pt capsules scaled by the input level. Fixed per-bar weights give
+/// the meter a shape; the level gives it life. Hidden from VoiceOver — the
+/// recording dot already says what this shows.
+private struct LevelMeter: View {
+    let level: Float
+
+    private static let weights: [CGFloat] = [
+        0.35, 0.7, 0.5, 1.0, 0.6, 0.85, 0.4, 0.75,
+        0.55, 0.95, 0.45, 0.8, 0.6, 0.35, 0.7, 0.5,
+    ]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<Self.weights.count, id: \.self) { index in
+                Capsule(style: .continuous)
+                    .fill(CC.text.tertiary)
+                    .frame(
+                        width: 2,
+                        height: 4 + Self.weights[index]
+                            * CGFloat(min(1, max(0, level))) * 14)
+            }
+        }
+        .frame(height: 22)
+        .ccAnimation(CC.motion.micro, value: level)
+        .accessibilityHidden(true)
     }
 }
 
