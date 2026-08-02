@@ -120,6 +120,11 @@ final class DaemonConnection {
     // MARK: Private
 
     private var endpoint: DaemonEndpoint?
+
+    /// Whether this connection still holds a credential that can only be spent
+    /// once. False from the moment a pairing exchange has upgraded it to the
+    /// durable token, which is the invariant `PairingUpgradeTests` pins.
+    var holdsPairingCode: Bool { endpoint?.isPairingCode ?? false }
     /// Offered on every hello. Only a daemon whose operator ran `codeconnect pair --ssh`
     /// does anything with it.
     private var sshPublicKey: String?
@@ -661,10 +666,23 @@ final class DaemonConnection {
                 endpoint?.useTLS = usingTLS
                 onTransportSettled?(usingTLS)
             }
-            // Ordered before `onConnected` so the durable credential is banked
-            // before anything can trigger a reconnect that would try to spend
-            // the single-use pairing code a second time.
+            // **A pairing code is dead the instant the daemon answers with a
+            // token, so this connection stops holding one.**
+            //
+            // Banking it in the Keychain through `onDeviceToken` was never enough:
+            // `endpoint` is what `retryNow()` and the supervise loop re-dial, and
+            // it still carried the spent code. Backgrounding the app right after
+            // pairing and returning was sufficient to replay it, and the daemon
+            // answers `unauthorized`, which is terminal, so a phone that had
+            // paired perfectly landed in a permanent failure. Measured: paired at
+            // 10:31:45, "pairing code already used" at 10:32:28.
+            //
+            // Upgrading here rather than at the call site is what makes it
+            // structural: this is the one moment the code is provably spent, and
+            // afterwards no dial path can reach one, because none exists.
+            // `useTLS` above is mutated from the same ack for the same reason.
             if let deviceToken = ack.deviceToken, !deviceToken.isEmpty {
+                endpoint?.credential = .token(deviceToken)
                 onDeviceToken?(deviceToken)
             }
             onConnected?()
