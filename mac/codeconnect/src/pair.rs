@@ -27,7 +27,7 @@ use std::io::IsTerminal;
 
 use anyhow::{bail, Result};
 use protocol::ipc::{ClientFrame, DaemonFrame};
-use protocol::pairing::{format_for_display, QrPayload, PAIRING_TTL_SECS};
+use protocol::pairing::{format_for_display, unreachable_host, QrPayload, PAIRING_TTL_SECS};
 use qrcode::render::unicode::Dense1x2;
 use qrcode::QrCode;
 
@@ -64,6 +64,32 @@ pub fn pair(args: &[String]) -> Result<()> {
         bail!("unexpected reply from ccd: {reply:?}");
     };
 
+    // **A code the phone cannot reach is worse than no code.**
+    //
+    // `ccd` resolves its bind address once, at startup, and prints whatever it
+    // resolved into every code minted afterwards. When Tailscale is not up at that
+    // moment it binds loopback and says so in a log nobody reads — and this
+    // command used to take that host verbatim, draw a perfectly scannable QR
+    // around it, and exit 0. Every visible sign was success: the daemon was
+    // installed, running and answering; only the code was dead.
+    //
+    // The check belongs here rather than in the daemon because this is the moment
+    // a human is asking for something to hand to a phone, and it is the last point
+    // at which refusing costs nothing.
+    if let Some(problem) = unreachable_host(&host) {
+        bail!(
+            "this daemon is listening on {host}, which {problem}, so a paired \
+             phone could never reach it.\n\n  \
+             `ccd` resolves its address once when it starts, so this usually means \
+             Tailscale was not up yet at that moment — launchd starts the daemon at \
+             login and does not wait for the tunnel.\n\n  \
+             Bring Tailscale up, then:\n\n      \
+             codeconnect daemon restart\n      \
+             codeconnect pair\n\n  \
+             `codeconnect daemon status` shows the address it is currently bound to."
+        );
+    }
+
     let payload = QrPayload::new(&host, port, &code);
     let json = payload.to_json();
 
@@ -87,6 +113,12 @@ pub fn pair(args: &[String]) -> Result<()> {
     if !tls {
         // Said plainly rather than buried: the operator is choosing a transport
         // here, and "no certificate" is a fact about their setup, not a bug.
+        //
+        // The claim about Tailscale is only true because `unreachable_host` has
+        // already refused every address that is not on the tailnet. It used to be
+        // printed unconditionally, which meant the one case where it was false —
+        // a loopback host, no tailnet involved at all — was also the one case
+        // where it was reassuring somebody about a code that could never work.
         println!("  note: this daemon has no tailscale certificate, so the app will");
         println!("        connect over ws://. Tailscale still encrypts the tailnet link.");
         println!();

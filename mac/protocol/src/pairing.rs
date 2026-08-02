@@ -73,6 +73,54 @@ impl QrPayload {
 /// Confusable characters are deliberately *not* remapped. `0`, `1`, `I` and `O`
 /// are never generated, so accepting them would mean guessing what the operator
 /// meant; failing with "not a pairing code" is the honest answer.
+/// Why a phone could never reach this host, or `None` when it might.
+///
+/// **What this is not.** It is not a check that the Mac is on the tailnet, and it
+/// cannot be — that would require asking Tailscale, from a process that may be
+/// running before the tunnel exists. It only refuses addresses that are
+/// *definitionally* unreachable from another device: a phone that dials
+/// `127.0.0.1` reaches its own loopback, and `0.0.0.0` is not an address at all.
+///
+/// **Why it does not require a tailnet address.** The obvious stricter rule —
+/// insist on `100.64/10` or a `.ts.net` name — would reject legitimate setups: a
+/// custom DNS name, a tailnet with its own domain, an operator who has pinned
+/// `ws_bind` to a reachable LAN address on purpose. Refusing what is certainly
+/// broken is a fact; refusing what is merely unfamiliar is a guess, and this
+/// system does not guess.
+pub fn unreachable_host(host: &str) -> Option<&'static str> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return Some("is empty");
+    }
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return Some("is this Mac's own loopback name");
+    }
+    // An IPv6 literal may arrive bracketed, as it does inside a URL.
+    let bare = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let Ok(ip) = bare.parse::<std::net::IpAddr>() else {
+        // A name this crate cannot resolve is not a name it may reject.
+        return None;
+    };
+    if ip.is_loopback() {
+        return Some("is a loopback address only this Mac can reach");
+    }
+    if ip.is_unspecified() {
+        return Some("is the unspecified address, which is not somewhere to connect");
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) if v4.is_link_local() => {
+            Some("is a link-local address that does not route")
+        }
+        std::net::IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            Some("is a link-local address that does not route")
+        }
+        _ => None,
+    }
+}
+
 pub fn normalize_code(input: &str) -> String {
     input
         .chars()
@@ -219,5 +267,58 @@ mod tests {
         assert!(!encoded.contains("revoked_at"), "{encoded}");
         assert!(device.is_active());
         assert_eq!(device, serde_json::from_str(&encoded).unwrap());
+    }
+
+    /// The addresses a phone can never reach, and the exact reason each is out.
+    ///
+    /// `127.0.0.1` is the one that shipped: `ccd` binds it whenever Tailscale is
+    /// not up at startup, and `codeconnect pair` drew a scannable code around it
+    /// and exited 0.
+    #[test]
+    fn definitionally_unreachable_hosts_are_refused() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "localhost",
+            "LocalHost",
+            "::1",
+            "[::1]",
+            "0.0.0.0",
+            "::",
+            "169.254.10.1",
+            "fe80::1",
+            "",
+            "   ",
+        ] {
+            assert!(
+                unreachable_host(host).is_some(),
+                "{host:?} cannot be reached from another device and must be refused"
+            );
+        }
+    }
+
+    /// The half that would do real damage if it were wrong. Refusing a working
+    /// setup is worse than the defect being fixed: the defect wastes one scan,
+    /// this would make pairing impossible with no way for the operator to argue.
+    #[test]
+    fn anything_that_might_work_is_allowed_through() {
+        for host in [
+            // A tailnet address and a MagicDNS name — the ordinary case.
+            "100.117.103.23",
+            "faisals-mac-studio.tailca4006.ts.net",
+            // A tailnet with its own domain, and an operator who pinned `ws_bind`
+            // to something reachable on purpose. Unfamiliar is not broken.
+            "mac.internal.example.com",
+            "192.168.1.20",
+            "10.0.0.5",
+            "2001:db8::1",
+            "[2001:db8::1]",
+        ] {
+            assert_eq!(
+                unreachable_host(host),
+                None,
+                "{host:?} may be reachable, and refusing it would be a guess"
+            );
+        }
     }
 }

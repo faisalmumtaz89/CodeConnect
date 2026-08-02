@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 
 /// Where the daemon lives and how to prove we may talk to it.
@@ -174,6 +175,8 @@ struct PairingQRPayload: Sendable, Hashable {
         case unsupportedVersion(Int)
         case missingField(String)
         case badPort(Int)
+        /// A host no other device could ever reach — see `unreachableHost`.
+        case unreachableHost(String, String)
 
         var errorDescription: String? {
             switch self {
@@ -186,8 +189,58 @@ struct PairingQRPayload: Sendable, Hashable {
                 return "That pairing code is missing its \(field)."
             case .badPort(let port):
                 return "That pairing code has an impossible port (\(port))."
+            case .unreachableHost(let host, let why):
+                return
+                    "That pairing code points at \(host), which \(why). Bring Tailscale up on the Mac, run `codeconnect daemon restart`, then `codeconnect pair` again."
             }
         }
+    }
+
+    /// Why no other device could reach this host, or `nil` when it might.
+    ///
+    /// The mirror of `protocol::pairing::unreachable_host` on the Mac, and it is
+    /// deliberately duplicated rather than trusted: the daemon that minted a code
+    /// may be older than the check, and the phone should refuse a code it can
+    /// prove is dead rather than spend five minutes discovering it. This is the
+    /// strongest evidence the app ever has before it has spoken to anything — a
+    /// fact established offline, from the payload alone.
+    ///
+    /// It rejects only what is *definitionally* unreachable. It deliberately does
+    /// **not** demand a `100.64/10` address or a `.ts.net` name: a custom DNS
+    /// name, a tailnet with its own domain, or a deliberately pinned `ws_bind` are
+    /// all legitimate, and refusing the unfamiliar would be a guess.
+    static func unreachableHost(_ host: String) -> String? {
+        let trimmed = host.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return "is empty" }
+        if trimmed.caseInsensitiveCompare("localhost") == .orderedSame {
+            return "is the Mac's own loopback name"
+        }
+        // An IPv6 literal may arrive bracketed, as it does inside a URL.
+        var bare = trimmed
+        if bare.hasPrefix("["), bare.hasSuffix("]") {
+            bare = String(bare.dropFirst().dropLast())
+        }
+        // A name this app cannot parse as a literal is not a name it may reject.
+        if let v4 = IPv4Address(bare) {
+            let octets = v4.rawValue
+            // **The whole of `127.0.0.0/8`, not just `127.0.0.1`.**
+            // `IPv4Address.isLoopback` matches only the canonical literal, which
+            // let `127.1.2.3` through — a real gap the Rust side does not have,
+            // since `Ipv4Addr::is_loopback` covers the block.
+            if octets.first == 127 { return "only that Mac can reach" }
+            if octets == Data([0, 0, 0, 0]) { return "is not an address to connect to" }
+            if octets.count == 4, octets[0] == 169, octets[1] == 254 {
+                return "is a link-local address that does not route"
+            }
+            return nil
+        }
+        if let v6 = IPv6Address(bare) {
+            if v6.isLoopback { return "only that Mac can reach" }
+            if v6.isLinkLocal { return "is a link-local address that does not route" }
+            if v6.rawValue.allSatisfy({ $0 == 0 }) { return "is not an address to connect to" }
+            return nil
+        }
+        return nil
     }
 
     static func decode(_ scanned: String) -> Result<PairingQRPayload, Failure> {
@@ -207,6 +260,9 @@ struct PairingQRPayload: Sendable, Hashable {
         }
         let port = value["port"]?.intValue ?? DaemonEndpoint.defaultPort
         guard (1...65535).contains(port) else { return .failure(.badPort(port)) }
+        if let why = PairingQRPayload.unreachableHost(host) {
+            return .failure(.unreachableHost(host, why))
+        }
 
         return .success(PairingQRPayload(host: host, port: port, code: code))
     }

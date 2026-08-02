@@ -508,6 +508,28 @@ async fn resolve_transport(
         port: bind.port(),
         tls: false,
     };
+
+    // **A name is only an honest endpoint if the socket is reachable at it.**
+    //
+    // Everything below resolves a MagicDNS name independently of `bind`, so a
+    // daemon listening on loopback would still advertise its tailnet name — and
+    // the QR built from it looks perfect, resolves, and reaches nothing. That is
+    // strictly worse than advertising loopback, because loopback is visibly wrong
+    // and a name is not.
+    //
+    // This is the same "decided together and once" rule the doc comment above
+    // states; it simply was not enforced when the two halves disagreed. A
+    // certificate is pointless here for the same reason: nothing off this machine
+    // can open the connection it would protect.
+    if bind.ip().is_loopback() {
+        crate::log_warn!(
+            "listening on {bind}, so no other device can reach this daemon; advertising the \
+             loopback address rather than a tailnet name it could not connect to. \
+             `codeconnect pair` will refuse to print a code until this is fixed."
+        );
+        return (None, fallback);
+    }
+
     if !config.tls {
         crate::log_info!("tls disabled by config; serving ws://");
         return (None, fallback);

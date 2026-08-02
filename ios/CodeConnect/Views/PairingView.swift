@@ -78,6 +78,32 @@ struct PairingView: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
+    /// The way in for somebody who has no Mac to pair with.
+    ///
+    /// There is exactly one such person and they matter: the App Store reviewer,
+    /// who cannot install a Rust daemon or join a tailnet, and for whom every
+    /// screen in this product is otherwise behind a pairing they can never
+    /// complete.
+    ///
+    /// `ghost` and last, because it is not what anybody who *does* have a Mac
+    /// should tap, and the label says "sample" rather than "demo" or "try it" so
+    /// the one thing a reader must not conclude — that these are their agents — is
+    /// the thing the button never implies.
+    @ViewBuilder
+    private var sampleModeButton: some View {
+        CCButton("Explore a sample fleet", variant: .ghost, size: .md, fullWidth: true) {
+            model.startSampleMode()
+        }
+        .padding(.top, CC.space.xs)
+        .accessibilityIdentifier("pairing-sample-mode")
+
+        Text("Sample data, no Mac required. Nothing here is connected to anything.")
+            .ccType(CC.type.footnote)
+            .foregroundStyle(CC.text.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, CC.rhythm.text)
+    }
+
     @ViewBuilder
     private var pairingInvitation: some View {
         Text("Pair with your Mac")
@@ -152,6 +178,12 @@ struct PairingView: View {
                 withAnimation(CC.motion.small) { showManualEntry = true }
             }
         }
+
+        // **Outside the scanner branch**, because a device with no camera is
+        // exactly a device that may have no Mac either — and the first version of
+        // this sat inside `if QRScannerView.isSupported`, so it vanished on every
+        // Simulator and would have vanished for anyone whose camera is restricted.
+        sampleModeButton
 
         if showManualEntry {
             manualEntry

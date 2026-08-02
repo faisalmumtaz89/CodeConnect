@@ -287,6 +287,29 @@ it once in `hello_ack{device_token}`; the app keeps it in the Keychain. Only the
 token's hash is stored here, so a leaked database cannot be replayed as a
 credential.
 
+### A code the phone could not reach is never printed
+
+`ccd` resolves its address **once, at startup**, and every code minted afterwards
+carries whatever it resolved. launchd starts the daemon at login and does not wait
+for the Tailscale tunnel, so losing that race leaves the daemon bound to loopback —
+and it used to print a perfectly scannable QR containing `127.0.0.1`, exit 0, and
+add a note saying Tailscale encrypts the link. It does not; there is no tailnet link
+in that state. Every visible sign was success and only the code was dead.
+
+Two checks now make that state impossible to hand to a phone:
+
+* A daemon bound to loopback advertises **loopback**, never a MagicDNS name. The
+  endpoint and the socket are one claim, and a name that resolves somewhere nothing
+  is listening is worse than an address that is visibly local.
+* `codeconnect pair` refuses to print a code whose host is loopback, link-local or
+  unspecified, and names the recovery: bring Tailscale up, then
+  `codeconnect daemon restart`.
+
+The phone applies the same rule to a scanned code, offline, before it dials — see
+`PairingQRPayload.unreachableHost`. Both sides reject only what is *definitionally*
+unreachable; neither demands a `100.64/10` address or a `.ts.net` name, because a
+custom DNS name or a deliberately pinned `ws_bind` are legitimate.
+
 The code's alphabet omits `I`, `O`, `0` and `1`, so reading it aloud when the
 camera fails has no ambiguous characters. The QR is drawn with explicit
 black-on-white ANSI so it scans under a dark terminal theme, where art that
@@ -518,7 +541,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | Key | Default | Meaning |
 |---|---|---|
 | `ws_port` | `8787` | WebSocket port. |
-| `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. |
+| `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. Bound to loopback, the daemon advertises loopback and `codeconnect pair` refuses to print a code — see [Pairing](#pairing). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
 | `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. |

@@ -728,6 +728,26 @@ private struct FleetBanner: View {
     /// untouched: the age of the card is still true, it was the age of the
     /// observation that was missing.
     private var bannerCandidates: [CCBannerItem?] {
+        // Sample mode says so, permanently and at the top, and offers the way out.
+        //
+        // It outranks every other banner because every other banner is a statement
+        // about a Mac, and in sample mode there is no Mac — a `stale` or `offline`
+        // notice here would be describing a link that does not exist. It is also
+        // the only banner in the product that is not a problem, which is why it is
+        // `info` and why its action is an exit rather than a retry.
+        if model.fixturesActive {
+            return [
+                CCBannerItem(
+                    .rejected,
+                    title: "Sample fleet",
+                    message:
+                        "These agents are not real and nothing here is connected to a Mac. Leave to pair with your own.",
+                    tone: .info,
+                    icon: "eye",
+                    actionTitle: "Leave",
+                    action: { model.stopSampleMode() })
+            ]
+        }
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
         guard let link, let stamp = cachedStamp else { return [link, cachedBannerItem] }
         return [

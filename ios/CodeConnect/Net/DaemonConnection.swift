@@ -5,6 +5,17 @@ enum ConnectionError: LocalizedError, Sendable {
     case notConnected
     case timedOut
     case unauthorized
+    /// A pairing code the daemon would not accept.
+    ///
+    /// Separate from `unauthorized` only for its noun. The daemon deliberately
+    /// collapses "unknown", "expired" and "already used" into one opaque refusal —
+    /// telling an unauthenticated caller which applies would be a free oracle — so
+    /// this cannot say *why*, and must not pretend to. What it can do is name the
+    /// thing the reader is holding, which is a code, not a token.
+    case rejectedPairingCode
+    /// The daemon speaks a protocol this app does not. Terminal: retrying cannot
+    /// change it, and the fix is at the Mac.
+    case incompatible(String)
     case invalidEndpoint
     case server(code: String, message: String)
     case transport(String)
@@ -14,6 +25,10 @@ enum ConnectionError: LocalizedError, Sendable {
         case .notConnected: return "Not connected to the daemon"
         case .timedOut: return "The daemon did not answer in time"
         case .unauthorized: return "The daemon rejected this token"
+        case .rejectedPairingCode:
+            return
+                "The Mac rejected that pairing code. It may have expired, already been used, or been mistyped — run `codeconnect pair` again for a fresh one."
+        case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
@@ -215,9 +230,14 @@ final class DaemonConnection {
                 attempt = 0
                 lastErrorMessage = "The daemon closed the connection"
             } catch let error as ConnectionError {
-                if case .unauthorized = error {
+                // Terminal refusals: the same attempt will be refused forever, so
+                // backing off would only hide the answer behind a spinner.
+                switch error {
+                case .unauthorized, .rejectedPairingCode, .incompatible:
                     phase = .failed(reason: error.localizedDescription)
                     return
+                default:
+                    break
                 }
                 lastErrorMessage = error.localizedDescription
                 attempt += 1
@@ -226,6 +246,25 @@ final class DaemonConnection {
             } catch {
                 lastErrorMessage = error.localizedDescription
                 attempt += 1
+            }
+
+            // **A pairing code is not worth retrying forever.**
+            //
+            // A device token is durable: the Mac may be asleep, the tunnel may be
+            // down, and backing off until either changes is exactly right. A
+            // pairing code is single-use and dies after five minutes, so the same
+            // patience becomes a lie — the app sat on `.waiting`, `pairingError`
+            // reads only `.failed`, and the pairing screen therefore showed a
+            // progress ring and "Exchanging the code for a device token…"
+            // indefinitely, for a code that had already expired. No error, ever.
+            //
+            // Both schemes are still tried, because the ws/wss alternation above
+            // is how a TLS mismatch corrects itself and giving up before it has
+            // swapped once would turn a recoverable setup into a dead end.
+            if case .pairingCode = endpoint.credential, attempt >= Self.pairingAttemptLimit {
+                phase = .failed(
+                    reason: lastErrorMessage ?? ConnectionError.timedOut.localizedDescription)
+                return
             }
 
             if Task.isCancelled { return }
@@ -254,6 +293,14 @@ final class DaemonConnection {
             await sleepInterruptibly(seconds: delay)
         }
     }
+
+    /// How many failed attempts end a pairing exchange.
+    ///
+    /// Four, which is two on each scheme: enough for the `ws`/`wss` alternation to
+    /// have tried both, and short enough to finish well inside the code's
+    /// five-minute life so the reader is told while the code they are holding is
+    /// still the one that failed.
+    static let pairingAttemptLimit = 4
 
     /// Which scheme this attempt should use.
     ///
@@ -360,8 +407,28 @@ final class DaemonConnection {
                 continue
             }
 
-            if case .error(let code, _) = decoded, code == "unauthorized" {
-                throw ConnectionError.unauthorized
+            if case .error(let code, let message) = decoded {
+                switch code {
+                case "unauthorized":
+                    // The same wire code covers a rejected device token and a
+                    // rejected pairing code; only this side knows which was sent.
+                    if case .pairingCode = credential {
+                        throw ConnectionError.rejectedPairingCode
+                    }
+                    throw ConnectionError.unauthorized
+                case "protocol_mismatch":
+                    // Terminal, and it used to be neither: it fell through to the
+                    // generic reconnect, so an app and a Mac helper that could
+                    // never speak to each other retried forever instead of saying
+                    // so once. The daemon's own words are kept — this is one of
+                    // the few refusals it explains.
+                    throw ConnectionError.incompatible(
+                        message.isEmpty
+                            ? "This Mac helper speaks a protocol this app does not. Update it and try again."
+                            : message)
+                default:
+                    break
+                }
             }
             handle(decoded)
         }
@@ -427,17 +494,18 @@ final class DaemonConnection {
     func answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?
     ) async throws -> AnswerResult {
-        #if DEBUG
-            if fixtureAnswers {
-                return .applied(
-                    outcome: AnswerOutcome(
-                        requestID: requestID, sessionID: session ?? "fixture", decision: decision,
-                        resolvedBy: .phone, appliedVia: .sendKeys,
-                        resolvedAt: Date().formatted(
-                            Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
-                        detail: "fixture", inferred: false))
-            }
-        #endif
+        // Sample mode resolves its own answers: there is no daemon to send to, and
+        // a card that cannot be answered would misrepresent the product to the one
+        // person who can only ever see it this way.
+        if fixtureAnswers {
+            return .applied(
+                outcome: AnswerOutcome(
+                    requestID: requestID, sessionID: session ?? "sample", decision: decision,
+                    resolvedBy: .phone, appliedVia: .sendKeys,
+                    resolvedAt: Date().formatted(
+                        Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+                    detail: "sample", inferred: false))
+        }
         return try await request(
             key: requestID,
             store: \.answerWaiters,
@@ -648,38 +716,38 @@ final class DaemonConnection {
         return lastDaemonErrorMessage
     }
 
-    #if DEBUG
-        /// Test seam: resolve answers locally instead of over the socket.
-        ///
-        /// Exists for exactly one reason: the Deck's *advance* behaviour — the
-        /// stack moving on, the count ticking down, the fleet-clear state — can
-        /// only be exercised when answers resolve, and arranging three agents
-        /// blocked at three risk classes on a live Mac on demand is not
-        /// something a test can rely on. The real answer path, with a real
-        /// daemon and a real ledger, is covered by `ApprovalFlowUITests`; this
-        /// seam never runs in a release build and never runs without the
-        /// `-CC_FIXTURE` launch argument.
-        var fixtureAnswers = false
+    /// Resolve answers locally instead of sending them over a socket.
+    ///
+    /// Exists for exactly one reason: the Deck's *advance* behaviour — the
+    /// stack moving on, the count ticking down, the fleet-clear state — can
+    /// only be exercised when answers resolve, and arranging three agents
+    /// blocked at three risk classes on a live Mac on demand is not
+    /// something a test can rely on. The real answer path, with a real
+    /// daemon and a real ledger, is covered by `ApprovalFlowUITests`; this
+    /// seam is now reachable in a release build too, because sample mode needs it
+    /// to answer a card — but only ever with `fixtureAnswers` set, which nothing
+    /// but sample mode and the `-CC_FIXTURE` launch argument turns on.
+    var fixtureAnswers = false
 
-        /// Test seam: feed a frame through the real inbound path.
-        ///
-        /// Debug builds only. It is the *decoded* message that is injected, so
-        /// everything downstream — ingest, the timeline builder, the fleet
-        /// ordering — runs exactly as it does on the wire.
-        func injectForTesting(_ message: ServerMessage) {
-            lastContactAt = Date()
-            handle(message)
-        }
+    /// Feed a frame through the real inbound path.
+    ///
+    /// It is the *decoded* message that is injected, so
+    /// everything downstream — ingest, the timeline builder, the fleet
+    /// ordering — runs exactly as it does on the wire.
+    func injectForTesting(_ message: ServerMessage) {
+        lastContactAt = Date()
+        handle(message)
+    }
 
-        /// Test seam: report a live link without one.
-        ///
-        /// Needed because link health gates every action, so a fixture run with
-        /// an idle connection could only ever demonstrate disabled buttons.
-        func simulateConnectedForTesting() {
-            phase = .connected(since: Date())
-            lastContactAt = Date()
-        }
-    #endif
+    /// Test seam: report a live link without one.
+    ///
+    /// Needed because link health gates every action, so a fixture run with
+    /// an idle connection could only ever demonstrate disabled buttons.
+    func simulateConnectedForTesting() {
+        phase = .connected(since: Date())
+        lastContactAt = Date()
+    }
+
 
     // MARK: - Identity
 
