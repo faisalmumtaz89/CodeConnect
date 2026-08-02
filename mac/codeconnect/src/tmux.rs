@@ -211,49 +211,10 @@ pub fn send_key(name: &str, key: &str) -> Result<()> {
 /// the session natively and closing the tab leaves the session running.
 pub fn exec_attach(name: &str) -> Result<std::convert::Infallible> {
     use std::os::unix::process::CommandExt;
-    keep_the_hosts_screen(name);
     let error = base()?
         .args(["attach-session", "-t", &target_session(name)])
         .exec();
     Err(error).context("exec tmux attach-session")
-}
-
-/// Stop tmux taking over the terminal's alternate screen when it attaches.
-///
-/// **The difference this removes.** A tmux *client* sends `smcup` and clears the
-/// host terminal on attach, and `rmcup` on detach — tmux's own `tty_start_tty` and
-/// `tty_stop_tty`, not anything the session does. So `codeconnect claude` blanked
-/// the tab, ran full-window, and took the terminal's scrollback with it, while
-/// plain `claude` scrolls in place and leaves history behind. Measured: the pane's
-/// `alternate_on` is 0, so Claude Code is not doing this; the client is.
-///
-/// `smcup@:rmcup@` removes those two capabilities, which is the form tmux's own
-/// maintainers recommend for exactly this. It is a **server** option and this is
-/// our private `-L codeconnect` server, so the user's own tmux is untouched.
-///
-/// Written to index 1 rather than appended: `-a` would add a duplicate on every
-/// attach, and slot 0 already holds a tmux default (`linux*:AX@`) that must
-/// survive. Assigning one stable slot is idempotent across any number of attaches.
-///
-/// **What this does not claim.** tmux still owns and redraws the viewport while
-/// attached, and the pane's history is tmux's rather than the terminal's. What
-/// changes is that the host's screen and scrollback are no longer swapped out
-/// from under the reader.
-fn keep_the_hosts_screen(name: &str) {
-    // Best-effort: a session that renders in the alternate screen is a cosmetic
-    // regression, and refusing to start over it would be a much worse one.
-    if run(&[
-        "set-option",
-        "-s",
-        "terminal-overrides[1]",
-        "*:smcup@:rmcup@",
-    ])
-    .ok()
-    .flatten()
-    .is_none()
-    {
-        eprintln!("codeconnect: could not keep the terminal's screen for {name}; attaching anyway");
-    }
 }
 
 /// Exact *pane* target — the session's current pane.

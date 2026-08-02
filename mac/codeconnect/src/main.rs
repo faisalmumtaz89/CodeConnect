@@ -144,7 +144,16 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
 
-    eprintln!("codeconnect: session {session_id} (detach with ctrl-b d, reattach with `codeconnect attach {session_id}`)");
+    // **Nothing is printed here.**
+    //
+    // This line used to name the session and how to detach, and no reader ever saw
+    // it: the tmux client takes the terminal's alternate screen microseconds later
+    // and the banner is erased with everything else on the tab. Verified by
+    // capturing the host pane, which starts at Claude's first frame.
+    //
+    // Even if it survived, it would be product output on a command whose whole
+    // promise is that the session is unchanged. `codeconnect --help` carries
+    // `attach`, which is where a durable answer belongs.
     tmux::exec_attach(&session_id)?;
     unreachable!("exec replaces the process")
 }

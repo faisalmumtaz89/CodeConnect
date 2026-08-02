@@ -11,7 +11,9 @@ Your agents keep working while you walk away. CodeConnect shows you every sessio
 $ codeconnect claude                 # your normal Claude Code session, now observable
 ```
 
-That's the whole setup. The session looks and behaves exactly as it did before; it just also appears on your phone.
+That's the whole setup. Claude Code itself behaves exactly as it did before, and the session also appears on your phone.
+
+One honest caveat about the terminal. The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client owns the terminal while it runs: it uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
 
 ## What it does
 
@@ -33,7 +35,7 @@ iPhone (SwiftUI)  ──WSS over Tailscale──▶  ccd (Rust daemon, launchd)
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
-- **`codeconnect`** — launches an agent inside a private tmux server and wires Claude Code's hooks. Your terminal experience is unchanged.
+- **`codeconnect`** — launches an agent inside a private tmux server and wires Claude Code's hooks. Claude Code behaves unchanged; the terminal is tmux's while the session is attached.
 - **`cc-hook`** — tiny binary the hooks call. Fails safe: if the daemon is unreachable, the decision goes back to the local keyboard.
 - **The phone** — a client of the event log, not a source of truth.
 
