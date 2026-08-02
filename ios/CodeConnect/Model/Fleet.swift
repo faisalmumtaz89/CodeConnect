@@ -226,14 +226,20 @@ enum FleetStatusRule {
         let pending = state?.pendingApprovals.count ?? 0
         if !summary.blockedOn.isEmpty || pending > 0 { return .blocked }
         if summary.lifecycle == .exited {
-            return lastTurnFailed(state) ? .failed : .ended
+            return endedAbnormally(state) ? .failed : .ended
         }
-        if lastTurnFailed(state) { return .failed }
         guard let state, let last = lastSubstantiveItem(state) else {
             return summary.lifecycle == .live ? .idle : .ended
         }
         if isTurnBoundary(last) {
-            return state.lastSeq > reviewedSeq ? .doneUnreviewed : .idle
+            // **The boundary's own seq, not the tail of the stream.** `lastSeq` is
+            // the highest seq of any raw event, including `usage`, `reasoning` and
+            // link chatter that produce no timeline item at all. Compared against
+            // it, one link flap after you reviewed a turn flipped the row back to
+            // Done-unreviewed, re-sorted it up the fleet, and made it open
+            // diff-first again. What was reviewed is a turn, so the question is
+            // whether *that turn* is newer than the mark.
+            return last.seq > reviewedSeq ? .doneUnreviewed : .idle
         }
         return .running
     }
@@ -245,8 +251,12 @@ enum FleetStatusRule {
         state.timeline.last { item in
             guard case .notice(let notice) = item.content else { return true }
             switch notice.kind {
-            case .link, .sessionStart, .other: return false
-            case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished, .failure: return true
+            // `.failure` sits with `.link` rather than with the agent's own events:
+            // it is the daemon reporting that it could not read a transcript line,
+            // which is a fact about our observation, not about the agent. Counted
+            // as activity it made a finished session look busy for ever.
+            case .link, .sessionStart, .other, .failure: return false
+            case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished: return true
             }
         }
     }
@@ -259,24 +269,36 @@ enum FleetStatusRule {
         }
     }
 
-    /// "Failed" means the newest turn ended badly — scanning only that turn
-    /// keeps a failure from an hour ago out of the top of the fleet forever.
-    private static func lastTurnFailed(_ state: SessionState?) -> Bool {
+    /// Whether this run's own exit says it ended badly.
+    ///
+    /// **Only the control plane may decide this.** `docs/ARCHITECTURE.md` splits the
+    /// system in two and says of the observation plane — transcripts and pane
+    /// snapshots — "never used to decide anything". The predicate this replaces
+    /// broke that rule: it scanned the turn for any tool whose `is_error` was set
+    /// and called the *session* failed. A tool exiting non-zero is what agent work
+    /// looks like — a grep that matches nothing, a failing test, `git diff
+    /// --exit-code` — and Claude reads the output and carries on. Measured: a
+    /// `git log | head` exited 1 and a healthy session showed Failed, sorted above
+    /// genuinely running ones, and stayed there. On an *ended* session it was worse
+    /// still: there is no next user message, so the verdict was permanent.
+    ///
+    /// The honest signal is the session's own exit, which `Timeline` already
+    /// renders as `Session ended (exit N)` and marks `.failure` **iff** a code
+    /// arrived and was non-zero. So this reads a fact the daemon reported rather
+    /// than inferring one from what the agent printed.
+    ///
+    /// **This is currently unreachable, deliberately.** Both writers of
+    /// `session_end` send `exit_code: null` — the supervisor because it proves
+    /// death by tmux absence and never sees a status, the daemon's sweep for the
+    /// same reason. Until something observes a real exit status, every ended run is
+    /// `Ended`, which is what is known. Inventing a failure from weaker evidence is
+    /// the defect this replaced.
+    private static func endedAbnormally(_ state: SessionState?) -> Bool {
         guard let state else { return false }
-        var sawFailure = false
-        for item in state.timeline.reversed() {
-            switch item.content {
-            case .userMessage:
-                return sawFailure
-            case .tool(let tool):
-                if tool.status == .failed || tool.status == .interrupted { sawFailure = true }
-            case .notice(let notice):
-                if notice.severity == .failure { sawFailure = true }
-            default:
-                break
-            }
+        return state.timeline.reversed().contains { item in
+            guard case .notice(let notice) = item.content else { return false }
+            return notice.kind == .sessionEnded && notice.severity == .failure
         }
-        return sawFailure
     }
 
     static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
