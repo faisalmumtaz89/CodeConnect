@@ -27,7 +27,7 @@ enum ConnectionError: LocalizedError, Sendable {
         case .unauthorized: return "The daemon rejected this token"
         case .rejectedPairingCode:
             return
-                "The Mac rejected that pairing code. It may have expired, already been used, or been mistyped — run `codeconnect pair` again for a fresh one."
+                "The Mac rejected that pairing code. It may have expired, already been used, or been mistyped, run `codeconnect pair` again for a fresh one."
         case .incompatible(let detail): return detail
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
@@ -283,7 +283,7 @@ final class DaemonConnection {
                 schemeAlternate.toggle()
                 lastErrorMessage =
                     (lastErrorMessage ?? "Connection failed")
-                    + " — trying \(resolveTLS(for: endpoint) ? "wss://" : "ws://") next."
+                    + ", trying \(resolveTLS(for: endpoint) ? "wss://" : "ws://") next."
             }
 
             let delay = Self.backoff(attempt: attempt)
@@ -494,18 +494,17 @@ final class DaemonConnection {
     func answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?
     ) async throws -> AnswerResult {
-        // Sample mode resolves its own answers: there is no daemon to send to, and
-        // a card that cannot be answered would misrepresent the product to the one
-        // person who can only ever see it this way.
-        if fixtureAnswers {
-            return .applied(
-                outcome: AnswerOutcome(
-                    requestID: requestID, sessionID: session ?? "sample", decision: decision,
-                    resolvedBy: .phone, appliedVia: .sendKeys,
-                    resolvedAt: Date().formatted(
-                        Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
-                    detail: "sample", inferred: false))
-        }
+        #if DEBUG
+            if fixtureAnswers {
+                return .applied(
+                    outcome: AnswerOutcome(
+                        requestID: requestID, sessionID: session ?? "fixture", decision: decision,
+                        resolvedBy: .phone, appliedVia: .sendKeys,
+                        resolvedAt: Date().formatted(
+                            Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+                        detail: "fixture", inferred: false))
+            }
+        #endif
         return try await request(
             key: requestID,
             store: \.answerWaiters,
@@ -716,37 +715,38 @@ final class DaemonConnection {
         return lastDaemonErrorMessage
     }
 
-    /// Resolve answers locally instead of sending them over a socket.
-    ///
-    /// Exists for exactly one reason: the Deck's *advance* behaviour — the
-    /// stack moving on, the count ticking down, the fleet-clear state — can
-    /// only be exercised when answers resolve, and arranging three agents
-    /// blocked at three risk classes on a live Mac on demand is not
-    /// something a test can rely on. The real answer path, with a real
-    /// daemon and a real ledger, is covered by `ApprovalFlowUITests`; this
-    /// seam is now reachable in a release build too, because sample mode needs it
-    /// to answer a card — but only ever with `fixtureAnswers` set, which nothing
-    /// but sample mode and the `-CC_FIXTURE` launch argument turns on.
-    var fixtureAnswers = false
+    #if DEBUG
+        /// Test seam: resolve answers locally instead of over the socket.
+        ///
+        /// Exists for exactly one reason: the Deck's *advance* behaviour — the
+        /// stack moving on, the count ticking down, the fleet-clear state — can
+        /// only be exercised when answers resolve, and arranging three agents
+        /// blocked at three risk classes on a live Mac on demand is not
+        /// something a test can rely on. The real answer path, with a real
+        /// daemon and a real ledger, is covered by `ApprovalFlowUITests`; this
+        /// seam never runs in a release build and never runs without the
+        /// `-CC_FIXTURE` launch argument.
+        var fixtureAnswers = false
 
-    /// Feed a frame through the real inbound path.
-    ///
-    /// It is the *decoded* message that is injected, so
-    /// everything downstream — ingest, the timeline builder, the fleet
-    /// ordering — runs exactly as it does on the wire.
-    func injectForTesting(_ message: ServerMessage) {
-        lastContactAt = Date()
-        handle(message)
-    }
+        /// Test seam: feed a frame through the real inbound path.
+        ///
+        /// Debug builds only. It is the *decoded* message that is injected, so
+        /// everything downstream — ingest, the timeline builder, the fleet
+        /// ordering — runs exactly as it does on the wire.
+        func injectForTesting(_ message: ServerMessage) {
+            lastContactAt = Date()
+            handle(message)
+        }
 
-    /// Test seam: report a live link without one.
-    ///
-    /// Needed because link health gates every action, so a fixture run with
-    /// an idle connection could only ever demonstrate disabled buttons.
-    func simulateConnectedForTesting() {
-        phase = .connected(since: Date())
-        lastContactAt = Date()
-    }
+        /// Test seam: report a live link without one.
+        ///
+        /// Needed because link health gates every action, so a fixture run with
+        /// an idle connection could only ever demonstrate disabled buttons.
+        func simulateConnectedForTesting() {
+            phase = .connected(since: Date())
+            lastContactAt = Date()
+        }
+    #endif
 
 
     // MARK: - Identity

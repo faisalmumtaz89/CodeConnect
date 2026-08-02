@@ -86,7 +86,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// diff request costs one frame — so the app asks, and says plainly that it
     /// is asking a daemon which never advertised the ability.
     var diffCaveat: String? {
-        guard isConnected else { return "Not connected — the daemon cannot be asked for a diff." }
+        guard isConnected else { return "Not connected. The daemon cannot be asked for a diff." }
         return servesDiff
             ? nil
             : "This daemon has not advertised diff support. Asking anyway; if it cannot answer, this will say so."
@@ -99,7 +99,7 @@ struct DaemonProfile: Sendable, Hashable {
             return "This iPhone's SSH key is authorised on the Mac."
         case .some(false):
             return
-                "The Mac received this iPhone's SSH key but did not install it. Run `codeconnect pair --ssh` there and scan the code it prints — that is the only path that asks for consent at the terminal."
+                "The Mac received this iPhone's SSH key but did not install it. Run `codeconnect pair --ssh` there and scan the code it prints, that is the only path that asks for consent at the terminal."
         case .none:
             return nil
         }

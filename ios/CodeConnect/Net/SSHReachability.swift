@@ -155,7 +155,7 @@ struct SSHSetupGuidance: Sendable, Equatable {
             return SSHSetupGuidance(
                 title: "\(host) did not answer on port \(port)",
                 detail:
-                    "Either the Mac is asleep or off the tailnet, or its SSH server is off. Check the daemon link first — if that is live, the Mac is reachable and this is the SSH server.",
+                    "Either the Mac is asleep or off the tailnet, or its SSH server is off. Check the daemon link first, if that is live, the Mac is reachable and this is the SSH server.",
                 steps: standardSteps)
         case .failed(let reason):
             return SSHSetupGuidance(
@@ -167,12 +167,12 @@ struct SSHSetupGuidance: Sendable, Equatable {
 
     private static let standardSteps: [Step] = [
         Step(
-            title: "Option 1 — Tailscale SSH",
+            title: "Option 1 - Tailscale SSH",
             body:
                 "Recommended: authentication and access control ride your tailnet ACLs, and there is no port exposed anywhere else. Run this on the Mac, then re-open this tab.",
             command: "tailscale up --ssh"),
         Step(
-            title: "Option 2 — macOS Remote Login",
+            title: "Option 2 - macOS Remote Login",
             body:
                 "System Settings → General → Sharing → Remote Login. Limit access to your own user while you are there.",
             command: nil),

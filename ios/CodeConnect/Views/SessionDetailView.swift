@@ -607,7 +607,7 @@ private struct SessionComposeBar: View {
                         text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
                 } else if isObserveOnly {
                     ComposeNote(
-                        text: "Observe only — answers are given at the Mac.",
+                        text: "Observe only - answers are given at the Mac.",
                         tone: .neutral, glyph: nil, action: ("Why?", onWhy))
                 }
 

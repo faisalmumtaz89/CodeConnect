@@ -93,7 +93,15 @@ struct CCMonoBlock: View {
 
     /// The copy affordance's chrome, on the same Dynamic Type ramp as the glyph
     /// inside it — and, crucially, as the trailing space reserved for it below.
-    @ScaledMetric(relativeTo: .footnote) private var copyChrome: CGFloat = CC.size.glyphSm
+    /// **The button's interactive rectangle, not its ink.**
+    ///
+    /// This reserved the old 24pt plate, while the thing that actually occupies the
+    /// corner is a 44pt hit target: 8pt of a tappable control sat over the last
+    /// characters of every line, and the mono run is selectable, so that strip
+    /// could take a long press meant for the text. Reserving the target closes it,
+    /// and the 13pt glyph centred inside still leaves a comfortable visual gap
+    /// without a separate spacing term.
+    @ScaledMetric(relativeTo: .footnote) private var copyChrome: CGFloat = CC.size.hitTarget
     /// The rendered point size of the mono run, on the token's own ramp.
     ///
     /// Built the same way `CCTypeModifier` builds it — same nominal size, same
@@ -301,7 +309,12 @@ struct CCMonoBlock: View {
         .padding(.trailing, trailingReservation)
         .frame(maxWidth: .infinity, alignment: .leading)
         .ccSurface(.raised, radius: CC.radius.md)
-        .overlay(alignment: .topTrailing) { if !stacksCopy { copyButton } }
+        // **Centred, not pinned to the top.** `.topTrailing` put the glyph level
+        // with the command's first line rather than with the block it acts on, so
+        // it read as high on a one-line block and as belonging to the wrong line
+        // on a two-line one. The button copies the whole block, so it sits with
+        // the whole block.
+        .overlay(alignment: .trailing) { if !stacksCopy { copyButton } }
         // **The two-edge rule's corollary, and the only place it is
         // implemented** (see `CCColumn.hang(from:)`). Applied outside the
         // surface, so it moves the border and leaves the text where the
@@ -391,7 +404,7 @@ struct CCMonoBlock: View {
 
     private var trailingReservation: CGFloat {
         showsCopy && !stacksCopy
-            ? copyChrome + CC.space.xxs + CC.space.sm
+            ? copyChrome + CC.space.xxs
             : CC.space.sm
     }
 
@@ -582,12 +595,14 @@ struct CCMonoBlock: View {
         if showsCopy && !stacksCopy {
             Button(action: copy) {
                 copyGlyph
-                    // Scales on the same ramp as the glyph inside and as the
-                    // trailing space reserved for it in `body`.
-                    .ccGlyphContainer(
-                        CC.size.glyphSm, radius: CC.radius.sm, level: .overlay,
-                        relativeTo: .footnote)
-                    // 24pt of visible chrome, 44pt of finger.
+                    // **No container.** It used to carry a filled, rounded plate of
+                    // its own, drawn inside a mono block that is already a raised
+                    // surface with its own border: a box in a box, and the inner one
+                    // said nothing the outer had not. The glyph alone is the
+                    // affordance. The 44pt finger stays, because that is layout
+                    // rather than decoration, and `copyRow` (the stacked AX form)
+                    // has never had a plate either, so this also makes the two
+                    // presentations of one control agree.
                     .ccHitTarget()
             }
             .buttonStyle(CCCopyButtonStyle())

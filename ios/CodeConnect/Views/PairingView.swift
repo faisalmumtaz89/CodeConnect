@@ -78,38 +78,12 @@ struct PairingView: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    /// The way in for somebody who has no Mac to pair with.
-    ///
-    /// There is exactly one such person and they matter: the App Store reviewer,
-    /// who cannot install a Rust daemon or join a tailnet, and for whom every
-    /// screen in this product is otherwise behind a pairing they can never
-    /// complete.
-    ///
-    /// `ghost` and last, because it is not what anybody who *does* have a Mac
-    /// should tap, and the label says "sample" rather than "demo" or "try it" so
-    /// the one thing a reader must not conclude — that these are their agents — is
-    /// the thing the button never implies.
-    @ViewBuilder
-    private var sampleModeButton: some View {
-        CCButton("Explore a sample fleet", variant: .ghost, size: .md, fullWidth: true) {
-            model.startSampleMode()
-        }
-        .padding(.top, CC.space.xs)
-        .accessibilityIdentifier("pairing-sample-mode")
-
-        Text("Sample data, no Mac required. Nothing here is connected to anything.")
-            .ccType(CC.type.footnote)
-            .foregroundStyle(CC.text.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, CC.rhythm.text)
-    }
-
     /// The app introducing itself, because this is the first thing a stranger sees.
     ///
     /// It used to open with "Pair with your Mac" and the line "Run this on the Mac
     /// running `ccd`". Neither the product's name nor its purpose appeared
-    /// anywhere, and `ccd` is a word the reader has never met — the screen assumed
-    /// a Mac already set up, without ever saying so or how.
+    /// anywhere, and `ccd` is a word the reader has never met: the screen assumed a
+    /// Mac already set up, without ever saying so or how.
     @ViewBuilder
     private var identity: some View {
         CCMark(size: 52)
@@ -120,11 +94,11 @@ struct PairingView: View {
             .foregroundStyle(CC.text.primary)
             .fixedSize(horizontal: false, vertical: true)
 
-        Text("Approve what your coding agents do, from anywhere.")
+        Text("Control your coding agents from anywhere.")
             .ccType(CC.type.body)
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            // 50–75 characters is the readable measure.
+            // 50-75 characters is the readable measure.
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.rhythm.text)
             .padding(.bottom, CC.rhythm.sections)
@@ -155,7 +129,7 @@ struct PairingView: View {
                 CCStepRow(
                     index: 1,
                     title: "Install CodeConnect on your Mac",
-                    message: "Clone it and run ./install.sh — you only do this once.",
+                    message: "Clone it and run ./install.sh. You only do this once.",
                     command: "github.com/faisalmumtaz89/CodeConnect")
                 CCHairline()
                 CCStepRow(
@@ -211,7 +185,7 @@ struct PairingView: View {
             // control it explains has already been read is not an explanation.
             // Found by rendering — the Simulator has no scanner, which is
             // exactly the case this copy exists for.
-            Text("No scanner on this device — pair by hand below.")
+            Text("No scanner on this device. Pair by hand below.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -221,11 +195,6 @@ struct PairingView: View {
                 withAnimation(CC.motion.small) { showManualEntry = true }
             }
         }
-
-        // **Outside the scanner branch**, because a device with no camera is
-        // exactly a device that may have no Mac either — and the first version of
-        // this sat inside `if QRScannerView.isSupported`, so it vanished on every
-        // Simulator and would have vanished for anyone whose camera is restricted.
 
         if showManualEntry {
             manualEntry
@@ -240,13 +209,6 @@ struct PairingView: View {
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.space.xl)
 
-        // **Last, after everything about pairing has finished.** Placed between the
-        // manual-entry button and this screen's closing note, it split a footnote
-        // about the *pairing code* away from the pairing content it explains, so
-        // the reader met an unrelated escape hatch mid-thought. Sample mode is not
-        // a third way to pair; it is what you do when you cannot.
-        sampleModeButton
-            .padding(.top, CC.rhythm.sections)
     }
 
     /// The card is replaced in place rather than growing a spinner underneath
@@ -379,7 +341,7 @@ struct PairingView: View {
 
     private var manualEntryBlockedReason: CCDisabledReason? {
         if address.trimmingCharacters(in: .whitespaces).isEmpty {
-            return CCDisabledReason("An address is needed — the one `codeconnect pair` printed.")
+            return CCDisabledReason("An address is needed - the one `codeconnect pair` printed.")
         }
         if token.trimmingCharacters(in: .whitespaces).isEmpty {
             return CCDisabledReason("A pairing code or a `codeconnect token` is needed.")
@@ -580,7 +542,7 @@ struct PairingView: View {
             Text(
                 encrypted
                     ? "The daemon serves its own certificate from `tailscale cert`."
-                    : "Plain ws:// inside the tailnet — WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate for its MagicDNS name."
+                    : "Plain ws:// inside the tailnet, WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate for its MagicDNS name."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -622,7 +584,7 @@ struct PairingView: View {
                     } else {
                         // Never a guess and never a blank: the app says it does
                         // not know, in the daemon's absence.
-                        Text("Unknown — not connected.")
+                        Text("Unknown - not connected.")
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)

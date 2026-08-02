@@ -28,8 +28,8 @@ enum BiometricGate {
         var message: String? {
             switch self {
             case .authenticated: return nil
-            case .cancelled: return "Not approved — the check was cancelled."
-            case .failed(let reason): return "Not approved — \(reason)"
+            case .cancelled: return "Not approved - the check was cancelled."
+            case .failed(let reason): return "Not approved - \(reason)"
             case .unavailable(let reason): return reason
             }
         }
@@ -105,7 +105,7 @@ enum BiometricGate {
                 "This iPhone has no passcode, so it cannot prove who is holding it. High-risk approvals have to be answered at the Mac."
         case .biometryNotEnrolled:
             return
-                "Face ID is not set up on this iPhone. Set it up, or answer high-risk approvals at the Mac — the passcode alone is offered when Face ID is available but unrecognised."
+                "Face ID is not set up on this iPhone. Set it up, or answer high-risk approvals at the Mac, the passcode alone is offered when Face ID is available but unrecognised."
         case .biometryNotAvailable:
             return
                 "Face ID is unavailable on this iPhone. High-risk approvals need it, or the passcode; answer this one at the Mac."

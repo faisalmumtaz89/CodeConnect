@@ -281,7 +281,7 @@ enum FleetStatusRule {
 
     static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
-            return .observe(reason: "Not connected — the daemon has not told us what it can do.")
+            return .observe(reason: "Not connected. The daemon has not told us what it can do.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(reason: "The daemon does not guarantee an answer will reach the agent.")
@@ -293,7 +293,7 @@ enum FleetStatusRule {
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
             return .observe(
-                reason: "No supervisor is attached to this session — it can only be answered at the Mac."
+                reason: "No supervisor is attached to this session. It can only be answered at the Mac."
             )
         case .stale:
             return .observe(reason: "The daemon has not heard from this session recently.")
@@ -328,7 +328,7 @@ struct LinkHealth: Sendable, Equatable {
     var disabledReason: String? {
         guard !actionsEnabled else { return nil }
         switch level {
-        case .stale: return "Link stale — \(ageText) since the daemon last spoke. \(detail)"
+        case .stale: return "Link stale - \(ageText) since the daemon last spoke. \(detail)"
         case .connecting: return "Connecting to the daemon…"
         case .offline: return detail
         case .rejected: return detail
@@ -336,7 +336,7 @@ struct LinkHealth: Sendable, Equatable {
         }
     }
 
-    var ageText: String { age.map(Format.age) ?? "—" }
+    var ageText: String { age.map(Format.age) ?? "-" }
 
     var symbol: String {
         switch level {
@@ -376,7 +376,7 @@ struct LinkHealth: Sendable, Equatable {
             return LinkHealth(
                 level: .offline,
                 age: lastContactAt.map { now.timeIntervalSince($0) },
-                detail: "\(reason) — \(when).")
+                detail: "\(reason), \(when).")
         case .connected:
             guard let lastContactAt else {
                 return LinkHealth(

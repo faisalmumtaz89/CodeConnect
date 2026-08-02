@@ -130,7 +130,7 @@ struct ResolutionBanner: View {
     /// is an outcome they skim.
     private var headline: String {
         switch attempt {
-        case .applied(let outcome): return "\(outcome.decisionLabel) — confirmed by the daemon"
+        case .applied(let outcome): return "\(outcome.decisionLabel), confirmed by the daemon"
         case .duplicate: return "Already answered"
         case .answeredAtKeyboard: return "Answered at the keyboard"
         case .staleCard: return "This card is out of date"
@@ -157,7 +157,7 @@ struct ResolutionBanner: View {
                 "The prompt was gone before the keystrokes could land, so somebody answered it on the Mac. Nothing was typed. (\(reason))"
         case .staleCard(let reason): return reason
         case .rejected(let reason): return reason
-        case .failed(let reason): return "\(reason) Answers are idempotent — retrying is safe."
+        case .failed(let reason): return "\(reason) Answers are idempotent. Retrying is safe."
         }
     }
 }

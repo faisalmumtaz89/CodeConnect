@@ -57,16 +57,9 @@ codeconnect claude             # start a session in the current directory
 
 The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same [Tailscale](https://tailscale.com) tailnet.
 
-Without a Mac there is nothing to pair with, so the app also opens a **sample fleet**
-from its pairing screen — recorded frames replayed through the real decoders, clearly
-labelled, connected to nothing. It exists because the App Store reviewer is the one
-person who arrives with no Mac and no tailnet, and every other screen is behind a
-pairing they cannot complete. It creates no pairing and opens no socket: a release
-build still has no way to be *paired* except by a person with a Mac.
+**Requirements:** Rust stable (1.80+) and **Xcode 26 or newer**. The app deploys to iOS 17, but one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available` is a runtime check, so the symbol still has to exist in the SDK to compile.
 
-**Requirements:** Rust stable (1.80+) and **Xcode 26 or newer**. The app deploys to iOS 17, but one navigation-chrome call is guarded with `if #available(iOS 26, *)` — and `#available` is a runtime check, so the symbol still has to exist in the SDK to compile.
-
-For the live terminal, enable Remote Login (System Settings → General → Sharing) or Tailscale SSH. **CodeConnect never enables a system service for you** — it shows you the command and lets you decide.
+For the live terminal, enable Remote Login (System Settings → General → Sharing) or Tailscale SSH. **CodeConnect never enables a system service for you**: it shows you the command and lets you decide.
 
 ## Repo layout
 

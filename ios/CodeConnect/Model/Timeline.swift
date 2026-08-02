@@ -399,8 +399,13 @@ enum TimelineBuilder {
                 kind: .agentWaiting,
                 symbol: "bell.badge",
                 title: "Claude asked for permission",
-                detail: (event.notificationMessage ?? "")
-                    + " — no card arrived, so it can only be answered at the Mac.",
+                // Built as a sentence rather than glued to the message with
+                // punctuation: the daemon does not always send one, and a
+                // conjunction with nothing before it reads as a truncated string.
+                detail: [event.notificationMessage, "No card arrived, so it can only be answered at the Mac."]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " "),
                 severity: .warning)
         case "agent_needs_input", "idle_prompt":
             return NoticeItem(

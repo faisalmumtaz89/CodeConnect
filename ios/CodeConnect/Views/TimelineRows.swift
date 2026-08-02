@@ -508,7 +508,7 @@ struct ApprovalRow: View {
         switch outcome.resolvedBy {
         case .phone: who = "from this app"
         case .local: who = "at the keyboard"
-        case .timeout: who = "by timeout — nobody answered"
+        case .timeout: who = "by timeout - nobody answered"
         case .superseded: who = "superseded"
         }
         return "\(outcome.decision.label) \(who)"

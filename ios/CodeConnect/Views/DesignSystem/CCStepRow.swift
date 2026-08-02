@@ -98,7 +98,14 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
                         // The gutter column. See the note above: 8pt of layout,
                         // 20pt of graphic, centred.
                         .frame(width: CC.size.dot)
-                        .frame(minHeight: titleLine)
+                        // **A fixed line box, not a minimum.** With `minHeight` the
+                        // frame grew to the badge's own 20pt while the title's line
+                        // is about 14, so the circle's centre sat ~3pt below the
+                        // centre of the words it numbers, and every step in a card
+                        // repeated the error down the column. A fixed height centres
+                        // the badge on the title's line and lets the circle overhang
+                        // it symmetrically, which is what a marginal number does.
+                        .frame(height: titleLine)
 
                     VStack(alignment: .leading, spacing: CC.space.xs) {
                         HStack(spacing: CC.space.xs) {
@@ -248,7 +255,7 @@ extension CCStepRow where Detail == EmptyView {
                 VStack(spacing: 0) {
                     CCStepRow(
                         index: 1,
-                        title: "Option 1 — Tailscale SSH",
+                        title: "Option 1 - Tailscale SSH",
                         message:
                             "Authentication and access control ride your tailnet ACLs, and no port is exposed anywhere.",
                         command: "tailscale up --ssh"
@@ -258,7 +265,7 @@ extension CCStepRow where Detail == EmptyView {
                     CCHairline()
                     CCStepRow(
                         index: 2,
-                        title: "Option 2 — macOS Remote Login",
+                        title: "Option 2 - macOS Remote Login",
                         message:
                             "System Settings → General → Sharing → Remote Login. Limit access to your own user.",
                         isComplete: true)

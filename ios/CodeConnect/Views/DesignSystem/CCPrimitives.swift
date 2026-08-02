@@ -154,7 +154,7 @@ extension View {
 enum CCMeasured {
     /// What a value nobody measured renders as. **Never `0`** — `0` is a
     /// measurement, and printing it is a lie about state.
-    static let mark = "—"
+    static let mark = "-"
 
     /// A value is unmeasured when the caller says so **or when it is already
     /// the mark**.
@@ -387,8 +387,8 @@ struct CCIcon: View {
 /// `accessibility-extra-large` the sheet's close cross measured 34pt wide
 /// inside its 28pt circle — the glyph escaped the ring, and the ring read as a
 /// smudge behind a cross rather than as a button. The same shape appeared three
-/// times in the kit (`CCSheetChrome`'s close, `CCMonoBlock`'s copy,
-/// `CCEmptyState`'s mark) and would have appeared again in every screen that
+/// times in the kit (`CCSheetChrome`'s close, `CCEmptyState`'s mark, and the
+/// fleet's settings glyph) and would have appeared again in every screen that
 /// needed one, so it is a single scaled container rather than three
 /// `@ScaledMetric`s that have to agree.
 ///

@@ -287,7 +287,7 @@ struct TerminalSettingsView: View {
             }
 
             Text(
-                "The Mac's SSH key is pinned the first time you connect. If it ever changes, the terminal stops rather than warning — a changed key means either the Mac was rebuilt or something else is answering."
+                "The Mac's SSH key is pinned the first time you connect. If it ever changes, the terminal stops rather than warning, a changed key means either the Mac was rebuilt or something else is answering."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -337,7 +337,7 @@ struct TerminalSettingsView: View {
             }
 
             Text(
-                "Generates a new key next time. The old one stays in the Mac's authorized_keys until you run `codeconnect ssh-revoke` there — this app cannot remove it for you."
+                "Generates a new key next time. The old one stays in the Mac's authorized_keys until you run `codeconnect ssh-revoke` there, this app cannot remove it for you."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
@@ -355,7 +355,7 @@ struct TerminalSettingsView: View {
         if model.settings.sshUsername.trimmingCharacters(in: .whitespaces).isEmpty {
             if let inferred = inferredUsername {
                 return
-                    "Left blank, CodeConnect uses \"\(inferred)\" — read from the working directory the daemon reports for your sessions. Type a name to override it."
+                    "Left blank, CodeConnect uses \"\(inferred)\", read from the working directory the daemon reports for your sessions. Type a name to override it."
             }
             return
                 "No account name could be read from your sessions' working directories, so this one has to be filled in."

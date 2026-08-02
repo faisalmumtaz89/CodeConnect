@@ -24,7 +24,7 @@ extension ApprovalCard {
             if !renderMatchesDisplayText {
                 return "Verified against the hash. Showing the daemon's exact text."
             }
-            return "Verified — this is the exact text the daemon hashed."
+            return "Verified - this is the exact text the daemon hashed."
         }
     }
 

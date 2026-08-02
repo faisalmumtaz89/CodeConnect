@@ -728,26 +728,6 @@ private struct FleetBanner: View {
     /// untouched: the age of the card is still true, it was the age of the
     /// observation that was missing.
     private var bannerCandidates: [CCBannerItem?] {
-        // Sample mode says so, permanently and at the top, and offers the way out.
-        //
-        // It outranks every other banner because every other banner is a statement
-        // about a Mac, and in sample mode there is no Mac — a `stale` or `offline`
-        // notice here would be describing a link that does not exist. It is also
-        // the only banner in the product that is not a problem, which is why it is
-        // `info` and why its action is an exit rather than a retry.
-        if model.fixturesActive {
-            return [
-                CCBannerItem(
-                    .rejected,
-                    title: "Sample fleet",
-                    message:
-                        "These agents are not real and nothing here is connected to a Mac. Leave to pair with your own.",
-                    tone: .info,
-                    icon: "eye",
-                    actionTitle: "Leave",
-                    action: { model.stopSampleMode() })
-            ]
-        }
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
         guard let link, let stamp = cachedStamp else { return [link, cachedBannerItem] }
         return [
@@ -1210,7 +1190,7 @@ struct CapabilitySheet: View {
 
                     CCSectionHeader("What still works")
                     Text(
-                        "Everything on this screen is still true. You can read the timeline, open the diff and attach the terminal — you just answer at the Mac."
+                        "Everything on this screen is still true. You can read the timeline, open the diff and attach the terminal, you just answer at the Mac."
                     )
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.secondary)
@@ -1245,7 +1225,7 @@ struct LinkHealthSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     /// Nothing measured yet. Deliberately not `0`, which is a measurement.
-    private static let unmeasured = "—"
+    private static let unmeasured = "-"
 
     var body: some View {
         CCSheetChrome("Link health", onClose: { dismiss() }) {
@@ -1420,7 +1400,7 @@ struct LinkHealthSheet: View {
                 } else {
                     // Verbatim, and deliberately not "no": an unknown is not a
                     // denial.
-                    Text("Unknown — not connected.")
+                    Text("Unknown - not connected.")
                         .ccType(CC.type.callout)
                         .foregroundStyle(CC.text.secondary)
                         .padding(CC.space.md)
@@ -1509,7 +1489,7 @@ struct LinkHealthSheet: View {
 
     private var pushReason: String? {
         guard let capabilities = model.connection.capabilities else {
-            return "Not connected — the daemon has not told us what it can do."
+            return "Not connected. The daemon has not told us what it can do."
         }
         guard capabilities.push else {
             return "This daemon does not send push notifications, so there is nothing to test."

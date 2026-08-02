@@ -92,7 +92,7 @@ struct RiskAssessment: Sendable, Hashable {
         case .daemon:
             if escalatedLocally {
                 return
-                    "The Mac classified this \(declared?.label ?? "—"); this app reads the command as \(heuristic.label) and applied the stricter one."
+                    "The Mac classified this \(declared?.label ?? "-"); this app reads the command as \(heuristic.label) and applied the stricter one."
             }
             return "Classified at the Mac."
         case .daemonSilent:

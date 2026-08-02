@@ -324,7 +324,16 @@ final class AppModel {
             // cards" stop agreeing.
             guard let variant = Fixtures.Variant(UserDefaults.standard.string(forKey: "CC_FIXTURE"))
             else { return }
-            showSample(variant: variant)
+            fixturesActive = true
+            connection.fixtureAnswers = true
+            connection.simulateConnectedForTesting()
+            for message in Fixtures.frames(variant: variant) {
+                connection.injectForTesting(message)
+            }
+            if let diff = Fixtures.diff() {
+                diffs[diff.sessionID] = .loaded(
+                    diff, parsed: UnifiedDiff.parse(diff.unified), fetchedAt: Date())
+            }
             applyCachedFixture()
             // Link health is measured from when a frame last *arrived*, so a
             // fixture run needs frames to keep arriving or the link correctly
@@ -381,56 +390,9 @@ final class AppModel {
         private var fixtureCachedFleet = false
     #endif
 
-    /// True while the app is showing sample frames instead of a daemon.
-    ///
-    /// It suppresses every network side effect — the fleet refresh, the cache
-    /// writes, the reconnect — so nothing it shows can be mistaken for a live link
-    /// that has gone quiet, and nothing it does can reach a Mac.
+    /// True while the app is showing replayed fixture frames instead of a
+    /// daemon. Always false in a release build.
     private(set) var fixturesActive = false
-
-    /// Load one sample fleet through the real decoders and the real ingest path.
-    ///
-    /// Shared by sample mode and the `-CC_FIXTURE` launch argument so the screens a
-    /// reviewer sees are the screens the UI tests drive — a second, simpler mock
-    /// would be a thing nobody tests and everybody trusts.
-    private func showSample(variant: Fixtures.Variant) {
-        fixturesActive = true
-        connection.fixtureAnswers = true
-        connection.simulateConnectedForTesting()
-        for message in Fixtures.frames(variant: variant) {
-            connection.injectForTesting(message)
-        }
-        if let diff = Fixtures.diff() {
-            diffs[diff.sessionID] = .loaded(
-                diff, parsed: UnifiedDiff.parse(diff.unified), fetchedAt: Date())
-        }
-    }
-
-    /// Show the sample fleet. The only way into it in a release build, and it
-    /// takes an explicit tap.
-    ///
-    /// **Why this ships.** The App Store reviewer is the one person who genuinely
-    /// arrives with no Mac and no tailnet, and every screen in this product is
-    /// behind a pairing that needs both. Without this the app is unreviewable.
-    ///
-    /// It creates no pairing and opens no socket, so the rule it used to sit
-    /// behind still holds: a release build has no way to be *paired* except by a
-    /// person with a Mac.
-    func startSampleMode() {
-        guard !fixturesActive, !pairing.isPaired else { return }
-        showSample(variant: .deck)
-    }
-
-    /// Leave the sample fleet and go back to pairing.
-    func stopSampleMode() {
-        guard fixturesActive else { return }
-        fixturesActive = false
-        connection.fixtureAnswers = false
-        summaries.removeAll()
-        diffs.removeAll()
-        subscribed.removeAll()
-        connection.stop()
-    }
 
     /// The fleet is the root once there is something to show it from.
     var showsFleet: Bool { pairing.isPaired || fixturesActive }

@@ -330,7 +330,11 @@ struct DecisionCardView: View {
         return Self.saysSomethingNew(intent, beyond: command) ? intent : nil
     }
 
-    static func saysSomethingNew(_ intent: String, beyond command: String) -> Bool {
+    /// `nonisolated` because it reads nothing: two strings in, a Bool out. Without
+    /// it the compiler inherits the view's `@MainActor` and every caller from a
+    /// synchronous test is a concurrency warning, which is how eight of them
+    /// accumulated unnoticed behind incremental builds.
+    nonisolated static func saysSomethingNew(_ intent: String, beyond command: String) -> Bool {
         func core(_ text: String) -> String {
             text.lowercased().filter { $0.isLetter || $0.isNumber }
         }
@@ -674,7 +678,7 @@ struct DecisionCardView: View {
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
-                Text("Still waiting on the Mac — \(Format.age(elapsed)).")
+                Text("Still waiting on the Mac - \(Format.age(elapsed)).")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)

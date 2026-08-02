@@ -47,7 +47,7 @@ import SwiftUI
         @State private var multiline = ""
         @State private var unlabelled = ""
         @State private var loadingButton = false
-        @State private var lastAction = "—"
+        @State private var lastAction = "-"
 
         enum Surface: String, Hashable { case timeline, terminal }
         enum Density: String, Hashable { case compact, comfortable, loose }
@@ -183,7 +183,7 @@ import SwiftUI
                 CCProse(
                     "Every component under `Views/DesignSystem/` has a page here, dark only. "
                         + "A component with no reachable render cannot be measured, so nothing "
-                        + "claimed about it can be checked — which is how `CCKeyCap` spent a "
+                        + "claimed about it can be checked, which is how `CCKeyCap` spent a "
                         + "long time being called a 44pt control.",
                     style: CC.type.callout, color: CC.text.secondary
                 )
@@ -211,7 +211,7 @@ import SwiftUI
         /// word tint is the dark one and it is the one that decides the values.
         private var syntaxSpecimen: some View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
-                Text("SYNTAX — THREE ROLES, MEASURED ON THE WORST BACKGROUND")
+                Text("SYNTAX - THREE ROLES, MEASURED ON THE WORST BACKGROUND")
                     .ccType(CC.type.micro)
                     .foregroundStyle(CC.text.tertiary)
 
@@ -262,7 +262,7 @@ import SwiftUI
         /// its normal and that nothing here belongs to a different family.
         private var ansiSpecimen: some View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
-                Text("ANSI — 16 COLOURS, NORMAL OVER BRIGHT")
+                Text("ANSI - 16 COLOURS, NORMAL OVER BRIGHT")
                     .ccType(CC.type.micro)
                     .foregroundStyle(CC.text.tertiary)
 
@@ -288,7 +288,7 @@ import SwiftUI
                 }
 
                 Text(
-                    "0 black · 1 red · 2 green · 3 yellow · 4 blue · 5 magenta · 6 cyan · 7 white, then the brights. Black and bright black are the two below AA and the two that must be — ANSI black is a background, bright black is the dim slot."
+                    "0 black · 1 red · 2 green · 3 yellow · 4 blue · 5 magenta · 6 cyan · 7 white, then the brights. Black and bright black are the two below AA and the two that must be, ANSI black is a background, bright black is the dim slot."
                 )
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
@@ -333,7 +333,7 @@ import SwiftUI
                     swatch("overlay", CC.color.surfaceOverlay, "L .0103")
                 }
 
-                Text("TEXT ON BG — MEASURED")
+                Text("TEXT ON BG - MEASURED")
                     .ccType(CC.type.micro)
                     .foregroundStyle(CC.text.tertiary)
                     .padding(.top, CC.space.xs)
@@ -404,7 +404,7 @@ import SwiftUI
                 // They shipped as one token in four colours, which is why
                 // `BLOCKED`, `MEDIUM` and `HELD FOR YOU` measured identically
                 // 200pt apart on one screen.
-                specimen("MICRO 11/14 +0.06EM — SECTION LABELS ONLY", CC.type.micro, CC.text.tertiary)
+                specimen("MICRO 11/14 +0.06EM - SECTION LABELS ONLY", CC.type.micro, CC.text.tertiary)
                 specimen("BADGELABEL 11/14 SEMIBOLD +0.04EM", CC.type.badgeLabel, CC.text.primary)
                 specimen("FIELDLABEL 11/14 +0.02EM", CC.type.fieldLabel, CC.text.secondary)
                 specimen("mono 14  cc-1 · K76F46", CC.type.mono, CC.text.primary)
@@ -426,7 +426,7 @@ import SwiftUI
             section("CCIdentity") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     Text(
-                        "The bright text is always the part that identifies. Two runs sharing `cc-1` differ only in the tail — so the tail is lit and the shared prefix is dimmed."
+                        "The bright text is always the part that identifies. Two runs sharing `cc-1` differ only in the tail, so the tail is lit and the shared prefix is dimmed."
                     )
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
@@ -441,7 +441,7 @@ import SwiftUI
                         }
                     }
 
-                    Text("FINGERPRINT DIFF — SSH HOST KEY CHANGED")
+                    Text("FINGERPRINT DIFF - SSH HOST KEY CHANGED")
                         .ccType(CC.type.micro)
                         .foregroundStyle(CC.text.tertiary)
                     CCCard {
@@ -507,7 +507,7 @@ import SwiftUI
                     // `.primary` + `.sm` is promoted to `.md` in the initialiser
                     // rather than being written down and measured at 36 later.
                     // Read the primary row: its first button is 44, not 36.
-                    note("sm 36 · md 44 · lg 52 — a primary at sm is promoted to md")
+                    note("sm 36 · md 44 · lg 52, a primary at sm is promoted to md")
 
                     ForEach(CCButtonVariant.allCases, id: \.self) { variant in
                         VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -538,7 +538,7 @@ import SwiftUI
                             "Loading, secondary", variant: .secondary, size: .md,
                             fullWidth: true, isLoading: true, action: {})
                         CCButton(
-                            "Disabled — link is stale", variant: .primary, size: .lg,
+                            "Disabled - link is stale", variant: .primary, size: .lg,
                             fullWidth: true,
                             disabledReason: CCDisabledReason(
                                 "The daemon has not spoken for 48 seconds."),
@@ -576,7 +576,7 @@ import SwiftUI
             section("CCHoldButton") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     Text(
-                        "Press and hold — the ring traces the perimeter in 1.2s. Tap without holding: the ring rewinds and the button says why, rather than looking like nothing happened."
+                        "Press and hold, the ring traces the perimeter in 1.2s. Tap without holding: the ring rewinds and the button says why, rather than looking like nothing happened."
                     )
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
@@ -587,7 +587,7 @@ import SwiftUI
                         tone: .warning, action: { lastAction = "held push" })
                     CCHoldButton("Submitting", isLoading: true, action: {})
 
-                    Text("DISABLED — THE REASON IS DRAWN, NOT ONLY HINTED")
+                    Text("DISABLED - THE REASON IS DRAWN, NOT ONLY HINTED")
                         .ccType(CC.type.micro)
                         .foregroundStyle(CC.text.tertiary)
                         .padding(.top, CC.space.xs)
@@ -647,7 +647,7 @@ import SwiftUI
                             "infra-terraform",
                             // `Done`, not `Finished`: one word per state, and
                             // the word is the one `FleetStatus.label` prints.
-                            subtitle: "Done — you have not looked at the diff",
+                            subtitle: "Done - you have not looked at the diff",
                             meta: "cc-3 · 4410FE · 4m",
                             action: { lastAction = "row 3" }
                         ) {
@@ -657,7 +657,7 @@ import SwiftUI
                         }
 
                         CCRow(
-                            "Display row — no action",
+                            "Display row - no action",
                             subtitle: "No press state, no chevron, no button trait",
                             meta: "cc-4 · 0000AA · 2h",
                             showsChevron: false
@@ -667,7 +667,7 @@ import SwiftUI
 
                         CCRow(
                             "Disabled row",
-                            subtitle: "Observe only — no supervisor attached",
+                            subtitle: "Observe only - no supervisor attached",
                             meta: "cc-5 · BEEF01 · 9m",
                             separator: false,
                             disabledReason: CCDisabledReason(
@@ -817,7 +817,7 @@ import SwiftUI
                             CCFactRow("State", value: "Live", tone: .success)
                             CCFactRow("Daemon last spoke", value: "0.4s ago")
                             // `—`, never `0`: nobody measured this.
-                            CCFactRow("Round trip", value: "—", isUnmeasured: true)
+                            CCFactRow("Round trip", value: "-", isUnmeasured: true)
                             CCFactRow("Address", value: "ws://100.x.y.z:8787")
                             CCFactRow(
                                 "Transport", value: "ws (plain)", tone: .warning,
@@ -954,7 +954,7 @@ import SwiftUI
         private var badgeSection: some View {
             section("CCBadge") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
-                    labelled("one construction — tint@12 fill, tint@40 border, full-strength label") {
+                    labelled("one construction, tint@12 fill, tint@40 border, full-strength label") {
                         ForEach(CCTone.allCases, id: \.self) { tone in
                             CCBadge(tone.rawValue, tone: tone)
                         }
@@ -970,7 +970,7 @@ import SwiftUI
                     // the button underneath it. Read this row left to right: the
                     // three stops share a construction, and HIGH still leads on
                     // its glyph, its 1.5pt edge and its word.
-                    labelled("risk — one scale, three stops; HIGH leads by glyph + edge") {
+                    labelled("risk, one scale, three stops; HIGH leads by glyph + edge") {
                         CCBadge(risk: .low)
                         CCBadge(risk: .medium)
                         CCBadge(risk: .high)
@@ -989,7 +989,7 @@ import SwiftUI
                         CCCountChip(3)
                         CCCountChip(128)
                     }
-                    labelled("tappable — 44pt hit, press state, selected") {
+                    labelled("tappable, 44pt hit, press state, selected") {
                         CCBadge(
                             "src/router.ts",
                             action: { lastAction = "chip" })
@@ -1006,7 +1006,7 @@ import SwiftUI
         private var dotSection: some View {
             section("CCStatusDot") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
-                    labelled("fleet status — running is WHITE, not blue") {
+                    labelled("fleet status, running is WHITE, not blue") {
                         ForEach(FleetStatus.allCases, id: \.self) { status in
                             HStack(spacing: CC.space.xxs) {
                                 CCStatusDot(status: status)
@@ -1024,7 +1024,7 @@ import SwiftUI
                     // The token permits it for two states; the *product* spends
                     // it on one object — the Deck's aggregate — because five
                     // dots pulsing in unison on the fleet reads as an alarm.
-                    labelled("pulsing — the aggregate only; a fleet row never pulses") {
+                    labelled("pulsing, the aggregate only; a fleet row never pulses") {
                         CCStatusDot(tone: .warning, pulses: true, accessibilityText: "Blocked")
                         CCStatusDot(tone: .info, pulses: true, accessibilityText: "Connecting")
                     }
@@ -1036,7 +1036,7 @@ import SwiftUI
                     // The dot scales now. Read this row at AX5: the dot has to
                     // still look like a state signal beside the word, not like
                     // dust that landed next to it.
-                    labelled("scales with type — 8 → 14 at AX5, beside its word") {
+                    labelled("scales with type, 8 → 14 at AX5, beside its word") {
                         HStack(spacing: CC.space.xs) {
                             CCStatusDot(status: .blocked)
                             Text("blocked")
@@ -1105,7 +1105,7 @@ import SwiftUI
                         placeholder: "Say something to this agent",
                         axis: .vertical, lineLimit: 1...5)
 
-                    Text("NO LABEL — THE COMPOSE BAR'S FORM")
+                    Text("NO LABEL - THE COMPOSE BAR'S FORM")
                         .ccType(CC.type.micro)
                         .foregroundStyle(CC.text.tertiary)
                     Text(
@@ -1155,20 +1155,20 @@ import SwiftUI
                         // The three strings that were measured breaking. Read
                         // them at AX5, which is where the old block hid a
                         // command completely.
-                        note("wraps with ↳ — never fades, never ellipsises")
+                        note("wraps with ↳, never fades, never ellipsises")
                         CCMonoBlock(
                             "git push --force-with-lease origin main && gh pr merge --squash --delete-branch"
                         )
-                        note("a path — never hyphen-broken, never proportional")
+                        note("a path, never hyphen-broken, never proportional")
                         CCMonoBlock("/private/tmp/ccsoak-work.giePJZ/Sources/Feature.swift")
                         note("clears the copy button at every type size")
                         CCMonoBlock(
                             "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", isSmall: true)
-                        note("prose output — soft wrap; ↳ only where a token was cut")
+                        note("prose output, soft wrap; ↳ only where a token was cut")
                         CCMonoBlock(
                             "npm ERR! code ELIFECYCLE\nnpm ERR! Failed at the build script; log at /Users/you/.npm/_logs/2026-07-31T09_14_02_113Z-debug.log",
                             tone: .danger, wraps: true)
-                        note("lineLimit collapses and says so — it never truncates")
+                        note("lineLimit collapses and says so, it never truncates")
                         CCMonoBlock(
                             "{\n  \"tool\": \"Bash\",\n  \"command\": \"rm -rf node_modules && npm install\",\n  \"cwd\": \"/Users/dev/app\"\n}",
                             lineLimit: 2)
@@ -1181,13 +1181,13 @@ import SwiftUI
                         // The only thing that may be shortened, and there is no
                         // `.tail`: tail truncation cuts a command's arguments,
                         // which is the byte a hostile suffix hides behind.
-                        note("a key, wrapped — the default; nothing hidden")
+                        note("a key, wrapped, the default; nothing hidden")
                         CCMonoBlock(Self.publicKey, lineLimit: 3, isSmall: true)
-                        note("middle — keeps the algorithm and the device comment")
+                        note("middle, keeps the algorithm and the device comment")
                         CCMonoBlock(
                             Self.publicKey, lineLimit: 2, wraps: true, truncation: .middle,
                             isSmall: true)
-                        note("head — a hash is identified by its tail")
+                        note("head, a hash is identified by its tail")
                         CCMonoBlock(
                             "sha256:9f2b1c7d4e6a8035bd5c1e2f7a9048c3b6d1e5f082a4c7d9e3b0f6a1c8d2e4b7",
                             lineLimit: 1, truncation: .head, isSmall: true)
@@ -1230,7 +1230,7 @@ import SwiftUI
             section("CCBanner + CCBannerSlot") {
                 VStack(alignment: .leading, spacing: CC.space.xs) {
                     Text(
-                        "One banner. Ever. The slot is handed every candidate and renders the highest-priority one — rejected > offline > stale > cached > gap > truncated."
+                        "One banner. Ever. The slot is handed every candidate and renders the highest-priority one, rejected > offline > stale > cached > gap > truncated."
                     )
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
@@ -1292,9 +1292,9 @@ import SwiftUI
                         // 258 and 258 — no two of the three shared a first
                         // baseline, on the screen whose whole job is to be
                         // trusted.
-                        note("two `fieldLabel` lines reserved — the labels share a baseline")
+                        note("two `fieldLabel` lines reserved, the labels share a baseline")
                         CCStatStrip([
-                            CCStat("Missed decisions", value: "—", spokenValue: "not measured"),
+                            CCStat("Missed decisions", value: "-", spokenValue: "not measured"),
                             CCStat("Seq gaps", value: "0"),
                             CCStat("Reconnects", value: "2"),
                         ])
@@ -1310,7 +1310,7 @@ import SwiftUI
                         // identical in weight to the two real numbers beside it,
                         // while the fact row drew it at #525252 / 2.53:1.
                         note(
-                            "not measured is one colour — `CCStat` and `CCFactValue` both ask `CCMeasured`, so the strip's `—` and the row's `—` cannot drift apart again"
+                            "not measured is one colour, `CCStat` and `CCFactValue` both ask `CCMeasured`, so the strip's `-` and the row's `-` cannot drift apart again"
                         )
                         CCStatStrip([
                             CCStat.unmeasured("Missed decisions"),
@@ -1319,15 +1319,15 @@ import SwiftUI
                         ])
                         CCCard(padding: 0) {
                             VStack(spacing: 0) {
-                                CCFactRow("Missed decisions", value: "—")
-                                CCFactRow("Round trip", value: "—", separator: false)
+                                CCFactRow("Missed decisions", value: "-")
+                                CCFactRow("Round trip", value: "-", separator: false)
                             }
                         }
                         note(
-                            "a tone cannot outrank it — a value nobody took is not also news")
+                            "a tone cannot outrank it, a value nobody took is not also news")
                         CCStatStrip([
                             CCStat(
-                                "Missed decisions", value: "—", tone: .warning,
+                                "Missed decisions", value: "-", tone: .warning,
                                 isUnmeasured: true),
                             CCStat("Reconnects", value: "2"),
                         ])
@@ -1346,7 +1346,7 @@ import SwiftUI
                         VStack(spacing: 0) {
                             CCStepRow(
                                 index: 1,
-                                title: "Option 1 — Tailscale SSH",
+                                title: "Option 1 - Tailscale SSH",
                                 message:
                                     "Authentication rides your tailnet ACLs, and no port is exposed anywhere.",
                                 command: "tailscale up --ssh"
@@ -1356,7 +1356,7 @@ import SwiftUI
                             CCHairline()
                             CCStepRow(
                                 index: 2,
-                                title: "Option 2 — macOS Remote Login",
+                                title: "Option 2 - macOS Remote Login",
                                 message:
                                     "System Settings → General → Sharing → Remote Login.",
                                 isComplete: true)
@@ -1427,7 +1427,7 @@ import SwiftUI
         private var proseSection: some View {
             section("CCProse") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
-                    note("identifiers and commands are monospace — always, and in prose too")
+                    note("identifiers and commands are monospace, always, and in prose too")
                     CCProse(
                         "In `ios/CodeConnect/Net/Sender.swift` lines 12–28",
                         style: CC.type.footnote, color: CC.text.secondary)
@@ -1438,7 +1438,7 @@ import SwiftUI
                         "Send to CodeConnect · `cc-tests`", style: CC.type.headline,
                         color: CC.text.primary)
                     note(
-                        "an **odd** number of backticks is not markup — it is a string with a backtick in it, and it renders literally rather than being silently eaten"
+                        "an **odd** number of backticks is not markup, it is a string with a backtick in it, and it renders literally rather than being silently eaten"
                     )
                     CCProse(
                         "a lone ` backtick stays put", style: CC.type.footnote,
@@ -1457,7 +1457,7 @@ import SwiftUI
             section("CCActionPair") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "40 : 60, 12pt gap — on a 370pt bar that is 143.20 / 214.80, on the first frame"
+                        "40 : 60, 12pt gap, on a 370pt bar that is 143.20 / 214.80, on the first frame"
                     )
                     CCActionBar {
                         CCActionPair {
@@ -1483,7 +1483,7 @@ import SwiftUI
                             ) { lastAction = "allow" }
                         }
                     }
-                    note("the ruler — flat fills, so the split is measurable to the pixel")
+                    note("the ruler, flat fills, so the split is measurable to the pixel")
                     CCActionBar {
                         CCActionPair {
                             Rectangle().fill(CC.color.danger).frame(height: CC.size.controlLg)
@@ -1503,7 +1503,7 @@ import SwiftUI
             section("CCHunkHeader") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "a band that carries actions is a control, so it is 44pt — tap or press and hold. The gesture lives here because the hunk's own rows carry `textSelection`, which always wins the long press"
+                        "a band that carries actions is a control, so it is 44pt, tap or press and hold. The gesture lives here because the hunk's own rows carry `textSelection`, which always wins the long press"
                     )
                     VStack(spacing: 0) {
                         CCHunkHeader(
@@ -1521,7 +1521,7 @@ import SwiftUI
                     }
                     .ccSurface(.surface, radius: CC.radius.md)
 
-                    note("no actions — the band is a caption again, 28pt, and draws no glyph")
+                    note("no actions, the band is a caption again, 28pt, and draws no glyph")
                     VStack(spacing: 0) {
                         CCHunkHeader(
                             header: "@@ -40,3 +42,3 @@ private var barWidth: CGFloat",
@@ -1553,7 +1553,7 @@ import SwiftUI
             section("CCScreenMark") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "one construction, one ramp — a shared token was not enough, because both sides already used `CC.size.emptyGlyphCircle` and still measured 150.33 against 108.67 at AX5"
+                        "one construction, one ramp, a shared token was not enough, because both sides already used `CC.size.emptyGlyphCircle` and still measured 150.33 against 108.67 at AX5"
                     )
                     HStack(spacing: CC.space.xl) {
                         CCScreenMark(glyph: "terminal")
@@ -1580,11 +1580,11 @@ import SwiftUI
             section("CCKeyCap") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "40pt of cap inside 44pt of finger — the 4pt is real layout, not a `contentShape` reaching outside the button. Press one: the cap contracts 6% and lifts a step"
+                        "40pt of cap inside 44pt of finger, the 4pt is real layout, not a `contentShape` reaching outside the button. Press one: the cap contracts 6% and lifts a step"
                     )
                     keyRow
                     note(
-                        "latched `ctrl` is the Vercel signature — `#EDEDED` fill, `#000` label — the same treatment a primary button and a selected chip take, because there is only one in the product"
+                        "latched `ctrl` is the Vercel signature, `#EDEDED` fill, `#000` label, the same treatment a primary button and a selected chip take, because there is only one in the product"
                     )
                     HStack(spacing: CC.space.xs) {
                         CCKeyCap("ctrl", spokenLabel: "Control, on", isLatched: true) {
@@ -1644,7 +1644,7 @@ import SwiftUI
             section("CCProgressRing") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "the only spinner in the app. `ProgressView` is the system's and cannot be sized honestly against a 13pt label. Under Reduce Motion it stops turning and drops to 55% — a static mark that still reads as *not finished*"
+                        "the only spinner in the app. `ProgressView` is the system's and cannot be sized honestly against a 13pt label. Under Reduce Motion it stops turning and drops to 55%, a static mark that still reads as *not finished*"
                     )
                     HStack(alignment: .center, spacing: CC.space.xl) {
                         VStack(spacing: CC.space.xs) {
@@ -1703,7 +1703,7 @@ import SwiftUI
             section("CCSkeleton") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "**no shimmer, ever.** A travelling highlight is an animation that implies progress, and this is the state where there may be none — on a stalled link it is a lie told sixty times a second"
+                        "**no shimmer, ever.** A travelling highlight is an animation that implies progress, and this is the state where there may be none, on a stalled link it is a lie told sixty times a second"
                     )
                     CCCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -1736,7 +1736,7 @@ import SwiftUI
             section("CCDiffFileChip") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "32pt of chip, 44pt of finger, and **no selected state** — the strip is a jump list, and the document does not know which file is under the fold. Marking the last one tapped would be wrong the moment you scrolled"
+                        "32pt of chip, 44pt of finger, and **no selected state**, the strip is a jump list, and the document does not know which file is under the fold. Marking the last one tapped would be wrong the moment you scrolled"
                     )
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: CC.space.xs) {
@@ -1748,7 +1748,7 @@ import SwiftUI
                     .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 
                     note(
-                        "the sticky band. At accessibility sizes it draws the **basename** rather than head-truncating a path down to `….swift` — a shorter true string beats a longer truncated one"
+                        "the sticky band. At accessibility sizes it draws the **basename** rather than head-truncating a path down to `….swift`, a shorter true string beats a longer truncated one"
                     )
                     VStack(spacing: 0) {
                         ForEach(Self.files) { file in
@@ -1764,7 +1764,7 @@ import SwiftUI
             section("CCDiffRow") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "three parts to the change signal — a 2pt bar, a marker glyph and a **6%** row tint. Not 12%: over a full-bleed mono block a 12% fill reads as a highlighter and after two screens you stop seeing it"
+                        "three parts to the change signal, a 2pt bar, a marker glyph and a **6%** row tint. Not 12%: over a full-bleed mono block a 12% fill reads as a highlighter and after two screens you stop seeing it"
                     )
                     let metrics = CCDiffMetrics(fontSize: 12, availableWidth: 340)
                     let map = CCDiffWordHighlight.map(for: Self.gridLines)
@@ -1780,7 +1780,7 @@ import SwiftUI
                     .ccSurface(.surface, radius: CC.radius.md)
 
                     note(
-                        "the fold is a control, so it is 44pt — and its `⋯` is `textTertiary`, not the 2.54:1 `textDisabled` reserved for gutter numbers and inactive chrome"
+                        "the fold is a control, so it is 44pt, and its `⋯` is `textTertiary`, not the 2.54:1 `textDisabled` reserved for gutter numbers and inactive chrome"
                     )
                     CCGapMarker(label: "Truncated at 512KB")
                 }

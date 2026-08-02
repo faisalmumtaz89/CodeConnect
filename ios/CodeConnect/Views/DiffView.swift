@@ -171,7 +171,7 @@ struct DiffSheet: View {
         CCEmptyState(
             glyph: "bolt.horizontal.circle",
             title: "Not connected",
-            message: "Not connected — the daemon cannot be asked for a diff.",
+            message: "Not connected. The daemon cannot be asked for a diff.",
             tone: .warning,
             actionTitle: "Try again",
             action: { start(force: true) }
@@ -914,7 +914,7 @@ struct DiffDocumentView: View {
     /// chrome before the first line of code. The marker states the
     /// mechanism where the mechanism is; up here, two facts and no lesson.
     private func partialityBanner(_ coverage: Coverage) -> CCBannerItem? {
-        let cut = "Truncated by the daemon at its 512KB cap — this is not the whole diff."
+        let cut = "Truncated by the daemon at its 512KB cap. This is not the whole diff."
         let drawn = "\(coverage.drawn.formatted()) of \(coverage.total.formatted()) lines drawn."
 
         switch (raw.truncated, coverage.isPartial) {

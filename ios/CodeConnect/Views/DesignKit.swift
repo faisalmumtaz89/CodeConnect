@@ -451,8 +451,6 @@ extension CC {
         static let iconLg: CGFloat = 20
         /// A glyph container: the circle around a sheet's close cross.
         static let glyph: CGFloat = 28
-        /// The smaller one: the square behind `CCMonoBlock`'s copy affordance.
-        static let glyphSm: CGFloat = 24
         /// The empty-state mark — a 32pt glyph inside a 64pt bordered circle.
         static let emptyGlyph: CGFloat = 32
         static let emptyGlyphCircle: CGFloat = 64

@@ -28,16 +28,16 @@ struct GapNotice: Sendable, Hashable {
         switch cause {
         case .daemonResync(let skipped):
             if let skipped {
-                return "Resynced — the daemon fell \(skipped) events behind and replayed the log."
+                return "Resynced. The daemon fell \(skipped) events behind and replayed the log."
             }
-            return "Resynced — the daemon replayed the log."
+            return "Resynced. The daemon replayed the log."
         case .sequenceJump(let missing):
-            return "Resynced — \(missing) event\(missing == 1 ? "" : "s") not shown."
+            return "Resynced, \(missing) event\(missing == 1 ? "" : "s") not shown."
         case .logRewound:
-            return "Resynced — the daemon's log was reset; cached history was discarded."
+            return "Resynced. The daemon's log was reset; cached history was discarded."
         case .cacheDiscarded:
             return
-                "Resynced — this Mac now tells its runs apart, so history cached under the old name was discarded."
+                "Resynced. This Mac now tells its runs apart, so history cached under the old name was discarded."
         }
     }
 }
@@ -96,7 +96,7 @@ final class SessionState {
     /// that the session is degraded.
     var silentBecauseOfPermissions: String? {
         permissionMode == "bypassPermissions"
-            ? "Permissions bypassed — this run decides for itself and will not ask you"
+            ? "Permissions bypassed - this run decides for itself and will not ask you"
             : nil
     }
 

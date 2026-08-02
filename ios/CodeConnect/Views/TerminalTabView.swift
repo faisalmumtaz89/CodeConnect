@@ -1216,7 +1216,7 @@ struct HostKeyChangedCard: View {
                     .padding(.top, CC.space.md)
 
                 Text(
-                    "CodeConnect pinned a key for \(change.host):\(change.port) and is being offered a different one. That happens when a Mac is rebuilt or its host keys are regenerated — and it also happens when something else is answering on that address. Nothing has been sent."
+                    "CodeConnect pinned a key for \(change.host):\(change.port) and is being offered a different one. That happens when a Mac is rebuilt or its host keys are regenerated, and it also happens when something else is answering on that address. Nothing has been sent."
                 )
                 .ccType(CC.type.body)
                 .foregroundStyle(CC.text.secondary)
@@ -1268,7 +1268,7 @@ struct HostKeyChangedCard: View {
                 // follows — none of which this button needs to repeat in the
                 // one colour reserved for `Forget this iPhone's SSH key`.
                 CCButton(
-                    "I checked — trust the new key", variant: .secondary, size: .lg,
+                    "I checked - trust the new key", variant: .secondary, size: .lg,
                     fullWidth: true
                 ) {
                     confirming = true
