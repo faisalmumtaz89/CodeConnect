@@ -305,7 +305,7 @@ mod tests {
         for host in [
             // A tailnet address and a MagicDNS name — the ordinary case.
             "100.117.103.23",
-            "faisals-mac-studio.tailca4006.ts.net",
+            "some-mac.tailnet-example.ts.net",
             // A tailnet with its own domain, and an operator who pinned `ws_bind`
             // to something reachable on purpose. Unfamiliar is not broken.
             "mac.internal.example.com",

@@ -59,7 +59,7 @@ final class PairingReachabilityTests: XCTestCase {
         for host in [
             // The ordinary cases: a tailnet address and a MagicDNS name.
             "100.117.103.23",
-            "faisals-mac-studio.tailca4006.ts.net",
+            "some-mac.tailnet-example.ts.net",
             // Unfamiliar is not broken. A tailnet with its own domain, or an
             // operator who pinned `ws_bind` to something reachable on purpose.
             "mac.internal.example.com",
