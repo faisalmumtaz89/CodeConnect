@@ -104,34 +104,77 @@ struct PairingView: View {
             .padding(.top, CC.rhythm.text)
     }
 
+    /// The app introducing itself, because this is the first thing a stranger sees.
+    ///
+    /// It used to open with "Pair with your Mac" and the line "Run this on the Mac
+    /// running `ccd`". Neither the product's name nor its purpose appeared
+    /// anywhere, and `ccd` is a word the reader has never met — the screen assumed
+    /// a Mac already set up, without ever saying so or how.
     @ViewBuilder
-    private var pairingInvitation: some View {
-        Text("Pair with your Mac")
+    private var identity: some View {
+        CCMark(size: 52)
+            .padding(.bottom, CC.rhythm.textSurface)
+
+        Text("CodeConnect")
             .ccType(CC.type.display)
             .foregroundStyle(CC.text.primary)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.bottom, CC.space.xxl)
 
-        Text("Run this on the Mac running ccd, then scan the code it prints.")
+        Text("Approve what your coding agents do, from anywhere.")
             .ccType(CC.type.body)
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
             // 50–75 characters is the readable measure.
             .frame(maxWidth: 320, alignment: .leading)
-            .padding(.bottom, CC.space.xl)
+            .padding(.top, CC.rhythm.text)
+            .padding(.bottom, CC.rhythm.sections)
+    }
 
+    @ViewBuilder
+    private var pairingInvitation: some View {
+        identity
+
+        CCSectionHeader("To get started")
+
+        // **Four steps, because four things are genuinely required**, and the
+        // screen used to name only two of them. Installing the Mac side and
+        // joining a tailnet were assumed; a reader who had done neither was told
+        // to run a command that does not exist on their machine.
+        //
+        // They are *instructions*, not verified state: no tick marks, and nothing
+        // here claims to know anything about the reader's Mac. The app cannot see
+        // it, and a checkmark it could not earn is the thing this product refuses
+        // to draw.
         CCCard(padding: 0) {
             VStack(spacing: 0) {
-                CCStepRow(index: 1, title: "At the Mac", command: "codeconnect pair")
+                // The address is the only thing on this screen a reader cannot
+                // get anywhere else, and as prose it was something to squint at
+                // and retype. Given as a command it is monospaced, unambiguous
+                // about where the slashes fall, and copyable — the same
+                // affordance step 3 gets, for the same reason.
+                CCStepRow(
+                    index: 1,
+                    title: "Install CodeConnect on your Mac",
+                    message: "Clone it and run ./install.sh — you only do this once.",
+                    command: "github.com/faisalmumtaz89/CodeConnect")
                 CCHairline()
                 CCStepRow(
                     index: 2,
-                    title: "Then scan the code it prints",
+                    title: "Put both devices on the same Tailscale network",
                     message:
-                        "Add --ssh if you also want the live terminal. It authorises this iPhone's key, and tells you so first.")
+                        "CodeConnect only ever talks to your Mac over your own private tailnet. It never goes through a server of ours.")
+                CCHairline()
+                CCStepRow(index: 3, title: "Run this at the Mac", command: "codeconnect pair")
+                CCHairline()
+                CCStepRow(
+                    index: 4,
+                    title: "Scan the code it prints",
+                    message:
+                        "Add --ssh to that command if you also want the live terminal. It authorises this iPhone's key, and tells you so first.")
             }
         }
-        .padding(.bottom, CC.space.xxl)
+        .padding(.top, CC.rhythm.textSurface)
+        .padding(.bottom, CC.rhythm.sections)
 
         // A scan error is not a dead end and the primary stays enabled —
         // retrying is the expected action.
@@ -183,7 +226,6 @@ struct PairingView: View {
         // exactly a device that may have no Mac either — and the first version of
         // this sat inside `if QRScannerView.isSupported`, so it vanished on every
         // Simulator and would have vanished for anyone whose camera is restricted.
-        sampleModeButton
 
         if showManualEntry {
             manualEntry
@@ -197,6 +239,14 @@ struct PairingView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.space.xl)
+
+        // **Last, after everything about pairing has finished.** Placed between the
+        // manual-entry button and this screen's closing note, it split a footnote
+        // about the *pairing code* away from the pairing content it explains, so
+        // the reader met an unrelated escape hatch mid-thought. Sample mode is not
+        // a third way to pair; it is what you do when you cannot.
+        sampleModeButton
+            .padding(.top, CC.rhythm.sections)
     }
 
     /// The card is replaced in place rather than growing a spinner underneath
