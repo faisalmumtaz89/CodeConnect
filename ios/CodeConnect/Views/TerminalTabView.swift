@@ -836,6 +836,15 @@ struct SwiftTermView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalView {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
+        // The hosted tmux server runs `mouse on` (that is what makes wheel
+        // scrolling work at the Mac), so it advertises mouse tracking to every
+        // client — including this one. SwiftTerm answers by turning a
+        // one-finger pan into SGR button-drag events, which tmux reads as
+        // copy-mode *selection*: touch-scrolling the terminal would start
+        // highlighting text instead. It never produces wheel events, so
+        // opting in buys nothing and costs the pan. Declined here until phone
+        // scrolling is designed deliberately.
+        view.allowMouseReporting = false
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         // The bug this avoids: `.systemBackground` renders **white** under a
         // light trait, and a white terminal is not a thing this product has.

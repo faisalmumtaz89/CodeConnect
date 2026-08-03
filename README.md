@@ -32,6 +32,8 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 ## Why you might not want this (yet)
 
 - **The terminal is tmux's while a session runs.** The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
+  - *Scrolling*: the private server runs `mouse on`, so the wheel scrolls the session's own history — up to `tmux_history_limit` lines (50,000 by default) of conversation. The trade tmux imposes: dragging now selects through tmux's copy mode; hold **Shift** to select through your terminal natively instead.
+  - *Padding*: some terminals draw full-screen apps edge to edge by design. Warp pads them with **0px by default** — Settings → Appearance → Full-screen Apps lets you set custom padding or match the blocks UI, which restores the exact framing plain `claude` gets. That is the terminal's presentation of tmux, and the terminal's setting is the right place to change it.
 - **You build it yourself.** There are no packaged releases: the daemon needs a Rust toolchain, the app needs Xcode 26 or newer, and your phone runs your own build.
 - **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
 

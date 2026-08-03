@@ -65,6 +65,9 @@ fn default_log_max_bytes() -> u64 {
 fn default_log_rotate_secs() -> u64 {
     300
 }
+fn default_tmux_history_limit() -> u32 {
+    50_000
+}
 fn default_ws_max_connections() -> usize {
     64
 }
@@ -261,6 +264,19 @@ pub struct Config {
     /// status line is the one thing that gives the hosting away.
     pub tmux_status: bool,
 
+    /// Lines of scrollback each hosted pane keeps.
+    ///
+    /// This is what the wheel scrolls: Claude Code renders inline under tmux,
+    /// so the conversation *is* the pane's history, and tmux's stock 2,000
+    /// lines silently amputated everything older on a long run. Fixed at pane
+    /// creation by tmux, so it reaches the server before the first pane —
+    /// raising it later cannot enlarge panes that already exist.
+    ///
+    /// 50,000 dense 120-column lines cost roughly 30 MiB per pane; the ceiling
+    /// exists so a typo in a config file cannot commit gigabytes.
+    #[serde(default = "default_tmux_history_limit")]
+    pub tmux_history_limit: u32,
+
     /// How many tailnet WebSocket connections may exist at once.
     ///
     /// The accept loop used to `spawn` unconditionally, so anything that could
@@ -362,6 +378,7 @@ impl Default for Config {
             claude_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
+            tmux_history_limit: default_tmux_history_limit(),
             tmux_status: false,
             ws_max_connections: default_ws_max_connections(),
             ws_max_per_peer: default_ws_max_per_peer(),
@@ -415,6 +432,17 @@ impl Config {
     /// Clamp values whose extremes would break an invariant rather than merely
     /// behave oddly.
     fn sanitised(mut self) -> Config {
+        // Below 1,000 the wheel hits a wall mid-conversation and the scroll fix
+        // this exists for is silently undone; above 200,000 a handful of panes
+        // can hold gigabytes of one agent's stdout.
+        if !(1_000..=200_000).contains(&self.tmux_history_limit) {
+            let clamped = self.tmux_history_limit.clamp(1_000, 200_000);
+            eprintln!(
+                "codeconnect: tmux_history_limit {} is outside 1000..=200000; using {clamped}",
+                self.tmux_history_limit
+            );
+            self.tmux_history_limit = clamped;
+        }
         if self.gate_timeout_ms <= self.hold_ms {
             eprintln!(
                 "codeconnect: gate_timeout_ms ({}) must exceed hold_ms ({}); raising it",

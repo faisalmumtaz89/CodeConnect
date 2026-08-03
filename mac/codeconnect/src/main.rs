@@ -139,6 +139,7 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
         &argv,
         tmux::terminal_size(),
         config.tmux_status,
+        config.tmux_history_limit,
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
 

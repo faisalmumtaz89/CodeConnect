@@ -24,6 +24,71 @@ fn base() -> Result<Command> {
     Ok(command)
 }
 
+/// The private server's config, written before every spawn and handed to tmux
+/// with `-f` so it is read **at server start — before the first pane exists**.
+///
+/// That ordering is the whole point, and it was measured, not assumed:
+/// `history-limit` is fixed into a pane at creation, `set-option -g` cannot
+/// start a server, and a `set-option` run after `new-session` leaves the first
+/// pane — the only pane — on tmux's stock 2,000 lines. With Claude rendering
+/// inline, the pane history *is* the conversation, and 2,000 lines is where
+/// "scroll up to see what happened" quietly stopped working.
+///
+/// `mouse on` is the scroll fix itself. Without it tmux never advertises mouse
+/// tracking, the outer terminal falls back to translating the wheel into arrow
+/// keys, and Claude receives arrows it neither wanted nor can use — the
+/// "scroll wheel is sending arrow keys" warning verbatim. With it, the wheel
+/// enters tmux copy-mode over the inline transcript, which is exactly the
+/// native-terminal scrollback plain `claude` gets for free. The remaining
+/// three lines are Anthropic's own documented tmux configuration for Claude
+/// Code (code.claude.com/docs/en/terminal-config): passthrough and extended
+/// keys are what keep bindings like shift+enter working under a host.
+fn render_server_conf(history_limit: u32) -> String {
+    format!(
+        "# Written by codeconnect before each spawn; edits here are overwritten.\n\
+         # Change history via `tmux_history_limit` in config.json instead.\n\
+         set -g mouse on\n\
+         set -g history-limit {history_limit}\n\
+         set -g allow-passthrough on\n\
+         set -s extended-keys on\n\
+         set -as terminal-features 'xterm*:extkeys'\n"
+    )
+}
+
+fn write_server_conf(history_limit: u32) -> Result<PathBuf> {
+    let path = protocol::root_dir().join("tmux.conf");
+    let body = render_server_conf(history_limit);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    std::fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    Ok(path)
+}
+
+/// Bring an **already-running** server up to the config's options.
+///
+/// The conf file above only speaks at server start, so a server that predates
+/// this build — or this config value — never hears it. `mouse` is a session
+/// option applied globally and takes effect immediately, upgrading even the
+/// session the user is attached to right now. `history-limit` genuinely cannot
+/// reach panes that already exist — tmux fixes capacity at pane creation — so
+/// it is set for the panes that come next and the shortfall is accepted rather
+/// than papered over.
+///
+/// Idempotent, and quiet on failure by design: if there is no server yet, the
+/// conf file is about to say all of this better.
+fn ensure_server_options(history_limit: u32) {
+    let limit = history_limit.to_string();
+    for args in [
+        ["set-option", "-g", "mouse", "on"],
+        ["set-option", "-g", "history-limit", limit.as_str()],
+        ["set-option", "-s", "extended-keys", "on"],
+        ["set-option", "-g", "allow-passthrough", "on"],
+    ] {
+        let _ = run(&args);
+    }
+}
+
 /// Run a tmux command and capture stdout. `Ok(None)` when tmux exits non-zero.
 ///
 /// Correct only for subcommands where non-zero genuinely means "nothing to
@@ -105,8 +170,15 @@ pub fn new_session(
     argv: &[String],
     size: Option<(u16, u16)>,
     status_bar: bool,
+    history_limit: u32,
 ) -> Result<()> {
+    // Both halves, deliberately: `-f` speaks when this command *starts* the
+    // server (options in place before the first pane), and the runtime pass
+    // upgrades a server that was already running from an older build.
+    let conf = write_server_conf(history_limit)?;
+    ensure_server_options(history_limit);
     let mut command = base()?;
+    command.arg("-f").arg(&conf);
     command.args(["new-session", "-d", "-s", name, "-c", cwd]);
     if let Some((cols, rows)) = size {
         command.args(["-x", &cols.to_string(), "-y", &rows.to_string()]);
@@ -211,6 +283,10 @@ pub fn send_key(name: &str, key: &str) -> Result<()> {
 /// the session natively and closing the tab leaves the session running.
 pub fn exec_attach(name: &str) -> Result<std::convert::Infallible> {
     use std::os::unix::process::CommandExt;
+    // A session that exists means a server that is running, and it may predate
+    // the scroll fix: bring its options up before the user's client connects,
+    // so the wheel works in the session they are about to look at.
+    ensure_server_options(protocol::config::Config::load().tmux_history_limit);
     let error = base()?
         .args(["attach-session", "-t", &target_session(name)])
         .exec();
@@ -284,6 +360,25 @@ mod tests {
         assert_eq!(target_pane("cc-1"), "=cc-1:");
     }
 
+    /// The conf is what makes the first pane correct, so its content is pinned:
+    /// lose `mouse on` and scrolling regresses to arrow-key noise; lose
+    /// `history-limit` and the first pane silently reverts to tmux's 2,000.
+    #[test]
+    fn the_server_conf_carries_the_scroll_contract() {
+        // The rendered string, not the file: the file's path is shared with the
+        // live-tmux test running in parallel, and reading it back raced.
+        let body = render_server_conf(12_345);
+        for line in [
+            "set -g mouse on",
+            "set -g history-limit 12345",
+            "set -g allow-passthrough on",
+            "set -s extended-keys on",
+            "set -as terminal-features 'xterm*:extkeys'",
+        ] {
+            assert!(body.contains(line), "conf lost {line:?}:\n{body}");
+        }
+    }
+
     #[test]
     fn live_tmux_accepts_both_target_forms() {
         // Guards against a tmux release changing the parse. Uses a throwaway
@@ -300,6 +395,7 @@ mod tests {
             ],
             Some((80, 24)),
             false,
+            50_000,
         );
         if created.is_err() {
             return; // no tmux in this environment; the unit test above still holds
