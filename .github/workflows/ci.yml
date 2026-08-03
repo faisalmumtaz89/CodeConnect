@@ -110,7 +110,14 @@ jobs:
         run: |
           # This file is excluded because it necessarily contains the pattern it
           # searches for, and would otherwise always match itself.
-          if grep -rIn --exclude-dir=.git --exclude-dir=internal \
+          #
+          # `site/` is excluded because its pages are the published privacy
+          # policy and support page, and App Store review requires both to name
+          # a real contact. This rule exists to catch identifiers that leak into
+          # code by accident; those two files exist to publish one on purpose.
+          # The exclusion is that narrow deliberately — a name in any other
+          # directory is still a failure.
+          if grep -rIn --exclude-dir=.git --exclude-dir=internal --exclude-dir=site \
               --exclude=LICENSE --exclude=ci.yml \
               -iE "faisal|mumtaz|tailca[0-9]+|/Users/[a-z]+/(Documents|Desktop)|[0-9]+@gmail\.com" . \
               | grep -v 'github.com/faisalmumtaz89/CodeConnect'; then
