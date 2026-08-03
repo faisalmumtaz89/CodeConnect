@@ -56,6 +56,9 @@ final class SessionState {
     /// When the on-disk copy was written. Non-nil only until live data arrives,
     /// so the UI can say "as of 6 minutes ago" and mean it.
     private(set) var loadedFromCacheAt: Date?
+    /// When *this launch* loaded that cache — the banner's grace clock, as
+    /// distinct from `loadedFromCacheAt`, which is how old the data itself is.
+    private(set) var cacheRestoredAt: Date?
     private(set) var hasLiveData = false
     private(set) var gap: GapNotice?
     /// True when the backfill started mid-log, so the top of the timeline is
@@ -152,6 +155,7 @@ final class SessionState {
         guard events.isEmpty, pendingMerge.isEmpty else { return }
         events = cached.events
         loadedFromCacheAt = cached.cachedAt
+        cacheRestoredAt = Date()
         lastEventAt = cached.events.last?.date
         if let titled = cached.events.reversed().first(where: { $0.aiTitle != nil }) {
             aiTitle = titled.aiTitle
@@ -203,6 +207,7 @@ final class SessionState {
         }
 
         loadedFromCacheAt = nil
+        cacheRestoredAt = nil
         // Once seq 1 is present the timeline really does start at the start.
         if events.first?.seq == 1 { headTruncated = false }
         scheduleRebuild()
@@ -220,6 +225,7 @@ final class SessionState {
         guard lastSeq > 0 else { return }
         hasLiveData = true
         loadedFromCacheAt = nil
+        cacheRestoredAt = nil
     }
 
     /// The daemon's log no longer contains what we cached; start clean rather
@@ -245,6 +251,7 @@ final class SessionState {
         pendingSeqs.removeAll()
         missingRanges.removeAll()
         loadedFromCacheAt = nil
+        cacheRestoredAt = nil
         lastEventAt = nil
         headTruncated = false
         aiTitle = nil

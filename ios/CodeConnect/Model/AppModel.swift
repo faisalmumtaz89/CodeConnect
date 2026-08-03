@@ -96,6 +96,10 @@ final class AppModel {
     private(set) var states: [String: SessionState] = [:]
     /// Age of the fleet list when it came off disk rather than the wire.
     private(set) var fleetCachedAt: Date?
+    /// When *this launch* put that cached list on screen. The cached banner's
+    /// grace clock — distinct from `fleetCachedAt`, which is how old the data
+    /// is, not how long the launch has had to replace it.
+    private(set) var fleetCacheRestoredAt: Date?
     private(set) var hasLiveFleet = false
     /// Ticks once a second so every age on screen stays true without each view
     /// owning a timer.
@@ -381,6 +385,10 @@ final class AppModel {
             fixtureCachedFleet = true
             hasLiveFleet = false
             fleetCachedAt = Date().addingTimeInterval(-age)
+            // The seam stages "the banner is up", so the grace is staged as
+            // already passed — the render harness is photographing the earned
+            // state, not the launch that leads to it.
+            fleetCacheRestoredAt = .distantPast
         }
     #endif
 
@@ -439,6 +447,12 @@ final class AppModel {
     }
 
     #if DEBUG
+        /// Test seam: run the real cold-open restore against this model's cache.
+        ///
+        /// `loadCachedFleet` is private and scheduled by `start()`, which also
+        /// arms timers and dials — none of which a test about restore wants.
+        func loadCachedFleetForTesting() async { await loadCachedFleet() }
+
         /// Test seam: start from a known fleet without a `sessions` frame.
         ///
         /// `summaries` is `private(set)` because the daemon owns it. A removal
@@ -529,6 +543,7 @@ final class AppModel {
         pendingPairing = nil
         hasLiveFleet = false
         fleetCachedAt = nil
+        fleetCacheRestoredAt = nil
         forgetDaemonKeying()
         Task { await cache.clearAll() }
     }
@@ -1101,6 +1116,7 @@ final class AppModel {
         #endif
         hasLiveFleet = true
         fleetCachedAt = nil
+        fleetCacheRestoredAt = nil
     }
 
     /// Cold open: show the last-known fleet immediately, stamped with its age,
@@ -1112,6 +1128,7 @@ final class AppModel {
         guard let cached = await cache.loadFleet(), !hasLiveFleet else { return }
         summaries = cached.sessions
         fleetCachedAt = cached.cachedAt
+        fleetCacheRestoredAt = Date()
         for summary in cached.sessions {
             let sessionState = state(for: summary.sessionKey)
             if let events = await cache.loadEvents(key: summary.sessionKey) {

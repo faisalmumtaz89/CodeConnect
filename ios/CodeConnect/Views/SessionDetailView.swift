@@ -590,6 +590,15 @@ private struct SessionBanner: View {
 
     private var cachedBanner: CCBannerItem? {
         guard let cachedAt = state.loadedFromCacheAt, !state.hasLiveData else { return nil }
+        // The same earned rule as the fleet's cached banner, for the same flash:
+        // a cold deep link paints this screen from the cache and the live replay
+        // lands half a second later. Amber in that half-second is noise.
+        guard
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: state.cacheRestoredAt,
+                connectingSince: model.connection.connectingSince,
+                now: model.now)
+        else { return nil }
         return CCBannerItem(
             .cached,
             title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",

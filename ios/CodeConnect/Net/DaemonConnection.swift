@@ -61,7 +61,23 @@ final class DaemonConnection {
 
     // MARK: Observable state
 
-    private(set) var phase: Phase = .idle
+    private(set) var phase: Phase = .idle {
+        didSet {
+            // Maintained here rather than at any caller, so every present and
+            // future writer of `phase` keeps it true by construction. The
+            // earliest entry into `.connecting` is kept: re-entering while
+            // already dialling is the same attempt, not a fresh grace.
+            switch phase {
+            case .connecting: connectingSince = connectingSince ?? Date()
+            default: connectingSince = nil
+            }
+        }
+    }
+    /// When the current dial attempt began, or nil when not dialling. The
+    /// banners' grace clock: a banner that flashes during the seconds an
+    /// ordinary connect is allowed to take is noise, and this is the fact that
+    /// says those seconds are still running.
+    private(set) var connectingSince: Date?
     private(set) var capabilities: Capabilities?
     /// The `hello_ack` this connection got, or nil before the handshake.
     private(set) var helloAck: HelloAck?

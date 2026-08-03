@@ -256,6 +256,30 @@ final class SessionRemovalTests: XCTestCase {
         XCTAssertEqual(model.tmuxName(for: hosted.sessionKey), "cc-1")
     }
 
+    // MARK: The cached-banner clocks
+
+    /// The grace clock's lifecycle, through the real restore and the real
+    /// frame handler. `fleetCacheRestoredAt` is when *this launch* painted the
+    /// cache — the fact the banner's grace runs on — and it must exist exactly
+    /// while the cached fleet is what is on screen.
+    func testTheRestoreClockIsSetByRestoreAndClearedByTheFirstLiveFrame() async {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = EventCache(root: root)
+        await cache.saveFleet([summary(lifecycle: "exited")])
+
+        let model = connectedModel(cache: cache)
+        XCTAssertNil(model.fleetCacheRestoredAt, "no restore has happened yet")
+
+        await model.loadCachedFleetForTesting()
+        XCTAssertNotNil(model.fleetCachedAt)
+        XCTAssertNotNil(model.fleetCacheRestoredAt, "the restore stamps the grace clock")
+
+        model.connection.injectForTesting(.sessions([]))
+        XCTAssertNil(model.fleetCachedAt, "the first live frame retires the cache")
+        XCTAssertNil(model.fleetCacheRestoredAt, "and its clock with it")
+    }
+
     // MARK: What has to be cleaned up, and why
 
     private func tempRoot() -> URL {

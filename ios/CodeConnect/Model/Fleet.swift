@@ -180,6 +180,63 @@ enum FleetCount {
 /// property that matters — *if the fleet is cached, its age is in the banner, no
 /// matter which level won* — is a function that can be asserted.
 enum FleetFreshness {
+    /// How long a launch may quietly work before the screen says anything
+    /// about it. One constant for both banners: the link banner has held this
+    /// grace while `connecting` since it was written — "a banner that flashes
+    /// on every ordinary reconnect is noise" — and the cached banner flashing
+    /// amber for the half-second before the first live frame was the same
+    /// noise through a gap in the same rule.
+    static let launchGrace: TimeInterval = 2
+
+    /// Whether a standalone cached banner has earned its place.
+    ///
+    /// `restoredAt` is when this launch put the cached content on screen — not
+    /// the cache's own age, which says how old the *data* is, not how long the
+    /// launch has had to replace it. Until the grace passes, "nothing live has
+    /// arrived" is a complaint about a launch that has not had a fair chance.
+    ///
+    /// `connectingSince` is the second clock, and it is not redundant: on a
+    /// *reconnect* the restore grace is long spent, and without this term the
+    /// amber banner would fill the fresh dial's own grace window — the launch
+    /// flash reappearing at every reconnect. While a dial is running, its
+    /// grace must pass too; the banner waits out whichever clock ends later.
+    static func cachedBannerEarned(
+        restoredAt: Date?, connectingSince: Date?, now: Date
+    ) -> Bool {
+        guard let restoredAt else { return false }
+        guard now.timeIntervalSince(restoredAt) >= launchGrace else { return false }
+        if let connectingSince, now.timeIntervalSince(connectingSince) < launchGrace {
+            return false
+        }
+        return true
+    }
+
+    /// Which banner the fleet's slot shows, decided as a value so the rule is
+    /// testable apart from the view that renders it.
+    enum BannerChoice: Equatable {
+        /// The link banner alone (no cached content behind it).
+        case link
+        /// One banner carrying both facts: the link's classification, led by
+        /// the cache's age.
+        case compound
+        /// The cached notice alone — only once earned.
+        case cachedOnly
+        case none
+    }
+
+    /// The composition rule `FleetBanner` renders. The link and the cache are
+    /// not alternatives: when both have something to say they merge into one
+    /// banner ("one banner, ever"), and the standalone cached notice exists
+    /// only for the case where the link has nothing to say and the cache has
+    /// earned the right to speak.
+    static func bannerChoice(hasLink: Bool, hasStamp: Bool, earned: Bool) -> BannerChoice {
+        switch (hasLink, hasStamp) {
+        case (true, true): return .compound
+        case (true, false): return .link
+        case (false, _): return earned && hasStamp ? .cachedOnly : .none
+        }
+    }
+
     /// How old the fleet on screen is, or `nil` when it came off the wire.
     static func stamp(cachedAt: Date?, hasLiveFleet: Bool, now: Date) -> String? {
         guard let cachedAt, !hasLiveFleet else { return nil }

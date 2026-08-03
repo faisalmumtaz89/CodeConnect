@@ -586,6 +586,82 @@ final class FleetFreshnessTests: XCTestCase {
 
     private let now = Date(timeIntervalSince1970: 1_785_466_205)
 
+    // MARK: The launch grace
+
+    /// The defect these pin: the cached banner rendered in the half-second
+    /// between the cache painting the screen and the first live frame — an
+    /// ominous amber flash on every healthy launch. The banner has to be
+    /// *earned* by a launch that had a fair chance and delivered nothing.
+    func testTheCachedBannerIsNotEarnedTheInstantTheCacheRestores() {
+        XCTAssertFalse(
+            FleetFreshness.cachedBannerEarned(restoredAt: now, connectingSince: nil, now: now),
+            "restore and render happen in the same beat; the banner must not")
+        XCTAssertFalse(
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: now.addingTimeInterval(-FleetFreshness.launchGrace + 0.1),
+                connectingSince: nil, now: now))
+    }
+
+    func testTheCachedBannerIsEarnedOnceTheGracePasses() {
+        XCTAssertTrue(
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: now.addingTimeInterval(-FleetFreshness.launchGrace),
+                connectingSince: nil, now: now))
+    }
+
+    /// The reconnect edge: the restore grace is long spent, but a *fresh dial*
+    /// is running. Without the second clock the banner would fill every
+    /// reconnect's grace window with the same amber flash this rule exists to
+    /// kill — the launch defect reappearing at every drop.
+    func testAFreshDialHoldsTheBannerEvenWhenTheRestoreGraceIsSpent() {
+        let longAgo = now.addingTimeInterval(-3600)
+        XCTAssertFalse(
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: longAgo, connectingSince: now.addingTimeInterval(-0.5), now: now))
+        XCTAssertTrue(
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: longAgo,
+                connectingSince: now.addingTimeInterval(-FleetFreshness.launchGrace), now: now),
+            "a dial that has used up its own grace no longer holds the banner")
+        XCTAssertTrue(
+            FleetFreshness.cachedBannerEarned(restoredAt: longAgo, connectingSince: nil, now: now),
+            "no dial running holds nothing")
+    }
+
+    /// No restore, no banner — whatever else the model believes. A launch with
+    /// nothing on disk has nothing to be stale about.
+    func testNoRestoreNeverEarnsTheBanner() {
+        XCTAssertFalse(
+            FleetFreshness.cachedBannerEarned(restoredAt: nil, connectingSince: nil, now: now))
+    }
+
+    /// The render-harness seam stages `.distantPast`, because it photographs
+    /// the earned state rather than the launch that leads to it.
+    func testADistantPastRestoreIsAlwaysEarned() {
+        XCTAssertTrue(
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: .distantPast, connectingSince: nil, now: now))
+    }
+
+    /// The composition table the fleet's slot renders. Compound always wins
+    /// when both facts exist — the cache's age is *part of* the link's story,
+    /// never a second banner ("one banner, ever") — and the standalone cached
+    /// notice exists only when the link is silent and the grace has passed.
+    func testTheBannerChoiceTable() {
+        XCTAssertEqual(
+            FleetFreshness.bannerChoice(hasLink: true, hasStamp: true, earned: false), .compound,
+            "a hard link failure carries the cache age immediately; it waits for no grace")
+        XCTAssertEqual(
+            FleetFreshness.bannerChoice(hasLink: true, hasStamp: false, earned: false), .link)
+        XCTAssertEqual(
+            FleetFreshness.bannerChoice(hasLink: false, hasStamp: true, earned: false), .none,
+            "the launch flash: cache on screen, link quietly dialling — nothing is shown")
+        XCTAssertEqual(
+            FleetFreshness.bannerChoice(hasLink: false, hasStamp: true, earned: true), .cachedOnly)
+        XCTAssertEqual(
+            FleetFreshness.bannerChoice(hasLink: false, hasStamp: false, earned: false), .none)
+    }
+
     func testLiveFleetIsNotStamped() {
         XCTAssertNil(
             FleetFreshness.stamp(

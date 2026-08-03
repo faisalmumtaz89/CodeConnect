@@ -785,9 +785,6 @@ private struct LinkPill: View {
 private struct FleetBanner: View {
     @Environment(AppModel.self) private var model
     let onSettings: () -> Void
-    /// When the link entered `connecting`, so the banner can hold off for the
-    /// two seconds an ordinary reconnect is allowed to finish in.
-    @State private var connectingSince: Date?
 
     var body: some View {
         Group {
@@ -798,10 +795,12 @@ private struct FleetBanner: View {
                     .padding(.bottom, CC.space.xl)
             }
         }
-        .onChange(of: model.linkHealth.level) { _, level in
-            connectingSince = level == .connecting ? (connectingSince ?? model.now) : nil
-        }
     }
+
+    /// The dial clock is the connection's own (`DaemonConnection.connectingSince`,
+    /// maintained where `phase` is written). It used to be `@State` here, which
+    /// meant any re-identity of this view — navigation, a sheet — restarted the
+    /// grace and could re-flash a banner mid-connect.
 
     /// **The link and the cache are not alternatives, so they do not compete.**
     ///
@@ -824,20 +823,31 @@ private struct FleetBanner: View {
     /// observation that was missing.
     private var bannerCandidates: [CCBannerItem?] {
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
-        guard let link, let stamp = cachedStamp else { return [link, cachedBannerItem] }
-        return [
-            CCBannerItem(
-                link.priority,
-                title: link.title,
-                message: FleetFreshness.message(stamp: stamp, linkDetail: link.message),
-                // The louder of the two. A neutral `Offline` over stale numbers
-                // undersells what the reader is looking at; a `danger` link
-                // stays `danger`.
-                tone: link.tone == .neutral || link.tone == .info ? .warning : link.tone,
-                icon: link.icon,
-                actionTitle: link.actionTitle,
-                action: link.action)
-        ]
+        let stamp = cachedStamp
+        // The decision is a value (`FleetFreshness.bannerChoice`) so the rule is
+        // testable apart from this view; what follows only renders the choice.
+        switch FleetFreshness.bannerChoice(
+            hasLink: link != nil, hasStamp: stamp != nil, earned: cachedBannerItem != nil)
+        {
+        case .compound:
+            guard let link, let stamp else { return [] }
+            return [
+                CCBannerItem(
+                    link.priority,
+                    title: link.title,
+                    message: FleetFreshness.message(stamp: stamp, linkDetail: link.message),
+                    // The louder of the two. A neutral `Offline` over stale
+                    // numbers undersells what the reader is looking at; a
+                    // `danger` link stays `danger`.
+                    tone: link.tone == .neutral || link.tone == .info ? .warning : link.tone,
+                    icon: link.icon,
+                    actionTitle: link.actionTitle,
+                    action: link.action)
+            ]
+        case .link: return [link]
+        case .cachedOnly: return [cachedBannerItem]
+        case .none: return []
+        }
     }
 
     /// The sentence that says how old the fleet on screen is, or `nil` when it
@@ -850,9 +860,13 @@ private struct FleetBanner: View {
 
     private var linkBannerItem: CCBannerItem? {
         // A banner that flashes on every ordinary reconnect is noise; the link
-        // gets two seconds to sort itself out before the screen says anything.
+        // gets the launch grace to sort itself out before the screen says
+        // anything. The shared constant, so this grace and the cached banner's
+        // cannot drift apart.
         if model.linkHealth.level == .connecting {
-            guard let since = connectingSince, model.now.timeIntervalSince(since) >= 2 else {
+            guard let since = model.connection.connectingSince,
+                model.now.timeIntervalSince(since) >= FleetFreshness.launchGrace
+            else {
                 return nil
             }
         }
@@ -863,6 +877,18 @@ private struct FleetBanner: View {
 
     private var cachedBannerItem: CCBannerItem? {
         guard let cachedAt = model.fleetCachedAt, !model.hasLiveFleet else { return nil }
+        // Earned, not instant. This banner used to render in the half-second
+        // between the cache painting the screen and the first live frame
+        // replacing it — an amber flash on every healthy launch, filling
+        // exactly the silence the link banner's grace above holds open.
+        // "Nothing live has arrived this launch" is only worth saying once the
+        // launch has had a fair chance to deliver.
+        guard
+            FleetFreshness.cachedBannerEarned(
+                restoredAt: model.fleetCacheRestoredAt,
+                connectingSince: model.connection.connectingSince,
+                now: model.now)
+        else { return nil }
         return CCBannerItem(
             .cached,
             title: "Last known state, \(Format.age(since: cachedAt, now: model.now)) old",
