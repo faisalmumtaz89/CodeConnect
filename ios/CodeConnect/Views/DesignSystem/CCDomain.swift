@@ -157,6 +157,10 @@ extension CCBadge {
             accessibilityText: capability.canAct
                 ? "Control: answers from this phone reach the agent"
                 : "Observe only. \(capability.reason ?? "")")
+        // Callers must not construct one for `.unknown` — the fleet's
+        // `showsCapability` refuses unsettled rows — but the type cannot make
+        // that unrepresentable without losing the shared initializer, so the
+        // guard lives at the render sites.
     }
 }
 

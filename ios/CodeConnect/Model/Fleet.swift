@@ -41,29 +41,62 @@ enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 enum CapabilityBadge: Sendable, Hashable {
     case control
     case observe(reason: String)
+    /// The handshake has not answered yet. **Neither claim is made**: unknown
+    /// is not control (nothing may act) and it is not observe (the fleet says
+    /// nothing) — it resolves the moment the ack lands. This is what stopped
+    /// "Observe only" flashing over every band for the half-second between the
+    /// cached fleet painting and the first `hello_ack`: an in-flight handshake
+    /// is not a capability verdict.
+    case unknown(reason: String)
 
     var label: String {
         switch self {
         case .control: return "control"
         case .observe: return "observe"
+        // Rendered nowhere; named for completeness and logs.
+        case .unknown: return "unknown"
         }
     }
 
     var symbol: String {
         switch self {
         case .control: return "circle.fill"
-        case .observe: return "circle.lefthalf.filled"
+        case .observe, .unknown: return "circle.lefthalf.filled"
         }
     }
 
+    /// The reason actions stay disabled. Carried by `unknown` too: the fleet
+    /// stays silent about an unanswered handshake, but a button someone taps
+    /// still owes them the sentence.
     var reason: String? {
-        if case .observe(let reason) = self { return reason }
-        return nil
+        switch self {
+        case .observe(let reason), .unknown(let reason): return reason
+        case .control: return nil
+        }
     }
 
     var canAct: Bool {
         if case .control = self { return true }
         return false
+    }
+
+    /// Whether the fleet may say anything about this at all. `unknown` gates
+    /// exactly like observe (`canAct == false`) but renders as nothing —
+    /// asserting a limitation the daemon never stated is the flash this case
+    /// exists to kill.
+    var isSettled: Bool {
+        if case .unknown = self { return false }
+        return true
+    }
+
+    /// What a uniformly-limited band's header prints. On the model rather than
+    /// in the view so the rule is pinned by a test: only a **settled** observe
+    /// earns the words — control is the promise and says nothing, and unknown
+    /// is a handshake still in flight, which printing "Observe only" over
+    /// every band at launch briefly and falsely announced.
+    var bandNote: String? {
+        if case .observe = self { return "Observe only" }
+        return nil
     }
 }
 
@@ -360,7 +393,7 @@ enum FleetStatusRule {
 
     static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
-            return .observe(reason: "Not connected. The daemon has not told us what it can do.")
+            return .unknown(reason: "Not connected. The daemon has not told us what it can do.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(reason: "The daemon does not guarantee an answer will reach the agent.")

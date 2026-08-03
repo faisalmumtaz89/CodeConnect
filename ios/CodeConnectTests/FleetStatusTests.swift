@@ -17,7 +17,9 @@ final class FleetStatusTests: XCTestCase {
 
     // MARK: Building a session out of real wire frames
 
-    private func summary(lifecycle: String, blockedOn: [String] = []) -> SessionSummary {
+    private func summary(
+        lifecycle: String, blockedOn: [String] = [], link: String = "attached"
+    ) -> SessionSummary {
         let ids = blockedOn.map { "\"\($0)\"" }.joined(separator: ",")
         // A failure here is a decoder change, not a test bug, so it must be loud.
         // swiftlint:disable:next force_try
@@ -27,7 +29,7 @@ final class FleetStatusTests: XCTestCase {
                 """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
                  "tmux_session":"cc-1","cwd":"/tmp/x","lifecycle":"\(lifecycle)",
-                 "link":"attached","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
+                 "link":"\(link)","last_seq":9,"created_at":"2026-08-02T10:00:00Z",
                  "updated_at":"2026-08-02T10:00:00Z","blocked_on":[\(ids)]}
                 """.utf8))
     }
@@ -194,5 +196,48 @@ final class FleetStatusTests: XCTestCase {
             ]
         let result = await status(events: events, reviewedSeq: 99)
         XCTAssertEqual(result, .idle)
+    }
+
+
+    // MARK: Capability: unknown is not observe
+
+    /// The launch flash, pinned: before the handshake answers, the rule must
+    /// say "unknown" — which the fleet renders as nothing — never "observe",
+    /// which it renders as a claim over every band.
+    func testNilCapabilitiesIsUnknownNotObserve() {
+        let badge = FleetStatusRule.capability(
+            summary: summary(lifecycle: "live"), capabilities: nil)
+        guard case .unknown(let reason) = badge else {
+            return XCTFail("an unanswered handshake is not a verdict: \(badge)")
+        }
+        XCTAssertFalse(badge.canAct, "nothing may act before the ack")
+        XCTAssertFalse(badge.isSettled, "and the fleet must say nothing")
+        XCTAssertEqual(reason, "Not connected. The daemon has not told us what it can do.")
+    }
+
+    /// The band-header rule, whole: only settled observe earns the words.
+    func testOnlySettledObserveEarnsTheBandNote() {
+        XCTAssertNil(CapabilityBadge.control.bandNote, "control is the promise, not news")
+        XCTAssertNil(
+            CapabilityBadge.unknown(reason: "Not connected.").bandNote,
+            "an in-flight handshake must print nothing — the launch flash, pinned")
+        XCTAssertEqual(CapabilityBadge.observe(reason: "detached").bandNote, "Observe only")
+    }
+
+    /// The settled truth table stays settled.
+    func testSettledCapabilityTruthTable() throws {
+        let caps = try JSONDecoder().decode(
+            Capabilities.self,
+            from: Data(
+                #"{"can_approve_reliably":true,"fail_mode":"fail_open","answer_path":"hook_return","hold_secs":25,"send_text":true,"capture":true,"push":true,"tls":false}"#
+                    .utf8))
+        for (link, expectControl) in [("attached", true), ("degraded", false),
+                                      ("detached", false), ("stale", false)]
+        {
+            let badge = FleetStatusRule.capability(
+                summary: summary(lifecycle: "live", link: link), capabilities: caps)
+            XCTAssertEqual(badge.canAct, expectControl, link)
+            XCTAssertTrue(badge.isSettled, "\(link) is a verdict and must render")
+        }
     }
 }

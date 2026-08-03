@@ -335,7 +335,14 @@ struct FleetView: View {
             let matching = rows.filter { $0.status == status }
             guard !matching.isEmpty else { return nil }
             let first = matching[0].capability
-            let uniform = matching.allSatisfy { $0.capability.canAct == first.canAct }
+            // Presentation state, not `canAct`: unknown and observe both gate
+            // actions, but only one of them may be *said* — comparing on
+            // `canAct` would let one settled observe row brand a band of
+            // unknowns, or the reverse.
+            let uniform = matching.allSatisfy {
+                $0.capability.canAct == first.canAct
+                    && $0.capability.isSettled == first.isSettled
+            }
             return Band(status: status, rows: matching, capability: uniform ? first : nil)
         }
     }
@@ -475,11 +482,15 @@ struct FleetView: View {
     /// says nothing, because control is the promise and its presence is not
     /// news.
     private func observeNote(_ band: Band) -> String? {
-        guard let capability = band.capability, !capability.canAct else { return nil }
-        return "Observe only"
+        // The rule lives on the model (`CapabilityBadge.bandNote`), pinned by
+        // its test: settled observe speaks, control and in-flight unknown say
+        // nothing — the latter was the half-second launch flash.
+        band.capability?.bandNote
     }
 
     private func showsCapability(_ row: FleetRow, in band: Band) -> Bool {
+        // An unsettled badge is never shown, uniform band or not.
+        guard row.capability.isSettled else { return false }
         guard let summary = band.capability else { return true }
         return summary.canAct != row.capability.canAct
     }
@@ -1288,7 +1299,11 @@ struct FleetRowView: View {
         } else if let last = row.lastEventAt {
             parts.append("last activity \(Format.spokenAge(now.timeIntervalSince(last)))")
         }
-        parts.append(row.capability.canAct ? "control" : "observe only")
+        // Silent while unsettled: VoiceOver asserting "observe only" during
+        // the handshake is the same flash, spoken.
+        if row.capability.isSettled {
+            parts.append(row.capability.canAct ? "control" : "observe only")
+        }
         return parts.joined(separator: ", ")
     }
 
