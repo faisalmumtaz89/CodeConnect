@@ -213,6 +213,13 @@ pub struct DaemonInfo {
     pub endpoint_host: String,
     pub endpoint_port: u16,
     pub tls: bool,
+    /// The address the WebSocket listener is actually bound to — distinct
+    /// from `endpoint_host`, which under TLS is the MagicDNS *name*. The CLI's
+    /// reachability advisory keys on this: only a daemon genuinely bound to a
+    /// tailnet address is "reachable again the moment the tailnet is back".
+    /// Optional so a newer CLI still reads an older daemon's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_ip: Option<String>,
     pub sessions: usize,
 }
 
@@ -740,6 +747,7 @@ mod tests {
             started_at: "2026-07-31T10:00:00.000Z".into(),
             launchd_label: Some(crate::LAUNCHD_LABEL.to_string()),
             endpoint_host: "host.ts.net".into(),
+            bind_ip: Some("100.64.0.7".into()),
             endpoint_port: 8787,
             tls: true,
             sessions: 2,

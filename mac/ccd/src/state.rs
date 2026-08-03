@@ -147,6 +147,11 @@ pub struct Daemon {
     /// for map lookups only; never across an await.
     pub push_gate: Arc<crate::push_gate::PushGate>,
     pub endpoint: Endpoint,
+    /// The listener's actual bind address, told to the daemon by `main` once
+    /// the socket exists. A `OnceLock` rather than a constructor parameter so
+    /// the tests — which never open a real listener — say nothing instead of
+    /// inventing an address.
+    pub bind_ip: std::sync::OnceLock<String>,
     /// When this process started, and which launchd job it belongs to. Captured
     /// once at construction: `XPC_SERVICE_NAME` is set by launchd at exec, and
     /// reading it later would be reading whatever the environment has become.
@@ -448,6 +453,7 @@ impl Daemon {
             push,
             push_gate: Arc::new(crate::push_gate::PushGate::new()),
             endpoint,
+            bind_ip: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
             launchd_label: launchd_label(),
             inner: Mutex::new(Inner::default()),
@@ -647,6 +653,7 @@ impl Daemon {
             endpoint_host: self.endpoint.host.clone(),
             endpoint_port: self.endpoint.port,
             tls: self.endpoint.tls,
+            bind_ip: self.bind_ip.get().cloned(),
             sessions: self.inner.lock().await.supervisors.len(),
         }
     }

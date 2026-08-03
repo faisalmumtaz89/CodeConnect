@@ -145,6 +145,11 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
 
+    // After the session and supervisor exist, before the alternate screen: the
+    // hold below must delay only the *display*, never the session it is
+    // promising is unaffected — Claude is already running while this is read.
+    warn_if_phone_unreachable();
+
     // **Nothing is printed here.**
     //
     // This line used to name the session and how to detach, and no reader ever saw
@@ -157,6 +162,195 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
     // `attach`, which is where a durable answer belongs.
     tmux::exec_attach(&session_id)?;
     unreachable!("exec replaces the process")
+}
+
+/// One warning, printed after the session and supervisor already exist and
+/// held for a beat before the alternate screen takes the terminal, when the
+/// phone cannot reach this Mac — the same fact the app shows as its "Connect
+/// Tailscale" banner, told in the same words at the other keyboard.
+///
+/// Three states earn it, distinguished because their fixes differ:
+///
+///   * the daemon is bound to an address no phone could ever reach (it
+///     started before the tailnet was up) — connect Tailscale, then restart
+///     the daemon so it can re-resolve;
+///   * the daemon is bound to a tailnet address but Tailscale's backend is
+///     stopped (toggled off after the daemon started) — connect Tailscale
+///     and nothing else. The standing bind revives with the tunnel: measured
+///     on this machine, one daemon held its 100.x listener across a full
+///     off/on toggle and accepted connections again with no restart;
+///   * Tailscale is not installed at all — set it up.
+///
+/// A probe that *fails* (tailscale wedged, output unreadable) stays silent:
+/// "Tailscale is off" is a categorical claim, and an error is not evidence.
+///
+/// The session itself is untouched: it is already running when this prints,
+/// everything is recorded, and the hold delays only the attach. A warning
+/// with no pause is a warning nobody has ever seen — the tmux client erases
+/// the terminal microseconds after `exec_attach` (measured; see the note
+/// there).
+fn warn_if_phone_unreachable() {
+    // No daemon, no claim: a daemon that is not running is a different
+    // conversation, and its absence already has its own surfaces. The
+    // timeout is advisory-sized — this check must never make a healthy
+    // start wait behind a wedged daemon.
+    let Ok(protocol::ipc::DaemonFrame::Daemon(info)) = daemon::request_within(
+        &protocol::ipc::ClientFrame::DaemonInfo,
+        std::time::Duration::from_millis(400),
+    ) else {
+        return;
+    };
+    let signal = match protocol::pairing::tailscale_bin() {
+        None => TailscaleSignal::NotInstalled,
+        Some(bin) => probe_tailscale(&bin),
+    };
+    let Some(note) = phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal)
+    else {
+        return;
+    };
+    eprintln!();
+    eprintln!("{note}");
+    eprintln!();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+}
+
+/// What this Mac's Tailscale is doing right now, as far as an advisory may
+/// honestly claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailscaleSignal {
+    NotInstalled,
+    /// The probe failed — wedged daemon, unreadable output. Not evidence.
+    Unknown,
+    Up,
+    /// The backend answered and said it is not running the tunnel.
+    Down,
+}
+
+/// Ask `tailscale status --json` for its `BackendState`.
+///
+/// The JSON is the only shape worth parsing: `tailscale ip -4` was measured
+/// printing the *assigned* address while `status` said "Tailscale is
+/// stopped" — the address is configuration, not liveness. Bounded, because
+/// an advisory must never hang a start behind a wedged tailscaled.
+fn probe_tailscale(bin: &std::path::Path) -> TailscaleSignal {
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(bin)
+        .args(["status", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+    else {
+        return TailscaleSignal::Unknown;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return TailscaleSignal::Unknown;
+            }
+        }
+    }
+    let mut stdout = String::new();
+    use std::io::Read;
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    parse_backend_state(&stdout)
+}
+
+/// `BackendState` → signal. Pure, so the recognised states stay pinned.
+///
+/// Only the states that *mean* the tunnel is not carrying traffic map to
+/// `Down`; anything unrecognised — including a transitional `Starting` — is
+/// `Unknown`, because an advisory that guesses is worse than one that stays
+/// quiet.
+fn parse_backend_state(stdout: &str) -> TailscaleSignal {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return TailscaleSignal::Unknown;
+    };
+    match value.get("BackendState").and_then(|v| v.as_str()) {
+        Some("Running") => TailscaleSignal::Up,
+        Some("Stopped") | Some("NeedsLogin") | Some("NeedsMachineAuth") => TailscaleSignal::Down,
+        _ => TailscaleSignal::Unknown,
+    }
+}
+
+/// Whether this address is the tailnet's to explain: Tailscale's own CGNAT
+/// v4 range, or its `fd7a:115c:a1e0::/48` v6 range (the /48 matters — all of
+/// `fd7a::/16` is ordinary ULA space anyone may use). An operator who
+/// explicitly bound the daemon elsewhere gets no Tailscale advice about it.
+fn tailnet_shaped_ip(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let octets = v4.octets();
+            octets[0] == 100 && (64..128).contains(&octets[1])
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let segments = v6.segments();
+            segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+        }
+        Err(_) => false,
+    }
+}
+
+/// The warning text, or `None` while the phone has a route to this daemon.
+/// Pure, so the wording and the rules are pinned by tests.
+///
+/// `bind_ip` is the socket's real address; `endpoint_host` is the name the
+/// phone dials, which under TLS is a MagicDNS name regardless of the bind.
+/// The toggled-off advice keys on the *bind*: only a daemon genuinely bound
+/// to a tailnet address revives with the tunnel, and an older daemon that
+/// does not report its bind gets silence, not a guess.
+///
+/// The wording matches the app's own banner for the same state — the phone
+/// says "Connect Tailscale" / "Set up Tailscale"; this says the same thing
+/// to the same person at the other keyboard.
+fn phone_reachability_note(
+    endpoint_host: &str,
+    bind_ip: Option<&str>,
+    signal: TailscaleSignal,
+) -> Option<String> {
+    if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {
+        let fix = match signal {
+            TailscaleSignal::NotInstalled => {
+                "  set up Tailscale on this Mac — CodeConnect reaches phones only over\n  \
+                 your tailnet:\n\n      \
+                 https://tailscale.com/download\n\n  \
+                 then `codeconnect daemon restart`"
+            }
+            _ => {
+                "  connect Tailscale on this Mac (menu bar, or `tailscale up`), then:\n\n      \
+                 codeconnect daemon restart"
+            }
+        };
+        return Some(format!(
+            "  note: your phone cannot reach this Mac right now. The daemon is\n  \
+             listening on {endpoint_host}, which {problem}.\n\n\
+             {fix}\n\n  \
+             This session is unaffected — it is already running and recording;\n  \
+             the phone catches up when the tailnet is back."
+        ));
+    }
+    if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
+        return Some(
+            "  note: Tailscale is off on this Mac, so your phone cannot reach it\n  \
+             right now.\n\n  \
+             connect Tailscale (menu bar, or `tailscale up`) — the daemon keeps\n  \
+             its tailnet address and is reachable again the moment the tunnel\n  \
+             is back. Nothing needs restarting.\n\n  \
+             This session is unaffected — it is already running and recording;\n  \
+             the phone catches up when the tailnet is back."
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// Launch the supervisor so it outlives this process *and* the terminal tab.
@@ -421,5 +615,126 @@ mod tests {
             std::path::Path::new("/bin/sh"),
             Some(std::path::Path::new("/bin/echo"))
         ));
+    }
+
+    /// The pre-attach warning across its states, in the app's own vocabulary
+    /// ("connect Tailscale" / "set up Tailscale") so the two screens the same
+    /// person is looking at never disagree — and each state names *its* fix,
+    /// because they differ.
+    #[test]
+    fn the_phone_reachability_note_matches_the_apps_vocabulary() {
+        use TailscaleSignal::*;
+        let note = phone_reachability_note;
+
+        // Bound wrong (daemon started before the tailnet): restart required.
+        let bound_wrong = note("127.0.0.1", Some("127.0.0.1"), Up).expect("loopback warns");
+        assert!(bound_wrong.contains("127.0.0.1"));
+        assert!(bound_wrong.contains("connect Tailscale"));
+        assert!(bound_wrong.contains("codeconnect daemon restart"));
+        assert!(
+            bound_wrong.contains("unaffected"),
+            "the note must say the session itself is fine: {bound_wrong}"
+        );
+
+        // Tailscale absent entirely: set-up instruction.
+        let missing = note("127.0.0.1", Some("127.0.0.1"), NotInstalled).expect("loopback warns");
+        assert!(missing.contains("set up Tailscale"));
+        assert!(missing.contains("https://tailscale.com/download"));
+
+        // Bound to the tailnet, backend stopped afterwards: connect it back
+        // and nothing else — the standing bind revives with the tunnel
+        // (measured: one daemon held its 100.x listener across a full off/on
+        // toggle and accepted connections again, same pid). Keyed on the
+        // *bind*: under TLS the endpoint is a MagicDNS name whatever the
+        // operator bound.
+        let toggled_off =
+            note("mac.tailnet.ts.net", Some("100.64.0.7"), Down).expect("dead tailnet warns");
+        assert!(toggled_off.contains("Tailscale is off on this Mac"));
+        assert!(toggled_off.contains("Nothing needs restarting"));
+        assert!(
+            !toggled_off.contains("codeconnect daemon restart"),
+            "no restart instruction when the bind is fine: {toggled_off}"
+        );
+
+        // Silence, each for its own reason.
+        assert_eq!(
+            note("mac.tailnet.ts.net", Some("100.64.0.7"), Up),
+            None,
+            "healthy earns silence"
+        );
+        assert_eq!(
+            note("mac.tailnet.ts.net", Some("192.168.1.20"), Down),
+            None,
+            "an operator's explicit LAN bind gets no Tailscale advice, even \
+             though TLS put a MagicDNS name on the endpoint"
+        );
+        assert_eq!(
+            note("mac.tailnet.ts.net", None, Down),
+            None,
+            "an older daemon that cannot report its bind gets silence, not a guess"
+        );
+        assert_eq!(
+            note("mac.tailnet.ts.net", Some("100.64.0.7"), Unknown),
+            None,
+            "a failed probe is not evidence; stay quiet"
+        );
+        assert_eq!(
+            note("mac.tailnet.ts.net", Some("100.64.0.7"), NotInstalled),
+            None,
+            "a tailnet bind with no tailscale binary is a state the daemon \
+             could not have produced; stay silent rather than guess"
+        );
+    }
+
+    /// `BackendState` is the only liveness signal worth believing:
+    /// `tailscale ip -4` was measured printing the assigned address while
+    /// `status` said stopped. Unrecognised states — including transitional
+    /// ones — are Unknown, never Down.
+    #[test]
+    fn the_tailscale_probe_believes_backend_state_only() {
+        use TailscaleSignal::*;
+        assert_eq!(parse_backend_state(r#"{"BackendState":"Running"}"#), Up);
+        assert_eq!(parse_backend_state(r#"{"BackendState":"Stopped"}"#), Down);
+        assert_eq!(
+            parse_backend_state(r#"{"BackendState":"NeedsLogin"}"#),
+            Down
+        );
+        assert_eq!(
+            parse_backend_state(r#"{"BackendState":"NeedsMachineAuth"}"#),
+            Down
+        );
+        assert_eq!(
+            parse_backend_state(r#"{"BackendState":"Starting"}"#),
+            Unknown,
+            "transitional is not off"
+        );
+        assert_eq!(parse_backend_state("not json"), Unknown);
+        assert_eq!(parse_backend_state(""), Unknown);
+        assert_eq!(parse_backend_state(r#"{"Version":"1.94"}"#), Unknown);
+    }
+
+    /// Which addresses are the tailnet's to explain: the CGNAT v4 range and
+    /// Tailscale's own `fd7a:115c:a1e0::/48` — not all of `fd7a::/16`, which
+    /// is ordinary ULA space anyone may use.
+    #[test]
+    fn tailnet_shaped_ips_are_cgnat_and_the_tailscale_48_only() {
+        assert!(tailnet_shaped_ip("100.64.0.1"));
+        assert!(tailnet_shaped_ip("100.117.103.23"));
+        assert!(tailnet_shaped_ip("100.127.255.254"));
+        assert!(
+            !tailnet_shaped_ip("100.128.0.1"),
+            "the CGNAT range ends at 100.127"
+        );
+        assert!(!tailnet_shaped_ip("100.63.255.255"));
+        assert!(!tailnet_shaped_ip("192.168.1.20"));
+        assert!(tailnet_shaped_ip("fd7a:115c:a1e0::6001:6740"));
+        assert!(
+            !tailnet_shaped_ip("fd7a:2222::1"),
+            "a stranger's ULA in fd7a::/16 is not Tailscale's"
+        );
+        assert!(
+            !tailnet_shaped_ip("mac.tailnet.ts.net"),
+            "names are not binds"
+        );
     }
 }

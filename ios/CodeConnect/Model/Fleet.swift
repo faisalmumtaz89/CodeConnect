@@ -427,9 +427,20 @@ struct LinkHealth: Sendable, Equatable {
         case rejected
     }
 
+    /// What broke, when the level alone cannot pick the right words or the
+    /// right action. `tailnetHostUnresolvable` is the `*.ts.net` DNS failure —
+    /// recovery guidance points at Tailscale, though the measured fact is only
+    /// that DNS did not answer. Any other unresolvable name gets the generic
+    /// case and a pointer at Settings.
+    enum Cause: Sendable, Equatable {
+        case tailnetHostUnresolvable(host: String)
+        case hostUnresolvable(host: String)
+    }
+
     var level: Level
     var age: TimeInterval?
     var detail: String
+    var cause: Cause?
 
     /// Beyond this, a "connected" socket is not evidence of anything.
     private static let lagAfter: TimeInterval = 15
@@ -470,25 +481,68 @@ struct LinkHealth: Sendable, Equatable {
         }
     }
 
+    /// The suffix rule for "this name lives on a tailnet": case-insensitive,
+    /// tolerant of a trailing DNS dot, and anchored at a label boundary so
+    /// `evilts.net` never qualifies.
+    static func isTailnetHost(_ host: String) -> Bool {
+        var name = host.lowercased()
+        if name.hasSuffix(".") { name.removeLast() }
+        return name.hasSuffix(".ts.net")
+    }
+
+    private static func cause(of failure: DaemonConnection.DialFailure?) -> Cause? {
+        guard case .hostUnresolvable(let host) = failure else { return nil }
+        return isTailnetHost(host)
+            ? .tailnetHostUnresolvable(host: host) : .hostUnresolvable(host: host)
+    }
+
+    /// The stable sentence for a link that is down and retrying. **No
+    /// countdown**: a per-second number re-renders the banner sixty times a
+    /// minute and informs no decision — the deadline still schedules the
+    /// retry, it just doesn't narrate it.
+    private static func offlineDetail(
+        reason: String, failure: DaemonConnection.DialFailure?
+    ) -> String {
+        if case .hostUnresolvable(let host) = failure {
+            return "`\(host)` is not resolving. Retrying automatically."
+        }
+        return "\(reason). Retrying automatically."
+    }
+
     static func evaluate(
-        phase: DaemonConnection.Phase, lastContactAt: Date?, now: Date = Date()
+        phase: DaemonConnection.Phase,
+        lastContactAt: Date?,
+        dialFailure: DaemonConnection.DialFailure? = nil,
+        isRedial: Bool = false,
+        now: Date = Date()
     ) -> LinkHealth {
         switch phase {
         case .idle:
             return LinkHealth(level: .offline, age: nil, detail: "Not paired with a daemon.")
         case .connecting:
+            // A redial is a retry of a failure the screen is already showing,
+            // and blanking the banner for the second the dial takes was the
+            // flicker: every attempt flashed the screen. The failure stays on
+            // display until the handshake disproves it; only the launch dial —
+            // no failure yet — reads as "connecting".
+            if isRedial, let dialFailure {
+                return LinkHealth(
+                    level: .offline,
+                    age: lastContactAt.map { now.timeIntervalSince($0) },
+                    detail: offlineDetail(
+                        reason: reasonText(of: dialFailure), failure: dialFailure),
+                    cause: cause(of: dialFailure))
+            }
             return LinkHealth(level: .connecting, age: nil, detail: "Opening the connection.")
         case .failed(let reason):
             return LinkHealth(level: .rejected, age: nil, detail: reason)
-        case .waiting(let until, let reason):
-            let seconds = max(0, until.timeIntervalSince(now))
-            // Early backoffs are sub-second; "retrying in 0s" reads like a stuck
-            // counter rather than the truth, which is "any moment now".
-            let when = seconds < 1 ? "retrying now" : "retrying in \(Int(seconds.rounded()))s"
+        case .waiting(_, let reason):
             return LinkHealth(
                 level: .offline,
                 age: lastContactAt.map { now.timeIntervalSince($0) },
-                detail: "\(reason), \(when).")
+                detail: offlineDetail(
+                    reason: dialFailure.map(reasonText(of:)) ?? reason, failure: dialFailure),
+                cause: cause(of: dialFailure))
         case .connected:
             guard let lastContactAt else {
                 return LinkHealth(
@@ -504,6 +558,13 @@ struct LinkHealth: Sendable, Equatable {
                 return LinkHealth(level: .lagging, age: age, detail: "Link lagging.")
             }
             return LinkHealth(level: .live, age: age, detail: "Live.")
+        }
+    }
+
+    private static func reasonText(of failure: DaemonConnection.DialFailure) -> String {
+        switch failure {
+        case .hostUnresolvable(let host): return "`\(host)` is not resolving"
+        case .other(let message): return message
         }
     }
 }

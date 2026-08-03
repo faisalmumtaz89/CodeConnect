@@ -83,6 +83,14 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Lets `canOpenURL("tailscale://")` be answered, so the offline banner
+	     can say "Open Tailscale" only when opening it will actually work, and
+	     "Set up Tailscale" otherwise. Query-only: opening still goes through
+	     the user's tap on that banner action. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>tailscale</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CodeConnect talks to your own Mac's CodeConnect daemon over your Tailscale network.</string>
 	<!-- Dictation in the compose bar. Recognition is Apple's own: fully

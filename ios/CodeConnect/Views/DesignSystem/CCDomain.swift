@@ -254,9 +254,12 @@ extension LinkHealth {
     /// Returns the *candidate*, never the decision: `CCBannerSlot` picks. That
     /// is what keeps "rejected beats offline beats stale" in one place instead
     /// of in an `if` ladder on every screen.
-    func ccBannerItem(onRetry: @escaping () -> Void, onSettings: @escaping () -> Void)
-        -> CCBannerItem?
-    {
+    @MainActor
+    func ccBannerItem(
+        onRetry: @escaping () -> Void,
+        onSettings: @escaping () -> Void,
+        onTailscale: (() -> Void)? = nil
+    ) -> CCBannerItem? {
         switch level {
         case .live, .lagging:
             return nil
@@ -265,9 +268,34 @@ extension LinkHealth {
                 .rejected, title: "Token rejected", message: detail, tone: .danger,
                 icon: "lock.slash", actionTitle: "Settings", action: onSettings)
         case .offline:
-            return CCBannerItem(
-                .offline, title: "Offline", message: detail, tone: .neutral,
-                icon: "bolt.horizontal.circle", actionTitle: "Retry", action: onRetry)
+            switch cause {
+            case .tailnetHostUnresolvable(let host):
+                // Recovery guidance, not a claim: DNS said only that the name
+                // did not answer. On a tailnet name that is almost always
+                // Tailscale being off on this phone — but "almost always" is
+                // why the title is an instruction rather than a diagnosis.
+                return CCBannerItem(
+                    .offline, title: "Connect Tailscale",
+                    message:
+                        "`\(host)` isn't resolving. Use Tailscale to put this iPhone on the same tailnet as your Mac — CodeConnect reconnects on its own.",
+                    tone: .neutral,
+                    icon: "bolt.horizontal.circle",
+                    actionTitle: TailscaleAssist.isInstallHintNeeded
+                        ? "Set up Tailscale" : "Open Tailscale",
+                    action: onTailscale ?? onRetry)
+            case .hostUnresolvable(let host):
+                return CCBannerItem(
+                    .offline, title: "Host not found",
+                    message:
+                        "`\(host)` isn't resolving. Check the paired address and this iPhone's network — CodeConnect reconnects on its own.",
+                    tone: .neutral,
+                    icon: "bolt.horizontal.circle",
+                    actionTitle: "Settings", action: onSettings)
+            case nil:
+                return CCBannerItem(
+                    .offline, title: "Offline", message: detail, tone: .neutral,
+                    icon: "bolt.horizontal.circle", actionTitle: "Retry", action: onRetry)
+            }
         case .stale:
             return CCBannerItem(
                 .stale, title: "Link stale",

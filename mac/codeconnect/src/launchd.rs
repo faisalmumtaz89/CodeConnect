@@ -528,6 +528,7 @@ fn legacy_daemon_probe() -> Option<DaemonInfo> {
         started_at: String::new(),
         launchd_label: None,
         endpoint_host: String::new(),
+        bind_ip: None,
         endpoint_port: 0,
         tls: false,
         sessions: 0,

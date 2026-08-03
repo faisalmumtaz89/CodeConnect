@@ -360,6 +360,20 @@ final class PairingStore {
         }
     }
 
+    #if DEBUG
+        /// Test seam: hold a pairing in memory only, skipping the Keychain.
+        /// The automation launches (`-CC_HOST`/`-CC_TOKEN`) run unsigned under
+        /// `CODE_SIGNING_ALLOWED=NO`, and an unsigned build has no Keychain
+        /// entitlement — `save` fails with "A required entitlement isn't
+        /// present", measured, which left every automation launch unpaired.
+        /// Ephemeral is also the more hermetic behavior for a test seam.
+        func saveEphemeral(_ endpoint: DaemonEndpoint) {
+            guard !endpoint.isPairingCode else { return }
+            self.endpoint = endpoint
+            lastError = nil
+        }
+    #endif
+
     /// The daemon has answered a pairing code with a device token. Swap the
     /// spent code for the durable credential and keep everything else.
     func adopt(deviceToken: String, from endpoint: DaemonEndpoint) {

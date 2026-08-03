@@ -87,6 +87,24 @@ impl QrPayload {
 /// `ws_bind` to a reachable LAN address on purpose. Refusing what is certainly
 /// broken is a fact; refusing what is merely unfamiliar is a guess, and this
 /// system does not guess.
+/// Where the Tailscale CLI lives when it is installed at all. launchd hands
+/// daemons no shell `PATH`, so lookup is by known install location, never
+/// `which` — and the CLI shares this list so "is Tailscale installed" cannot
+/// answer differently on the two sides of one machine.
+pub const TAILSCALE_CANDIDATES: &[&str] = &[
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+];
+
+/// The installed Tailscale binary, if any candidate exists.
+pub fn tailscale_bin() -> Option<std::path::PathBuf> {
+    TAILSCALE_CANDIDATES
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+}
+
 pub fn unreachable_host(host: &str) -> Option<&'static str> {
     let trimmed = host.trim();
     if trimmed.is_empty() {

@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import os
 import Observation
 
 enum ConnectionError: LocalizedError, Sendable {
@@ -19,6 +21,10 @@ enum ConnectionError: LocalizedError, Sendable {
     case invalidEndpoint
     case server(code: String, message: String)
     case transport(String)
+    /// DNS could not resolve the daemon's name — classified at the throw site
+    /// because both transport wrappers otherwise reduce a `URLError` to its
+    /// sentence, and the sentence cannot be matched honestly.
+    case hostUnresolvable
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +38,7 @@ enum ConnectionError: LocalizedError, Sendable {
         case .invalidEndpoint: return "That address could not be turned into a URL"
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
+        case .hostUnresolvable: return "The daemon's address is not resolving"
         }
     }
 }
@@ -133,6 +140,25 @@ final class DaemonConnection {
     /// pairing's stored preference is only a starting point.
     private(set) var usingTLS = false
 
+    /// Why the last dial of this `start` failed, typed — the stable fact the
+    /// banner renders while retries cycle underneath it. Set by `supervise`,
+    /// cleared on `start`, `stop` and a successful `hello_ack`, and it names
+    /// its host so a stale classification can never dress a replacement
+    /// endpoint.
+    enum DialFailure: Equatable, Sendable {
+        /// DNS cannot resolve the daemon's name. On a `*.ts.net` pairing this
+        /// almost always means Tailscale is off on this phone — but it is
+        /// recovery guidance, not an observed fact, and the copy built from it
+        /// must not claim more than DNS reported.
+        case hostUnresolvable(host: String)
+        case other(message: String)
+    }
+    private(set) var dialFailure: DialFailure?
+    /// Whether this `start` has already completed at least one failed dial —
+    /// what separates the launch dial (whose quiet grace is earned) from a
+    /// redial (whose blank-out was the flicker).
+    private(set) var isRedial = false
+
     // MARK: Private
 
     private var endpoint: DaemonEndpoint?
@@ -182,7 +208,7 @@ final class DaemonConnection {
     private static let requestTimeout: Duration = .seconds(20)
     /// Comfortably longer than the daemon's own 10s handshake window.
     private static let handshakeTimeout: Duration = .seconds(15)
-    private static let maxBackoff: Double = 30
+    nonisolated private static let maxBackoff: Double = 30
 
     // MARK: - Lifecycle
 
@@ -198,7 +224,11 @@ final class DaemonConnection {
         schemeAlternate = false
         lastErrorMessage = nil
         lastErrorAt = nil
+        dialFailure = nil
+        isRedial = false
+        ledger.reset()
         supervisor = Task { [weak self] in await self?.supervise() }
+        startPathMonitor()
     }
 
     func stop() {
@@ -206,6 +236,11 @@ final class DaemonConnection {
         supervisor = nil
         wakeTask?.cancel()
         wakeTask = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        dialFailure = nil
+        isRedial = false
+        ledger.reset()
         closeCurrentSocket()
         failAllWaiters(with: ConnectionError.notConnected)
         phase = .idle
@@ -233,7 +268,6 @@ final class DaemonConnection {
     // MARK: - Supervision
 
     private func supervise() async {
-        var attempt = 0
         while !Task.isCancelled {
             guard let endpoint else {
                 phase = .failed(reason: ConnectionError.invalidEndpoint.localizedDescription)
@@ -250,26 +284,37 @@ final class DaemonConnection {
             do {
                 try await runConnection(url: url, credential: endpoint.credential)
                 // A clean close is still a disconnect; reconnect promptly.
-                attempt = 0
+                ledger.reset()
+                dialFailure = .other(message: "The daemon closed the connection")
                 lastErrorMessage = "The daemon closed the connection"
             } catch let error as ConnectionError {
+                // A dial that had completed its handshake before dying ends
+                // the failure run: what follows is a fresh outage, not
+                // attempt N+1 of the old one.
+                if helloAck != nil { ledger.reset() }
                 // Terminal refusals: the same attempt will be refused forever, so
                 // backing off would only hide the answer behind a spinner.
                 switch error {
                 case .unauthorized, .rejectedPairingCode, .incompatible:
                     phase = .failed(reason: error.localizedDescription)
                     return
+                case .hostUnresolvable:
+                    dialFailure = .hostUnresolvable(host: endpoint.host)
+                    ledger.dnsFailure()
                 default:
-                    break
+                    dialFailure = .other(message: error.localizedDescription)
+                    ledger.failure()
                 }
                 lastErrorMessage = error.localizedDescription
-                attempt += 1
             } catch is CancellationError {
                 return
             } catch {
+                if helloAck != nil { ledger.reset() }
+                dialFailure = .other(message: error.localizedDescription)
+                ledger.failure()
                 lastErrorMessage = error.localizedDescription
-                attempt += 1
             }
+            isRedial = true
 
             // **A pairing code is not worth retrying forever.**
             //
@@ -284,7 +329,7 @@ final class DaemonConnection {
             // Both schemes are still tried, because the ws/wss alternation above
             // is how a TLS mismatch corrects itself and giving up before it has
             // swapped once would turn a recoverable setup into a dead end.
-            if case .pairingCode = endpoint.credential, attempt >= Self.pairingAttemptLimit {
+            if case .pairingCode = endpoint.credential, ledger.attempts >= Self.pairingAttemptLimit {
                 phase = .failed(
                     reason: lastErrorMessage ?? ConnectionError.timedOut.localizedDescription)
                 return
@@ -295,21 +340,24 @@ final class DaemonConnection {
             helloAck = nil
             reconnectCount += 1
 
-            // Two consecutive failures on one scheme, then try the other.
+            // Two consecutive *TLS-eligible* failures on one scheme, then try
+            // the other.
             //
             // A daemon that turns TLS on stops speaking `ws://` on that port
             // altogether — nothing arrives to *tell* the app to switch, because
             // the handshake never completes. Guessing from URLSession error
             // codes is guesswork; alternating is not, and it self-corrects in
             // both directions for the price of at most one extra attempt.
-            if attempt > 0, attempt.isMultiple(of: 2) {
+            //
+            // DNS failures are counted separately: no TCP ever happened, so the
+            // scheme is not implicated — alternating on them would both narrate
+            // a switch that cannot help and let a stack of stale DNS attempts
+            // flip the scheme on the first real failure after DNS recovers.
+            if ledger.takeAlternation() {
                 schemeAlternate.toggle()
-                lastErrorMessage =
-                    (lastErrorMessage ?? "Connection failed")
-                    + ", trying \(resolveTLS(for: endpoint) ? "wss://" : "ws://") next."
             }
 
-            let delay = Self.backoff(attempt: attempt)
+            let delay = ledger.delay()
             phase = .waiting(
                 until: Date().addingTimeInterval(delay),
                 reason: lastErrorMessage ?? "Reconnecting")
@@ -319,10 +367,12 @@ final class DaemonConnection {
 
     /// How many failed attempts end a pairing exchange.
     ///
-    /// Four, which is two on each scheme: enough for the `ws`/`wss` alternation to
-    /// have tried both, and short enough to finish well inside the code's
-    /// five-minute life so the reader is told while the code they are holding is
-    /// still the one that failed.
+    /// Four: enough for the `ws`/`wss` alternation to have tried both schemes
+    /// when the failures are scheme-eligible (DNS failures never advance the
+    /// alternation — no TCP happened, so the scheme is not implicated), and
+    /// short enough to finish well inside the code's five-minute life so the
+    /// reader is told while the code they are holding is still the one that
+    /// failed.
     static let pairingAttemptLimit = 4
 
     /// Which scheme this attempt should use.
@@ -338,12 +388,142 @@ final class DaemonConnection {
         return schemeAlternate ? !endpoint.useTLS : endpoint.useTLS
     }
 
+    /// The retry counters, owned together because their invariant is shared:
+    /// **every one of them is about the current unbroken run of failures**,
+    /// and a successful handshake ends that run. Kept as raw properties they
+    /// drifted — a scheme-eligible failure survived a successful `hello_ack`,
+    /// so a later unrelated disconnect became "failure two" and switched away
+    /// from a scheme that demonstrably worked; a fresh `start` inherited the
+    /// previous outage's DNS streak and began at the 20–30s cadence.
+    struct RetryLedger: Equatable {
+        /// Failed dials since the last handshake (or start).
+        private(set) var attempts = 0
+        /// Consecutive unresolvable-host failures, driving the DNS cadence.
+        private(set) var dnsStreak = 0
+        /// Consecutive failures a scheme switch could plausibly fix. DNS
+        /// failures never count: no TCP happened, the scheme is not
+        /// implicated, and stale DNS attempts must not flip the scheme on
+        /// the first real failure after DNS recovers.
+        private(set) var schemeEligibleFailures = 0
+
+        /// A dial failed with DNS unable to resolve the host.
+        mutating func dnsFailure() {
+            attempts += 1
+            dnsStreak += 1
+        }
+
+        /// A dial failed for any scheme-eligible reason.
+        mutating func failure() {
+            attempts += 1
+            dnsStreak = 0
+            schemeEligibleFailures += 1
+        }
+
+        /// The connection completed a handshake, or a new `start` began:
+        /// whatever run of failures was accumulating is over.
+        mutating func reset() {
+            self = RetryLedger()
+        }
+
+        /// Whether the ladder should switch scheme now — true on every second
+        /// eligible failure, consuming the pair.
+        mutating func takeAlternation() -> Bool {
+            guard schemeEligibleFailures > 0, schemeEligibleFailures.isMultiple(of: 2) else {
+                return false
+            }
+            schemeEligibleFailures = 0
+            return true
+        }
+
+        /// The next backoff, from whichever cadence the failure run is in.
+        func delay(unit: Double = Double.random(in: 0...1)) -> Double {
+            dnsStreak > 0
+                ? DaemonConnection.dnsBackoff(streak: dnsStreak, unit: unit)
+                : DaemonConnection.backoff(attempt: attempts, unit: unit)
+        }
+    }
+
+    private var ledger = RetryLedger()
+
     /// Exponential with full jitter, so a daemon restart does not meet a
     /// thundering herd of retries from every client at the same instant.
-    private static func backoff(attempt: Int) -> Double {
+    nonisolated static func backoff(attempt: Int, unit: Double = Double.random(in: 0...1)) -> Double {
         guard attempt > 0 else { return 0.5 }
         let ceiling = min(maxBackoff, 0.5 * pow(2, Double(attempt - 1)))
-        return Double.random(in: (ceiling / 2)...ceiling)
+        return ceiling / 2 + unit * (ceiling / 2)
+    }
+
+    /// The cadence for a host that does not resolve. DNS answers instantly and
+    /// costs nothing, but every attempt cycles the connection's state — so two
+    /// fast tries absorb a transient blip, then the pace drops to one the
+    /// screen can be calm over. Recovery does not wait on it: the path monitor
+    /// and foregrounding both wake the backoff early.
+    nonisolated static func dnsBackoff(streak: Int, unit: Double = Double.random(in: 0...1)) -> Double {
+        switch streak {
+        case ..<3: return backoff(attempt: streak, unit: unit)
+        case 3: return 10 + unit * 5
+        default: return 20 + unit * 10
+        }
+    }
+
+    /// Whether this error, anywhere down its underlying chain, is DNS failing
+    /// to resolve the host — `.cannotFindHost` or `.dnsLookupFailed`.
+    static func isUnresolvableHost(_ error: Error) -> Bool {
+        var current: NSError? = error as NSError
+        while let e = current {
+            if e.domain == NSURLErrorDomain,
+                e.code == NSURLErrorCannotFindHost || e.code == NSURLErrorDNSLookupFailed
+            {
+                return true
+            }
+            current = e.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    /// Wakes a recoverable backoff the moment the network path changes —
+    /// Tailscale coming up is an interface appearing, and waiting out a 30s
+    /// timer after the user just fixed the network is the wrong trade.
+    ///
+    /// Deliberately narrower than `retryNow()`: only `.waiting` is woken. A
+    /// `.failed` phase is a terminal refusal (rejected token, incompatible
+    /// protocol) that a path change cannot cure, and `retryNow` restarting it
+    /// is a *user* gesture.
+    private var pathMonitor: NWPathMonitor?
+
+    #if DEBUG
+        /// Test seam: place the connection in a phase directly, so the path
+        /// monitor's guard can be tested without arranging a real dial.
+        func simulatePhaseForTesting(_ value: Phase) { phase = value }
+    #endif
+
+    /// The narrow wake: only a recoverable backoff. Factored out of the
+    /// monitor closure so the guard is testable — `.failed` is a terminal
+    /// refusal a path change cannot cure, and waking it would retry a
+    /// rejected token forever.
+    func pathDidChange() {
+        guard case .waiting = phase else { return }
+        wakeTask?.cancel()
+    }
+
+    private func startPathMonitor() {
+        pathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        // The monitor always reports once on start; that delivery describes
+        // the present, not a change, and must not wake anything. The lock is
+        // how a Sendable closure is allowed to remember it happened — the
+        // handler runs on the monitor's own queue.
+        let sawInitial = OSAllocatedUnfairLock(initialState: false)
+        monitor.pathUpdateHandler = { [weak self] _ in
+            let isChange = sawInitial.withLock { seen -> Bool in
+                defer { seen = true }
+                return seen
+            }
+            guard isChange else { return }
+            Task { @MainActor [weak self] in self?.pathDidChange() }
+        }
+        monitor.start(queue: DispatchQueue(label: "codeconnect.pathmonitor"))
+        pathMonitor = monitor
     }
 
     private func sleepInterruptibly(seconds: Double) async {
@@ -408,6 +588,7 @@ final class DaemonConnection {
                 message = try await socket.receive()
             } catch {
                 if Task.isCancelled { throw CancellationError() }
+                if Self.isUnresolvableHost(error) { throw ConnectionError.hostUnresolvable }
                 throw ConnectionError.transport((error as NSError).localizedDescription)
             }
 
@@ -496,6 +677,7 @@ final class DaemonConnection {
         do {
             try await socket.send(.string(String(decoding: data, as: UTF8.self)))
         } catch {
+            if Self.isUnresolvableHost(error) { throw ConnectionError.hostUnresolvable }
             throw ConnectionError.transport((error as NSError).localizedDescription)
         }
     }
@@ -708,6 +890,12 @@ final class DaemonConnection {
             serverTime = ack.serverTime
             generation &+= 1
             phase = .connected(since: Date())
+            // Only here: a socket that opened is not yet a daemon that
+            // answered. The handshake is the first proof the link works —
+            // and the end of whatever failure run was accumulating.
+            dialFailure = nil
+            isRedial = false
+            ledger.reset()
             lastErrorMessage =
                 ack.protocolVersion == Wire.protocolVersion
                 ? nil

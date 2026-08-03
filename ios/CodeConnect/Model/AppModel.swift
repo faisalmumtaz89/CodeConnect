@@ -279,7 +279,10 @@ final class AppModel {
             if defaults.bool(forKey: "CC_RESET_CACHE") {
                 Task { [cache] in await cache.clearAll() }
             }
-            pairing.save(endpoint)
+            // Ephemeral on purpose: this unsigned automation build has no
+            // Keychain entitlement, so a durable save cannot work — measured
+            // as every `-CC_HOST` launch landing on the welcome screen.
+            pairing.saveEphemeral(endpoint)
         }
 
         /// Test seam: `-CC_PAIR_HOST <host> -CC_PAIR_CODE <code>` runs the real
@@ -606,7 +609,8 @@ final class AppModel {
 
     var linkHealth: LinkHealth {
         LinkHealth.evaluate(
-            phase: connection.phase, lastContactAt: connection.lastContactAt, now: now)
+            phase: connection.phase, lastContactAt: connection.lastContactAt,
+            dialFailure: connection.dialFailure, isRedial: connection.isRedial, now: now)
     }
 
     /// Which daemon build this is, and therefore which of the newer surfaces

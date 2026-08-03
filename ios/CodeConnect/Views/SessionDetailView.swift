@@ -909,7 +909,8 @@ private struct SessionBanner: View {
         let candidates: [CCBannerItem?] = [
             model.linkHealth.ccBannerItem(
                 onRetry: { model.connection.retryNow() },
-                onSettings: onSettings),
+                onSettings: onSettings,
+                onTailscale: { TailscaleAssist.open() }),
             cachedBanner,
         ]
         if candidates.contains(where: { $0 != nil }) {

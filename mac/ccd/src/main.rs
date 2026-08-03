@@ -72,6 +72,10 @@ async fn main() -> Result<()> {
     let (acceptor, endpoint) = resolve_transport(&config, bind).await;
     let local_resolve_poll = Duration::from_millis(config.local_resolve_poll_ms);
     let daemon = Daemon::new(config, Arc::clone(&store), push, endpoint, transcript_tx);
+    // Told once, from the one place that knows it: `daemon_info` serves this
+    // to the CLI's reachability advisory, which must reason about the socket
+    // that exists, not the name the QR advertises.
+    let _ = daemon.bind_ip.set(bind.ip().to_string());
 
     crate::log_info!(
         "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} gate={} hold_ms={} managed={}",
@@ -466,11 +470,7 @@ async fn resolve_bind(config: &Config) -> SocketAddr {
         crate::log_warn!("ws_bind {explicit:?} is not an IP address; ignoring it");
     }
 
-    for candidate in [
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ] {
+    for candidate in protocol::pairing::TAILSCALE_CANDIDATES {
         if !Path::new(candidate).exists() {
             continue;
         }

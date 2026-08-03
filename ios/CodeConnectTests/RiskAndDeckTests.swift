@@ -685,11 +685,11 @@ final class FleetFreshnessTests: XCTestCase {
             cachedAt: now.addingTimeInterval(-7200), hasLiveFleet: false, now: now)
         let message = FleetFreshness.message(
             stamp: stamp,
-            linkDetail: "Could not connect to the server. — trying ws:// next. — retrying in 7s.")
+            linkDetail: "Could not connect to the server. Retrying automatically.")
         XCTAssertEqual(
             message,
             "Showing the last known state, 2h old. "
-                + "Could not connect to the server. — trying ws:// next. — retrying in 7s.")
+                + "Could not connect to the server. Retrying automatically.")
         XCTAssertTrue(
             message?.hasPrefix("Showing the last known state") == true,
             "the age leads: it is what decides how much of the screen to trust")

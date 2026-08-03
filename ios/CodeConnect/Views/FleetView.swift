@@ -874,7 +874,9 @@ private struct FleetBanner: View {
         // A banner that flashes on every ordinary reconnect is noise; the link
         // gets the launch grace to sort itself out before the screen says
         // anything. The shared constant, so this grace and the cached banner's
-        // cannot drift apart.
+        // cannot drift apart. Redials never reach this branch: `evaluate`
+        // keeps them at `.offline` with the standing failure, which is what
+        // stopped every retry from blanking the banner.
         if model.linkHealth.level == .connecting {
             guard let since = model.connection.connectingSince,
                 model.now.timeIntervalSince(since) >= FleetFreshness.launchGrace
@@ -884,7 +886,8 @@ private struct FleetBanner: View {
         }
         return model.linkHealth.ccBannerItem(
             onRetry: { model.connection.retryNow() },
-            onSettings: onSettings)
+            onSettings: onSettings,
+            onTailscale: { TailscaleAssist.open() })
     }
 
     private var cachedBannerItem: CCBannerItem? {

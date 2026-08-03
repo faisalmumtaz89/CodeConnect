@@ -34,13 +34,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
-/// launchd hands the daemon no shell PATH, so every external binary is looked
-/// up at a known install location rather than through `which`.
-const TAILSCALE_CANDIDATES: &[&str] = &[
-    "/usr/local/bin/tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-];
+use protocol::pairing::TAILSCALE_CANDIDATES;
 
 /// ACME issuance is not fast, and the first call on a tailnet may do a full
 /// order. Generous, but bounded: a wedged subprocess must not wedge startup.
