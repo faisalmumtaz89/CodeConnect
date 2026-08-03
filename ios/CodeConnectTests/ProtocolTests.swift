@@ -260,3 +260,59 @@ final class TestPushWireTests: XCTestCase {
         }
     }
 }
+
+
+/// The agent-prose renderer's model half: what becomes a code block, what
+/// stays prose, and the rule that malformed fences lose nothing.
+final class AgentProseTests: XCTestCase {
+
+    func testFencesBecomeCodeAndProseStaysProse() {
+        let text = "Look:\n```swift\nlet x = 1\n```\nDone."
+        XCTAssertEqual(
+            AgentProse.segments(text),
+            [.prose("Look:"), .code("let x = 1"), .prose("Done.")],
+            "the fence lines and the language tag are wrapper, not content")
+    }
+
+    func testMultipleFencesKeepTheirOrder() {
+        let text = "```\na\n```\nmiddle\n```\nb\n```"
+        XCTAssertEqual(
+            AgentProse.segments(text), [.code("a"), .prose("middle"), .code("b")])
+    }
+
+    /// An unclosed fence is not a fence: guessing at what an unterminated
+    /// block meant is how content vanishes, so the text renders literally.
+    func testAnUnclosedFenceFallsBackToVerbatimProse() {
+        let text = "before\n```swift\nnever closed"
+        let segments = AgentProse.segments(text)
+        XCTAssertEqual(segments.count, 1)
+        guard case .prose(let prose) = segments[0] else { return XCTFail("\(segments)") }
+        XCTAssertTrue(prose.contains("```"), "the fence line itself must survive")
+        XCTAssertTrue(prose.contains("never closed"))
+    }
+
+    func testInlineMarkdownRendersInsteadOfShowingArtifacts() {
+        let rendered = AgentProse.inline("**CodeConnect** lets you *monitor*")
+        let plain = String(rendered.characters)
+        XCTAssertFalse(plain.contains("*"), "asterisks are formatting, not content: \(plain)")
+        XCTAssertTrue(plain.contains("CodeConnect lets you monitor"))
+    }
+
+    func testTickedFenceMarkerInProseIsNotADelimiter() {
+        // A line *mentioning* backticks inline is prose; only a delimiter line
+        // opens a fence.
+        let text = "use ```code``` fences"
+        XCTAssertEqual(AgentProse.segments(text), [.prose("use ```code``` fences")])
+    }
+}
+
+/// The composer chips: exact labels, exact order, and the reason "Stop" is
+/// absent is a product fact — injection cannot interrupt a running turn.
+final class ComposerTemplateTests: XCTestCase {
+    func testTheTemplatesAreTheAgreedSetInOrder() {
+        XCTAssertEqual(
+            ComposerTemplates.all,
+            ["Continue", "Fix it", "Run the tests", "Commit & push", "Explain this",
+             "Use a simpler approach"])
+    }
+}

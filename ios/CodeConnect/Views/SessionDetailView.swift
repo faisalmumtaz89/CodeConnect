@@ -1,6 +1,19 @@
 import SwiftUI
 import UIKit
 
+/// What a developer most often tells an agent from a phone, most-used first.
+/// **No "Stop"**: an injected message needs the Mac's composer to be present,
+/// so it cannot interrupt a running turn — a chip that reads like an interrupt
+/// would be a control the product does not have. Chips insert, never send.
+///
+/// Internal (not view-private) solely so the tests can pin the set.
+enum ComposerTemplates {
+    static let all = [
+        "Continue", "Fix it", "Run the tests", "Commit & push", "Explain this",
+        "Use a simpler approach",
+    ]
+}
+
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
 ///
@@ -36,6 +49,10 @@ struct SessionDetailView: View {
     @State private var showLinkDetail = false
     @State private var newSinceLeaving = 0
     @State private var appearedAt = Date()
+    /// The composer's focus, owned here rather than inside the bar: the
+    /// screen's chrome collapses around the keyboard, and only the screen can
+    /// do the collapsing.
+    @FocusState private var composerFocused: Bool
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff, the terminal — is scoped to this one key, so a
@@ -50,26 +67,36 @@ struct SessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            identityBlock
+            // While the keyboard is up, the header earns its height or loses
+            // it: the identity collapses to one line and the surface picker —
+            // an intent nobody has mid-sentence — steps aside, so the freed
+            // ~150pt goes to the conversation being typed at.
+            if composerFocused {
+                compactIdentityLine
+            } else {
+                identityBlock
+            }
             // The surface picker lives in the content, not the navigation bar.
             // A segmented control in a `.principal` slot squeezes the trailing
             // items into an overflow menu on a phone — the diff button
             // disappeared behind a "…" — and it clips outright at large Dynamic
             // Type sizes. Below the bar it has the whole width and grows.
-            CCSegmented(
-                selection: $surface,
-                options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
-                accessibilityLabel: "Session surface")
-            .padding(.horizontal, CC.space.md)
-            .padding(.top, CC.space.lg)
-            // Nothing under the picker on the Terminal side: the liveness strip
-            // sits *directly beneath* it and carries no top padding of its own,
-            // so the 12 that used to sit here measured as a 12pt seam of `bg`
-            // between two elements that are meant to touch. The timeline keeps
-            // its 12 — a scroll view abutting a control is not the same
-            // relationship.
-            .padding(.bottom, surface == .terminal ? 0 : CC.space.sm)
-            .background(CC.color.bg)
+            if !composerFocused {
+                CCSegmented(
+                    selection: $surface,
+                    options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
+                    accessibilityLabel: "Session surface")
+                .padding(.horizontal, CC.space.md)
+                .padding(.top, CC.space.lg)
+                // Nothing under the picker on the Terminal side: the liveness
+                // strip sits *directly beneath* it and carries no top padding
+                // of its own, so the 12 that used to sit here measured as a
+                // 12pt seam of `bg` between two elements that are meant to
+                // touch. The timeline keeps its 12 — a scroll view abutting a
+                // control is not the same relationship.
+                .padding(.bottom, surface == .terminal ? 0 : CC.space.sm)
+                .background(CC.color.bg)
+            }
 
             switch surface {
             case .timeline:
@@ -89,6 +116,11 @@ struct SessionDetailView: View {
             }
         }
         .background(CC.color.bg)
+        // One coordinated animation for the chrome swap around the keyboard —
+        // the header and picker collapse and return as a unit. The focus
+        // change itself is never wrapped in `withAnimation`; the keyboard owns
+        // its own transition and fights any second one.
+        .ccAnimation(CC.motion.small, value: composerFocused)
         .ccNavigationChrome()
         // Empty on purpose. The identity block below carries the name, and it
         // carries the uid tail the bar could never fit.
@@ -116,7 +148,8 @@ struct SessionDetailView: View {
                     displayName: displayName,
                     summary: summary,
                     onWhy: { showLinkDetail = true },
-                    onSend: send)
+                    onSend: send,
+                    focused: $composerFocused)
             }
         }
         .sheet(item: $openApproval) { approval in
@@ -141,6 +174,31 @@ struct SessionDetailView: View {
             composeResultClearTask?.cancel()
         }
         .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+    }
+
+    /// One line of who this is, for while the keyboard owns the screen: the
+    /// status dot and the identity, nothing else. Everything the full block
+    /// carries — folder, cwd, freshness, the permission note — is context a
+    /// reader mid-sentence has already absorbed, and it returns the moment
+    /// focus ends.
+    private var compactIdentityLine: some View {
+        HStack(spacing: CC.space.sm) {
+            CCStatusDot(
+                color: dotColour,
+                size: CCStatusDot.Size.cardHeader.rawValue,
+                isHollow: state?.loadedFromCacheAt != nil && state?.hasLiveData != true,
+                pulses: (state?.pendingApprovals.isEmpty == false))
+            Text(summary?.folderName ?? displayName)
+                .ccType(CC.type.headline)
+                .foregroundStyle(CC.text.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, CC.space.md)
+        .padding(.vertical, CC.space.sm)
+        .background(CC.color.surface)
+        .overlay(alignment: .bottom) { CCHairline() }
     }
 
     // MARK: Identity block
@@ -371,6 +429,24 @@ struct SessionDetailView: View {
                 .padding(.bottom, CC.space.lg)
             }
             .scrollIndicators(.hidden)
+            // The Apple-standard dismissal pair. The drag tracks the keyboard
+            // interactively; the tap fires only where nothing more specific
+            // claims it — rows' buttons, links and text selection all win the
+            // gesture arbitration, so this is precisely "tapping the empty
+            // background" and never a stolen control tap.
+            .scrollDismissesKeyboard(.interactively)
+            // Simultaneous, not exclusive: with the keyboard up the visible
+            // timeline is mostly selectable text, which consumes an exclusive
+            // tap — measured, the "background" tap never fired. Simultaneous
+            // lets a tap on prose or true background dismiss while buttons
+            // keep winning their own taps; the keyboard-owning field itself is
+            // outside this subtree, so typing never self-dismisses.
+            .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
+            // Named so a UI test can tell this scroll view from the keyboard's
+            // own input-assistant bar, which is also a scroll view and wins
+            // `firstMatch` while the keyboard is up — measured, and exactly the
+            // kind of impostor a coordinate tap then presses keys on.
+            .accessibilityIdentifier("session-timeline")
             .ccCollectsToolColumn(into: $toolColumn)
             .background(CC.color.bg)
             .simultaneousGesture(
@@ -635,7 +711,10 @@ private struct SessionComposeBar: View {
     @Environment(\.openURL) private var openURL
 
     @State private var dictation = DictationController()
-    @FocusState private var focused: Bool
+    /// The screen's, not the bar's: `SessionDetailView` collapses its chrome
+    /// around the keyboard, and focus mirrored through a second flag is focus
+    /// that drifts. One owner, one binding, passed in.
+    let focused: FocusState<Bool>.Binding
     /// The 0.9s the checkmark holds the circle's face after a confirmed send.
     @State private var sentFlash = false
     /// When Stop handed text back. The send face ignores taps for 300ms after,
@@ -708,9 +787,9 @@ private struct SessionComposeBar: View {
         .padding(CC.space.sm)
         .ccSurface(
             fill: CC.color.surface, radius: CC.radius.xl,
-            border: (focused || dictation.isRecording)
+            border: (focused.wrappedValue || dictation.isRecording)
                 ? CC.color.borderFocus : CC.color.border)
-        .ccAnimation(CC.motion.micro, value: focused)
+        .ccAnimation(CC.motion.micro, value: focused.wrappedValue)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
     }
 
@@ -726,7 +805,7 @@ private struct SessionComposeBar: View {
         .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
-        .focused($focused)
+        .focused(focused)
         .accessibilityLabel("Message for \(displayName)")
     }
 
@@ -777,7 +856,7 @@ private struct SessionComposeBar: View {
                 // Staged, never sent: the transcript lands in the editable
                 // field and takes the same deliberate tap as typed text.
                 text = heard
-                focused = true
+                focused.wrappedValue = true
             }
             stoppedAt = .now
         case .send:
@@ -885,9 +964,12 @@ private struct SessionComposeBar: View {
         typeSize.isAccessibilitySize ? "Say something" : "Say something to this agent"
     }
 
-    private static let templates = [
-        "Stop", "Explain", "Test it", "Smaller", "Use existing helper", "Commit & push",
-    ]
+    /// What a developer most often tells an agent from a phone, most-used
+    /// first. **No "Stop"**: an injected message needs the Mac's composer to be
+    /// present, so it cannot interrupt a running turn — a chip that reads like
+    /// an interrupt would be a control the product does not have. These insert,
+    /// never send; the contract lives at `insert(_:)`.
+    private static let templates = ComposerTemplates.all
 
     private func insert(_ template: String) {
         text =

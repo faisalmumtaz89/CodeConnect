@@ -139,13 +139,48 @@ struct AgentMessageRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            Text(text)
-                .ccType(CC.type.body)
-                .foregroundStyle(CC.text.primary)
-                .textSelection(.enabled)
-                .lineLimit(expanded ? nil : 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if isLong && !expanded {
+                // The collapsed preview is ONE `Text`, whole-message. A
+                // `lineLimit` on the segmented form below would clamp each
+                // segment separately — four lines *per paragraph and per code
+                // block* is not a four-line preview. Fences appear literally
+                // here, which a preview can afford; the expansion renders them
+                // properly.
+                //
+                // Clamped **only because the expander exists.** `isLong` is a
+                // character-count proxy for rendered lines, and a proxy
+                // misses: a 202-character sentence wraps to five lines on a
+                // phone, and the old unconditional clamp amputated line five
+                // with no button to reveal it. Below the threshold the message
+                // renders whole; the clamp is the price of a "Show more",
+                // never a tax on its absence.
+                Text(AgentProse.inline(text))
+                    .ccType(CC.type.body)
+                    .foregroundStyle(CC.text.primary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // The full form: prose with inline markdown rendered —
+                // `**bold**` as bold, never as asterisks — and fenced code in
+                // the kit's own mono block, copyable and clamped behind its
+                // own disclosure rather than reflowed as prose.
+                ForEach(Array(AgentProse.segments(text).enumerated()), id: \.offset) {
+                    _, segment in
+                    switch segment {
+                    case .prose(let prose):
+                        Text(AgentProse.inline(prose))
+                            .ccType(CC.type.body)
+                            .foregroundStyle(CC.text.primary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case .code(let code):
+                        CCMonoBlock(code, lineLimit: 12)
+                    }
+                }
+            }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
                     withAnimation(CC.motion.small) { expanded.toggle() }
@@ -542,10 +577,17 @@ struct NoticeRow: View {
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = notice.detail, !detail.isEmpty {
-                    Text(detail)
+                    // Inline-parsed like the prose it previews — asterisks in a
+                    // summary are the same artifact as asterisks in the body.
+                    // The 3-line clamp is legitimate **only for turn-complete**,
+                    // whose full agent row renders immediately beneath; any
+                    // other notice's detail is the whole of what the reader
+                    // gets, and a preview clamp there would be the silent
+                    // truncation this file just eliminated.
+                    Text(AgentProse.inline(detail))
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
-                        .lineLimit(3)
+                        .lineLimit(notice.kind == .turnComplete ? 3 : nil)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

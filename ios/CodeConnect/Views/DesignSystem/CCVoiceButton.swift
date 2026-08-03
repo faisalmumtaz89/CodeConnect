@@ -86,6 +86,14 @@ struct CCVoiceButton: View {
         .ccAnimation(CC.motion.micro, value: isBlocked)
     }
 
+    /// Optically tuned for this one 44pt disc, deliberately off the token
+    /// ramp: at the kit's `iconLg` (20) the glyphs crowded the circle's face,
+    /// and the owner sized them down ~13% by eye. Local constants rather than
+    /// new tokens — the ramp stays closed, and these numbers mean nothing
+    /// outside this circle.
+    private static let faceGlyph: CGFloat = 17
+    private static let stopGlyph: CGFloat = 14
+
     @ViewBuilder
     private var glyph: some View {
         switch phase {
@@ -94,17 +102,17 @@ struct CCVoiceButton: View {
             // dictation surfaces draw now, and it says "speech becomes text"
             // rather than "this records audio" — which is exactly the promise
             // (nothing is kept, the transcript is staged for review).
-            CCIcon("waveform", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
+            CCIcon("waveform", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
         case .send:
-            CCIcon("arrow.up", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
+            CCIcon("arrow.up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
         case .stop:
-            CCIcon("stop.fill", size: CC.size.icon, weight: .semibold, relativeTo: .body)
+            CCIcon("stop.fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body)
         case .sending:
             // Inherits `onAccent`, so the ring is black on the white face
             // without being told — same contract as CCButton's spinner.
             CCProgressRing(inheritingSize: 16)
         case .sent:
-            CCIcon("checkmark", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
+            CCIcon("checkmark", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
         }
     }
 
