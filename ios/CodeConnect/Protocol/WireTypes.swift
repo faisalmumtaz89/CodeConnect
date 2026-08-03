@@ -379,6 +379,9 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// false, so an older Mac simply does not offer the swipe rather than offering
     /// one that silently does nothing.
     var deletesSessions: Bool { advertises(["delete_session"]) }
+    /// `test_push` is answerable — distinct from `push`, which a minor-6 daemon
+    /// advertises without understanding the test request.
+    var testsPush: Bool { advertises(["test_push"]) }
     /// This particular connection is encrypted — a different fact from `tls`,
     /// which only says the listener *holds* a certificate. The daemon accepts
     /// both schemes on one port during the migration, so the phone is entitled
@@ -764,6 +767,8 @@ enum ClientMessage: Sendable {
     /// `cc-1` could name a session this phone never saw. The daemon refuses
     /// anything still live, in SQL, whatever this end believed.
     case deleteSession(sessionUID: String)
+    /// One real APNs notification to this device — the doorbell, proven.
+    case testPush(requestID: String)
     /// `session` scopes the answer to one run. Optional on the wire so a
     /// pre-uid daemon still accepts it; when present the daemon refuses to apply
     /// the answer to a different run that happens to be showing a card with the
@@ -838,6 +843,9 @@ extension ClientMessage: Encodable {
         case .deleteSession(let sessionUID):
             try c.encode("delete_session", forKey: .type)
             try c.encode(sessionUID, forKey: .sessionUID)
+        case .testPush(let requestID):
+            try c.encode("test_push", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
         case .answer(let requestID, let payloadHash, let decision, let session):
             try c.encode("answer", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
@@ -958,6 +966,46 @@ enum DeleteSessionResult: Decodable, Sendable, Hashable {
     }
 }
 
+/// What became of a `test_push`. Decode-only, like every reply; `accepted`
+/// claims exactly what Apple's 200 proves — accepted for delivery, with the
+/// banner as the device's own final word. An unknown status stays inert.
+enum TestPushResult: Decodable, Sendable, Hashable {
+    case accepted(apnsID: String?)
+    case pushUnconfigured
+    case notPairedDevice
+    case noRegisteredToken
+    case rateLimited(retryAfterSecs: UInt32)
+    case failed(reason: String)
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case apnsID = "apns_id"
+        case retryAfterSecs = "retry_after_secs"
+        case reason
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "accepted":
+            self = .accepted(apnsID: try c.decodeIfPresent(String.self, forKey: .apnsID))
+        case "push_unconfigured": self = .pushUnconfigured
+        case "not_paired_device": self = .notPairedDevice
+        case "no_registered_token": self = .noRegisteredToken
+        case "rate_limited":
+            self = .rateLimited(
+                retryAfterSecs: try c.decodeIfPresent(UInt32.self, forKey: .retryAfterSecs) ?? 30)
+        case "failed":
+            self = .failed(
+                reason: try c.decodeIfPresent(String.self, forKey: .reason)
+                    ?? "The Mac could not send the test.")
+        default: self = .unknown(status: status)
+        }
+    }
+}
+
 enum ServerMessage: Sendable {
     case helloAck(HelloAck)
     case sessions([SessionSummary])
@@ -966,6 +1014,7 @@ enum ServerMessage: Sendable {
     case sendTextResult(sessionID: String, result: SendTextResult)
     case captureResult(sessionID: String, text: String)
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
+    case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
     case error(code: String, message: String)
     case pong
@@ -1025,6 +1074,10 @@ extension ServerMessage: Decodable {
             self = .sendTextResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 result: try c.decode(SendTextResult.self, forKey: .result))
+        case "test_push_result":
+            self = .testPushResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                result: try c.decode(TestPushResult.self, forKey: .result))
         case "delete_session_result":
             self = .deleteSessionResult(
                 sessionUID: try c.decode(String.self, forKey: .sessionUID),

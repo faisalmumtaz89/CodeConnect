@@ -203,23 +203,19 @@ struct CCSegmented<Value: Hashable>: View {
         self.accessibilityLabelText = accessibilityLabel
     }
 
-    /// **The drawn track is 36 and the finger is 44**, and the two are
-    /// different objects.
+    /// **The drawn track is the finger's 44 — visible target and hit target are
+    /// one object.**
     ///
-    /// It shipped as one: `.frame(minHeight: CC.size.controlMd)` on the segment
-    /// *plus* 3pt of track padding, with the border drawn around the result — so
-    /// the visible track measured **49.67pt** against an intended 36. The obvious
-    /// repair, shrinking the frame to 36, buys the height back by giving up 8pt
-    /// of target, and the kit's own rule forbids buying it back with a
-    /// `contentShape` larger than the frame: an expanded shape is *reported* to
-    /// the accessibility tree without being hit-tested, so it measures as a pass
-    /// and fails under a thumb.
-    ///
-    /// So the button keeps its full 44pt of real, hit-tested height and the
-    /// chrome is inset into it: 4pt of transparent overhang above and below the
-    /// track, 3pt from the track to the thumb, 30pt of thumb. Every point of the
-    /// 44 is inside the `Button`'s own frame.
-    private var trackInset: CGFloat { (CC.size.controlMd - CC.size.controlSm) / 2 }
+    /// This control has been wrong in both directions. It shipped drawing
+    /// 49.67pt against an intended 36 (frame *plus* padding *plus* border); the
+    /// repair inset the chrome to a 36 track inside the 44 button, keeping the
+    /// full hit-tested height — and that read as the opposite failure: a
+    /// control that *looks* 36 invites a 36-sized press, and the 8pt of honest
+    /// but invisible target bought nothing a reader could see. The kit's rule
+    /// still forbids a `contentShape` larger than the frame (reported to the
+    /// accessibility tree without being hit-tested), so the resolution is the
+    /// only one with no gap anywhere: draw the track over the whole 44.
+
     /// Track edge to thumb edge.
     private var thumbInset: CGFloat { CC.space.xxs - 1 }
 
@@ -235,8 +231,8 @@ struct CCSegmented<Value: Hashable>: View {
         .accessibilityLabel(accessibilityLabelText ?? "")
     }
 
-    /// Drawn behind the buttons and inset out of their hit area, so the rule the
-    /// reader sees is 36 while the target they hit is 44.
+    /// Drawn behind the buttons, edge to edge with their hit area: what the
+    /// reader sees is exactly what they can press.
     ///
     /// `surfaceRaised`, not `surface`: a segmented control is a block nested
     /// inside a screen, which is the rung of the luminance ladder that means
@@ -246,7 +242,6 @@ struct CCSegmented<Value: Hashable>: View {
         return shape
             .fill(CC.color.surfaceRaised)
             .overlay { shape.strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
-            .padding(.vertical, trackInset)
     }
 
     private func segment(_ option: CCSegmentedOption<Value>) -> some View {
@@ -288,9 +283,9 @@ struct CCSegmented<Value: Hashable>: View {
             // accessibility sizes, where the label outgrows the floor and would
             // otherwise sit hard against the thumb's own edge.
             .padding(.vertical, CC.space.xxs)
-            // The **thumb**: 30pt, inside a 36pt track, inside a 44pt button.
-            // See `trackInset`.
-            .frame(minHeight: CC.size.controlSm - thumbInset * 2)
+            // The **thumb**: 38pt, inside the 44pt track/button — the 3pt
+            // `thumbInset` on each side is the whole of the remaining chrome.
+            .frame(minHeight: CC.size.controlMd - thumbInset * 2)
             .background {
                 if isSelected {
                     RoundedRectangle(cornerRadius: CC.radius.sm, style: .continuous)
@@ -304,12 +299,11 @@ struct CCSegmented<Value: Hashable>: View {
                         .matchedGeometryEffect(id: "cc.segment.thumb", in: thumb)
                 }
             }
-            // Track padding, then the overhang that makes the button 44pt tall
-            // without drawing a 44pt track. Both are inside the `Button`'s own
-            // frame, so `.contentShape` here makes a real region hit-test —
-            // it does not invent one outside the view.
+            // Only the thumb's own inset from the track edge: the track fills
+            // the button, so the pressable region and the drawn one are the
+            // same rectangle and `.contentShape` hit-tests exactly what the
+            // reader sees.
             .padding(.vertical, thumbInset)
-            .padding(.vertical, trackInset)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

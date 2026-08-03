@@ -256,6 +256,10 @@ impl LivenessSweep {
 
 #[derive(Default)]
 struct Inner {
+    /// Per-device floor between deliberate test pushes. A stolen credential
+    /// must not become an APNs harassment primitive, and 30 seconds costs a
+    /// legitimate tester nothing.
+    test_pushes: HashMap<String, std::time::Instant>,
     /// Keyed by `session_uid`. A second run of the same name gets its own slot
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
@@ -1252,13 +1256,22 @@ impl Daemon {
         ) {
             return;
         }
+        // **The doorbell carries no agent text.** `input.message` is the
+        // agent's own sentence and routinely names files and commands; an APNs
+        // payload passes through Apple, and the documented design is that
+        // nothing an agent wrote ever does. The body is derived from the hook's
+        // *type* alone — the fact that a bell rang, never what it rang about.
+        let body = match kind {
+            "permission_prompt" => "Waiting on an approval",
+            "agent_needs_input" => "Waiting for your input",
+            "agent_completed" => "Finished a turn",
+            "idle_prompt" => "Waiting for you",
+            _ => "Needs your attention",
+        };
         self.push.send(&PushHint {
             session_id: session.name.clone(),
             title: session.name.clone(),
-            body: input
-                .message
-                .clone()
-                .unwrap_or_else(|| kind.replace('_', " ")),
+            body: body.to_string(),
             blocked_sessions: self.blocked_session_count().await,
         });
     }
@@ -2865,6 +2878,25 @@ impl Daemon {
 
         sweep.elapsed = started.elapsed();
         sweep
+    }
+
+    /// The per-device floor between deliberate test pushes: `None` when this
+    /// device may send now (and the send is recorded), or the seconds left.
+    pub async fn test_push_gate(&self, device_id: &str) -> Option<u32> {
+        const FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut inner = self.inner.lock().await;
+        let now = std::time::Instant::now();
+        if let Some(last) = inner.test_pushes.get(device_id) {
+            let elapsed = now.duration_since(*last);
+            if elapsed < FLOOR {
+                // Ceiling, not floor: "try again in 1s" must never be sayable
+                // while 1.9s actually remain — a wait the answer understates is
+                // a refusal the user cannot act on.
+                return Some((FLOOR - elapsed).as_secs_f64().ceil() as u32);
+            }
+        }
+        inner.test_pushes.insert(device_id.to_string(), now);
+        None
     }
 
     /// Remove one ended run, for the phone's swipe.
@@ -5369,6 +5401,93 @@ mod tests {
             .into_iter()
             .map(|event| event.kind)
             .collect()
+    }
+
+    /// The doorbell carries no agent text — the leak this pins: the
+    /// notification hook's `message` is the agent's own sentence and routinely
+    /// names files and commands, and it used to be copied verbatim into the
+    /// APNs alert body, through Apple, on every "agent needs input".
+    #[tokio::test]
+    async fn a_push_hint_never_carries_the_agents_own_words() {
+        struct Capture(std::sync::Mutex<Vec<crate::apns::PushHint>>);
+        impl crate::apns::PushSender for Capture {
+            fn send(&self, hint: &crate::apns::PushHint) {
+                self.0.lock().unwrap().push(hint.clone());
+            }
+        }
+        let capture = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        let store = shared_store();
+        let (tx, rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let daemon = Daemon::new(
+            Config::default(),
+            store,
+            Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
+            Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tx,
+        );
+
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "agent_needs_input",
+                    "message": "I need /Users/alice/secrets/deploy_key.pem to continue",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+
+        let hints = capture.0.lock().unwrap();
+        assert_eq!(hints.len(), 1, "the doorbell must still ring");
+        assert_eq!(hints[0].body, "Waiting for your input");
+        assert!(
+            !format!("{:?}", hints[0]).contains("deploy_key"),
+            "nothing the agent wrote may reach the APNs payload"
+        );
+    }
+
+    /// The per-device floor: a second test inside the window is refused with
+    /// the wait, a different device is not, and the window expires.
+    #[tokio::test]
+    async fn the_test_push_gate_is_per_device_and_timed() {
+        let daemon = test_daemon();
+        assert_eq!(
+            daemon.test_push_gate("dev-a").await,
+            None,
+            "first send passes"
+        );
+        let wait = daemon.test_push_gate("dev-a").await;
+        assert!(
+            wait.is_some_and(|s| (1..=30).contains(&s)),
+            "second is floored: {wait:?}"
+        );
+        assert_eq!(
+            daemon.test_push_gate("dev-b").await,
+            None,
+            "another device is unaffected"
+        );
+
+        // Expiry, proven rather than trusted: age the recorded send past the
+        // floor by editing the record, not by sleeping 30 wall seconds.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let aged = std::time::Instant::now() - std::time::Duration::from_secs(31);
+            inner.test_pushes.insert("dev-a".into(), aged);
+        }
+        assert_eq!(
+            daemon.test_push_gate("dev-a").await,
+            None,
+            "a window that has passed refuses nobody"
+        );
     }
 
     // ===================================================== deleting one run

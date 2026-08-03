@@ -88,6 +88,16 @@ pub enum ClientMessage {
     DeleteSession {
         session_uid: String,
     },
+    /// "Prove the doorbell rings." Sends one real APNs notification to **this
+    /// connection's own device**, so the whole chain — stored token, provider
+    /// key, Apple, banner — is demonstrated rather than implied.
+    ///
+    /// Correlated by `request_id` because two sheets on two phones may test at
+    /// once, and gated on the `test_push` capability: a minor-6 daemon can
+    /// advertise `push` without understanding this message.
+    TestPush {
+        request_id: String,
+    },
     /// Idempotent, leased answer. `payload_hash` must match the text the phone
     /// displayed or the answer is refused.
     Answer {
@@ -215,6 +225,10 @@ pub enum ServerMessage {
         session_uid: String,
         result: DeleteSessionResult,
     },
+    TestPushResult {
+        request_id: String,
+        result: TestPushResult,
+    },
     SendTextResult {
         session_id: String,
         result: SendTextResult,
@@ -270,6 +284,10 @@ pub struct Capabilities {
     /// is that an action it cannot perform is not offered.
     #[serde(default)]
     pub delete_session: bool,
+    /// `test_push` is answerable. Distinct from `push` — a minor-6 daemon can
+    /// send pushes without understanding the test request.
+    #[serde(default)]
+    pub test_push: bool,
     /// APNs wired to a real key. False while the sender is the logging stub.
     pub push: bool,
     /// The listener holds a `tailscale cert` and accepts `wss://`. Says nothing
@@ -431,6 +449,35 @@ pub enum DeleteSessionResult {
     /// silently. Every request this daemon accepts gets an answer to *that*
     /// request.
     Failed { message: String },
+}
+
+/// What became of a `test_push`. Every refusal is a distinct fact the phone
+/// renders differently, and `accepted` says exactly what Apple's 200 proves:
+/// the notification was **accepted for delivery** — display is the device's
+/// half, which is why the phone shows the banner as the final word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TestPushResult {
+    Accepted {
+        /// Apple's own `apns-id` response header, when it sent one — the
+        /// receipt a reader can take to Apple's delivery logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        apns_id: Option<String>,
+    },
+    /// The daemon has no APNs key configured; the sender is the logging stub.
+    PushUnconfigured,
+    /// This connection authenticated with the static bootstrap token, so there
+    /// is no device row — and no token — to send to.
+    NotPairedDevice,
+    /// The device exists but has never registered an APNs token (notifications
+    /// were never enabled, or registration has not completed yet).
+    NoRegisteredToken,
+    RateLimited {
+        retry_after_secs: u32,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -674,6 +721,65 @@ mod tests {
         assert_eq!(reply["result"]["status"], "deleted");
     }
 
+    /// Same discipline for the push test: every status the daemon can answer
+    /// with, pinned to the exact strings the phone matches on.
+    #[test]
+    fn the_test_push_wire_shape_is_exactly_what_the_phone_matches_on() {
+        let request = serde_json::to_value(ClientMessage::TestPush {
+            request_id: "tp-1".into(),
+        })
+        .unwrap();
+        assert_eq!(request["type"], "test_push");
+        assert_eq!(request["request_id"], "tp-1");
+
+        for (result, expected) in [
+            (
+                TestPushResult::Accepted {
+                    apns_id: Some("A1".into()),
+                },
+                serde_json::json!({"status": "accepted", "apns_id": "A1"}),
+            ),
+            (
+                TestPushResult::Accepted { apns_id: None },
+                serde_json::json!({"status": "accepted"}),
+            ),
+            (
+                TestPushResult::PushUnconfigured,
+                serde_json::json!({"status": "push_unconfigured"}),
+            ),
+            (
+                TestPushResult::NotPairedDevice,
+                serde_json::json!({"status": "not_paired_device"}),
+            ),
+            (
+                TestPushResult::NoRegisteredToken,
+                serde_json::json!({"status": "no_registered_token"}),
+            ),
+            (
+                TestPushResult::RateLimited {
+                    retry_after_secs: 12,
+                },
+                serde_json::json!({"status": "rate_limited", "retry_after_secs": 12}),
+            ),
+            (
+                TestPushResult::Failed {
+                    reason: "apns 500".into(),
+                },
+                serde_json::json!({"status": "failed", "reason": "apns 500"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&result).unwrap(), expected);
+        }
+
+        let reply = serde_json::to_value(ServerMessage::TestPushResult {
+            request_id: "tp-1".into(),
+            result: TestPushResult::Accepted { apns_id: None },
+        })
+        .unwrap();
+        assert_eq!(reply["type"], "test_push_result");
+        assert_eq!(reply["request_id"], "tp-1");
+    }
+
     #[test]
     fn an_answer_may_name_its_session_and_a_legacy_one_still_decodes() {
         let legacy: ClientMessage = serde_json::from_str(
@@ -722,6 +828,7 @@ mod tests {
                 assert!(!capabilities.send_text_idempotent);
                 assert!(!capabilities.prompt_identity);
                 assert!(!capabilities.delete_session);
+                assert!(!capabilities.test_push);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -847,6 +954,7 @@ mod tests {
             send_text: true,
             capture: true,
             delete_session: true,
+            test_push: true,
             push: false,
             tls: true,
             tls_active: true,

@@ -217,3 +217,46 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(outcome.decisionLabel, "Denied")
     }
 }
+
+
+/// The push-test wire, pinned like the delete wire: every status the daemon can
+/// answer, and the rule that an unknown one stays inert.
+@MainActor
+final class TestPushWireTests: XCTestCase {
+    private func decode(_ json: String) throws -> TestPushResult {
+        try JSONDecoder().decode(TestPushResult.self, from: Data(json.utf8))
+    }
+
+    func testEveryStatusDecodesToItsOwnMeaning() throws {
+        XCTAssertEqual(
+            try decode(#"{"status":"accepted","apns_id":"A1"}"#), .accepted(apnsID: "A1"))
+        XCTAssertEqual(try decode(#"{"status":"accepted"}"#), .accepted(apnsID: nil))
+        XCTAssertEqual(try decode(#"{"status":"push_unconfigured"}"#), .pushUnconfigured)
+        XCTAssertEqual(try decode(#"{"status":"not_paired_device"}"#), .notPairedDevice)
+        XCTAssertEqual(try decode(#"{"status":"no_registered_token"}"#), .noRegisteredToken)
+        XCTAssertEqual(
+            try decode(#"{"status":"rate_limited","retry_after_secs":12}"#),
+            .rateLimited(retryAfterSecs: 12))
+        XCTAssertEqual(
+            try decode(#"{"status":"failed","reason":"apns 500"}"#), .failed(reason: "apns 500"))
+        XCTAssertEqual(try decode(#"{"status":"queued"}"#), .unknown(status: "queued"))
+    }
+
+    func testTheRequestCarriesItsCorrelationId() throws {
+        let encoded = try JSONEncoder().encode(ClientMessage.testPush(requestID: "tp-9"))
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(text.contains(#""test_push""#), text)
+        XCTAssertTrue(text.contains(#""tp-9""#), text)
+    }
+
+    func testTheReplyRoutesByItsId() throws {
+        let decoded = try JSONDecoder().decode(
+            ServerMessage.self,
+            from: Data(
+                #"{"type":"test_push_result","request_id":"tp-9","result":{"status":"accepted"}}"#
+                    .utf8))
+        guard case .testPushResult("tp-9", .accepted(nil)) = decoded else {
+            return XCTFail("got \(decoded)")
+        }
+    }
+}

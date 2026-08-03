@@ -24,7 +24,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
-use crate::apns::{coalesce, PushHint, PushSender};
+use crate::apns::{coalesce, PushHint, PushSender, TestDelivery};
 
 /// How long any single leg of a push may take. Generous for a network round
 /// trip, short enough that a silently-filtered connection is reported rather
@@ -143,7 +143,7 @@ impl ApnsPushSender {
         payload: String,
         // Guards the one environment retry below against recursing forever.
         retried: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let host = target.environment.host();
         let bearer = token.bearer()?;
         // **Bounded, because an unbounded connect can hang forever and say
@@ -205,7 +205,14 @@ impl ApnsPushSender {
             .context("awaiting the APNs response")?;
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            // Apple's receipt for this exact notification, when it sends one —
+            // the id a reader can take to Apple's delivery logs.
+            let apns_id = response
+                .headers()
+                .get("apns-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            return Ok(apns_id);
         }
 
         let mut reason = String::new();
@@ -252,7 +259,7 @@ impl ApnsPushSender {
                 environment: other,
                 ..target.clone()
             };
-            Box::pin(Self::deliver(
+            let apns_id = Box::pin(Self::deliver(
                 tls,
                 token,
                 Arc::clone(&registry),
@@ -262,7 +269,7 @@ impl ApnsPushSender {
             ))
             .await?;
             registry.correct_environment(&target.device_id, other);
-            return Ok(());
+            return Ok(apns_id);
         }
         bail!("APNs refused the push: {status} {reason}")
     }
@@ -288,7 +295,7 @@ impl PushSender for ApnsPushSender {
             let device = target.device_id.clone();
             tokio::spawn(async move {
                 match Self::deliver(tls, token, registry, target, payload, false).await {
-                    Ok(()) => crate::log_info!("push: delivered to device {device}"),
+                    Ok(_) => crate::log_info!("push: delivered to device {device}"),
                     Err(err) => crate::log_warn!("push: {device}: {err:#}"),
                 }
             });
@@ -297,6 +304,52 @@ impl PushSender for ApnsPushSender {
 
     fn is_live(&self) -> bool {
         true
+    }
+
+    fn send_test(&self, device_id: &str) -> tokio::sync::oneshot::Receiver<TestDelivery> {
+        let (respond, rx) = tokio::sync::oneshot::channel();
+        // The one registered target with this identity, or the honest refusal.
+        let Some(target) = self
+            .registry
+            .targets()
+            .into_iter()
+            .find(|t| t.device_id == device_id)
+        else {
+            let _ = respond.send(TestDelivery::NoToken);
+            return rx;
+        };
+        // Says what it is, carries nothing else. The `test` marker is what the
+        // phone's foreground handler keys on: an ordinary doorbell is redundant
+        // while the app is open, but a test the user just requested must show.
+        let payload = serde_json::json!({
+            "aps": {
+                "alert": {
+                    "title": "CodeConnect",
+                    "body": "Push works. This is the test you asked for.",
+                },
+                "sound": "default",
+            },
+            "codeconnect_test": 1,
+        })
+        .to_string();
+        let tls = self.tls.clone();
+        let token = Arc::clone(&self.token);
+        let registry = Arc::clone(&self.registry);
+        let device = target.device_id.clone();
+        tokio::spawn(async move {
+            let outcome = match Self::deliver(tls, token, registry, target, payload, false).await {
+                Ok(apns_id) => {
+                    crate::log_info!("push: test accepted for device {device}");
+                    TestDelivery::Accepted { apns_id }
+                }
+                Err(err) => {
+                    crate::log_warn!("push: test to {device} failed: {err:#}");
+                    TestDelivery::Failed(format!("{err:#}"))
+                }
+            };
+            let _ = respond.send(outcome);
+        });
+        rx
     }
 }
 

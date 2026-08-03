@@ -172,6 +172,7 @@ final class DaemonConnection {
     private var sendTextWaiters: [String: [Waiter<SendTextResult>]] = [:]
     private var captureWaiters: [String: [Waiter<String>]] = [:]
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
+    private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     private var nextTicket: UInt64 = 0
 
@@ -561,7 +562,19 @@ final class DaemonConnection {
             send: .deleteSession(sessionUID: sessionUID))
     }
 
-    func capture(session: String, lines: UInt32?) async throws -> String {
+    /// One real push to this device, with the daemon's typed answer.
+    func testPush() async throws -> TestPushResult {
+        let requestID = "tp-" + UUID().uuidString
+        #if DEBUG
+            if let testPushStub { return try await testPushStub(requestID) }
+        #endif
+        return try await request(
+            key: requestID,
+            store: \.testPushWaiters,
+            send: .testPush(requestID: requestID))
+    }
+
+        func capture(session: String, lines: UInt32?) async throws -> String {
         try await request(
             key: session,
             store: \.captureWaiters,
@@ -678,6 +691,10 @@ final class DaemonConnection {
         let deletes = deleteWaiters
         deleteWaiters = [:]
         for queue in deletes.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        let tests = testPushWaiters
+        testPushWaiters = [:]
+        for queue in tests.values { for w in queue { w.continuation?.resume(throwing: error) } }
     }
 
     // MARK: - Inbound
@@ -743,6 +760,8 @@ final class DaemonConnection {
             deliver(store: \.captureWaiters, key: sessionID, value: text)
         case .deleteSessionResult(let sessionUID, let result):
             deliver(store: \.deleteWaiters, key: sessionUID, value: result)
+        case .testPushResult(let requestID, let result):
+            deliver(store: \.testPushWaiters, key: requestID, value: result)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         case .error(let code, let message):
@@ -816,6 +835,8 @@ final class DaemonConnection {
         /// that was never sent is a different fact from one that was sent and
         /// refused, and only that distinction tests a gate.
         var deleteStub: ((String) async throws -> DeleteSessionResult)?
+        /// Test seam: answer `testPush` locally.
+        var testPushStub: ((String) async throws -> TestPushResult)?
         /// Uids passed to `deleteSession`, in order, whether stubbed or not.
         private(set) var deleteRequests: [String] = []
 

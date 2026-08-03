@@ -710,6 +710,45 @@ where
             )
             .await?;
         }
+        ClientMessage::TestPush { request_id } => {
+            // Every branch answers the request it was asked — same contract as
+            // `delete_session`: a phone holding a spinner can only be released
+            // by a result carrying its own correlation id.
+            let result = if !daemon.push.is_live() {
+                protocol::ws::TestPushResult::PushUnconfigured
+            } else if let Some(device) = device_id {
+                match daemon.test_push_gate(device).await {
+                    Some(retry_after_secs) => {
+                        protocol::ws::TestPushResult::RateLimited { retry_after_secs }
+                    }
+                    None => match daemon.push.send_test(device).await {
+                        Ok(crate::apns::TestDelivery::Accepted { apns_id }) => {
+                            protocol::ws::TestPushResult::Accepted { apns_id }
+                        }
+                        Ok(crate::apns::TestDelivery::Unconfigured) => {
+                            protocol::ws::TestPushResult::PushUnconfigured
+                        }
+                        Ok(crate::apns::TestDelivery::NoToken) => {
+                            protocol::ws::TestPushResult::NoRegisteredToken
+                        }
+                        Ok(crate::apns::TestDelivery::Failed(reason)) => {
+                            protocol::ws::TestPushResult::Failed { reason }
+                        }
+                        // The sender dropped its half without answering — a bug
+                        // worth a log line, reported as a failure rather than a
+                        // hang.
+                        Err(_) => protocol::ws::TestPushResult::Failed {
+                            reason: "the push sender did not report an outcome".into(),
+                        },
+                    },
+                }
+            } else {
+                // The static bootstrap token has no device row: nothing to
+                // send to, and by design nothing it may exercise.
+                protocol::ws::TestPushResult::NotPairedDevice
+            };
+            send(sink, &ServerMessage::TestPushResult { request_id, result }).await?;
+        }
         ClientMessage::Unsubscribe { session_id } => {
             // Resolution can fail here — the run may have been forgotten — and
             // an unsubscribe that cannot name anything has nothing to undo, so
@@ -1007,6 +1046,10 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool) -> Capabilities {
         // never runs serde; `Capabilities.advertises` is where it lives. The
         // `#[serde(default)]` on this field is for Rust decoders only.
         delete_session: true,
+        // Same liveness as `push`, but its own flag: a minor-6 daemon can send
+        // pushes without understanding the test request, and the phone must be
+        // able to tell those apart without version arithmetic.
+        test_push: daemon.push.is_live(),
         // The hook emits nothing when we are unreachable, so a dead daemon is
         // indistinguishable from no daemon.
         fail_mode: "fail_open".into(),

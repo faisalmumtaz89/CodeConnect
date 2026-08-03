@@ -532,7 +532,7 @@ struct PairingView: View {
                             .foregroundStyle(CC.color.warning)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, CCColumn.content)
+                            .padding(.leading, CC.space.md)
                             .padding(.trailing, CC.space.md)
                             .padding(.vertical, CC.space.sm)
                     }
@@ -589,7 +589,7 @@ struct PairingView: View {
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, CCColumn.content)
+                            .padding(.leading, CC.space.md)
                             .padding(.trailing, CC.space.md)
                             .padding(.vertical, CC.space.md)
                     }

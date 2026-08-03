@@ -274,7 +274,7 @@ struct TerminalSettingsView: View {
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, CCColumn.content)
+                            .padding(.leading, CC.space.md)
                             .padding(.trailing, CC.space.md)
                             .padding(.vertical, CC.space.md)
                     } else {

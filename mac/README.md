@@ -428,8 +428,8 @@ the link; what is lost is the certificate, not the confidentiality.
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `send_text`,
-`capture` and `delete_session` so the app disables affordances it does not see
-advertised instead of failing at tap time.
+`capture`, `delete_session` and `test_push` so the app disables affordances it
+does not see advertised instead of failing at tap time.
 `hello_ack.protocol_minor` is the additive feature level: `>= 1` means
 `TurnComplete`, `get_diff`, pairing and `risk_class` are all present; `>= 2`
 means every session and event carries a `session_uid`, every message that names

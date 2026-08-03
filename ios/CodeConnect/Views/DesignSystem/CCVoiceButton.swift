@@ -90,7 +90,11 @@ struct CCVoiceButton: View {
     private var glyph: some View {
         switch phase {
         case .dictate:
-            CCIcon("mic.fill", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
+            // `waveform`, not `mic.fill`: the waveform is what Apple's own
+            // dictation surfaces draw now, and it says "speech becomes text"
+            // rather than "this records audio" — which is exactly the promise
+            // (nothing is kept, the transcript is staged for review).
+            CCIcon("waveform", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
         case .send:
             CCIcon("arrow.up", size: CC.size.iconLg, weight: .semibold, relativeTo: .body)
         case .stop:

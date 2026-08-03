@@ -178,6 +178,12 @@ final class AppModel {
     /// Push Notifications capability. Reported, never swallowed.
     private(set) var pushFailure: String?
 
+    /// The live iOS permission state, re-read on every ask — the stored
+    /// `pushAuthorized` goes stale the moment the user visits Settings.
+    func pushAuthorizationStatus() async -> UNAuthorizationStatus {
+        await pushRegistrar.authorizationStatus()
+    }
+
     /// Ask once the phone is paired: a token is worthless before there is a
     /// device row to store it against, and a permission prompt on the pairing
     /// screen is a prompt with no context.
@@ -797,6 +803,9 @@ final class AppModel {
         case .deleteSessionResult:
             // Nothing to do here. `removeSession` awaits the reply itself and does
             // the local clean-up, because only it knows which row asked.
+            break
+        case .testPushResult:
+            // Same shape: the sheet's own request awaits the reply by id.
             break
         case .sessions(let list):
             markFleetLive()

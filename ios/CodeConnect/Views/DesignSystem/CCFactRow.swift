@@ -36,13 +36,15 @@ enum CCFactLabelStyle {
 ///  * **A state takes its semantic colour; a measurement stays `text`.**
 ///  * **Every fact carries its age**, in `monoSmall`, at the trailing edge.
 ///
-/// **It lands on the content column itself** (`CCColumn.content`). It used to
-/// inset its text 16 from the card edge, which is 32 on screen — the *gutter*,
-/// where the `CCRow`s in the card above put their status dots, not their titles.
-/// Link Health and Settings therefore ran two text edges 20pt apart on one
-/// screen, and two screens carried a hand-written 20pt shim at every
-/// call site to close it. The number belongs to the component: a fact row and a
-/// list row now begin in the same place without anybody adding anything.
+/// **It lands on its container's edge** — 16 inside a zero-padding card, 32 on
+/// screen — because a fact row carries no mark, and the kit's law (written at
+/// `CCRow`'s gutter) is that *a row with no mark keeps its edge rather than
+/// reserving a column for nothing*. This row has been at both numbers: an
+/// early fix moved it out to the dot column to match the *marked* rows of one
+/// Settings card, which read as harmony there and as a phantom indent on every
+/// screen where no mark exists — the settings sheet, the link sheet, the
+/// terminal settings, which is all twenty call sites. Marked `CCRow`s keep 52
+/// because their mark earns it; this row never has one.
 struct CCFactRow<Value: View, Detail: View>: View {
     let label: String
     var labelStyle: CCFactLabelStyle = .prose
@@ -59,11 +61,6 @@ struct CCFactRow<Value: View, Detail: View>: View {
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.ccColumnInset) private var columnInset
-    /// Same ramp and ceiling as `CCStatusDot` and `CCSectionHeader`: the content
-    /// column moves at accessibility sizes to clear a grown mark, and a fact row
-    /// that stayed on a constant 36 would part company with the rows above it.
-    @ScaledMetric(relativeTo: .footnote) private var scaledDot: CGFloat = CC.size.dot
-
     /// Declared in the struct body rather than an extension on purpose: an
     /// initialiser in an extension does not suppress the synthesised memberwise
     /// one, and the two collide over the private closure properties.
@@ -95,22 +92,24 @@ struct CCFactRow<Value: View, Detail: View>: View {
                     ageText
                 }
                 detail()
-                    // The row has just stepped its own content onto the content
-                    // column, so it says where that column ended up. A nested
+                    // Where this row's own text edge ended up, so a nested
                     // surface in this slot — the daemon's verbatim note, a
-                    // fingerprint — then hangs its border 12pt left of the
-                    // label above it instead of adding a third text edge under
-                    // it — the two-edge rule's corollary; see
+                    // fingerprint — hangs from the label above it instead of
+                    // adding a second text edge under it. See
                     // `CCColumn.hang(from:)`.
-                    .ccColumnInset(
-                        max(columnInset, CCColumn.content(scaledDot: scaledDot)))
+                    .ccColumnInset(max(columnInset, CC.space.md))
             }
-            // The *remainder* of the content column, not the whole of it: a fact
-            // row inside a `CCCard` that has already stepped out would otherwise
-            // land its label on 72. `CCCard` reports its own inset; this asks
-            // for what is left. Free-standing — the common case, a
-            // `CCCard(padding: 0)` full of rows — the remainder is all 36 of it.
-            .padding(.leading, CCColumn.step(from: columnInset, scaledDot: scaledDot))
+            // **The container's edge, not the content column.** A fact row is a
+            // key–value line with no mark in front of it, and text without a
+            // mark sits on its container's edge — the rule `CCSectionHeader`
+            // (dotless) and the fleet's ended footer already follow. This used
+            // to step every label out to the dot column, 52 on screen, and
+            // since no fact row anywhere in the app sits beside a mark
+            // (verified across all twenty call sites), that read as a phantom
+            // indent against the header above it — on the settings sheet, the
+            // link sheet, and the terminal settings alike. The remainder logic
+            // stays for the container that already padded itself.
+            .padding(.leading, max(0, CC.space.md - columnInset))
             .padding(.trailing, CC.space.md)
             .padding(.vertical, CC.space.sm)
             .frame(minHeight: CC.size.factRow)

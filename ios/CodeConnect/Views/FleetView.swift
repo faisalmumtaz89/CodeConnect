@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// Where a push in the navigation stack points: one *run*, by its key, never by
 /// its tmux name. A route that held `cc-1` would follow the name to whichever
@@ -1365,6 +1366,11 @@ struct CapabilitySheet: View {
 ///    with the daemon's own reason on a build that advertises `push: false`.
 struct LinkHealthSheet: View {
     @Environment(AppModel.self) private var model
+    /// Live iOS permission state, read on appearance. `nil` until read.
+    @State private var pushPermission: UNAuthorizationStatus?
+    @State private var testingPush = false
+    /// The last test's outcome sentence, held until the next test.
+    @State private var testOutcome: String?
     @Environment(\.dismiss) private var dismiss
 
     /// Nothing measured yet. Deliberately not `0`, which is a measurement.
@@ -1614,13 +1620,47 @@ struct LinkHealthSheet: View {
 
     private var actions: some View {
         VStack(spacing: CC.rhythm.controls) {
-            // Disabled with a reason, never dead: this daemon advertises
-            // `push: false`, and saying so is more useful than hiding the
-            // control that would prove it.
+            // Disabled with a reason, never dead — and when nothing disables it,
+            // the tap sends one real notification through Apple to this phone:
+            // stored token, provider key, APNs, banner, proven end to end.
             CCButton(
-                "Send a test notification", variant: .secondary, size: .lg, fullWidth: true,
+                testingPush ? "Sending…" : "Send a test notification",
+                variant: .secondary, size: .lg, fullWidth: true,
                 disabledReason: CCDisabledReason(pushReason)
-            ) {}
+            ) {
+                guard !testingPush else { return }
+                testingPush = true
+                testOutcome = nil
+                Task {
+                    let result = try? await model.connection.testPush()
+                    testingPush = false
+                    let outcome = Self.sentence(for: result)
+                    testOutcome = outcome
+                    // Nothing on screen moves on a refusal, and the banner a
+                    // success promises is outside the app — either way a
+                    // screen-reader user hears the outcome or nothing.
+                    UIAccessibility.post(notification: .announcement, argument: outcome)
+                }
+            }
+            if let testOutcome {
+                // Held, not flashed — the same rule as the swipe's refusal: a
+                // sentence that clears itself is one the reader can miss.
+                Text(testOutcome)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if pushDeniedInSettings {
+                // The one rung of the ladder the app cannot fix itself: the
+                // user said no in Settings, and only Settings can unsay it.
+                CCButton("Open notification settings", variant: .ghost, size: .lg, fullWidth: true)
+                {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            }
             CCButton("Reconnect now", variant: .ghost, size: .lg, fullWidth: true) {
                 model.connection.retryNow()
             }
@@ -1628,8 +1668,38 @@ struct LinkHealthSheet: View {
                 model.refreshFleet()
             }
         }
+        .task { pushPermission = await model.pushAuthorizationStatus() }
     }
 
+    /// The reader's sentence for each typed answer. `nil` result — a timeout or
+    /// a dropped link — is a refusal too, and says so.
+    private static func sentence(for result: TestPushResult?) -> String {
+        switch result {
+        case .accepted(let apnsID):
+            let receipt = apnsID.map { " Apple's receipt: \($0)." } ?? ""
+            return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
+        case .pushUnconfigured:
+            return "The Mac has no APNs key configured, so nothing was sent."
+        case .notPairedDevice:
+            return "This connection uses the bootstrap token; pair the phone to test push."
+        case .noRegisteredToken:
+            return "The Mac holds no notification token for this phone yet. Enable notifications, then try again."
+        case .rateLimited(let secs):
+            return "Tested a moment ago — try again in \(secs)s."
+        case .failed(let reason):
+            return "The Mac could not send it: \(reason)"
+        case .unknown(let status):
+            return "The Mac answered “\(status)”, which this build does not know."
+        case .none:
+            return "No answer from the Mac."
+        }
+    }
+
+    private var pushDeniedInSettings: Bool { pushPermission == .denied }
+
+    /// The ladder, each rung a fact the reader can act on. Live permission
+    /// state, re-read on appearance — the stored boolean goes stale the moment
+    /// the user visits Settings.
     private var pushReason: String? {
         guard let capabilities = model.connection.capabilities else {
             return "Not connected. The daemon has not told us what it can do."
@@ -1637,7 +1707,22 @@ struct LinkHealthSheet: View {
         guard capabilities.push else {
             return "This daemon does not send push notifications, so there is nothing to test."
         }
-        return "Push arrives in a later build; this control is not wired yet."
+        guard capabilities.testsPush else {
+            return "This daemon predates push testing. Update the Mac to prove the doorbell."
+        }
+        switch pushPermission {
+        case .denied:
+            return "Notifications are off for CodeConnect in iOS Settings, so a test could not show."
+        case .notDetermined:
+            return "Notifications have not been requested yet. Pair and allow them first."
+        case nil:
+            // The live read has not answered yet. A button that is enabled for
+            // the first frame and disables itself is a button that lies for a
+            // frame; unknown holds it shut instead.
+            return "Checking notification permission…"
+        default:
+            return nil
+        }
     }
 
     // MARK: Row primitives

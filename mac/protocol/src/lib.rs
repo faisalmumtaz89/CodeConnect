@@ -110,6 +110,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///       - the daemon deletes its own record. Claude Code's transcript is its
 ///         own file and is untouched, so `claude --resume` still works
 ///         afterwards.
+///
+///     Also in 7: [`ws::ClientMessage::TestPush`] and its
+///     [`ws::ServerMessage::TestPushResult`], gated by the `test_push`
+///     capability — one real APNs notification to the requesting device, so
+///     the doorbell can be proven rather than trusted. Refused for
+///     static-token connections and rate-limited per device.
 pub const PROTOCOL_MINOR: u32 = 7;
 
 /// Private tmux server name. Never the user's default server.

@@ -20,8 +20,33 @@ pub struct PushHint {
     pub blocked_sessions: usize,
 }
 
+/// What one deliberate test delivery came to. Internal twin of the wire's
+/// `TestPushResult`; the ws layer does the translation so this module never
+/// depends on the protocol crate's wire shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestDelivery {
+    /// Apple accepted it; `apns_id` is Apple's own receipt header when present.
+    Accepted {
+        apns_id: Option<String>,
+    },
+    /// The sender is the logging stub — no key configured.
+    Unconfigured,
+    /// The device has no registered token to send to.
+    NoToken,
+    Failed(String),
+}
+
 pub trait PushSender: Send + Sync {
     fn send(&self, hint: &PushHint);
+    /// One real notification to **one named device**, with the outcome
+    /// reported. `send` is deliberately fire-and-forget spray; a test whose
+    /// result nobody can see would prove nothing, so this one answers on the
+    /// returned channel.
+    fn send_test(&self, _device_id: &str) -> tokio::sync::oneshot::Receiver<TestDelivery> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(TestDelivery::Unconfigured);
+        rx
+    }
     /// Advertised in `hello_ack` so the phone can tell "no push configured"
     /// from "push failed".
     fn is_live(&self) -> bool {

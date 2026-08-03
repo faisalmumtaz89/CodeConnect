@@ -24,6 +24,30 @@ final class PushRegistration: NSObject {
     var onAuthorization: ((Bool) -> Void)?
 
     private var delegate: TokenDelegate?
+    private let presenter = ForegroundPresenter()
+
+    override init() {
+        super.init()
+        // Installed at construction, not at enable: a test the user requests
+        // while the app is open must banner, and by the time `enablePush` runs
+        // the first test could already be in flight.
+        UNUserNotificationCenter.current().delegate = presenter
+    }
+
+    /// While the app is foregrounded, iOS shows no banners unless the delegate
+    /// says so — and for the ordinary doorbell that silence is right: the app
+    /// itself is already showing the state the push would announce. The one
+    /// exception is a **test** the user just asked for, whose entire point is
+    /// the banner; the daemon marks those with `codeconnect_test`.
+    private final class ForegroundPresenter: NSObject, UNUserNotificationCenterDelegate {
+        func userNotificationCenter(
+            _ center: UNUserNotificationCenter,
+            willPresent notification: UNNotification
+        ) async -> UNNotificationPresentationOptions {
+            let info = notification.request.content.userInfo
+            return info["codeconnect_test"] != nil ? [.banner, .sound] : []
+        }
+    }
 
     /// Ask, then register.
     ///
