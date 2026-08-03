@@ -199,6 +199,50 @@ final class FleetStatusTests: XCTestCase {
     }
 
 
+    // MARK: Turn complete is a boundary, not a bearer
+
+    /// The duplication defect, pinned: the hook's copy of the message rendered
+    /// in the notice, clamped, directly above the transcript's own message row
+    /// — the same words twice. The boundary now carries no content.
+    func testTurnCompleteCarriesNoDetail() async {
+        let events = [
+            event(
+                1, "turn_complete",
+                #"{"last_assistant_message":"Done - all tests pass."}"#)
+        ]
+        let state = SessionState(sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
+        for e in events { state.ingest(e) }
+        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        let notices = state.timeline.compactMap { item -> NoticeItem? in
+            if case .notice(let n) = item.content { return n }
+            return nil
+        }
+        guard let turn = notices.first(where: { $0.kind == .turnComplete }) else {
+            return XCTFail("no turn boundary in \(state.timeline)")
+        }
+        XCTAssertEqual(turn.title, "Turn complete")
+        XCTAssertNil(turn.detail, "the transcript's message row is the record; this is a boundary")
+    }
+
+    /// And with the transcript row present, the content exists exactly once.
+    func testTheMessageRendersExactlyOnceAlongsideItsBoundary() async {
+        let events = [
+            event(
+                1, "agent_message",
+                ###"{"message":{"content":[{"type":"text","text":"## Done"}]}}"###,
+                source: "transcript"),
+            event(2, "turn_complete", ###"{"last_assistant_message":"## Done"}"###),
+        ]
+        let state = SessionState(sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
+        for e in events { state.ingest(e) }
+        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        let contentRows = state.timeline.filter {
+            if case .agentMessage = $0.content { return true }
+            return false
+        }
+        XCTAssertEqual(contentRows.count, 1, "one message, one row")
+    }
+
     // MARK: Capability: unknown is not observe
 
     /// The launch flash, pinned: before the handshake answers, the rule must

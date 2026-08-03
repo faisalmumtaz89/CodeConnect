@@ -437,7 +437,14 @@ enum TimelineBuilder {
                 kind: .turnComplete,
                 symbol: "checkmark.circle",
                 title: "Turn complete",
-                detail: event.lastAssistantMessage,
+                // A boundary, not a bearer: the hook's copy of the message
+                // rendered here, clamped, directly above the transcript's own
+                // message row — the same words twice, which read as a
+                // duplicated render. The transcript row is the record
+                // (`event.rs` calls transcripts authoritative and slightly
+                // lagging), and a briefly content-less boundary is honest
+                // where an adjacency fallback would flicker.
+                detail: nil,
                 severity: .success)
         }
         if let code = event.exitCode {

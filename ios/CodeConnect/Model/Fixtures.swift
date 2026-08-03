@@ -279,7 +279,7 @@
                 {"type":"event","event":{"seq":13,"session_id":"fx-5","ts":"\(stamp)",\
                 "kind":"agent_message","source":"transcript",\
                 "payload":{"message":{"content":[{"type":"text",\
-                "text":"Starting the soak now — **CodeConnect lets you monitor and control the agents on your Mac from your iPhone**, and this run is the proof of it. First failure lands with its seed:\\n```swift\\nlet seed = 0x5eed\\n```\\nWatching."}]}}}}
+                "text":"## Soak status\\nStarting now — **auto-answer lands after ~60 seconds**, and the config in `~/.codeconnect/config.json` holds (~$0 cost). First failure with its seed:\\n```swift\\nlet seed = 0x5eed\\n```\\nWatching."}]}}}}
                 """,
                 """
                 {"type":"event","event":{"seq":14,"session_id":"fx-5","ts":"\(stamp)",\

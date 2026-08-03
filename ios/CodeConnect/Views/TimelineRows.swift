@@ -154,7 +154,7 @@ struct AgentMessageRow: View {
                 // with no button to reveal it. Below the threshold the message
                 // renders whole; the clamp is the price of a "Show more",
                 // never a tax on its absence.
-                Text(AgentProse.inline(text))
+                Text(AgentProse.inline(AgentProse.previewSource(text)))
                     .ccType(CC.type.body)
                     .foregroundStyle(CC.text.primary)
                     .textSelection(.enabled)
@@ -178,6 +178,17 @@ struct AgentMessageRow: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     case .code(let code):
                         CCMonoBlock(code, lineLimit: 12)
+                    case .heading(let heading):
+                        // One style for all six levels; the marker's job was
+                        // hierarchy in a document, and here it is a title over
+                        // a paragraph.
+                        Text(AgentProse.inline(heading))
+                            .ccType(CC.type.headline)
+                            .foregroundStyle(CC.text.primary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, CC.space.xs)
                     }
                 }
             }
@@ -579,15 +590,14 @@ struct NoticeRow: View {
                 if let detail = notice.detail, !detail.isEmpty {
                     // Inline-parsed like the prose it previews — asterisks in a
                     // summary are the same artifact as asterisks in the body.
-                    // The 3-line clamp is legitimate **only for turn-complete**,
-                    // whose full agent row renders immediately beneath; any
-                    // other notice's detail is the whole of what the reader
-                    // gets, and a preview clamp there would be the silent
-                    // truncation this file just eliminated.
+                    // Never clamped: a notice's detail is the whole of what the
+                    // reader gets. (Turn-complete used to preview the agent's
+                    // message here, clamped, directly above the message row —
+                    // which read as a duplicate; its detail is now nil at the
+                    // builder, so the boundary is a boundary.)
                     Text(AgentProse.inline(detail))
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.secondary)
-                        .lineLimit(notice.kind == .turnComplete ? 3 : nil)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

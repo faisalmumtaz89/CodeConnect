@@ -298,6 +298,88 @@ final class AgentProseTests: XCTestCase {
         XCTAssertTrue(plain.contains("CodeConnect lets you monitor"))
     }
 
+    // MARK: Tildes
+
+    private func hasStrikethrough(_ a: AttributedString) -> Bool {
+        // The markdown parser records strikethrough as an *inline presentation
+        // intent*, not as `strikethroughStyle` — asserted on the wrong
+        // attribute, the first version of these tests passed vacuously.
+        // Probed, not assumed.
+        a.runs.contains { $0.inlinePresentationIntent?.contains(.strikethrough) == true }
+    }
+
+    /// The real defect: lone "approximately" tildes that Apple's parser pairs
+    /// into a deletion. `a ~single~ pair` provably pairs (probed) — after
+    /// neutralization it must not, and the tildes must survive as text.
+    func testLoneTildesDoNotStrikeTheTextBetweenThem() {
+        let unguarded = try? AttributedString(
+            markdown: "a ~single~ pair",
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        XCTAssertTrue(
+            hasStrikethrough(unguarded ?? AttributedString()),
+            "the premise: without the neutralizer, Apple pairs lone tildes")
+
+        let rendered = AgentProse.inline("a ~single~ pair")
+        XCTAssertFalse(hasStrikethrough(rendered), "a lone ~ is a word, not a deletion")
+        XCTAssertTrue(String(rendered.characters).contains("~single~"))
+
+        // And the real message's shape survives whole.
+        let real = AgentProse.inline("after ~60 seconds, work stalls (~$25 one-time).")
+        XCTAssertFalse(hasStrikethrough(real))
+        XCTAssertTrue(String(real.characters).contains("~60 seconds"))
+    }
+
+    func testIntentionalDoubleTildeStillStrikes() {
+        XCTAssertTrue(
+            hasStrikethrough(AgentProse.inline("keep ~~this struck~~ though")),
+            "~~...~~ is the strikethrough an agent occasionally means")
+    }
+
+    /// The trap the neutralizer must never fall into: tildes inside backtick
+    /// spans are paths, and an escape there renders as a literal backslash.
+    func testTildesInsideInlineCodeAreUntouched() {
+        let rendered = AgentProse.inline("config lives in `~/.codeconnect/config.json`")
+        let plain = String(rendered.characters)
+        XCTAssertTrue(plain.contains("~/.codeconnect/config.json"))
+        XCTAssertFalse(plain.contains("\\~"), "no backslash may reach a path: \(plain)")
+    }
+
+    func testAnAlreadyEscapedTildeIsNotDoubleEscaped() {
+        XCTAssertEqual(
+            AgentProse.neutralizeLoneTildes("about \\~60"), "about \\~60",
+            "singly escaped stays singly escaped")
+    }
+
+    func testDoubleBacktickSpansShieldTheirTildes() {
+        XCTAssertEqual(
+            AgentProse.neutralizeLoneTildes("run ``x ~ y`` then ~5s"),
+            "run ``x ~ y`` then \\~5s",
+            "span matching is by backtick-run length, per CommonMark")
+    }
+
+    // MARK: Headings
+
+    func testHeadingLevelsSegmentAsHeadingsAmongProseAndCode() {
+        let text = "# One\nbody\n###### Six\n```\n# not a heading\n```"
+        XCTAssertEqual(
+            AgentProse.segments(text),
+            [
+                .heading("One"), .prose("body"), .heading("Six"),
+                .code("# not a heading"),
+            ],
+            "markers strip outside fences and never inside them")
+    }
+
+    func testNonHeadingsStayLiteral() {
+        XCTAssertEqual(AgentProse.segments("#nospace"), [.prose("#nospace")])
+        XCTAssertEqual(AgentProse.segments("####### seven"), [.prose("####### seven")])
+    }
+
+    func testThePreviewSourceStripsHeadingMarkers() {
+        let source = AgentProse.previewSource("## How it's useful\nThe core value is x.")
+        XCTAssertEqual(source, "How it's useful\nThe core value is x.")
+    }
+
     func testTickedFenceMarkerInProseIsNotADelimiter() {
         // A line *mentioning* backticks inline is prose; only a delimiter line
         // opens a fence.
