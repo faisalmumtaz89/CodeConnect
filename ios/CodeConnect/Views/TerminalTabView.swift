@@ -20,10 +20,14 @@ private typealias UIColour = SwiftUI.Color
 /// banner can be scrolled past; a 28pt strip that never moves cannot.
 struct TerminalTabView: View {
     /// The tmux session name to attach to, or nil when the daemon no longer
-    /// lists this run. There is no fallback: `tmux attach -t =<uid>` cannot
-    /// work, and attaching to a name nothing vouches for could hand the user a
-    /// different agent's keyboard.
+    /// lists this run — or never hosted it. There is no fallback: `tmux attach
+    /// -t =<uid>` cannot work, and attaching to a name nothing vouches for
+    /// could hand the user a different agent's keyboard.
     let tmuxName: String?
+    /// True when the run is listed but has no tmux location: adopted, observed
+    /// through its hooks, launched by something other than CodeConnect. The
+    /// blocked reason has to tell that story rather than claim the run is gone.
+    let unhosted: Bool
     /// What to call this run on screen.
     let displayName: String
 
@@ -667,12 +671,14 @@ struct TerminalTabView: View {
                     fix: .init(title: "Terminal and SSH", run: { showSSHSettings = true })))
         }
         guard let tmuxName else {
-            // No route to a fix, and honestly so: nothing on this phone can
-            // make the daemon list a run it has stopped listing.
+            // No route to a fix, and honestly so — but two different truths.
+            // An adopted run was never in CodeConnect's tmux, so "no longer
+            // lists" would be a lie about a session the fleet is showing.
             return .blocked(
                 Blocked(
-                    reason:
-                        "The daemon no longer lists this run, so there is no tmux session to attach to."
+                    reason: unhosted
+                        ? "CodeConnect did not launch this session, so there is no tmux session of its own to attach to."
+                        : "The daemon no longer lists this run, so there is no tmux session to attach to."
                 ))
         }
         return .ready(

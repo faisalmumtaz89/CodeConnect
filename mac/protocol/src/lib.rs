@@ -86,7 +86,31 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         The envelope and the kind are unchanged.
 ///       - nothing is ever marked exited on ambiguous evidence, so
 ///         [`event::Lifecycle::Unknown`] remains a state a client must render.
-pub const PROTOCOL_MINOR: u32 = 6;
+///   * `6` — push. A new client message, [`ws::ClientMessage::RegisterPush`],
+///     carrying an APNs token and the environment it was issued for, plus the
+///     `push` capability that says the daemon can act on one. Separate from
+///     `hello` because notification permission can be granted or revoked at any
+///     point in a session's life. Additive: a client that never sends it is
+///     unchanged.
+///   * `7` — a client can delete one ended run. A new client message,
+///     [`ws::ClientMessage::DeleteSession`], a new
+///     [`ws::ServerMessage::DeleteSessionResult`] answering it, and the
+///     `delete_session` capability. Three things a client must know:
+///       - it names the run by `session_uid` and never by `session_id`. A tmux
+///         name is handed to the next run, so a name is not an identity a
+///         destructive verb may be pointed at.
+///       - for a run the daemon hosts, it refuses anything not `Exited`, and
+///         anything it still holds live state for. `still_running` and
+///         `not_exited` are complete answers, not errors. A run it never hosted
+///         — an adopted session, recognisable by its empty `tmux_session` in
+///         the summary — is deletable at any lifecycle: no probe can ever prove
+///         such a run ended, and a record that cannot be removed until an
+///         unobtainable proof arrives would be immortal. Claude Code's own
+///         transcript is untouched either way.
+///       - the daemon deletes its own record. Claude Code's transcript is its
+///         own file and is untouched, so `claude --resume` still works
+///         afterwards.
+pub const PROTOCOL_MINOR: u32 = 7;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

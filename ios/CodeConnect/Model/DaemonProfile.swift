@@ -56,6 +56,14 @@ struct DaemonProfile: Sendable, Hashable {
     /// class meaningful (contract: treat it as medium) rather than merely old.
     var classifiesRisk: Bool { capabilities?.classifiesRisk == true || speaksMinor1OrLater }
 
+    /// The daemon accepts `delete_session` (minor 7).
+    ///
+    /// A **soft gate**, like `servesDiff`: an older Mac simply does not offer the
+    /// swipe. Unknown is false, so this can only ever hide the action, never
+    /// invent one — and a swipe that appeared and then failed would be worse than
+    /// no swipe, because the row would stay and the user would not know why.
+    var removesSessions: Bool { capabilities?.deletesSessions == true }
+
     /// The daemon answers `get_diff`.
     var servesDiff: Bool { capabilities?.servesDiff == true || speaksMinor1OrLater }
 

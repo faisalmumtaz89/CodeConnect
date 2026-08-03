@@ -71,6 +71,23 @@ pub enum ClientMessage {
     Unsubscribe {
         session_id: String,
     },
+    /// Remove one run's record from the Mac.
+    ///
+    /// Deliberately the only destructive verb the phone has, and deliberately
+    /// narrow: `session_uid`, never a tmux name, because a name is handed to the
+    /// next run and a phone that deleted "cc-1" could destroy a session it never
+    /// saw. A **hosted** run is refused unless proven `exited`; an **adopted**
+    /// one (empty `tmux_session` — CodeConnect never launched it, so no proof of
+    /// its end can ever exist) is accepted at any lifecycle, and its deletion
+    /// also stops observation of that conversation until a new session start
+    /// re-adopts it.
+    ///
+    /// It removes CodeConnect's own record, not the conversation: Claude Code
+    /// keeps its transcript under `~/.claude/projects`, so `claude --resume` still
+    /// works afterwards. The phone's copy says so.
+    DeleteSession {
+        session_uid: String,
+    },
     /// Idempotent, leased answer. `payload_hash` must match the text the phone
     /// displayed or the answer is refused.
     Answer {
@@ -191,6 +208,13 @@ pub enum ServerMessage {
         request_id: String,
         result: AnswerResult,
     },
+    /// The outcome of a `delete_session`. Typed rather than a bare ack: "there was
+    /// nothing there" and "it is still running, so no" are different answers and
+    /// the phone shows different things.
+    DeleteSessionResult {
+        session_uid: String,
+        result: DeleteSessionResult,
+    },
     SendTextResult {
         session_id: String,
         result: SendTextResult,
@@ -241,6 +265,11 @@ pub struct Capabilities {
     pub hold_secs: u64,
     pub send_text: bool,
     pub capture: bool,
+    /// The daemon accepts `delete_session`. Advertised rather than assumed so an
+    /// older Mac does not get a swipe that silently does nothing: this app's rule
+    /// is that an action it cannot perform is not offered.
+    #[serde(default)]
+    pub delete_session: bool,
     /// APNs wired to a real key. False while the sender is the logging stub.
     pub push: bool,
     /// The listener holds a `tailscale cert` and accepts `wss://`. Says nothing
@@ -369,6 +398,39 @@ pub enum AnswerResult {
     Rejected {
         reason: String,
     },
+}
+
+/// What became of a `delete_session`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DeleteSessionResult {
+    /// Gone, with what went. Reported so the phone can say what it removed rather
+    /// than assume.
+    Deleted { events: u64 },
+    /// The run is not exited. Refusing is the store's own rule, enforced again
+    /// here so the answer is a sentence rather than a silent no-op.
+    StillRunning,
+    /// Refused, but the daemon cannot say the run is alive either.
+    ///
+    /// **Separate from `still_running` because it is a different claim.** That
+    /// one asserts the agent is there. This one is the absence of a claim: the
+    /// daemon never established what happened to this run, and
+    /// [`event::Lifecycle::Unknown`] is exactly the state `prune_exited_sessions`
+    /// treats as the strongest reason of all not to delete — the record is the
+    /// only evidence left. Reporting it as "still running" would invent a fact
+    /// in the one place the daemon has none.
+    NotExited { lifecycle: String },
+    /// No such run. Not an error: two phones deleting the same row is a race the
+    /// user does not need to hear about.
+    NotFound,
+    /// The daemon tried and could not — a database error, and nothing else.
+    ///
+    /// Carried here rather than sent as a bare `error` frame because an `error`
+    /// names no session: a phone with a delete in flight cannot tell whether one
+    /// belongs to it, so it waits out its timeout with a spinner up and then fails
+    /// silently. Every request this daemon accepts gets an answer to *that*
+    /// request.
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,10 +610,68 @@ mod tests {
             "`register_push` — the phone telling the daemon where to send a \
              notification — is minor 6"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 7,
+            "`delete_session` — the phone's first and only destructive verb, and \
+             the `delete_session` capability that gates it — is minor 7"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 6);
+        assert_eq!(crate::PROTOCOL_MINOR, 7);
+    }
+
+    /// **The tags, pinned on this side too.**
+    ///
+    /// Every one of these strings is matched by hand in Swift
+    /// (`WireTypes.swift`), and nothing here asserted them, so renaming a serde
+    /// variant would compile, pass, ship, and leave the phone decoding a status
+    /// it has never seen. `unknown` is inert by design, so the failure would be
+    /// a silent no-op on a destructive action rather than a crash.
+    #[test]
+    fn the_delete_wire_shape_is_exactly_what_the_phone_matches_on() {
+        let request = serde_json::to_value(ClientMessage::DeleteSession {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+        })
+        .unwrap();
+        assert_eq!(request["type"], "delete_session");
+        assert_eq!(request["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
+        assert!(
+            request.get("session_id").is_none(),
+            "a tmux name is handed to the next run and must never carry a delete"
+        );
+
+        for (result, expected) in [
+            (
+                DeleteSessionResult::Deleted { events: 5 },
+                serde_json::json!({"status": "deleted", "events": 5}),
+            ),
+            (
+                DeleteSessionResult::StillRunning,
+                serde_json::json!({"status": "still_running"}),
+            ),
+            (
+                DeleteSessionResult::NotFound,
+                serde_json::json!({"status": "not_found"}),
+            ),
+            (
+                DeleteSessionResult::Failed {
+                    message: "disk".into(),
+                },
+                serde_json::json!({"status": "failed", "message": "disk"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&result).unwrap(), expected);
+        }
+
+        let reply = serde_json::to_value(ServerMessage::DeleteSessionResult {
+            session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            result: DeleteSessionResult::Deleted { events: 5 },
+        })
+        .unwrap();
+        assert_eq!(reply["type"], "delete_session_result");
+        assert_eq!(reply["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
+        assert_eq!(reply["result"]["status"], "deleted");
     }
 
     #[test]
@@ -601,6 +721,7 @@ mod tests {
                 assert!(!capabilities.session_uid);
                 assert!(!capabilities.send_text_idempotent);
                 assert!(!capabilities.prompt_identity);
+                assert!(!capabilities.delete_session);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -725,6 +846,7 @@ mod tests {
             hold_secs: 0,
             send_text: true,
             capture: true,
+            delete_session: true,
             push: false,
             tls: true,
             tls_active: true,

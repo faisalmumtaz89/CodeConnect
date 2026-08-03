@@ -671,6 +671,45 @@ where
                 .await?;
             }
         },
+        ClientMessage::DeleteSession { session_uid } => {
+            // **By uid, never by name.** `resolve` accepts a tmux name and maps it
+            // to the newest run under it, which is right for subscribing and wrong
+            // for deleting: a name is handed to the next run, so a phone holding a
+            // stale "cc-1" could destroy a session it never saw.
+            let result = match daemon.delete_exited_session(&session_uid).await {
+                Ok(outcome) => outcome,
+                // Answered as a delete result, not as a bare `error` frame. An
+                // `error` names no session, so a phone waiting on this one cannot
+                // tell the failure is its own and sits on a spinner until its
+                // timeout.
+                Err(err) => {
+                    crate::log_error!("delete_session {session_uid}: {err:#}");
+                    protocol::ws::DeleteSessionResult::Failed {
+                        message: "the daemon could not remove that session".into(),
+                    }
+                }
+            };
+            // Only when the row is really gone. The watermark is what feeds this
+            // socket's replay, and dropping it for a session the daemon just
+            // refused to delete stops that session's events reaching a phone that
+            // still believes it is subscribed — silent until the next reconnect.
+            // Matched positively so a later outcome has to opt in to this.
+            if matches!(
+                result,
+                protocol::ws::DeleteSessionResult::Deleted { .. }
+                    | protocol::ws::DeleteSessionResult::NotFound
+            ) {
+                watermarks.remove(&session_uid);
+            }
+            send(
+                sink,
+                &ServerMessage::DeleteSessionResult {
+                    session_uid,
+                    result,
+                },
+            )
+            .await?;
+        }
         ClientMessage::Unsubscribe { session_id } => {
             // Resolution can fail here — the run may have been forgotten — and
             // an unsubscribe that cannot name anything has nothing to undo, so
@@ -962,6 +1001,12 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool) -> Capabilities {
         // keystrokes into the live prompt, and a refused injection is reported
         // rather than silently dropped.
         can_approve_reliably: true,
+        // Minor 7. A phone talking to an older daemon finds no such key in the
+        // ack and reads that as false, so the swipe is absent rather than
+        // present and broken. That default is the *phone's* — it is Swift and
+        // never runs serde; `Capabilities.advertises` is where it lives. The
+        // `#[serde(default)]` on this field is for Rust decoders only.
+        delete_session: true,
         // The hook emits nothing when we are unreachable, so a dead daemon is
         // indistinguishable from no daemon.
         fail_mode: "fail_open".into(),

@@ -263,6 +263,16 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// `Event.sessionKey` for why it is read off the data rather than off a flag.
     var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
 
+    /// Whether the phone may offer to remove this run.
+    ///
+    /// Two routes, matching the daemon's own delete rule exactly. A **hosted**
+    /// run must be proven `exited` — `lifecycle`, never the derived Ended
+    /// status. An **unhosted** run — adopted, empty `tmux_session`, nothing
+    /// ever put it in tmux — is removable at any lifecycle, because no probe
+    /// can ever prove it ended and a row awaiting an unobtainable proof would
+    /// be immortal.
+    var isRemovable: Bool { lifecycle == .exited || tmuxSession.isEmpty }
+
     var id: String { sessionKey }
     var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
     var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
@@ -365,6 +375,10 @@ struct Capabilities: Codable, Sendable, Hashable {
     var servesDiff: Bool { advertises(["diff", "get_diff", "diffs"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
+    /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
+    /// false, so an older Mac simply does not offer the swipe rather than offering
+    /// one that silently does nothing.
+    var deletesSessions: Bool { advertises(["delete_session"]) }
     /// This particular connection is encrypted — a different fact from `tls`,
     /// which only says the listener *holds* a certificate. The daemon accepts
     /// both schemes on one port during the migration, so the phone is entitled
@@ -744,6 +758,12 @@ enum ClientMessage: Sendable {
     case sessions
     case subscribe(session: String, afterSeq: UInt64)
     case unsubscribe(session: String)
+    /// Remove one **ended** run's record from the Mac. Minor 7.
+    ///
+    /// By uid, never by tmux name: a name is handed to the next run, so a stale
+    /// `cc-1` could name a session this phone never saw. The daemon refuses
+    /// anything still live, in SQL, whatever this end believed.
+    case deleteSession(sessionUID: String)
     /// `session` scopes the answer to one run. Optional on the wire so a
     /// pre-uid daemon still accepts it; when present the daemon refuses to apply
     /// the answer to a different run that happens to be showing a card with the
@@ -770,6 +790,7 @@ extension ClientMessage: Encodable {
         case clientID = "client_id"
         case clientName = "client_name"
         case sessionID = "session_id"
+        case sessionUID = "session_uid"
         case afterSeq = "after_seq"
         case environment
         case requestID = "request_id"
@@ -814,6 +835,9 @@ extension ClientMessage: Encodable {
         case .unsubscribe(let session):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+        case .deleteSession(let sessionUID):
+            try c.encode("delete_session", forKey: .type)
+            try c.encode(sessionUID, forKey: .sessionUID)
         case .answer(let requestID, let payloadHash, let decision, let session):
             try c.encode("answer", forKey: .type)
             try c.encode(requestID, forKey: .requestID)
@@ -869,6 +893,71 @@ struct HelloAck: Sendable, Hashable {
     var sshKeyInstalled: Bool?
 }
 
+/// What became of a `delete_session`.
+///
+/// Typed rather than a bare ack: "there was nothing there", "it is still
+/// running, so no" and "I tried and could not" are different answers, and only
+/// the first two mean the phone may forget the run.
+///
+/// **`Decodable`, not `Codable`.** This only ever arrives; nothing in the app
+/// sends one. An encoder here would also be a trap rather than dead weight: it
+/// cannot round-trip, because `.unknown(status: "deleted")` would encode as
+/// `{"status":"deleted"}` and decode back as `.deleted` — collapsing the exact
+/// distinction the `unknown` case exists to hold.
+enum DeleteSessionResult: Decodable, Sendable, Hashable {
+    case deleted(events: UInt64)
+    /// The daemon refused because the run is alive, or because it is still
+    /// holding live state for it. Its rule, not ours.
+    case stillRunning
+    /// Refused, and the daemon cannot say the run is alive either — it never
+    /// established what happened to it. Not folded into `stillRunning`, because
+    /// that one asserts the agent is there and this one asserts nothing.
+    case notExited(lifecycle: String)
+    /// Already gone. Two phones swiping the same row is a race, not an error.
+    case notFound
+    /// The daemon tried and could not.
+    case failed(message: String)
+    /// A status this build has never heard of, from a daemon ahead of it.
+    ///
+    /// **Its own case, and deliberately not folded into `notFound`.** Every other
+    /// unknown on this wire is decoded to something inert; this one used to decode
+    /// to the single most destructive answer in the enum, so a future daemon
+    /// inventing any new status would have wiped the row and its cache locally
+    /// while never having said the session was gone. Only the literal `not_found`
+    /// may mean that.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey { case status, events, message, lifecycle }
+
+    /// True only for the two answers that mean the Mac does not have this run.
+    /// The one place the destructive reading is decided, so it cannot drift.
+    var meansItIsGone: Bool {
+        switch self {
+        case .deleted, .notFound: true
+        case .stillRunning, .notExited, .failed, .unknown: false
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        switch status {
+        case "deleted":
+            self = .deleted(events: try c.decodeIfPresent(UInt64.self, forKey: .events) ?? 0)
+        case "still_running": self = .stillRunning
+        case "not_exited":
+            self = .notExited(
+                lifecycle: try c.decodeIfPresent(String.self, forKey: .lifecycle) ?? "unknown")
+        case "not_found": self = .notFound
+        case "failed":
+            self = .failed(
+                message: try c.decodeIfPresent(String.self, forKey: .message)
+                    ?? "The Mac could not remove that session.")
+        default: self = .unknown(status: status)
+        }
+    }
+}
+
 enum ServerMessage: Sendable {
     case helloAck(HelloAck)
     case sessions([SessionSummary])
@@ -876,6 +965,7 @@ enum ServerMessage: Sendable {
     case answerResult(requestID: String, result: AnswerResult)
     case sendTextResult(sessionID: String, result: SendTextResult)
     case captureResult(sessionID: String, text: String)
+    case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case diff(SessionDiff)
     case error(code: String, message: String)
     case pong
@@ -893,6 +983,7 @@ extension ServerMessage: Decodable {
         case protocolMinor = "protocol_minor"
         case deviceToken = "device_token"
         case deviceID = "device_id"
+        case sessionUID = "session_uid"
         case deviceName = "device_name"
         case sshKeyInstalled = "ssh_key_installed"
         case sessions
@@ -934,6 +1025,10 @@ extension ServerMessage: Decodable {
             self = .sendTextResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 result: try c.decode(SendTextResult.self, forKey: .result))
+        case "delete_session_result":
+            self = .deleteSessionResult(
+                sessionUID: try c.decode(String.self, forKey: .sessionUID),
+                result: try c.decode(DeleteSessionResult.self, forKey: .result))
         case "capture_result":
             self = .captureResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),

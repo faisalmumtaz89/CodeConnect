@@ -35,6 +35,9 @@ struct FleetView: View {
     @State private var toolColumn: CGFloat = 0
     @State private var path: [SessionRoute] = []
     @State private var showSettings = false
+    /// The one-open-swipe-row rules. Rows observe it; this view only calls
+    /// methods on it, so a pulse closes a row without re-rendering the fleet.
+    @State private var swipeCloses = CCSwipeCloseCoordinator()
     @State private var showLinkDetail = false
     @State private var showDeck = false
     @State private var deckStartsAt: String?
@@ -109,6 +112,34 @@ struct FleetView: View {
                 let next = titleVisible ? (-minY > 20) : (-minY > 24)
                 if next != titleVisible { titleVisible = next }
             }
+            // Scrolling stands an open swipe row down, the way a `List` would.
+            // A simultaneous gesture, not the scroll-offset preference:
+            // measured on this OS, `FleetScrollKey` delivers its value once at
+            // setup and never again mid-drag, so an offset-diffing close signal
+            // simply never fired. It recognises alongside the scroll without
+            // claiming the touch — the guard tests in `SwipeToRemoveUITests`
+            // are the proof that scrolling itself stays fluid — and it no-ops
+            // through the coordinator's nothing-is-open guard on every
+            // ordinary interaction. Deliberately no tap equivalent: a blanket
+            // tap-closes-everything fired on the revealed Remove button itself,
+            // closing the row before its refusal could be shown. Taps are
+            // handled where they mean something — the open row's own catcher,
+            // and the navigation/sheet observers below.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 12).onChanged { value in
+                    // The same 2:1-past-a-floor intent gate the app's other
+                    // drags use. A bare "more vertical than horizontal" check
+                    // fired on the first millimetres of a *horizontal* row
+                    // swipe — early jitter is often vertical-biased — and the
+                    // resulting pulse yanked shut the very row being dragged
+                    // open. Measured, then gated.
+                    let h = abs(value.translation.height)
+                    let w = abs(value.translation.width)
+                    if h > 24, h > w * 2 {
+                        swipeCloses.closeAll()
+                    }
+                }
+            )
             .background(CC.color.bg)
             .scrollIndicators(.hidden)
             .ccCollectsToolColumn(into: $toolColumn)
@@ -161,6 +192,10 @@ struct FleetView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 deckBar(pending, waiting: FleetCount.decisions(in: rows))
             }
+            // Leaving the screen — a push, or any sheet — stands the open
+            // swipe row down. A destructive control must not sit armed under
+            // whatever the user comes back to.
+            .onChange(of: overlayFingerprint) { swipeCloses.closeAll() }
             .sheet(isPresented: $showSettings) { PairingView() }
             .sheet(isPresented: $showLinkDetail) { LinkHealthSheet() }
             .sheet(item: $capabilityReason) { CapabilitySheet(reason: $0.text) }
@@ -304,32 +339,27 @@ struct FleetView: View {
         }
     }
 
+    /// One value that changes whenever the screen is taken over — a push, or
+    /// any of its sheets and covers. Six separate `.onChange` modifiers said
+    /// the same thing and tipped the body over the type-checker's budget.
+    private var overlayFingerprint: Int {
+        var hasher = Hasher()
+        hasher.combine(path)
+        hasher.combine(showSettings)
+        hasher.combine(diffRoute)
+        hasher.combine(showLinkDetail)
+        hasher.combine(capabilityReason != nil)
+        hasher.combine(showDeck)
+        return hasher.finalize()
+    }
+
     private func bandView(_ band: Band) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             bandHeader(band)
             CCCard(padding: 0, border: bandBorder(band.status)) {
                 VStack(spacing: 0) {
                     ForEach(Array(band.rows.enumerated()), id: \.element.id) { index, row in
-                        FleetRowView(
-                            row: row,
-                            waitingSince: waitingSince(row),
-                            blocked: blockedCard(row),
-                            showsCapability: showsCapability(row, in: band),
-                            separator: index < band.rows.count - 1,
-                            onOpenDiff: { diffRoute = DiffRoute(key: row.summary.sessionKey) },
-                            onMarkReviewed: { model.states[row.summary.sessionKey]?.markReviewed() }
-                        ) {
-                            // "Done, unreviewed" is exactly the moment the diff
-                            // is what you want: the agent finished and you have
-                            // not looked at what it did. So the row opens
-                            // diff-first rather than growing a second control —
-                            // and emphatically not a swipe, which is the one
-                            // gesture this app does not teach anywhere.
-                            path.append(
-                                SessionRoute(
-                                    key: row.summary.sessionKey,
-                                    openDiff: row.status == .doneUnreviewed))
-                        }
+                        rowView(row, in: band, isLast: index == band.rows.count - 1)
                     }
                 }
             }
@@ -348,6 +378,66 @@ struct FleetView: View {
         }
     }
 
+
+    /// One fleet row, wrapped in its removal gesture.
+    ///
+    /// Extracted from `bandView` because the nesting defeated the type checker —
+    /// a `ForEach` over a wrapper over a row over a trailing closure is more than
+    /// it will infer in reasonable time. Splitting it is also the honest shape:
+    /// the row and the gesture that can destroy it are two ideas.
+    private func rowView(_ row: FleetRow, in band: Band, isLast: Bool) -> some View {
+        // **Derived once.** The gesture and the named accessibility action have
+        // to agree about whether this row can be removed, and about what happens
+        // when it is. Written twice, they drift, and the drift is invisible:
+        // VoiceOver offers an action the swipe does not, or the reverse.
+        //
+        // Removable runs only, and only when the daemon says it accepts the
+        // request. `isRemovable` is `lifecycle`, not the derived status — the
+        // rule can read Ended without the run being proven exited — plus the
+        // unhosted case, where no proof of death can ever exist.
+        let remove: (() async -> String?)? =
+            row.summary.isRemovable && model.daemonProfile.removesSessions
+            ? { await model.removeSession(row.summary).refusal } : nil
+
+        return CCSwipeToRemove(
+            isEnabled: remove != nil,
+            // "Remove", not "Delete". Claude keeps its own transcript under
+            // `~/.claude/projects`, so the conversation survives and
+            // `claude --resume` still works; only CodeConnect's record goes.
+            title: "Remove",
+            action: { await remove?() },
+            rowID: row.summary.sessionKey,
+            coordinator: swipeCloses
+        ) {
+            FleetRowView(
+                row: row,
+                waitingSince: waitingSince(row),
+                blocked: blockedCard(row),
+                showsCapability: showsCapability(row, in: band),
+                separator: !isLast,
+                onOpenDiff: { diffRoute = DiffRoute(key: row.summary.sessionKey) },
+                onMarkReviewed: { model.states[row.summary.sessionKey]?.markReviewed() },
+                onRemove: remove
+            ) {
+                // "Done, unreviewed" is exactly the moment the diff is what you
+                // want: the agent finished and you have not looked at what it did.
+                // So the row opens diff-first rather than growing a second control.
+                //
+                // This note used to end "and emphatically not a swipe, which is the
+                // one gesture this app does not teach anywhere". That held while
+                // every row action was non-destructive and could be a tap. Removal
+                // cannot: it must not sit under the tap that opens the run, and it
+                // belongs to ended rows alone. Swipe is now taught in exactly one
+                // place for one action, and mirrored as a named accessibility
+                // action, because a gesture that is the only route to a feature is
+                // not a feature everyone has.
+                path.append(
+                    SessionRoute(
+                        key: row.summary.sessionKey,
+                        openDiff: row.status == .doneUnreviewed))
+            }
+        }
+    }
     private func bandHeader(_ band: Band) -> some View {
         // **No dot.** `DONE` never had one, so `BLOCKED`'s was emphasis and not
         // state — a fourth encoding of a fact the band border, the label and
@@ -443,7 +533,12 @@ struct FleetView: View {
                 withAnimation(CC.motion.small) { showEnded = true }
             }
         }
-        .padding(.leading, textColumn)
+        // **The screen's own edge, not the dot column.** `textColumn` is where text
+        // sits *beside a status dot*, and this footer has no dot — so it was
+        // indented past "Fleet" and the headline for a mark that is not drawn. The
+        // same mistake `CCSectionHeader` had; this is `FleetView`'s private copy of
+        // that column, which is why fixing the shared component did not reach here.
+        .padding(.leading, CC.space.md)
         .padding(.trailing, CC.space.md)
         .frame(minHeight: CC.size.controlLg)
         .padding(.bottom, CC.space.xl)
@@ -834,6 +929,13 @@ struct FleetRowView: View {
     let separator: Bool
     let onOpenDiff: () -> Void
     let onMarkReviewed: () -> Void
+    /// Present only on a row that can actually be removed, so VoiceOver never
+    /// announces an action that would be refused. A gesture cannot be the only
+    /// route to a feature — that is the rule `CCDiffPrimitives` writes down for
+    /// context menus and it applies with more force to a swipe, which is
+    /// invisible and unreachable by Switch Control.
+    /// Returns `nil` when the run was removed, or the reason it was not.
+    var onRemove: (() async -> String?)?
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -936,6 +1038,21 @@ struct FleetRowView: View {
         }
         .accessibilityAction(named: "Open diff", onOpenDiff)
         .accessibilityAction(named: "Mark reviewed", onMarkReviewed)
+        .accessibilityActions {
+            if let onRemove {
+                Button("Remove from CodeConnect") {
+                    Task {
+                        // The swipe shows a refusal in the button it revealed.
+                        // There is no button here — the row either disappears or
+                        // it does not — so the reason has to be spoken, or a
+                        // VoiceOver user gets silence and an unchanged list.
+                        if let refusal = await onRemove() {
+                            UIAccessibility.post(notification: .announcement, argument: refusal)
+                        }
+                    }
+                }
+            }
+        }
         // Restarted whenever the timestamp this row is counting from changes —
         // a new event, or a blocked row's oldest card being answered — because
         // the old deadline was computed from the old anchor.

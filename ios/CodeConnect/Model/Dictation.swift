@@ -1,4 +1,12 @@
-import AVFoundation
+// `@preconcurrency` for one call: `AVAudioConverter.convert(to:error:withInputFrom:)`
+// takes an input block that AVFoundation invokes *synchronously*, on this thread,
+// during that call — it is a pull, not a callback. The header predates Sendable
+// annotation, so the block imports as `@Sendable` and the compiler reads a
+// same-thread closure as a concurrent one: it flags the `AVAudioPCMBuffer` it is
+// handed and the local `served` flag it sets, neither of which is ever seen by a
+// second thread. Suppressed at the import rather than by restructuring code that
+// is already correct.
+@preconcurrency import AVFoundation
 import Foundation
 import Speech
 
@@ -399,7 +407,12 @@ private final class BufferConverter: @unchecked Sendable {
         }
 
         var error: NSError?
-        var served = false
+        // `nonisolated(unsafe)` because the block below is `@Sendable` by import
+        // and this flag is not: it is written and read only inside that block,
+        // which AVFoundation runs synchronously on this thread before `convert`
+        // returns. There is no second thread to race with, and a lock here would
+        // be machinery guarding nothing.
+        nonisolated(unsafe) var served = false
         converter.convert(to: output, error: &error) { _, status in
             if served {
                 status.pointee = .noDataNow

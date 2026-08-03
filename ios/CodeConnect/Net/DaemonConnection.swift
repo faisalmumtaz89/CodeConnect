@@ -155,6 +155,7 @@ final class DaemonConnection {
     private var answerWaiters: [String: [Waiter<AnswerResult>]] = [:]
     private var sendTextWaiters: [String: [Waiter<SendTextResult>]] = [:]
     private var captureWaiters: [String: [Waiter<String>]] = [:]
+    private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
     private var nextTicket: UInt64 = 0
 
@@ -531,6 +532,19 @@ final class DaemonConnection {
             send: .sendText(session: session, text: text, require: require, submit: submit))
     }
 
+    /// Ask the Mac to forget one ended run. Keyed by uid, which is also the
+    /// waiter key, so two rows swiped at once cannot collect each other's answer.
+    func deleteSession(sessionUID: String) async throws -> DeleteSessionResult {
+        #if DEBUG
+            deleteRequests.append(sessionUID)
+            if let deleteStub { return try await deleteStub(sessionUID) }
+        #endif
+        return try await request(
+            key: sessionUID,
+            store: \.deleteWaiters,
+            send: .deleteSession(sessionUID: sessionUID))
+    }
+
     func capture(session: String, lines: UInt32?) async throws -> String {
         try await request(
             key: session,
@@ -640,6 +654,14 @@ final class DaemonConnection {
         let diffs = diffWaiters
         diffWaiters = [:]
         for queue in diffs.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        // Every waiter store belongs in here. One left out does not just leak: it
+        // becomes a tombstone after its timeout, and the *next* good answer for
+        // that key is handed to the dead waiter and dropped, so the request that
+        // is actually in flight fails too. Once per reconnect, forever.
+        let deletes = deleteWaiters
+        deleteWaiters = [:]
+        for queue in deletes.values { for w in queue { w.continuation?.resume(throwing: error) } }
     }
 
     // MARK: - Inbound
@@ -703,6 +725,8 @@ final class DaemonConnection {
             deliver(store: \.sendTextWaiters, key: sessionID, value: result)
         case .captureResult(let sessionID, let text):
             deliver(store: \.captureWaiters, key: sessionID, value: text)
+        case .deleteSessionResult(let sessionUID, let result):
+            deliver(store: \.deleteWaiters, key: sessionUID, value: result)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
         case .error(let code, let message):
@@ -763,6 +787,34 @@ final class DaemonConnection {
         func simulateConnectedForTesting() {
             phase = .connected(since: Date())
             lastContactAt = Date()
+        }
+
+        /// Test seam: answer `deleteSession` locally, and record what was asked.
+        ///
+        /// **Without this, the removal tests were unfalsifiable.** An `AppModel`
+        /// built in a test has no socket, so `deleteSession` throws
+        /// `notConnected` and `removeSession`'s `try?` turns that into the same
+        /// `nil` its guards produce. Every gate test therefore passed whether or
+        /// not the gate existed — measured by deleting the guards, which changed
+        /// nothing. The count is what makes the difference observable: a request
+        /// that was never sent is a different fact from one that was sent and
+        /// refused, and only that distinction tests a gate.
+        var deleteStub: ((String) async throws -> DeleteSessionResult)?
+        /// Uids passed to `deleteSession`, in order, whether stubbed or not.
+        private(set) var deleteRequests: [String] = []
+
+        /// Test seam: claim a set of capabilities without a handshake.
+        ///
+        /// `DaemonProfile` is derived from the ack, so a test that wants to
+        /// exercise a capability gate has to be able to set both sides of it —
+        /// otherwise "the daemon cannot delete" is indistinguishable from "there
+        /// is no daemon".
+        func simulateCapabilitiesForTesting(_ capabilities: Capabilities, minor: UInt32) {
+            helloAck = HelloAck(
+                protocolVersion: Wire.protocolVersion, protocolMinor: minor,
+                serverTime: "", capabilities: capabilities, deviceToken: nil,
+                deviceID: nil, deviceName: nil, sshKeyInstalled: nil)
+            self.capabilities = capabilities
         }
     #endif
 

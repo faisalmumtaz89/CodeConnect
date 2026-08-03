@@ -109,12 +109,14 @@ db_ops! {
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
-    fn upsert_session(row: SessionRow) -> ();
+    fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
-    fn upsert_pending_approval(row: PendingApprovalRow) -> ();
+    fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
+    fn name_is_tombstoned(session_id: String) -> bool;
+    fn clear_name_tombstone(session_id: String) -> ();
     fn claim_answer(claim: AnswerClaim) -> ();
     fn unresolved_answer_claims() -> Vec<AnswerClaim>;
     fn find_device(needle: String) -> DeviceLookup;
@@ -156,6 +158,17 @@ impl Db {
 
     pub async fn set_lifecycle(&self, session_uid: String, lifecycle: Lifecycle) -> Result<()> {
         self.run(move |store| store.set_lifecycle(&session_uid, lifecycle))
+            .await
+    }
+
+    /// Remove one ended run. Small next to a prune, and off the runtime for the
+    /// same reason: it is still a multi-table transaction on the write
+    /// connection, and the phone is waiting on the answer.
+    pub async fn delete_exited_session(
+        &self,
+        session_uid: String,
+    ) -> Result<crate::store::DeleteOutcome> {
+        self.run(move |store| store.delete_exited_session(&session_uid))
             .await
     }
 
@@ -389,7 +402,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
             })
-            .unwrap();
+            .unwrap()
+            .assert_present();
         key
     }
 

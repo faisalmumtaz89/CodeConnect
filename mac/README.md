@@ -427,9 +427,9 @@ the link; what is lost is the certificate, not the confidentiality.
 ## What the phone can ask for
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
-`session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `send_text`
-and `capture` so the app disables affordances it does not see advertised instead
-of failing at tap time.
+`session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `send_text`,
+`capture` and `delete_session` so the app disables affordances it does not see
+advertised instead of failing at tap time.
 `hello_ack.protocol_minor` is the additive feature level: `>= 1` means
 `TurnComplete`, `get_diff`, pairing and `risk_class` are all present; `>= 2`
 means every session and event carries a `session_uid`, every message that names
@@ -437,7 +437,23 @@ a session accepts one, and `answer` may carry `session_id` to scope itself to a
 run; `>= 3` means `send_text` is an idempotent mutation and approval cards carry
 a prompt generation; `>= 4` adds the `protocol_mismatch` and `message_too_large`
 error codes, the truncated-event placeholder, and the transcript tailer's two
-`error` payload shapes.
+`error` payload shapes; `>= 5` means `lifecycle` is reconciled against tmux
+rather than merely remembered, so `live` is proven rather than unrefuted, and a
+derived `session_end` carries a `reason`; `>= 6` adds `register_push`, the
+phone telling the daemon where to send a notification; `>= 7` adds
+`delete_session`.
+
+**`delete_session` is the only destructive verb a phone has.** It names the run
+by `session_uid` and never by `session_id` — a tmux name is handed to the next
+run, so it is not an identity a destructive request may be pointed at. For a
+hosted run the daemon refuses anything whose lifecycle is not `exited`, and
+anything it still holds a supervisor or an open approval for. An **adopted**
+run — empty `tmux_session`; CodeConnect never launched it, so no probe can
+ever prove it ended — is deletable at any lifecycle, and its deletion also
+stops observation of that conversation until a new session start re-adopts it.
+A refusal is a `delete_session_result`, not an error. It deletes the daemon's own record only:
+Claude Code's transcripts live under `~/.claude/projects` and are untouched, so
+`codeconnect claude --resume <id>` still works afterwards.
 
 **`protocol_version` is now enforced.** A client on a different *major* is
 refused with `error{code: "protocol_mismatch"}` and disconnected, before its

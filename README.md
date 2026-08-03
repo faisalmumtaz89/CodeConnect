@@ -1,11 +1,17 @@
-# CodeConnect
+<div align="center">
+  <img src=".github/assets/wordmark.svg" width="520" alt="CODECONNECT">
+</div>
+
+<div align="center">
+
+**Control your agents from anywhere.**
 
 [![CI](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml/badge.svg)](https://github.com/faisalmumtaz89/CodeConnect/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Monitor and approve your terminal coding agents from your iPhone.
+</div>
 
-Your agents keep working while you walk away. CodeConnect shows you every session on your Mac, tells you the moment one is blocked, and lets you read the command and approve or deny it from your phone — without ever pretending to know something it doesn't.
+Your agents keep working while you walk away. CodeConnect puts every session on your Mac in your hand: steer an agent mid-run, answer the prompt it's blocked on, review its diff, or take over its terminal outright — without ever pretending to know something it doesn't.
 
 ```
 $ codeconnect claude                 # your normal Claude Code session, now observable
@@ -13,18 +19,23 @@ $ codeconnect claude                 # your normal Claude Code session, now obse
 
 That's the whole setup. Claude Code itself behaves exactly as it did before, and the session also appears on your phone.
 
-One honest caveat about the terminal. The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client owns the terminal while it runs: it uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
-
 ## What it does
 
 - **A fleet view.** Every agent, what it's asking for, and how long it's been waiting.
 - **Approvals with the actual command.** Risk-tiered — a read is one tap, a `git push --force` needs a deliberate hold and Face ID. The command is never truncated or faded, because a hidden suffix is where a dangerous argument hides.
 - **Nothing decides without you.** Claude Code auto-answers an unanswered question after ~60 seconds; CodeConnect holds it open instead. If the daemon can't be reached, the prompt falls back to your keyboard rather than being silently answered.
 - **Diff review that works on a phone.** Unified, monospace, word-level highlighting, comment-to-agent on any hunk.
+- **Talk to it — out loud if you like.** The compose bar stages text into the agent's prompt; template chips insert, never send. Dictation is Apple's own speech recognition — on-device wherever your language supports it; where it doesn't, Apple's speech service does the transcription. A transcript is always staged for review, never auto-sent.
 - **A real terminal.** SSH into the live tmux session and take over completely.
 - **It never lies about state.** Every fact shows its age. A stale link disables actions and says why. "Answered at the keyboard" is a state the phone renders, not a guess.
 
-## Architecture
+## Why you might not want this (yet)
+
+- **The terminal is tmux's while a session runs.** The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
+- **You build it yourself.** There are no packaged releases: the daemon needs a Rust toolchain, the app needs Xcode 26 or newer, and your phone runs your own build.
+- **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
+
+## How it works
 
 ```
 iPhone (SwiftUI)  ──WSS over Tailscale──▶  ccd (Rust daemon, launchd)
@@ -63,6 +74,14 @@ The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same 
 
 For the live terminal, enable Remote Login (System Settings → General → Sharing) or Tailscale SSH. **CodeConnect never enables a system service for you**: it shows you the command and lets you decide.
 
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit together, and why each is shaped the way it is
+- [`mac/README.md`](mac/README.md) — the daemon in depth: session and prompt identity, durability, pairing, TLS, configuration, and the chaos soak
+- [`ios/README.md`](ios/README.md) — the app: honesty rules, test seams, the render harness, and the design system
+- [`SECURITY.md`](SECURITY.md) — trust boundaries, including exactly what a stolen phone token can do
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — house rules, each one paid for by a bug
+
 ## Repo layout
 
 | Path | What |
@@ -73,8 +92,6 @@ For the live terminal, enable Remote Login (System Settings → General → Shar
 | `fixtures/` | Recorded hook payloads and transcripts, replayed by tests |
 
 ## Design
-
-How the system fits together is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 The interface is dark mode only, in a Vercel/Geist register. Two principles do most of the work: **colour is information, never decoration**, and **make the wrong thing unconstructible** — there is no truncation case that can cut a command's arguments, hairlines have no inset parameter to get wrong, and a section header cannot be placed on the wrong column. The design system lives in `ios/CodeConnect/Views/DesignSystem/`, and each component documents the defect it prevents.
 

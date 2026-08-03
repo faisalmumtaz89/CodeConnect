@@ -220,16 +220,56 @@ pub struct AnswerClaim {
     pub started_at: String,
 }
 
+/// What `upsert_session` did.
+#[must_use = "a tombstoned upsert wrote nothing; the session must not be set up"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionUpsert {
+    /// The row exists (written or updated).
+    Present,
+    /// The uid was deliberately deleted; nothing was written. The caller must
+    /// abandon whatever it was setting up for this session.
+    Tombstoned,
+}
+
+#[cfg(test)]
+impl SessionUpsert {
+    /// For seeding in tests, where the uid is fresh and a tombstone would mean
+    /// the fixture itself is wrong. Compiled only for tests: production callers
+    /// must handle `Tombstoned`, not assert it away.
+    #[track_caller]
+    pub fn assert_present(self) {
+        assert!(
+            matches!(self, SessionUpsert::Present),
+            "seeding a session that has a tombstone; the fixture is wrong"
+        );
+    }
+}
+
+/// What `delete_exited_session` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted {
+        events: u64,
+    },
+    /// Refused: the row is not `Exited`. Carries the daemon's own word for what
+    /// it is, so the refusal can be stated rather than guessed at.
+    NotExited {
+        lifecycle: String,
+    },
+    NotFound,
+}
+
 /// Everything a run owns, besides its own row in `sessions`.
 ///
-/// One list, in one place, because pruning a session has to remove all of it:
+/// One list, in one place, because removing a session has to remove all of it:
 /// a table left off leaves rows keyed to a `session_uid` that no longer exists,
 /// and the ones here are exactly the tables that decide whether an answer may
 /// be typed. An orphaned `answer_claims` row would outlive its run and be
 /// recovered as an indeterminate answer for a session nobody can name.
-/// [`Store::prune_exited_sessions`] deletes from every one of them, and
-/// `every_session_scoped_table_is_pruned` reads the schema back to prove the
-/// list has not fallen behind it.
+/// [`Store::prune_exited_sessions`] and [`Store::delete_exited_session`] both
+/// delete from every one of them — sharing this list is what stops the two paths
+/// drifting — and `every_session_scoped_table_is_named_in_the_prune_list` reads
+/// the schema back to prove the list has not fallen behind it.
 const SESSION_SCOPED_TABLES: &[&str] = &[
     "events",
     "answers",
@@ -322,6 +362,23 @@ impl Store {
         // keeps its old `devices` shape and every push statement fails on a
         // missing column.
         add_missing_columns(&conn)?;
+        // A normalizer, not a versioned migration — there is no version gate to
+        // hang one on (`user_version` below is write-only), and an idempotent
+        // UPDATE costs nothing to repeat. Adopted rows (`claude:*`, the prefix
+        // cc-hook mints for sessions CodeConnect did not launch) were written
+        // with a fabricated tmux location — a name in a server they never lived
+        // in — and the liveness sweep read the inevitable "no such session" as
+        // proof of death for runs that were alive. Empty is the honest value:
+        // the daemon has no idea where, or whether, this process runs. GLOB,
+        // not LIKE: LIKE is case-insensitive and the prefix is an exact
+        // contract. Ordered after `migrate_to_session_uids`, whose synthesized
+        // rows this must also catch on a legacy database.
+        conn.execute(
+            "UPDATE sessions SET tmux_session = '', tmux_socket = ''
+              WHERE session_id GLOB 'claude:*'
+                AND (tmux_session != '' OR tmux_socket != '')",
+            [],
+        )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
@@ -408,6 +465,17 @@ impl Store {
     /// not facts (malformed JSON, entries we do not map) legitimately produce no
     /// events, and refusing to move past them would re-read the same bytes
     /// forever.
+    ///
+    /// **A batch for a session that is gone is dropped, cursor and all.** Ending
+    /// a run stops its tail by *queueing* a `TailCommand::Stop`, so one more
+    /// poll can already be in flight when the run's rows are deleted. Landing it
+    /// afterwards would file events and a cursor under a `session_uid` with no
+    /// row — the schema has no foreign key to prevent that, and the resulting
+    /// orphans are the exact shape `SESSION_SCOPED_TABLES` exists to avoid.
+    /// Checked inside the same `BEGIN IMMEDIATE` as the writes, so the delete
+    /// either happened before this and the batch is refused, or after it and the
+    /// delete takes these rows with the rest. There is no third ordering: both
+    /// transactions are `Immediate` on the one write connection.
     pub fn append_batch_with_cursor(
         &self,
         session_uid: &str,
@@ -416,6 +484,17 @@ impl Store {
     ) -> Result<Vec<Event>> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_uid = ?1)",
+            params![session_uid],
+            |row| row.get(0),
+        )?;
+        if !known {
+            // Rolled back rather than committed empty: the cursor must not move
+            // for a session whose log no longer exists.
+            tx.rollback()?;
+            return Ok(Vec::new());
+        }
         let mut out = Vec::with_capacity(pendings.len());
         for pending in pendings {
             if let Some(event) = append_in_tx(&tx, pending)? {
@@ -539,13 +618,27 @@ impl Store {
         Ok(events)
     }
 
-    pub fn upsert_session(&self, row: &SessionRow) -> Result<()> {
+    /// Write or update one session row — unless its uid has been deliberately
+    /// deleted, in which case nothing is written and the caller is told.
+    ///
+    /// **The tombstone check is inside the statement, and that is the fix.** A
+    /// hook or registration looks a row up, awaits, and writes; a phone's
+    /// delete can commit between those two steps, and the write would re-insert
+    /// the row the user just removed. No ordering at the caller can close that
+    /// window — only the write itself refusing can, because every write goes
+    /// through the one connection whose transactions are serial.
+    ///
+    /// Callers must not treat `Tombstoned` as success: whatever they were about
+    /// to set up for this session — a tail, a push, an in-memory supervisor —
+    /// must not happen.
+    pub fn upsert_session(&self, row: &SessionRow) -> Result<SessionUpsert> {
         let conn = self.write();
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
                                   claude_session_id, transcript_path, lifecycle,
                                   created_at, updated_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+             WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)
              ON CONFLICT(session_uid) DO UPDATE SET
                 session_id        = excluded.session_id,
                 tmux_session      = excluded.tmux_session,
@@ -569,6 +662,33 @@ impl Store {
                 row.created_at,
                 row.updated_at,
             ],
+        )?;
+        // `INSERT ... SELECT ... WHERE NOT EXISTS` writes zero rows exactly when
+        // the tombstone matched; `ON CONFLICT` paths always write one.
+        Ok(if changed == 0 {
+            SessionUpsert::Tombstoned
+        } else {
+            SessionUpsert::Present
+        })
+    }
+
+    /// Whether this name was deliberately removed — see `deleted_names`.
+    pub fn name_is_tombstoned(&self, session_id: &str) -> Result<bool> {
+        let conn = self.read();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_names WHERE session_id = ?1)",
+            params![session_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// A SessionStart is a resume announcing itself: observation was asked for
+    /// again, so the removal stops applying.
+    pub fn clear_name_tombstone(&self, session_id: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "DELETE FROM deleted_names WHERE session_id = ?1",
+            params![session_id],
         )?;
         Ok(())
     }
@@ -643,6 +763,100 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Remove exactly one ended run, by uid.
+    ///
+    /// Shares `SESSION_SCOPED_TABLES` and the `lifecycle = 'exited'` predicate with
+    /// `prune_exited_sessions` rather than restating them: a second delete path
+    /// that forgot a table would leave orphaned answers and cursors pointing at a
+    /// session nobody can see, and the two would drift the first time a table was
+    /// added.
+    ///
+    /// The lifecycle predicate is the safety property and it is in the SQL, not in
+    /// the caller. A phone asking to delete a running session is refused by the
+    /// statement itself, whatever the phone believed.
+    pub fn delete_exited_session(&self, session_uid: &str) -> Result<DeleteOutcome> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let row: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT lifecycle, tmux_socket, session_id FROM sessions WHERE session_uid = ?1",
+                params![session_uid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((lifecycle, tmux_socket, session_id_of_row)) = row else {
+            return Ok(DeleteOutcome::NotFound);
+        };
+        // **A run the daemon never hosted is deletable at any lifecycle.** An
+        // empty `tmux_socket` means adoption: the hooks arrived but nothing here
+        // spawned or supervises the process, so no probe can ever prove it
+        // ended, and holding the row hostage to a proof that cannot exist would
+        // make it immortal. "The daemon cannot say — you may remove it" is the
+        // honest contract; Claude Code's own transcript, the authoritative
+        // record, is untouched either way. Hosted rows keep the strict rule.
+        let unhosted = tmux_socket.is_empty();
+        if !unhosted && lifecycle != lifecycle_str(Lifecycle::Exited) {
+            // **Which non-ended state it is, because they do not mean the same
+            // thing.** `Live` and `Spawning` say the agent is there. `Unknown`
+            // says the opposite of a claim: the daemon could not establish what
+            // happened to this run — which `prune_exited_sessions` treats as the
+            // sharpest reason of all not to delete, and which is precisely not
+            // "still running". Both refuse; only one of them may say so.
+            return Ok(DeleteOutcome::NotExited { lifecycle });
+        }
+
+        let events: u64 = tx.query_row(
+            "SELECT COUNT(*) FROM events WHERE session_uid = ?1",
+            params![session_uid],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+
+        for table in SESSION_SCOPED_TABLES {
+            // The table names are a compile-time list in this file; nothing a
+            // caller supplies reaches the statement text.
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE session_uid = ?1"),
+                params![session_uid],
+            )?;
+        }
+        let gone = tx.execute(
+            "DELETE FROM sessions
+              WHERE session_uid = ?1 AND (lifecycle = ?2 OR tmux_socket = '')",
+            params![session_uid, lifecycle_str(Lifecycle::Exited)],
+        )?;
+        if gone != 1 {
+            // The row changed underneath the transaction. Roll back rather than
+            // report a deletion that did not happen. Unreachable as things
+            // stand — one `BEGIN IMMEDIATE` on the one write connection — and
+            // kept as the same destructive-transaction assertion
+            // `prune_exited_sessions` makes: a deletion that removed a number of
+            // rows nobody predicted must abort, not be reported as success.
+            tx.rollback()?;
+            return Ok(DeleteOutcome::NotExited {
+                lifecycle: lifecycle_str(Lifecycle::Unknown).into(),
+            });
+        }
+        // The decision, recorded with the deed: from this commit on, nothing may
+        // file anything under this uid again — see `deleted_sessions`.
+        tx.execute(
+            "INSERT OR IGNORE INTO deleted_sessions(session_uid, deleted_at) VALUES(?1, ?2)",
+            params![session_uid, protocol::time::now_rfc3339()],
+        )?;
+        if unhosted {
+            // And under this *name*: an adopted run's hooks carry no uid, so
+            // without this the very next one would mint a fresh identity and
+            // put the row straight back — the resurrection wearing a new uid.
+            // See `deleted_names`; a SessionStart clears it.
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_names(session_id, deleted_at) VALUES(?1, ?2)",
+                params![session_id_of_row, protocol::time::now_rfc3339()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(DeleteOutcome::Deleted { events })
     }
 
     /// Delete every run that has **ended**, and everything filed under it.
@@ -729,6 +943,15 @@ impl Store {
                     "refusing to prune {session_uid}: the delete matched {gone} rows rather than \
                      the one ended session it named"
                 );
+                // Same decision, same record as the phone's single delete: a
+                // pruned uid is deliberately erased, and a hook in flight when
+                // this commits must not be able to resurrect it. Dry runs
+                // decide nothing and so record nothing.
+                tx.execute(
+                    "INSERT OR IGNORE INTO deleted_sessions(session_uid, deleted_at) \
+                     VALUES(?1, ?2)",
+                    params![session_uid, protocol::time::now_rfc3339()],
+                )?;
             }
 
             removed.push(PrunedSession {
@@ -826,8 +1049,12 @@ impl Store {
             });
         }
         tx.execute(
+            // `WHERE EXISTS(sessions)`: an answer settling just as its session
+            // is deleted must vanish with the session rather than survive it as
+            // a row nothing can ever name again.
             "INSERT INTO answers(session_uid, request_id, payload_hash, outcome, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
+             SELECT ?1, ?2, ?3, ?4, ?5
+              WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)",
             params![
                 session_uid,
                 request_id,
@@ -1209,12 +1436,19 @@ impl Store {
 
     /// Persist a card so a restart can still answer "what is this agent waiting
     /// for?" with the truth rather than with silence.
-    pub fn upsert_pending_approval(&self, row: &PendingApprovalRow) -> Result<()> {
+    /// False when the session was deleted while the approval was in flight:
+    /// nothing was written, and the caller must retire its in-memory half too.
+    pub fn upsert_pending_approval(&self, row: &PendingApprovalRow) -> Result<bool> {
         let conn = self.write();
-        conn.execute(
+        let changed = conn.execute(
+            // `SELECT ... WHERE EXISTS(sessions)` rather than VALUES: an
+            // approval for a session that was deleted mid-flight must not leave
+            // an orphan row that is later recovered as an indeterminate answer
+            // for a run nobody can name.
             "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
                                            generation, created_ms)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+              WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)
              ON CONFLICT(session_uid, request_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 card       = excluded.card,
@@ -1229,7 +1463,7 @@ impl Store {
                 row.created_ms,
             ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn delete_pending_approval(&self, session_uid: &str, request_id: &str) -> Result<()> {
@@ -1381,9 +1615,12 @@ impl Store {
         let claim = match existing {
             None => {
                 tx.execute(
+                    // Same rule as `answers`: no new claim for a session that
+                    // was deleted while the request was in flight.
                     "INSERT INTO text_mutations(session_uid, request_id, payload_hash,
                                                 status, matched, started_at, settled_at)
-                     VALUES(?1, ?2, ?3, 'applying', NULL, ?4, NULL)",
+                     SELECT ?1, ?2, ?3, 'applying', NULL, ?4, NULL
+                      WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)",
                     params![session_uid, request_id, payload_hash, now],
                 )?;
                 TextClaim::Claimed
@@ -1688,6 +1925,30 @@ fn create_schema(conn: &Connection) -> Result<()> {
             updated_at      TEXT    NOT NULL
         );
 
+        -- A deletion is a decision, and this is its record. A uid here was
+        -- deliberately erased by an operator; nothing may file anything under
+        -- it again. Without this, a hook or registration in flight when the
+        -- delete committed would re-insert the row a heartbeat later, and the
+        -- user's removal would silently undo itself. Uids are ULIDs and are
+        -- never reused, so the table only ever grows by one small row per
+        -- deliberate deletion and entries never need expiry.
+        CREATE TABLE IF NOT EXISTS deleted_sessions(
+            session_uid TEXT PRIMARY KEY,
+            deleted_at  TEXT NOT NULL
+        );
+
+        -- The same decision at the name level, for runs that have no uid to
+        -- tombstone. An adopted session's hooks carry no CodeConnect uid, so a
+        -- uid tombstone cannot stop the next hook minting a fresh identity and
+        -- putting the row straight back. Removing an adopted run means "stop
+        -- observing this conversation": its name is recorded here, ordinary
+        -- hooks for it are dropped, and an explicit SessionStart — a resume
+        -- announcing itself — clears the entry and re-adopts.
+        CREATE TABLE IF NOT EXISTS deleted_names(
+            session_id TEXT PRIMARY KEY,
+            deleted_at TEXT NOT NULL
+        );
+
         -- Pairing codes are stored hashed. The code is a bearer capability
         -- for five minutes; a database file or a backup that leaked one in
         -- the clear would hand over that capability, and hashing costs
@@ -1891,7 +2152,17 @@ fn migrate_to_session_uids(conn: &mut Connection) -> Result<()> {
         "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
                               claude_session_id, transcript_path, lifecycle,
                               created_at, updated_at)
-            SELECT m.session_uid, m.session_id, m.session_id, ?1, '',
+            SELECT m.session_uid, m.session_id,
+                   -- An adopted name (`claude:*`, cc-hook's prefix for sessions
+                   -- CodeConnect did not launch) gets no tmux location: nothing
+                   -- here ever put it in tmux, and a fabricated one is what let
+                   -- the liveness sweep mark live adopted runs dead. The
+                   -- startup normalizer enforces the same rule for rows written
+                   -- before it existed; this keeps a legacy rebuild from
+                   -- re-fabricating what it just cleaned.
+                   CASE WHEN m.session_id GLOB 'claude:*' THEN '' ELSE m.session_id END,
+                   CASE WHEN m.session_id GLOB 'claude:*' THEN '' ELSE ?1 END,
+                   '',
                    NULL,
                    (SELECT c.path FROM tail_cursors_v0 c WHERE c.session_id = m.session_id),
                    'unknown',
@@ -1949,6 +2220,21 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
         pending.session_id,
         pending.kind.as_str()
     );
+
+    // A fact for a session that is gone is dropped, not filed. A hook or an
+    // approval already in flight when the phone's delete commits would
+    // otherwise write rows keyed to a uid nothing can name again — the same
+    // orphan shape `append_batch_with_cursor` refuses, enforced here so every
+    // single-event path shares the rule. `None` is the shape callers already
+    // tolerate for a dedup miss.
+    let known: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_uid = ?1)",
+        params![pending.session_uid],
+        |row| row.get(0),
+    )?;
+    if !known {
+        return Ok(None);
+    }
 
     if let Some(source_event_id) = &pending.source_event_id {
         let existing: Option<i64> = tx
@@ -2034,7 +2320,7 @@ fn device_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
     })
 }
 
-fn lifecycle_str(lifecycle: Lifecycle) -> &'static str {
+pub(crate) fn lifecycle_str(lifecycle: Lifecycle) -> &'static str {
     match lifecycle {
         Lifecycle::Spawning => "spawning",
         Lifecycle::Live => "live",
@@ -2123,7 +2409,7 @@ mod tests {
     fn seed_run(store: &Store, session: &SessionKey, lifecycle: Lifecycle, events: u32) {
         let mut row = session_row(session);
         row.lifecycle = lifecycle;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
         for i in 0..events {
             store
                 .append_event(&pending(
@@ -2178,6 +2464,230 @@ mod tests {
             );
             assert_eq!(store.count_events(&survivor.uid).unwrap(), 2);
         }
+    }
+
+    // ------------------------------------------------ deleting exactly one
+
+    /// The safety property of the phone's swipe, stated at the level that
+    /// enforces it. The daemon checks the lifecycle too, but this is the check
+    /// that cannot be forgotten by a caller: it is in the `WHERE` clause.
+    #[test]
+    fn a_live_run_cannot_be_deleted_however_it_is_asked_for() {
+        let (store, _path) = temp_store();
+        let live = key("AA", "cc-1");
+        let unsure = key("BB", "cc-2");
+        seed_run(&store, &live, Lifecycle::Live, 2);
+        seed_run(&store, &unsure, Lifecycle::Unknown, 2);
+
+        // The two are asserted separately because the *word* differs, and that
+        // is the point: `Unknown` means the daemon could not establish what
+        // happened to this run, which is not "still running" and must not be
+        // reported as it.
+        for (session, expected) in [(&live, Lifecycle::Live), (&unsure, Lifecycle::Unknown)] {
+            assert_eq!(
+                store.delete_exited_session(&session.uid).unwrap(),
+                DeleteOutcome::NotExited {
+                    lifecycle: lifecycle_str(expected).into()
+                },
+                "{} is not exited and must survive being asked for by uid",
+                session.uid
+            );
+            assert!(store.get_session(&session.uid).unwrap().is_some());
+            assert_eq!(store.count_events(&session.uid).unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn deleting_one_ended_run_takes_its_rows_and_leaves_its_neighbours() {
+        let (store, _path) = temp_store();
+        let doomed = key("AA", "cc-1");
+        let neighbour = key("BB", "cc-2");
+        seed_run(&store, &doomed, Lifecycle::Exited, 5);
+        seed_run(&store, &neighbour, Lifecycle::Exited, 4);
+
+        assert_eq!(
+            store.delete_exited_session(&doomed.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 5 },
+            "the count is reported because afterwards there is nothing left to count"
+        );
+        assert!(store.get_session(&doomed.uid).unwrap().is_none());
+        assert_eq!(store.count_events(&doomed.uid).unwrap(), 0);
+
+        // The other ended run is the point: this deletes one, not a class.
+        assert!(store.get_session(&neighbour.uid).unwrap().is_some());
+        assert_eq!(store.count_events(&neighbour.uid).unwrap(), 4);
+    }
+
+    /// **The write that arrives after the delete.** Ending a run stops its tail
+    /// by queueing a command, so one more transcript poll can already be under
+    /// way when the phone removes the run. Landing it afterwards would file
+    /// events and a cursor under a `session_uid` with no row — orphans of
+    /// exactly the kind `SESSION_SCOPED_TABLES` exists to prevent, and which
+    /// nothing would ever clean up because no session names them.
+    #[test]
+    fn a_transcript_batch_for_a_deleted_run_is_refused_entirely() {
+        let (store, _path) = temp_store();
+        let gone = key("AA", "cc-1");
+        seed_run(&store, &gone, Lifecycle::Exited, 2);
+        let cursor = TailCursor {
+            path: "/tmp/x.jsonl".into(),
+            dev: 1,
+            ino: 2,
+            offset: 4096,
+            last_line_start: 4000,
+            last_line_sha: "abc".into(),
+        };
+
+        assert_eq!(
+            store.delete_exited_session(&gone.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 2 }
+        );
+
+        let late = [pending(&gone, EventKind::ToolCall, Some("late-1"))];
+        let written = store
+            .append_batch_with_cursor(&gone.uid, &late, &cursor)
+            .unwrap();
+
+        assert!(
+            written.is_empty(),
+            "nothing may be written for a run that is gone"
+        );
+        assert_eq!(store.count_events(&gone.uid).unwrap(), 0);
+        assert!(
+            store.load_cursor(&gone.uid).unwrap().is_none(),
+            "and the cursor must not come back either — it is a session-scoped row like any other"
+        );
+    }
+
+    /// The daemon's own delete rule, stated as a matrix. Hosted rows need the
+    /// proof; unhosted rows (empty socket — nothing here ever put them in tmux)
+    /// are removable at any lifecycle, because the proof cannot exist.
+    #[test]
+    fn an_unhosted_row_is_deletable_at_any_lifecycle_and_a_hosted_one_is_not() {
+        let (store, _path) = temp_store();
+        for (i, lifecycle) in [Lifecycle::Live, Lifecycle::Unknown, Lifecycle::Exited]
+            .into_iter()
+            .enumerate()
+        {
+            let unhosted = key(&format!("A{i}"), &format!("claude:conv-{i}"));
+            let mut row = session_row(&unhosted);
+            row.lifecycle = lifecycle;
+            row.tmux_session = String::new();
+            row.tmux_socket = String::new();
+            store.upsert_session(&row).unwrap().assert_present();
+            assert_eq!(
+                store.delete_exited_session(&unhosted.uid).unwrap(),
+                DeleteOutcome::Deleted { events: 0 },
+                "an unhosted {lifecycle:?} row must be removable"
+            );
+        }
+    }
+
+    /// Deleted means deleted: the tombstone outlives the row, the upsert that
+    /// raced the delete writes nothing, and no fact can be filed under the uid.
+    #[test]
+    fn a_deleted_uid_can_never_be_recreated_or_written_to() {
+        let (store, _path) = temp_store();
+        let doomed = key("AA", "cc-1");
+        seed_run(&store, &doomed, Lifecycle::Exited, 1);
+        assert_eq!(
+            store.delete_exited_session(&doomed.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 1 }
+        );
+
+        // The exact shape of `ensure_session`'s second half after losing the race.
+        assert_eq!(
+            store.upsert_session(&session_row(&doomed)).unwrap(),
+            SessionUpsert::Tombstoned,
+            "an upsert that raced the delete must write nothing"
+        );
+        assert!(store.get_session(&doomed.uid).unwrap().is_none());
+        assert!(
+            store
+                .append_event(&pending(&doomed, EventKind::ToolCall, Some("late")))
+                .unwrap()
+                .is_none(),
+            "no fact may be filed under a deleted uid"
+        );
+    }
+
+    /// Prune is the same decision at bulk, so it leaves the same record.
+    #[test]
+    fn a_pruned_uid_is_tombstoned_like_a_swiped_one() {
+        let (store, _path) = temp_store();
+        let doomed = key("AA", "cc-1");
+        seed_run(&store, &doomed, Lifecycle::Exited, 1);
+        assert_eq!(store.prune_exited_sessions(&[], false).unwrap().len(), 1);
+        assert_eq!(
+            store.upsert_session(&session_row(&doomed)).unwrap(),
+            SessionUpsert::Tombstoned
+        );
+        // And a dry run decides nothing, so it records nothing.
+        let spared = key("BB", "cc-2");
+        seed_run(&store, &spared, Lifecycle::Exited, 1);
+        assert_eq!(store.prune_exited_sessions(&[], true).unwrap().len(), 1);
+        store
+            .upsert_session(&session_row(&spared))
+            .unwrap()
+            .assert_present();
+    }
+
+    /// The startup normalizer: adopted rows lose their fabricated location,
+    /// exactly once each, case-sensitively, and nothing else moves.
+    #[test]
+    fn the_normalizer_clears_adopted_locations_and_only_those() {
+        let (store, path) = temp_store();
+        let adopted = key("AA", "claude:8f37b678");
+        let hosted = key("BB", "cc-1");
+        let decoy = key("CC", "Claude:shout");
+        for k in [&adopted, &hosted, &decoy] {
+            store
+                .upsert_session(&session_row(k))
+                .unwrap()
+                .assert_present();
+        }
+        drop(store);
+        // A second open runs the normalizer against the rows above.
+        let store = Store::open(&path).unwrap();
+        let cleared = store.get_session(&adopted.uid).unwrap().unwrap();
+        assert_eq!(cleared.tmux_session, "");
+        assert_eq!(cleared.tmux_socket, "");
+        assert_eq!(
+            cleared.lifecycle,
+            Lifecycle::Live,
+            "lifecycle is not its business"
+        );
+        let kept = store.get_session(&hosted.uid).unwrap().unwrap();
+        assert_eq!(kept.tmux_session, "cc-1", "hosted rows keep their location");
+        let case = store.get_session(&decoy.uid).unwrap().unwrap();
+        assert_eq!(
+            case.tmux_session, "Claude:shout",
+            "the prefix is an exact contract; GLOB must not match a different case"
+        );
+    }
+
+    /// Two phones swiping the same row is a race, not an error. The second one
+    /// must get an answer it can act on rather than a failure it has to explain.
+    #[test]
+    fn deleting_something_already_gone_is_not_an_error() {
+        let (store, _path) = temp_store();
+        let gone = key("AA", "cc-1");
+        seed_run(&store, &gone, Lifecycle::Exited, 1);
+
+        assert_eq!(
+            store.delete_exited_session(&gone.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 1 }
+        );
+        assert_eq!(
+            store.delete_exited_session(&gone.uid).unwrap(),
+            DeleteOutcome::NotFound
+        );
+        assert_eq!(
+            store
+                .delete_exited_session("01NOSUCHRUNATALLXXXXXXXXXX")
+                .unwrap(),
+            DeleteOutcome::NotFound
+        );
     }
 
     #[test]
@@ -2327,6 +2837,12 @@ mod tests {
             if name == "sessions" || name.starts_with("sqlite_") {
                 continue;
             }
+            // The one deliberate exception: tombstones are the record that a
+            // deletion happened, so they are precisely the rows that must
+            // SURVIVE the deletion they describe.
+            if name == "deleted_sessions" || name == "deleted_names" {
+                continue;
+            }
             let mut info = conn.prepare(&format!("PRAGMA table_info({name})")).unwrap();
             let has_uid = info
                 .query_map([], |row| row.get::<_, String>(1))
@@ -2352,9 +2868,19 @@ mod tests {
         // to delete data whose provenance nobody understands.
         let (store, _path) = temp_store();
         let ghost = key("AA", "cc-gone");
-        store
-            .append_event(&pending(&ghost, EventKind::ToolCall, Some("orphan-1")))
+        // Raw SQL, deliberately: `append_event` now refuses to create exactly
+        // this shape (a fact with no session row), which is the fix — so the
+        // legacy orphans this test is about have to be manufactured the way
+        // they actually arose, by writes that predate the guard.
+        {
+            let conn = store.write();
+            conn.execute(
+                "INSERT INTO events(session_uid, session_id, seq, ts, kind, payload, source)
+                 VALUES(?1, ?2, 1, ?3, 'tool_call', '{}', 'hook')",
+                params![ghost.uid, ghost.name, protocol::time::now_rfc3339()],
+            )
             .unwrap();
+        }
         let dead = key("BB", "cc-1");
         seed_run(&store, &dead, Lifecycle::Exited, 2);
 
@@ -2400,6 +2926,10 @@ mod tests {
     fn seq_is_monotonic_and_per_run() {
         let (store, _path) = temp_store();
         let first = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&first))
+            .unwrap()
+            .assert_present();
         for expected in 1..=3u64 {
             let event = store
                 .append_event(&pending(&first, EventKind::ToolCall, None))
@@ -2409,6 +2939,10 @@ mod tests {
         }
         // A second session starts its own numbering.
         let second = key("AB", "cc-2");
+        store
+            .upsert_session(&session_row(&second))
+            .unwrap()
+            .assert_present();
         let other = store
             .append_event(&pending(&second, EventKind::ToolCall, None))
             .unwrap()
@@ -2425,7 +2959,15 @@ mod tests {
         // with an empty log, not continue somebody else's numbering.
         let (store, _path) = temp_store();
         let dead = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&dead))
+            .unwrap()
+            .assert_present();
         let live = key("AB", "cc-1");
+        store
+            .upsert_session(&session_row(&live))
+            .unwrap()
+            .assert_present();
         assert_ne!(dead.uid, live.uid);
 
         for i in 0..5 {
@@ -2480,12 +3022,12 @@ mod tests {
         let mut row = session_row(&old);
         row.created_at = "2026-07-01T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
 
         let mut row = session_row(&new);
         row.created_at = "2026-07-02T00:00:00.000Z".into();
         row.lifecycle = Lifecycle::Exited;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
 
         assert_eq!(
             store.find_session("cc-1").unwrap().unwrap().session_uid,
@@ -2507,6 +3049,10 @@ mod tests {
     fn count_and_max_seq_agree_for_a_healthy_log() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         for i in 0..7 {
             store
                 .append_event(&pending(
@@ -2529,6 +3075,10 @@ mod tests {
     fn duplicate_source_event_id_consumes_no_seq() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         let first = store
             .append_event(&pending(&session, EventKind::ToolCall, Some("toolu_1")))
             .unwrap();
@@ -2550,6 +3100,10 @@ mod tests {
     fn same_id_from_a_different_source_is_a_different_fact() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         let mut hook = pending(&session, EventKind::ToolCall, Some("uuid-1"));
         hook.source = Source::Hook;
         let mut transcript = pending(&session, EventKind::ToolCall, Some("uuid-1"));
@@ -2562,6 +3116,10 @@ mod tests {
     fn events_without_ids_are_never_collapsed() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         assert!(store
             .append_event(&pending(&session, EventKind::Notification, None))
             .unwrap()
@@ -2577,6 +3135,10 @@ mod tests {
     fn restart_backfill_does_not_duplicate_or_renumber() {
         let (store, path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         let batch: Vec<_> = (0..5)
             .map(|i| pending(&session, EventKind::UserMessage, Some(&format!("u{i}"))))
             .collect();
@@ -2601,6 +3163,10 @@ mod tests {
     fn events_after_replays_only_the_tail() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         for i in 0..5 {
             store
                 .append_event(&pending(
@@ -2626,6 +3192,10 @@ mod tests {
     fn unknown_kind_survives_a_database_round_trip() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         let mut event = pending(&session, EventKind::Other("future_kind".into()), None);
         event.payload = json!({"a": [1, 2, 3]});
         store.append_event(&event).unwrap();
@@ -2652,6 +3222,10 @@ mod tests {
     fn ledger_is_insert_once_and_returns_the_original() {
         let (store, _path) = temp_store();
         let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         let first = outcome("toolu_1", AnswerDecision::Allow);
         assert!(matches!(
             store
@@ -2684,7 +3258,15 @@ mod tests {
         // second's card come back as an already-applied duplicate.
         let (store, _path) = temp_store();
         let dead = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&dead))
+            .unwrap()
+            .assert_present();
         let live = key("AB", "cc-1");
+        store
+            .upsert_session(&session_row(&live))
+            .unwrap()
+            .assert_present();
 
         store
             .record_answer(
@@ -2737,7 +3319,15 @@ mod tests {
         // rather than "whichever row SQLite reached first".
         let (store, _path) = temp_store();
         let old = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&old))
+            .unwrap()
+            .assert_present();
         let new = key("AB", "cc-1");
+        store
+            .upsert_session(&session_row(&new))
+            .unwrap()
+            .assert_present();
         store
             .record_answer(
                 &old.uid,
@@ -2770,6 +3360,10 @@ mod tests {
         let (store, path) = temp_store();
         let session = key("AA", "cc-1");
         store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        store
             .record_answer(
                 &session.uid,
                 "toolu_9",
@@ -2790,18 +3384,18 @@ mod tests {
         let session = key("AA", "cc-1");
         let mut row = session_row(&session);
         row.lifecycle = Lifecycle::Spawning;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
 
         // SessionStart teaches us the transcript path.
         row.transcript_path = Some("/tmp/x.jsonl".into());
         row.claude_session_id = Some("uuid-1".into());
         row.lifecycle = Lifecycle::Live;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
 
         // A later heartbeat knows neither; they must not be erased.
         row.transcript_path = None;
         row.claude_session_id = None;
-        store.upsert_session(&row).unwrap();
+        store.upsert_session(&row).unwrap().assert_present();
 
         let stored = store.get_session(&session.uid).unwrap().unwrap();
         assert_eq!(stored.transcript_path.as_deref(), Some("/tmp/x.jsonl"));
@@ -2815,8 +3409,14 @@ mod tests {
         let (store, _path) = temp_store();
         let first = key("AA", "cc-1");
         let second = key("AB", "cc-1");
-        store.upsert_session(&session_row(&first)).unwrap();
-        store.upsert_session(&session_row(&second)).unwrap();
+        store
+            .upsert_session(&session_row(&first))
+            .unwrap()
+            .assert_present();
+        store
+            .upsert_session(&session_row(&second))
+            .unwrap()
+            .assert_present();
         let rows = store.list_sessions().unwrap();
         assert_eq!(rows.len(), 2, "the second run must not replace the first");
         assert!(rows.iter().all(|r| r.session_id == "cc-1"));
@@ -3039,6 +3639,13 @@ mod tests {
             last_line_start: 4000,
             last_line_sha: "abc".into(),
         };
+        // The row first: a batch for a session that is not in `sessions` is
+        // refused, so that a tail poll still in flight when a run is deleted
+        // cannot file events — or a cursor — under a uid nobody can name.
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
         // Through the production path: a cursor only ever moves alongside the
         // events it claims, so there is nothing else to save it with.
         store

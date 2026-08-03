@@ -705,6 +705,36 @@ mod tests {
         SessionKey::new(protocol::uid::new().unwrap(), "cc-1")
     }
 
+    /// A store that already knows about this run.
+    ///
+    /// **The row is the point.** `append_batch_with_cursor` refuses a batch for
+    /// a `session_uid` with no row in `sessions`, because a tail poll can still
+    /// be in flight when the phone deletes the run underneath it and orphaned
+    /// events are exactly what that check exists to prevent. Production always
+    /// has the row — `ensure_session` writes it before it asks for a tail — so
+    /// a test tailing into an empty database was modelling a state the daemon
+    /// never produces.
+    fn store_for(path: &std::path::Path, run: &SessionKey) -> Store {
+        let store = Store::open(path).unwrap();
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: run.uid.clone(),
+                session_id: run.name.clone(),
+                tmux_session: run.name.clone(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .unwrap()
+            .assert_present();
+        store
+    }
+
     fn temp_paths() -> (std::path::PathBuf, std::path::PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
@@ -844,8 +874,8 @@ mod tests {
         // from exactly one place — the final read — and the event log's promise
         // that a `kill -9` costs nothing depends on it happening.
         let (db_path, transcript) = temp_paths();
-        let store = Store::open(&db_path).unwrap();
         let run = session();
+        let store = store_for(&db_path, &run);
         append(
             &transcript,
             &[
@@ -881,8 +911,8 @@ mod tests {
         // and a warning each would be the log spam this whole change removes,
         // reintroduced from the other side.
         let (db_path, transcript) = temp_paths();
-        let store = Store::open(&db_path).unwrap();
         let run = session();
+        let store = store_for(&db_path, &run);
         assert!(!transcript.exists());
         assert!(scan_file(&store, &run, transcript.to_str().unwrap())
             .unwrap()
@@ -985,7 +1015,7 @@ mod tests {
     fn incremental_tail_consumes_each_line_once() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(
             &jsonl,
             &[
@@ -1017,7 +1047,7 @@ mod tests {
     fn incomplete_trailing_line_is_not_consumed() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         {
             let mut file = std::fs::File::create(&jsonl).unwrap();
             // Second line has no terminator: a poll landed mid-write.
@@ -1053,7 +1083,7 @@ mod tests {
         // consumed, and the next poll has to offer the same lines again.
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(
             &jsonl,
             &[
@@ -1102,7 +1132,7 @@ mod tests {
     fn restart_resumes_without_duplicates() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(
             &jsonl,
             &[
@@ -1118,7 +1148,7 @@ mod tests {
 
         // ccd was killed; it comes back and the agent wrote more meanwhile.
         append(&jsonl, &[r#"{"type":"user","uuid":"u2"}"#]);
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         let scan = scan_file(&store, &run, jsonl.to_str().unwrap())
             .unwrap()
             .unwrap();
@@ -1131,7 +1161,7 @@ mod tests {
     fn rewritten_file_rescans_and_dedup_absorbs_it() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(&jsonl, &[r#"{"type":"user","uuid":"u1"}"#]);
         let scan = scan_file(&store, &run, jsonl.to_str().unwrap())
             .unwrap()
@@ -1155,7 +1185,7 @@ mod tests {
     fn truncated_file_is_rescanned_from_zero() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(
             &jsonl,
             &[
@@ -1182,7 +1212,7 @@ mod tests {
     fn missing_transcript_is_not_an_error() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         assert!(scan_file(&store, &run, jsonl.to_str().unwrap())
             .unwrap()
             .is_none());
@@ -1192,7 +1222,7 @@ mod tests {
     fn blank_lines_are_ignored_but_still_advance_the_cursor() {
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(&jsonl, &["", r#"{"type":"user","uuid":"u1"}"#, ""]);
         let scan = scan_file(&store, &run, jsonl.to_str().unwrap())
             .unwrap()
@@ -1212,7 +1242,7 @@ mod tests {
         // were read — otherwise the tailer re-reads them on every poll forever.
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         // Blank lines and well-formed JSON in a shape this build does not map.
         // `"not json at all"` used to be in this fixture; it moved to
         // `an_unreadable_line_is_reported_rather_than_vanishing`, because a line
@@ -1242,7 +1272,7 @@ mod tests {
         // silently discards is a log claiming there was nothing there.
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         append(
             &jsonl,
             &[
@@ -1287,7 +1317,7 @@ mod tests {
         // idle file.
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
 
         // 5MiB with no newline, then a real line behind it. Larger than
         // MAX_BYTES_PER_POLL, so the first window contains no terminator at all.
@@ -1350,7 +1380,7 @@ mod tests {
         // writing*. Consuming it would lose the fact it is about to become.
         let (db, jsonl) = temp_paths();
         let run = session();
-        let store = Store::open(&db).unwrap();
+        let store = store_for(&db, &run);
         {
             use std::io::Write;
             let mut file = std::fs::File::create(&jsonl).unwrap();

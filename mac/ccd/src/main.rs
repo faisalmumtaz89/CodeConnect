@@ -655,7 +655,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
             })
-            .unwrap();
+            .unwrap()
+            .assert_present();
         for i in 0..events {
             store
                 .append_event(

@@ -50,6 +50,25 @@ fn temp_store() -> Store {
     Store::open(&path).unwrap()
 }
 
+fn seed_session(store: &Store, run: &protocol::event::SessionKey) {
+    let now = protocol::time::now_rfc3339();
+    store
+        .upsert_session(&crate::store::SessionRow {
+            session_uid: run.uid.clone(),
+            session_id: run.name.clone(),
+            tmux_session: run.name.clone(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: protocol::event::Lifecycle::Live,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .unwrap()
+        .assert_present();
+}
+
 #[test]
 fn every_recorded_hook_payload_parses() {
     let payloads = load_hook_payloads("hooks/acceptance-run.jsonl");
@@ -207,6 +226,7 @@ fn recorded_approvals_classify_from_their_real_payload_shape() {
 fn replaying_hook_payloads_twice_is_idempotent() {
     let store = temp_store();
     let run = run();
+    seed_session(&store, &run);
     let payloads = load_hook_payloads("hooks/acceptance-run.jsonl");
 
     let build = || -> Vec<protocol::event::PendingEvent> {
@@ -250,6 +270,10 @@ fn replaying_hook_payloads_twice_is_idempotent() {
 fn real_transcript_maps_to_known_kinds_and_dedups() {
     let store = temp_store();
     let run = run();
+    // The row first: `append_batch_with_cursor` refuses a batch for a session
+    // that is not in `sessions`, so that a tail poll still in flight when a run
+    // is deleted cannot file events under a uid nobody can name.
+    seed_session(&store, &run);
     let path = fixture("transcript/session-sample.jsonl");
     let path = path.to_str().unwrap();
 

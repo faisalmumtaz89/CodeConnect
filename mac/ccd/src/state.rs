@@ -777,9 +777,14 @@ impl Daemon {
         let input: HookInput = serde_json::from_value(post.payload.clone()).unwrap_or_default();
         let event_name = HookEventName::parse(&post.event);
 
-        let session = self
+        let Some(session) = self
             .ensure_session(&post.session_id, post.session_uid.as_deref(), &input)
-            .await?;
+            .await?
+        else {
+            // Deleted while the hook was in flight; there is nothing to file it
+            // under and nothing to decide. Claude proceeds as if unobserved.
+            return Ok(HookDecision::passthrough());
+        };
 
         match &event_name {
             HookEventName::PreToolUse => {
@@ -804,12 +809,19 @@ impl Daemon {
                     .await;
             }
             HookEventName::Notification => {
-                self.ingest(
-                    self.notification_event(&session, &post.payload, &input)
-                        .await,
-                )
-                .await?;
-                self.maybe_push(&session, &input).await;
+                let filed = self
+                    .ingest(
+                        self.notification_event(&session, &post.payload, &input)
+                            .await,
+                    )
+                    .await?;
+                // Pushed only if the fact was actually filed. `None` here means
+                // the session was deleted between `ensure_session` and this
+                // write — a notification for a run the user just removed must
+                // not ring their phone and open onto nothing.
+                if filed.is_some() {
+                    self.maybe_push(&session, &input).await;
+                }
             }
             _ => {
                 self.ingest(hook_event(&session, &event_name, &post.payload, &input))
@@ -942,8 +954,29 @@ impl Daemon {
                 },
             );
         }
-        self.persist_pending(session, &card, generation, created_ms)
-            .await;
+        if !self
+            .persist_pending(session, &card, generation, created_ms)
+            .await
+        {
+            // The session was deleted between this hook arriving and the card
+            // being filed. The row, its events and its tombstone all exist;
+            // keeping the in-memory approval would leave the daemon holding
+            // live state for a run nobody can see. Retire it and answer the
+            // hook locally.
+            let mut inner = self.inner.lock().await;
+            inner
+                .pending
+                .remove(&(session.uid.clone(), request_id.clone()));
+            drop(inner);
+            crate::log_info!(
+                "dropping approval {} for {}: the session was deleted while it was in flight",
+                request_id,
+                session.name
+            );
+            return Ok(HookDecision::ask(
+                "CodeConnect: this session was removed from the fleet; answer at the keyboard",
+            ));
+        }
 
         // The prompt is not on screen yet — the hook runs microseconds before
         // Claude draws it — so identity is established just behind it, off the
@@ -1032,18 +1065,22 @@ impl Daemon {
     /// Best-effort by design: failing to write the projection must not stop the
     /// card reaching the phone, because the durable *fact* is already in the
     /// event log and the projection is only there to save rebuilding it.
+    /// False when the write was refused because the session no longer exists —
+    /// deleted while the hook was in flight. The caller must retire the
+    /// in-memory entry it just made, or the daemon holds an approval for a run
+    /// with no row until the expiry sweep finds it.
     async fn persist_pending(
         &self,
         session: &SessionKey,
         card: &ApprovalCard,
         generation: u64,
         created_ms: i64,
-    ) {
+    ) -> bool {
         let Ok(encoded) = serde_json::to_string(card) else {
             crate::log_error!("could not encode the card for {}", card.request_id);
-            return;
+            return true;
         };
-        if let Err(err) = self
+        match self
             .db
             .upsert_pending_approval(PendingApprovalRow {
                 session_uid: session.uid.clone(),
@@ -1055,10 +1092,17 @@ impl Daemon {
             })
             .await
         {
-            crate::log_error!(
-                "could not persist the pending card for {}: {err:#}",
-                card.request_id
-            );
+            Ok(written) => written,
+            Err(err) => {
+                crate::log_error!(
+                    "could not persist the pending card for {}: {err:#}",
+                    card.request_id
+                );
+                // An I/O failure is not evidence the session is gone; the
+                // in-memory half stays and recovery is the expiry sweep's job,
+                // exactly as before this returned anything.
+                true
+            }
         }
     }
 
@@ -1244,35 +1288,79 @@ impl Daemon {
     ///    launched (`claude:<uuid>`) or a name whose previous holder has exited.
     ///    A fresh identity is minted — an exited run must never gain new events,
     ///    which is the whole point.
+    ///
+    /// `Ok(None)` when the run was deleted while this hook was in flight: the
+    /// hook is dropped, and that is the expected outcome rather than an error.
     async fn ensure_session(
         &self,
         session_id: &str,
         session_uid: Option<&str>,
         input: &HookInput,
-    ) -> Result<SessionKey> {
+    ) -> Result<Option<SessionKey>> {
         let now = protocol::time::now_rfc3339();
         let existing = self.lookup_run(session_id, session_uid).await?;
         let uid = match (&existing, session_uid) {
             (Some(row), _) => row.session_uid.clone(),
             (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.to_string(),
             (None, _) => {
+                // A name the user removed stays removed: an adopted run's hooks
+                // carry no uid, so without this check the next hook after a
+                // deletion would mint a fresh identity and put the row straight
+                // back. A SessionStart is the one exception — a resume
+                // announcing itself is a request to observe again, so it clears
+                // the record and re-adopts.
+                if self.db.name_is_tombstoned(session_id.to_string()).await? {
+                    if input.event_name() == HookEventName::SessionStart {
+                        self.db.clear_name_tombstone(session_id.to_string()).await?;
+                        crate::log_info!(
+                            "re-adopting {session_id}: a new session announced itself"
+                        );
+                    } else {
+                        crate::log_info!(
+                            "dropping a hook for {session_id}: the run was removed and nothing new has started"
+                        );
+                        return Ok(None);
+                    }
+                }
                 let uid = protocol::uid::new()?;
                 crate::log_info!("adopting session {session_id} as {uid}");
                 uid
             }
         };
 
+        // **An adopted run gets no tmux location, because it has none we know
+        // of.** `claude:` is the prefix cc-hook mints for a session CodeConnect
+        // did not launch; recording `codeconnect`/`<name>` for one — a server
+        // and a name nothing ever created — is how the liveness sweep came to
+        // read tmux's inevitable "no such session" as proof of death for runs
+        // that were alive, marked them Exited, and let the phone delete them.
+        // Empty is the honest answer: the daemon cannot say where, or whether,
+        // this process runs. Hosted recreations — a `cc-*` name, or an exact
+        // uid after a crash — keep the real location.
+        let adopted = session_id.starts_with("claude:");
         let row = SessionRow {
             session_uid: uid.clone(),
             session_id: session_id.to_string(),
             tmux_session: existing
                 .as_ref()
                 .map(|r| r.tmux_session.clone())
-                .unwrap_or_else(|| session_id.to_string()),
+                .unwrap_or_else(|| {
+                    if adopted {
+                        String::new()
+                    } else {
+                        session_id.to_string()
+                    }
+                }),
             tmux_socket: existing
                 .as_ref()
                 .map(|r| r.tmux_socket.clone())
-                .unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
+                .unwrap_or_else(|| {
+                    if adopted {
+                        String::new()
+                    } else {
+                        protocol::TMUX_SOCKET_NAME.to_string()
+                    }
+                }),
             cwd: input
                 .cwd
                 .clone()
@@ -1287,7 +1375,18 @@ impl Daemon {
                 .unwrap_or_else(|| now.clone()),
             updated_at: now,
         };
-        self.db.upsert_session(row.clone()).await?;
+        if self.db.upsert_session(row.clone()).await? == crate::store::SessionUpsert::Tombstoned {
+            // The uid was deliberately deleted while this hook was in flight.
+            // Nothing was written, so nothing may be set up either — no tail,
+            // no key to file the event under. Dropping the hook is the honest
+            // outcome — the user removed this run, and it stays removed — and
+            // it is an expected outcome, not a failure, so it is reported as
+            // one: `None`, logged at info, never an error.
+            crate::log_info!(
+                "session {uid} was deleted; dropping the hook that raced the deletion"
+            );
+            return Ok(None);
+        }
 
         if let Some(path) = &input.transcript_path {
             let already = existing
@@ -1301,7 +1400,7 @@ impl Daemon {
                 });
             }
         }
-        Ok(SessionKey::new(uid, session_id))
+        Ok(Some(SessionKey::new(uid, session_id)))
     }
 
     /// The row a hook or a registration should continue, if there is one.
@@ -2180,7 +2279,8 @@ impl Daemon {
             }
         };
 
-        self.db
+        let wrote = self
+            .db
             .upsert_session(SessionRow {
                 session_uid: uid.clone(),
                 session_id: info.session_id.clone(),
@@ -2197,6 +2297,16 @@ impl Daemon {
                 updated_at: now,
             })
             .await?;
+        if wrote == crate::store::SessionUpsert::Tombstoned {
+            // The uid was deleted while this registration was in flight.
+            // Installing the in-memory supervisor anyway would leave the daemon
+            // holding live state for a session with no row — a ghost that
+            // resolves approvals into nothing. Refuse the registration; the
+            // supervisor's next report fails and it exits on its own account.
+            anyhow::bail!(
+                "session {uid} was deleted; refusing the registration that raced the deletion"
+            );
+        }
 
         let session = SessionKey::new(uid, info.session_id.clone());
         let epoch = {
@@ -2611,6 +2721,15 @@ impl Daemon {
             if row.lifecycle == Lifecycle::Exited {
                 continue;
             }
+            // A run with no recorded location was adopted, not spawned: the
+            // hooks arrived but nothing here put it in tmux, so tmux cannot
+            // testify about it — probing a fabricated name is how live adopted
+            // runs used to be "proven" dead and deleted. Skipped before the
+            // counters so `examined`/`unknown` and the per-sweep warn line stay
+            // truthful rather than naming these rows forever.
+            if row.tmux_socket.is_empty() {
+                continue;
+            }
             sweep.examined += 1;
             by_target
                 .entry(crate::liveness::Target {
@@ -2746,6 +2865,70 @@ impl Daemon {
 
         sweep.elapsed = started.elapsed();
         sweep
+    }
+
+    /// Remove one ended run, for the phone's swipe.
+    ///
+    /// The lifecycle rule lives in the SQL, so this cannot weaken it by
+    /// forgetting a check. The other two guards it *must* carry itself, because
+    /// they are facts no query can see: a run with a supervisor attached right
+    /// now, and a run with an approval still open. Those are the same two
+    /// [`Self::prune_ended_sessions`] refuses on, and skipping them here would
+    /// have made a swipe the one route past a protection the bulk path calls
+    /// non-negotiable.
+    ///
+    /// Not theoretical. `mark_exited` records the end and stops the tail; it does
+    /// not retire `inner.pending`, so an approval outlives the run it belongs to
+    /// until something resolves or expires it. Delete the rows underneath one and
+    /// its later resolution writes events for a session that no longer exists —
+    /// the schema has no foreign key to stop it.
+    ///
+    /// A refusal reads as `StillRunning` on the wire. That is the honest word for
+    /// it: whatever the lifecycle column says, this daemon is still holding live
+    /// state for that run.
+    pub async fn delete_exited_session(
+        &self,
+        session_uid: &str,
+    ) -> Result<protocol::ws::DeleteSessionResult> {
+        {
+            let inner = self.inner.lock().await;
+            if inner.supervisors.contains_key(session_uid)
+                || inner.pending.keys().any(|(uid, _)| uid == session_uid)
+            {
+                crate::log_info!(
+                    "refused to delete {session_uid}: still holding live state for it"
+                );
+                return Ok(protocol::ws::DeleteSessionResult::StillRunning);
+            }
+        }
+        let uid = session_uid.to_string();
+        let outcome = self.db.delete_exited_session(uid).await?;
+        Ok(match outcome {
+            crate::store::DeleteOutcome::Deleted { events } => {
+                crate::log_info!("deleted session {session_uid} and {events} event(s) on request");
+                // A live unhosted run may still have a transcript tail; its
+                // cursor died with the rows, so an unstopped tail would re-read
+                // the file from byte zero every poll, forever, into a guard
+                // that drops every batch. Harmless no-op for hosted rows, whose
+                // tails stopped at `mark_exited`.
+                let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
+                    session_uid: session_uid.to_string(),
+                });
+                protocol::ws::DeleteSessionResult::Deleted { events }
+            }
+            // The store's word for it, carried through rather than flattened.
+            // `Live` and `Spawning` mean the agent is there; `Unknown` means the
+            // daemon never found out, and those are not the same refusal.
+            crate::store::DeleteOutcome::NotExited { lifecycle }
+                if lifecycle == crate::store::lifecycle_str(Lifecycle::Unknown) =>
+            {
+                protocol::ws::DeleteSessionResult::NotExited { lifecycle }
+            }
+            crate::store::DeleteOutcome::NotExited { .. } => {
+                protocol::ws::DeleteSessionResult::StillRunning
+            }
+            crate::store::DeleteOutcome::NotFound => protocol::ws::DeleteSessionResult::NotFound,
+        })
     }
 
     /// Remove ended runs from the log, at an operator's explicit request.
@@ -5170,7 +5353,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
             })
-            .unwrap();
+            .unwrap()
+            .assert_present();
     }
 
     fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
@@ -5185,6 +5369,324 @@ mod tests {
             .into_iter()
             .map(|event| event.kind)
             .collect()
+    }
+
+    // ===================================================== deleting one run
+
+    /// An adopted hook creates a row with no tmux location — the daemon cannot
+    /// claim to know where a process it never launched lives — while a hosted
+    /// recreation by exact uid keeps the location a crash left behind.
+    #[tokio::test]
+    async fn an_adopted_hook_records_no_location_and_a_hosted_recreation_keeps_its_own() {
+        let daemon = test_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "claude:8f37b678".into(),
+                session_uid: None,
+                event: "SessionStart".into(),
+                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                wait: false,
+            })
+            .await;
+        let adopted = daemon
+            .store
+            .find_session("claude:8f37b678")
+            .unwrap()
+            .unwrap();
+        assert_eq!(adopted.tmux_session, "");
+        assert_eq!(adopted.tmux_socket, "");
+
+        // Crash recovery: an exact-uid hook for a hosted name refabricates the
+        // hosted location, which for a `cc-*` run is correct.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-9".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "SessionStart".into(),
+                payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                wait: false,
+            })
+            .await;
+        let hosted = daemon.store.get_session(TEST_UID).unwrap().unwrap();
+        assert_eq!(hosted.tmux_session, "cc-9");
+        assert_eq!(hosted.tmux_socket, protocol::TMUX_SOCKET_NAME);
+    }
+
+    /// The sweep only asks tmux about sessions that live in tmux. An unhosted
+    /// row is not probed, not counted, and above all not "proven" dead by a
+    /// server that has never heard of it.
+    #[tokio::test]
+    async fn the_sweep_leaves_an_unhosted_row_alone_and_uncounted() {
+        let daemon = test_daemon();
+        let unhosted = "01KYZ5E56X0D1RT7ZVRYK1ZEF7";
+        let mut row = SessionRow {
+            session_uid: unhosted.into(),
+            session_id: "claude:conv".into(),
+            tmux_session: String::new(),
+            tmux_socket: String::new(),
+            cwd: "/tmp".into(),
+            claude_session_id: None,
+            transcript_path: None,
+            lifecycle: Lifecycle::Live,
+            created_at: protocol::time::now_rfc3339(),
+            updated_at: protocol::time::now_rfc3339(),
+        };
+        daemon.store.upsert_session(&row).unwrap().assert_present();
+        row.session_uid = "01KYZ5E56X0D1RT7ZVRYK1ZEF8".into();
+        row.session_id = "cc-1".into();
+        row.tmux_session = "cc-1".into();
+        row.tmux_socket = protocol::TMUX_SOCKET_NAME.into();
+        daemon.store.upsert_session(&row).unwrap().assert_present();
+
+        // Every probe answers "gone" — the answer that used to kill both rows.
+        let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            sweep.examined, 1,
+            "the unhosted row must not even be counted"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, unhosted),
+            Lifecycle::Live,
+            "no probe ran, so nothing may claim this run ended"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, "01KYZ5E56X0D1RT7ZVRYK1ZEF8"),
+            Lifecycle::Exited,
+            "the hosted row is still reconciled exactly as before"
+        );
+    }
+
+    /// The primary resurrection path, closed: an adopted run's hooks carry no
+    /// uid, so a uid tombstone alone cannot stop the next hook minting a fresh
+    /// identity and putting the row straight back. Removing an adopted run
+    /// means "stop observing this conversation" — ordinary hooks are dropped —
+    /// and a SessionStart, a resume announcing itself, is the one thing that
+    /// clears the record and re-adopts.
+    #[tokio::test]
+    async fn a_deleted_adopted_run_stays_deleted_until_a_new_session_starts() {
+        let daemon = test_daemon();
+        let adopt = |event: &'static str| HookPost {
+            session_id: "claude:conv-1".into(),
+            session_uid: None,
+            event: event.into(),
+            payload: json!({"hook_event_name": event, "cwd": "/tmp"}),
+            wait: false,
+        };
+        daemon.handle_hook(adopt("SessionStart")).await;
+        let first = daemon.store.find_session("claude:conv-1").unwrap().unwrap();
+        assert_eq!(
+            daemon
+                .delete_exited_session(&first.session_uid)
+                .await
+                .unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { events: 1 }
+        );
+
+        // The very next ordinary hook — the one that used to resurrect.
+        daemon.handle_hook(adopt("PostToolUse")).await;
+        assert!(
+            daemon
+                .store
+                .find_session("claude:conv-1")
+                .unwrap()
+                .is_none(),
+            "an ordinary hook must not bring a removed conversation back"
+        );
+
+        // A new session start is a request to observe again.
+        daemon.handle_hook(adopt("SessionStart")).await;
+        let readopted = daemon.store.find_session("claude:conv-1").unwrap();
+        assert!(readopted.is_some(), "a resume announcing itself re-adopts");
+        assert_ne!(
+            readopted.unwrap().session_uid,
+            first.session_uid,
+            "as a new run, never by resurrecting the deleted uid"
+        );
+    }
+
+    /// Deleting a live unhosted run retires its transcript tail. The cursor
+    /// died with the rows, so a tail left running would re-read the file from
+    /// byte zero every poll, forever, into a guard that drops every batch.
+    #[tokio::test]
+    async fn deleting_an_unhosted_run_stops_its_tail() {
+        let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
+        daemon
+            .handle_hook(HookPost {
+                session_id: "claude:conv-2".into(),
+                session_uid: None,
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart", "cwd": "/tmp",
+                    "transcript_path": "/tmp/conv-2.jsonl"
+                }),
+                wait: false,
+            })
+            .await;
+        let row = daemon.store.find_session("claude:conv-2").unwrap().unwrap();
+        assert!(matches!(
+            tails.try_recv(),
+            Ok(crate::tailer::TailCommand::Follow { .. })
+        ));
+
+        assert!(matches!(
+            daemon
+                .delete_exited_session(&row.session_uid)
+                .await
+                .unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { .. }
+        ));
+        match tails.try_recv() {
+            Ok(crate::tailer::TailCommand::Stop { session_uid }) => {
+                assert_eq!(session_uid, row.session_uid)
+            }
+            other => panic!("the delete must stop the tail, got {other:?}"),
+        }
+    }
+
+    /// The registration that raced a delete: the row is gone, the tombstone is
+    /// not, and installing the supervisor anyway would leave the daemon holding
+    /// live state for a session with no row.
+    #[tokio::test]
+    async fn a_registration_that_raced_a_deletion_is_refused() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        seed_session(&daemon, uid, "cc-1", Lifecycle::Exited);
+        assert_eq!(
+            daemon.delete_exited_session(uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { events: 0 }
+        );
+
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        let refused = daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "a registration for a deleted uid must be refused"
+        );
+        let inner = daemon.inner.lock().await;
+        assert!(
+            !inner.supervisors.contains_key(uid),
+            "no ghost supervisor for a deleted run"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "and no resurrected row"
+        );
+    }
+
+    /// The guard the store cannot hold, and the reason it is here.
+    ///
+    /// `mark_exited` writes the lifecycle and stops the tail; it does not retire
+    /// `inner.pending`. So an approval raised before the run ended is still in
+    /// this process afterwards, while the row it belongs to reads `Exited` and
+    /// the phone will happily offer a swipe on it. Delete the rows underneath
+    /// that approval and whatever resolves it later writes events for a session
+    /// that no longer exists — there is no foreign key to stop it.
+    ///
+    /// `prune_ended_sessions` has refused exactly this since it was written. A
+    /// swipe must not be the way around it.
+    ///
+    /// **The supervisor is detached first, and that is what makes this a test.**
+    /// The guard is `supervisors || pending`, and `attach` leaves a supervisor
+    /// registered — `Registration` has no `Drop`, so letting the handle fall out
+    /// of scope detaches nothing. With one attached, the first clause
+    /// short-circuits and the second is never evaluated: deleting the `pending`
+    /// clause outright left this test green, which was measured, not supposed.
+    /// Detaching leaves the open approval as the only thing that can refuse.
+    ///
+    /// It is also the shape the real case has. A supervisor that is still
+    /// attached keeps its run out of `Exited` anyway; the run that reaches this
+    /// guard is one whose supervisor is gone and whose approval outlived it.
+    #[tokio::test]
+    async fn an_ended_run_with_an_approval_still_open_is_not_deletable() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, &permission_pane("touch /tmp/a"), "").await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        assert!(wait_bound(&daemon, uid, &request_id).await);
+
+        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        daemon.unregister_supervisor(&pane._registration).await;
+        assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
+        {
+            let inner = daemon.inner.lock().await;
+            assert!(
+                !inner.supervisors.contains_key(uid),
+                "the premise: no supervisor, so only the approval can refuse this"
+            );
+            assert_eq!(
+                inner.pending.len(),
+                1,
+                "the premise: ending a run does not retire its open approval"
+            );
+        }
+
+        assert_eq!(
+            daemon.delete_exited_session(uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::StillRunning,
+            "the daemon still holds live state for it, whatever the column says"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_some(),
+            "and the row is still there to be held"
+        );
+    }
+
+    /// The other half of the same guard, isolated the same way: a supervisor
+    /// attached and no approval open. Without this, deleting the `supervisors`
+    /// clause would go unnoticed.
+    #[tokio::test]
+    async fn an_ended_run_with_a_supervisor_still_attached_is_not_deletable() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        {
+            let inner = daemon.inner.lock().await;
+            assert!(inner.supervisors.contains_key(uid));
+            assert!(
+                inner.pending.is_empty(),
+                "the premise: nothing pending, so only the supervisor can refuse this"
+            );
+        }
+
+        assert_eq!(
+            daemon.delete_exited_session(uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::StillRunning
+        );
+        assert!(daemon.store.get_session(uid).unwrap().is_some());
+    }
+
+    /// The control for the test above: nothing held, so it goes.
+    #[tokio::test]
+    async fn an_ended_run_nobody_is_holding_is_deletable() {
+        let daemon = test_daemon();
+        let uid = "01KYZ5E56X0D1RT7ZVRYK1ZEF9";
+        seed_session(&daemon, uid, "cc-9", Lifecycle::Exited);
+
+        assert_eq!(
+            daemon.delete_exited_session(uid).await.unwrap(),
+            protocol::ws::DeleteSessionResult::Deleted { events: 0 }
+        );
+        assert!(daemon.store.get_session(uid).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -6029,6 +6531,7 @@ mod tests {
         // that run must not be able to complete.
         let daemon = test_daemon();
         let key = test_key();
+        seed_session(&daemon, &key.uid, &key.name, Lifecycle::Live);
         let gate = daemon.publish_gate(&key.uid).await;
         let held = gate.lock().await;
 
@@ -6069,6 +6572,7 @@ mod tests {
         // lower one afterwards.
         let daemon = test_daemon();
         let key = test_key();
+        seed_session(&daemon, &key.uid, &key.name, Lifecycle::Live);
         let mut events = daemon.events_tx.subscribe();
 
         let mut tasks = Vec::new();
@@ -6524,6 +7028,26 @@ mod tests {
         let uid = TEST_UID;
         let text = "deploy";
         let hash = protocol::hash::send_text_hash(uid, text, true);
+        // The claim writer refuses a uid with no session row, so the run this
+        // claim belongs to has to exist the way it would in production.
+        {
+            let now = protocol::time::now_rfc3339();
+            store
+                .upsert_session(&SessionRow {
+                    session_uid: uid.into(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .unwrap()
+                .assert_present();
+        }
 
         // A claim from a process that did not come back.
         assert_eq!(

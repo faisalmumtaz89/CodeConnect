@@ -40,9 +40,29 @@
         /// agent holding two decisions, which is the ordinary case for a
         /// `Write`-heavy turn and the smallest state that tells the two counts
         /// apart.
+        /// `ended` is the only fixture with runs that have **exited**, and it
+        /// exists because removal cannot be reached without one: the swipe is
+        /// offered on `lifecycle == .exited` alone, so under `deck` and `stacked`
+        /// — every session `live` — the gesture is not merely untested, it is not
+        /// installed. It carries enough of them to overflow the screen, because
+        /// the thing most worth proving is that the list still *scrolls* over
+        /// rows that own a horizontal drag.
         enum Variant: String, CaseIterable {
             case deck
             case stacked
+            case ended
+            /// The owner's real machine once held 45 ended soak runs, and the
+            /// Ended band materializes every row the moment it expands — the
+            /// band's own VStack is deliberately not lazy. This is that fleet,
+            /// so the cost of the worst real case stays measurable.
+            ///
+            /// Measured (simulator, identical instrument, 2026-08): expanding 8
+            /// rows took 1563ms wall-clock and 45 rows 1645ms — the instrument
+            /// itself (quiescence, queries, the 180ms animation) is the 1.5s;
+            /// the 37 extra wrapped rows cost ~82ms, ~2ms each. That is why the
+            /// band stays eager: a lazy rewrite would be machinery spent on two
+            /// milliseconds a row.
+            case ended45
 
             init?(_ raw: String?) {
                 guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -51,8 +71,17 @@
 
             var cards: [Card] {
                 switch self {
-                case .deck: return deckCards
+                case .deck, .ended, .ended45: return deckCards
                 case .stacked: return deckCards + [stackedCard]
+                }
+            }
+
+            /// Sessions after the cards' own, reported `exited`.
+            var endedCount: Int {
+                switch self {
+                case .ended: return 8
+                case .ended45: return 45
+                case .deck, .stacked: return 0
                 }
             }
 
@@ -63,7 +92,7 @@
             /// either.
             var sessionCount: Int {
                 switch self {
-                case .deck: return 4
+                case .deck, .ended, .ended45: return 4
                 case .stacked: return 5
                 }
             }
@@ -169,7 +198,8 @@
             "server_time":"2026-07-31T09:14:00.000Z",\
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
             "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
-            "push":false,"tls":false,"tls_active":false,"diff":true,"risk_class":true},\
+            "push":false,"tls":false,"tls_active":false,"diff":true,"risk_class":true,\
+            "delete_session":true},\
             "device_name":"iPhone","ssh_key_installed":true}
             """
 
@@ -189,7 +219,21 @@
                     "blocked_on":[\(blocked.joined(separator: ","))]}
                     """
             }
-            return "{\"type\":\"sessions\",\"sessions\":[\(summaries.joined(separator: ","))]}"
+            // Exited runs carry a `session_uid`, because that is what a daemon new
+            // enough to have ended one this way sends, and it is the only id a
+            // removal is allowed to name.
+            let endedRuns = (0..<variant.endedCount).map { offset in
+                let index = variant.sessionCount + offset + 1
+                return """
+                    {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
+                    "session_id":"fx-\(index)","tmux_session":"fx-\(index)",\
+                    "cwd":"/Users/dev/app-\(index)","lifecycle":"exited","link":"detached",\
+                    "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
+                    "blocked_on":[]}
+                    """
+            }
+            let all = (summaries + endedRuns).joined(separator: ",")
+            return "{\"type\":\"sessions\",\"sessions\":[\(all)]}"
         }
 
         private static func approvalEventJSON(_ card: Card, seq: UInt64, now: Date) -> String {

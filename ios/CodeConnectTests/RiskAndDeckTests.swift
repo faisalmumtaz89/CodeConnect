@@ -378,7 +378,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// values, exactly as they already are for every edge on this probe.
     @MainActor
     func testTheBarsHeightArrivingLateCannotOpenTheGate() {
-        var probe = ReadGateProbe()
+        let probe = ReadGateProbe()
         // The scroll view is 800pt tall; the bar covers the bottom 140pt; the
         // command block ends at 760pt — behind the bar, unreadable.
         probe.viewportBottom = 800
@@ -409,14 +409,14 @@ final class RiskAndDeckTests: XCTestCase {
         // the flag latched: the bar said it was 1pt tall on an early layout
         // pass, so the readable region came out 167pt too generous and a
         // command 4pt inside it counted as read.
-        var transient = ReadGateProbe()
+        let transient = ReadGateProbe()
         transient.viewportBottom = 853
         transient.actionBarHeight = 1
         XCTAssertNil(
             transient.visibleBottom,
             "a bar shorter than one tappable control has not been laid out")
 
-        var settled = ReadGateProbe()
+        let settled = ReadGateProbe()
         settled.viewportBottom = 853
         settled.actionBarHeight = 168
         XCTAssertEqual(settled.visibleBottom, 685)

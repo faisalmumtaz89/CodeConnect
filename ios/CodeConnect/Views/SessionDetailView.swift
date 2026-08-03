@@ -82,7 +82,10 @@ struct SessionDetailView: View {
                 // The tmux name comes from the fleet, not from the route: tmux
                 // has never heard of a uid, and a name the daemon no longer
                 // vouches for could attach to a different agent.
-                TerminalTabView(tmuxName: model.tmuxName(for: key), displayName: displayName)
+                TerminalTabView(
+                    tmuxName: model.tmuxName(for: key),
+                    unhosted: model.summary(for: key)?.tmuxSession.isEmpty == true,
+                    displayName: displayName)
             }
         }
         .background(CC.color.bg)
@@ -181,6 +184,35 @@ struct SessionDetailView: View {
                             .truncationMode(.head)
                             .onLongPressGesture { CCPasteboard.copy(cwd) }
                             .accessibilityLabel("Working directory, \(cwd)")
+                    }
+                    // **An ended run is not a dead end.** Claude Code keeps its own
+                    // transcript under `~/.claude/projects`, so the conversation
+                    // outlives our record of it and can be picked up at the Mac.
+                    // Shown only when the daemon actually recorded the id — it is
+                    // learned from a hook after the run starts, so a run that died
+                    // early may not have one, and a command with a blank id would
+                    // be worse than none.
+                    //
+                    // Resume happens at the Mac by design: the phone starting
+                    // processes on your machine is a different product, and the
+                    // daemon spawns nothing today.
+                    if summary?.lifecycle == .exited,
+                        let claudeID = summary?.claudeSessionID, !claudeID.isEmpty
+                    {
+                        VStack(alignment: .leading, spacing: CC.rhythm.text) {
+                            Text("Pick this conversation up at the Mac")
+                                .ccType(CC.type.footnote)
+                                .foregroundStyle(CC.text.secondary)
+                            // Quoted, because this is a command a person copies
+                            // and runs. The id is whatever a hook reported —
+                            // decoded as an unrestricted string, never validated
+                            // — and a space in it would silently resume the
+                            // wrong thing while anything shell-special would run
+                            // as syntax. Quoting costs nothing on the UUID this
+                            // is in practice.
+                            CCMonoBlock("codeconnect claude --resume \(Shell.quoted(claudeID))")
+                        }
+                        .padding(.top, CC.rhythm.textSurface)
                     }
                     // Stated here rather than left to be inferred from an empty
                     // screen. `textTertiary`, not a banner and not a warning:

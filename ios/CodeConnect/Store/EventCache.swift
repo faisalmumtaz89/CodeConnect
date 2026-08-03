@@ -252,6 +252,19 @@ enum ReviewMarks {
         UserDefaults.standard.set(pruned(map), forKey: key)
     }
 
+    /// Drop one session's mark, when that session is deleted for good.
+    ///
+    /// Not housekeeping. The map is capped, so a mark held for a run that no
+    /// longer exists is one an existing run does not get: prune by ULID keeps the
+    /// *newest* keys, and a removed session is usually newer than the ones being
+    /// evicted to make room for it.
+    static func forget(sessionKey: String) {
+        guard var map = UserDefaults.standard.dictionary(forKey: key) as? [String: NSNumber],
+            map.removeValue(forKey: sessionKey) != nil
+        else { return }
+        UserDefaults.standard.set(map, forKey: key)
+    }
+
     /// Keep the newest `maxEntries`.
     ///
     /// A ULID sorts by the millisecond it was minted, so plain string order *is*

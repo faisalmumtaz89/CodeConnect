@@ -394,6 +394,60 @@ final class AppModel {
     /// daemon. Always false in a release build.
     private(set) var fixturesActive = false
 
+    /// Ask the Mac to forget a run, and forget it here too.
+    ///
+    /// **Gated on `SessionSummary.isRemovable`, which mirrors the daemon's own
+    /// rule.** A hosted run needs `lifecycle == .exited` — the proof, never the
+    /// derived Ended status, which can read Ended without the run being proven
+    /// exited. An unhosted run (adopted; empty `tmux_session`) is removable at
+    /// any lifecycle, because no proof of its end can ever exist — and removing
+    /// one also stops observation of that conversation: the Mac drops its
+    /// further hooks until a new session start announces itself and re-adopts
+    /// it. The daemon enforces the same rule in SQL regardless; the gate here
+    /// keeps the phone from offering what would be refused.
+    ///
+    /// Also gated on the daemon having advertised `delete_session`. `FleetView`
+    /// checks that too, to decide whether to offer the swipe at all; it is
+    /// repeated here because this is the method that puts a request on the wire,
+    /// and an older Mac answers an unknown message with an error rather than a
+    /// result — a spinner that ends in nothing.
+    ///
+    /// Local clean-up happens **after** the daemon says it is gone, through the
+    /// ordered cache path — see `enqueueCacheWork` for why order is not free —
+    /// and is awaited, so a caller that reports success is reporting something
+    /// that has actually been written.
+    @discardableResult
+    func removeSession(_ summary: SessionSummary) async -> DeleteSessionResult? {
+        guard summary.isRemovable, daemonProfile.removesSessions else { return nil }
+        let key = summary.sessionKey
+        let result = try? await connection.deleteSession(sessionUID: summary.sessionUID)
+        // `notFound` counts as gone: the Mac does not have it, so neither should
+        // we. Nothing else does — see `meansItIsGone`.
+        guard let result, result.meansItIsGone else { return result }
+
+        forgetLocalState(of: key)
+        summaries.removeAll { $0.sessionKey == key }
+        // **The row itself lives here.** `loadCachedFleet` restores this file
+        // wholesale on a cold open and is what the app shows before the first
+        // live reply, so a removal that skipped it survived only until the app
+        // was killed — and offline, indefinitely. Written now rather than left
+        // to the next fleet reply, which may never come.
+        let remaining = summaries
+        enqueueCacheWork { await $0.saveFleet(remaining) }
+        await cacheSettled()
+        return result
+    }
+
+    #if DEBUG
+        /// Test seam: start from a known fleet without a `sessions` frame.
+        ///
+        /// `summaries` is `private(set)` because the daemon owns it. A removal
+        /// test has to begin with the row present, and injecting the frame would
+        /// also start subscriptions and cache migrations that have nothing to do
+        /// with what is being tested.
+        func adoptSummariesForTesting(_ list: [SessionSummary]) { summaries = list }
+    #endif
+
     /// The fleet is the root once there is something to show it from.
     var showsFleet: Bool { pairing.isPaired || fixturesActive }
 
@@ -660,7 +714,13 @@ final class AppModel {
     /// that it belongs to this run.
     func tmuxName(for key: String) -> String? {
         guard let summary = summary(for: key) else { return nil }
-        return summary.tmuxSession.isEmpty ? summary.sessionID : summary.tmuxSession
+        // Empty is the daemon saying "no known location": an adopted run whose
+        // hooks arrived but which nothing ever put in tmux. Falling back to the
+        // session id here was a guess wearing a fact's clothes — the exact
+        // thing the comment above forbids — and attaching to a name nothing
+        // vouches for could hand the user a different agent's keyboard.
+        guard !summary.tmuxSession.isEmpty else { return nil }
+        return summary.tmuxSession
     }
 
     private func title(for summary: SessionSummary, state: SessionState?) -> String {
@@ -719,6 +779,10 @@ final class AppModel {
 
     private func handle(_ message: ServerMessage) {
         switch message {
+        case .deleteSessionResult:
+            // Nothing to do here. `removeSession` awaits the reply itself and does
+            // the local clean-up, because only it knows which row asked.
+            break
         case .sessions(let list):
             markFleetLive()
             // **Assigned only when it differs.** The fleet is re-asked every 15
@@ -732,20 +796,25 @@ final class AppModel {
             // on screen. `SessionSummary` is `Hashable` on every wire field, so
             // this comparison is the whole fact.
             if summaries != list { summaries = list }
-            Task { [cache] in await cache.saveFleet(list) }
+            enqueueCacheWork { await $0.saveFleet(list) }
             // Anything the daemon does not list is not something this app can
             // claim to know about. Dropping those states is what stops a
             // session read from a cold cache — or one left over from the old
             // name keying — contributing a card to the Deck that no daemon
             // would accept an answer for.
-            //
-            // Guarded for the same reason: `filter` always returns a new
-            // dictionary, and assigning one that dropped nothing is an
-            // invalidation carrying no news.
             let live = Set(list.map(\.sessionKey))
-            if states.contains(where: { !live.contains($0.key) }) {
-                states = states.filter { live.contains($0.key) }
+            // **Every route out of the fleet ends here, not just this phone's
+            // swipe.** A session removed from another phone, pruned at the Mac,
+            // or lost with the daemon's database simply stops being listed, and
+            // that is the only notice this app gets. Cleaning up only in
+            // `removeSession` left a cache file and a review mark behind for
+            // each one, permanently — nothing else sweeps that directory.
+            for departed in states.keys.filter({ !live.contains($0) }) {
+                forgetLocalState(of: departed)
             }
+            // Guarded for the same reason the assignment above is: `filter`
+            // always returns a new dictionary, and assigning one that dropped
+            // nothing is an invalidation carrying no news.
             if diffs.contains(where: { !live.contains($0.key) }) {
                 diffs = diffs.filter { live.contains($0.key) }
             }
@@ -956,11 +1025,69 @@ final class AppModel {
             state.settlePendingEvents()
             return (key, state.events)
         }
-        Task { [cache] in
+        enqueueCacheWork { cache in
             for (key, events) in snapshots {
                 await cache.saveEvents(events, key: key)
             }
         }
+    }
+
+    // MARK: - The cache is written in one order
+
+    /// The tail of the cache-write chain. Every mutation is appended to it.
+    private var cacheWork: Task<Void, Never> = Task {}
+
+    /// Run one cache mutation after every mutation asked for before it.
+    ///
+    /// **Actor isolation is not ordering, and that is the whole reason this
+    /// exists.** `EventCache` being an actor guarantees its methods do not
+    /// overlap; it promises nothing about *which* of two independently spawned
+    /// tasks arrives first. Both hazards that follow from that are real:
+    ///
+    ///   * `flushCache` snapshots its events and *then* spawns a write. A
+    ///     removal that clears the same session's file can land between the two,
+    ///     and the write puts the file back. Dropping the key from
+    ///     `pendingCacheWrites` cannot help — by then the snapshot is taken.
+    ///   * every fleet reply spawns a `saveFleet`. One carrying a row that has
+    ///     since been removed can land after the removal's own `saveFleet`, and
+    ///     `fleet.json` is what a cold launch restores from.
+    ///
+    /// Chaining makes the order the order things were asked for, which is the
+    /// only order that is ever right here. Nothing is dropped or coalesced: a
+    /// stale `saveFleet` still runs, it just cannot run *last*.
+    private func enqueueCacheWork(_ work: @escaping @Sendable (EventCache) async -> Void) {
+        let previous = cacheWork
+        let cache = self.cache
+        cacheWork = Task {
+            await previous.value
+            await work(cache)
+        }
+    }
+
+    /// Wait for everything queued so far to have been written.
+    private func cacheSettled() async {
+        await cacheWork.value
+    }
+
+    /// Forget every trace of a session that is no longer on the Mac.
+    ///
+    /// **Called from both routes, because a session leaves the fleet more ways
+    /// than one.** This phone's swipe is the obvious one. The others are the
+    /// common ones: another phone removed it, the operator ran
+    /// `codeconnect prune` at the Mac, or the daemon's database was replaced.
+    /// Reachable only from the swipe, this cleanup would leave a cache file and
+    /// a review mark behind for every one of those — and nothing else ever
+    /// sweeps that directory, so on a long-lived install it only grows. The
+    /// review-mark map is capped at 200 and pruned oldest-first, so marks held
+    /// for sessions that no longer exist are slots taken from sessions that do,
+    /// and those rows announce work the user has already read as new.
+    private func forgetLocalState(of key: String) {
+        subscribed.remove(key)
+        states.removeValue(forKey: key)
+        diffs.removeValue(forKey: key)
+        pendingCacheWrites.remove(key)
+        ReviewMarks.forget(sessionKey: key)
+        enqueueCacheWork { await $0.clearEvents(key: key) }
     }
 
     /// The fleet on screen came off the wire, so it carries no age.
@@ -1172,3 +1299,29 @@ extension String {
     }
 }
 
+
+extension Optional where Wrapped == DeleteSessionResult {
+    /// What to tell the person who swiped, or `nil` when the run is gone.
+    ///
+    /// **`nil` — the request never got an answer — is a refusal too.** It is the
+    /// one this used to lose: `removeSession` reaches the daemon through `try?`,
+    /// so a dropped link, a timeout, or a second swipe while the first is still
+    /// in flight all arrive here as `nil`, and reading that as success would
+    /// close the row over a session the Mac still has.
+    ///
+    /// Short because it is rendered inside the revealed button, which is as wide
+    /// as the word "Remove" and cannot grow.
+    var refusal: String? {
+        switch self {
+        case .deleted, .notFound: nil
+        case .stillRunning: "Still running"
+        // The Mac's own word, because it has none better: it never established
+        // what happened to this run, and saying "still running" here would
+        // invent the one fact it is missing.
+        case .notExited(let lifecycle): "Mac says “\(lifecycle)”"
+        case .failed(let message): message
+        case .unknown(let status): "Mac said “\(status)”"
+        case .none: "No answer"
+        }
+    }
+}
