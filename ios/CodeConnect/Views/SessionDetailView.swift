@@ -14,6 +14,193 @@ enum ComposerTemplates {
     ]
 }
 
+/// The tail-following verdict, deliberately outside the screen's own state.
+///
+/// `following` flips as `TailObserver` reads the scroll offset, and as
+/// `SessionDetailView` `@State` every flip re-evaluated the whole screen —
+/// timeline included. With a taller-than-screen row expanded, that re-entry
+/// re-windows the LazyVStack and re-lays the giant text: a measured limit
+/// cycle that pegged the main thread for 30s+ (AttributeGraph churn under
+/// `sample`; a build with no writes laid the same content out in under a
+/// second). As `@Observable` state read only by `TailPill`, a flip repaints
+/// one capsule and the timeline subtree is never re-entered — the cycle has
+/// no fuel.
+@MainActor
+@Observable
+final class TailWatch {
+    /// Auto-scroll follows the tail until the reader scrolls away from it.
+    var following = true
+    /// Rows that arrived while the reader was away, for the pill's label.
+    var newSinceLeaving = 0
+    /// The reader deliberately moved away from the tail — a hand-scroll up,
+    /// or opening a long message to read it. Set synchronously, cleared by
+    /// `arrive`. `following` flips through a deliberate 400ms debounce so
+    /// the pill cannot flicker; this flag exists precisely for that window,
+    /// where an arriving event would otherwise yank the reader back to the
+    /// tail and slip past the "N new" count. Ignored by Observation
+    /// (nothing renders it) and raw on purpose — the debounce is for the
+    /// pill; intent must not wait.
+    @ObservationIgnored private(set) var handAway = false
+
+    /// Away for every purpose but the pill's own visibility: the follow
+    /// suppresses on this, and the "N new" counter counts on it. `following`
+    /// alone lags real departures by the debounce — events landing in that
+    /// lag used to both yank the reader and go uncounted.
+    var isAway: Bool { handAway || !following }
+    /// The one pending verdict — arrivals replace departures and vice versa.
+    /// Ignored by Observation: replacing a timer is bookkeeping, not a fact
+    /// any view renders.
+    @ObservationIgnored private var verdict: Task<Void, Never>?
+
+    /// **Both verdicts defer their writes; only the cancel is synchronous.**
+    /// `arrive`/`depart` fire from the scroll view's offset stream, many
+    /// times per gesture and — via KVO's `.initial` — from inside layout
+    /// when the probe attaches. A synchronous state write there re-enters
+    /// layout, and an earlier mechanism that wrote synchronously from layout
+    /// callbacks livelocked exactly that way: a single 30s+ update cycle of
+    /// repeated full-content `sizeThatFits` (`sample`; with the writes
+    /// removed the same content settled in under a second). Cancel-and-
+    /// replace is inert to layout, so a burst just swaps tasks, and
+    /// whichever verdict survives writes once, between transactions.
+    func arrive() {
+        handAway = false
+        verdict?.cancel()
+        verdict = Task {
+            guard !Task.isCancelled else { return }
+            if !following { following = true }
+            if newSinceLeaving != 0 { newSinceLeaving = 0 }
+        }
+    }
+
+    /// The reader deliberately left the tail — dragged up, or expanded a
+    /// message to read it. The pill still waits out the debounce; the
+    /// follow-yank guard takes effect this instant. Self-correcting when
+    /// the intent turns out not to have left the tail at all (a short
+    /// expansion whose end stays on screen): the very next offset reading
+    /// at the bottom calls `arrive`.
+    func leave() {
+        handAway = true
+        depart()
+    }
+
+    /// Departure also outwaits one follow animation (0.22s): appending a row
+    /// moves the content end away an instant before the follow-scroll
+    /// catches up, and that transient must meet its `arrive()` before the
+    /// verdict lands. A real departure meets the pill ~0.4s late.
+    ///
+    /// Called *without* `leave()` only when the tail slid away with no
+    /// deliberate act this side can name — a rotation, a keyboard reshape.
+    /// The two acts that *are* nameable — a hand-scroll up, and expanding a
+    /// message — go through `leave()`, so no event in the debounce window
+    /// can scroll a reader out of either.
+    func depart() {
+        verdict?.cancel()
+        verdict = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            // Guarded like `arrive`'s writes, and for the same reason:
+            // Observation notifies on every set with no equality check, so an
+            // unguarded `false` over `false` — one per row the reader scrolls
+            // across while away — schedules a fresh pill animation
+            // transaction each time. Measured as an app that never went
+            // quiescent while scrolling the history: UI-test snapshots
+            // starved at 30s apiece.
+            if following { following = false }
+        }
+    }
+}
+
+/// Reads "is the reader at the bottom" off the hosting `UIScrollView`'s own
+/// content offset, and feeds `TailWatch`.
+///
+/// UIKit introspection is the *last* resort, and every native route was
+/// measured broken on this OS before it was taken: scroll-offset preferences
+/// never fire; the tail sentinel's `onAppear`/`onDisappear` report the lazy
+/// window, which runs a screen past the viewport, so real departures went
+/// unnoticed and window-edge flapping livelocked layout; and
+/// `scrollPosition(id:)` over a taller-than-screen row froze the screen
+/// outright — frames identical 175 seconds apart. KVO on `contentOffset` is
+/// exact viewport truth, delivered outside SwiftUI's layout, and writes
+/// nothing SwiftUI lays out — the verdicts go through `TailWatch`'s deferred
+/// tasks and repaint one capsule.
+private struct TailObserver: UIViewRepresentable {
+    let watch: TailWatch
+
+    func makeUIView(context: Context) -> Probe { Probe(watch: watch) }
+    func updateUIView(_ probe: Probe, context: Context) { probe.watch = watch }
+
+    final class Probe: UIView {
+        var watch: TailWatch
+        private var watchers: [NSKeyValueObservation] = []
+        /// The last offset seen, for telling hand motion away from the tail
+        /// apart from content growing under a stationary reader.
+        private var lastOffsetY = CGFloat.zero
+
+        init(watch: TailWatch) {
+            self.watch = watch
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else {
+                watchers = []
+                return
+            }
+            var view = superview
+            while view != nil, !(view is UIScrollView) { view = view?.superview }
+            guard let scrollView = view as? UIScrollView else { return }
+            // All three geometry inputs, not offset alone: expanding the
+            // last message grows `contentSize` under an unchanged offset,
+            // and a keyboard or rotation reshapes `bounds` — either moves
+            // the tail out of view with no offset event at all.
+            watchers = [
+                scrollView.observe(\.contentOffset, options: [.initial, .new]) {
+                    [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+                scrollView.observe(\.contentSize) { [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+                scrollView.observe(\.bounds) { [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+            ]
+        }
+
+        private func read(_ scrollView: UIScrollView) {
+            let dy = scrollView.contentOffset.y - lastOffsetY
+            lastOffsetY = scrollView.contentOffset.y
+            // Content shorter than the viewport has no "away" to be.
+            let span = scrollView.contentSize.height
+                - (scrollView.bounds.height - scrollView.adjustedContentInset.bottom
+                    - scrollView.adjustedContentInset.top)
+            guard span > 0 else {
+                watch.arrive()
+                return
+            }
+            let bottomEdge = scrollView.contentOffset.y + scrollView.bounds.height
+                - scrollView.adjustedContentInset.bottom
+            // One row-spacing of slack absorbs sub-pixel rounding and
+            // rubber-banding; without it the verdict flaps at rest.
+            if bottomEdge >= scrollView.contentSize.height - 32 {
+                watch.arrive()
+            } else if dy < -0.5 {
+                // The offset moved *up*: only a hand (or its deceleration)
+                // does that. Content growth and follow-scrolls move it down
+                // or not at all.
+                watch.leave()
+            } else {
+                watch.depart()
+            }
+        }
+    }
+}
+
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
 ///
@@ -41,13 +228,14 @@ struct SessionDetailView: View {
     @State private var composeResult: ComposeAttempt?
     @State private var composeResultClearTask: Task<Void, Never>?
     @State private var sending = false
-    /// Auto-scroll follows the tail until the reader scrolls away from it.
-    @State private var following = true
+    /// The tail-following verdict — a box read only by `TailPill`, never by
+    /// this body. See `TailWatch` for the measured limit cycle that scoping
+    /// prevents.
+    @State private var tailWatch = TailWatch()
     @State private var didAutoOpen = false
     @State private var surface: Surface = .timeline
     @State private var showDiff = false
     @State private var showLinkDetail = false
-    @State private var newSinceLeaving = 0
     @State private var appearedAt = Date()
     /// The composer's focus, owned here rather than inside the bar: the
     /// screen's chrome collapses around the keyboard, and only the screen can
@@ -382,6 +570,18 @@ struct SessionDetailView: View {
 
     private func timeline(_ state: SessionState) -> some View {
         ScrollViewReader { proxy in
+            // The pill rides an overlay, never a stack: an overlay is
+            // positioned after its base and cannot feed back into the base's
+            // layout, while a ZStack sizes itself from all children — and
+            // that coupling, with an animated sibling over this scroll view,
+            // was measured as a permanent layout loop (identical frames 175s
+            // apart, ages frozen, `explicitAlignment` pegged in `sample`).
+            scrollBody(state, proxy: proxy)
+                .overlay(alignment: .bottomTrailing) { jumpToLatest(proxy) }
+        }
+    }
+
+    private func scrollBody(_ state: SessionState, proxy: ScrollViewProxy) -> some View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     SessionBanner(state: state) { showLinkDetail = true }
@@ -404,7 +604,23 @@ struct SessionDetailView: View {
 
                     ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
                         TimelineRow(
-                            item: item, profile: model.daemonProfile
+                            item: item, profile: model.daemonProfile,
+                            // Fired from the collapse animation's completion
+                            // — see `AgentMessageRow` — so the target resolves
+                            // against settled layout; anchored `.top` so the
+                            // message the reader was inside comes back under
+                            // their eyes rather than leaving them in the blank
+                            // the collapse just made.
+                            onCollapse: { id in
+                                withAnimation(CC.motion.small) {
+                                    proxy.scrollTo(id, anchor: .top)
+                                }
+                            },
+                            // Expanding is choosing to read history: raise
+                            // the away guard this instant, or an event
+                            // landing in the next 400ms scrolls the reader
+                            // through the whole message they just opened.
+                            onExpand: { tailWatch.leave() }
                         ) { approval in
                             openApproval = approval
                         }
@@ -421,12 +637,21 @@ struct SessionDetailView: View {
                         }
                     }
 
+                    // The scroll target for "go to the latest" — nothing but
+                    // an identity; the at-the-tail verdict lives in
+                    // `TailObserver`, off the real scroll offset. The list's
+                    // bottom breathing room rides inside this child so the
+                    // target includes it.
                     Color.clear
                         .frame(height: 1)
+                        .padding(.bottom, CC.space.lg)
                         .id(Self.tailAnchor)
                 }
                 .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.lg)
+                // Inside the scroll content on purpose: the probe walks its
+                // superviews to the hosting UIScrollView. See `TailObserver`
+                // for why the verdict reads UIKit's own offset.
+                .background(TailObserver(watch: tailWatch))
             }
             .scrollIndicators(.hidden)
             // The Apple-standard dismissal pair. The drag tracks the keyboard
@@ -449,17 +674,26 @@ struct SessionDetailView: View {
             .accessibilityIdentifier("session-timeline")
             .ccCollectsToolColumn(into: $toolColumn)
             .background(CC.color.bg)
-            .simultaneousGesture(
-                DragGesture().onChanged { value in
-                    // Dragging downward means reading history; stop chasing the tail.
-                    if value.translation.height > 12 { following = false }
-                }
-            )
             .onChange(of: state.timeline.count) { old, new in
-                guard following else {
-                    newSinceLeaving += max(0, new - old)
-                    return
-                }
+                // `isAway`, not `!following`: events landing inside the
+                // departure debounce belong to "while you were away" too —
+                // gated on the settled flag alone they went uncounted and
+                // the pill said "Latest" over rows never seen.
+                guard tailWatch.isAway else { return }
+                tailWatch.newSinceLeaving += max(0, new - old)
+            }
+            // The follow trigger is the tail *item*, not the count: the
+            // builder merges some events into the row they belong to, so the
+            // last row can grow with no append — count would sit still while
+            // the anchor is pushed out of view, and following would silently
+            // end. Any change to the last item — new row or grown row — is
+            // exactly "the tail moved".
+            .onChange(of: state.timeline.last) { _, _ in
+                // `isAway`, not `following`: the settled flag lags a real
+                // departure by the debounce, and an event landing in that
+                // lag must not yank a reader who just scrolled up or just
+                // expanded a message back to the tail.
+                guard !tailWatch.isAway else { return }
                 withAnimation(CC.motion.medium) {
                     proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
                 }
@@ -468,8 +702,6 @@ struct SessionDetailView: View {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
                 autoOpenIfRequested(state)
             }
-            .overlay(alignment: .bottomTrailing) { jumpToLatest(proxy) }
-        }
     }
 
     private static let tailAnchor = "codeconnect.tail"
@@ -519,33 +751,13 @@ struct SessionDetailView: View {
         .background(CC.color.bg)
     }
 
-    @ViewBuilder
     private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
-        if !following {
-            Button {
-                CCHaptic.light.fire()
-                following = true
-                newSinceLeaving = 0
-                withAnimation(CC.motion.medium) {
-                    proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                }
-            } label: {
-                HStack(spacing: CC.space.xxs + 1) {
-                    CCIcon("arrow.down", size: 12, weight: .semibold, relativeTo: .caption)
-                    Text(newSinceLeaving > 0 ? "\(newSinceLeaving) new" : "Latest")
-                        .ccType(CC.type.footnote)
-                }
-                .foregroundStyle(CC.text.primary)
-                .padding(.horizontal, CC.space.sm)
-                .frame(minHeight: CC.size.controlSm)
-                .background(CC.color.surfaceOverlay, in: Capsule())
-                .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
-                .ccHitTarget(minWidth: 0)
+        TailPill(watch: tailWatch) {
+            CCHaptic.light.fire()
+            tailWatch.arrive()
+            withAnimation(CC.motion.medium) {
+                proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
             }
-            .buttonStyle(.plain)
-            .padding(CC.space.md)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-            .accessibilityLabel("Jump to the latest event")
         }
     }
 
@@ -569,8 +781,8 @@ struct SessionDetailView: View {
             if case .sent = result {
                 // Never optimistic: the field clears only on `.sent`.
                 composeText = ""
-                following = true
-                newSinceLeaving = 0
+                // Speaking is following: the reply lands at the tail.
+                tailWatch.arrive()
             }
             composeResultClearTask = Task {
                 try? await Task.sleep(for: .seconds(4))
@@ -578,6 +790,49 @@ struct SessionDetailView: View {
                 withAnimation(CC.motion.medium) { composeResult = nil }
             }
         }
+    }
+}
+
+/// The "Latest / N new" capsule — the only view that reads `TailWatch`.
+///
+/// A separate struct on purpose: Observation scopes invalidation to the body
+/// that did the reading, so a `following` flip repaints this capsule alone.
+/// Read from `SessionDetailView.body` instead, the same flip re-evaluates the
+/// whole screen — the measured limit cycle documented on `TailWatch`.
+///
+/// **Hidden by opacity, never by structure.** As an `if` in the overlay, the
+/// pill's arrival is a structural change the scroll view re-lays; as a
+/// permanent node its visibility is paint-only. A transparent button must be
+/// as absent to fingers and to VoiceOver as it is to the eye — hence the hit-
+/// testing and accessibility gates beside the opacity.
+private struct TailPill: View {
+    let watch: TailWatch
+    let jump: () -> Void
+
+    var body: some View {
+        Button(action: jump) {
+            HStack(spacing: CC.space.xxs + 1) {
+                CCIcon("arrow.down", size: 12, weight: .semibold, relativeTo: .caption)
+                Text(watch.newSinceLeaving > 0 ? "\(watch.newSinceLeaving) new" : "Latest")
+                    .ccType(CC.type.footnote)
+            }
+            .foregroundStyle(CC.text.primary)
+            .padding(.horizontal, CC.space.sm)
+            .frame(minHeight: CC.size.controlSm)
+            .background(CC.color.surfaceOverlay, in: Capsule())
+            .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
+            .ccHitTarget(minWidth: 0)
+        }
+        .buttonStyle(.plain)
+        .padding(CC.space.md)
+        // A cut, not a fade, deliberately: an in-flight opacity animation
+        // over this screen re-enters layout per frame, and with the timeline
+        // deep enough each frame overruns its budget — the pill's own fade
+        // was fuel for the layout loop documented at `timeline`.
+        .opacity(watch.following ? 0 : 1)
+        .allowsHitTesting(!watch.following)
+        .accessibilityHidden(watch.following)
+        .accessibilityLabel("Jump to the latest event")
     }
 }
 

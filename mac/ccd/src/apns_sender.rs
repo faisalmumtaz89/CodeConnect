@@ -276,7 +276,7 @@ impl ApnsPushSender {
 }
 
 impl PushSender for ApnsPushSender {
-    fn send(&self, hint: &PushHint) {
+    fn send(&self, hint: &PushHint, excluded: &[String]) {
         let targets = self.registry.targets();
         if targets.is_empty() {
             crate::log_info!(
@@ -288,6 +288,16 @@ impl PushSender for ApnsPushSender {
         }
         let payload = Self::payload(hint);
         for target in targets {
+            // The seen-filter: this device's live socket already carried the
+            // fact. Ringing it again is the noise the gate exists to stop.
+            if excluded.contains(&target.device_id) {
+                crate::log_debug!(
+                    "push: {} already saw session {} live; skipping",
+                    target.device_id,
+                    hint.session_id
+                );
+                continue;
+            }
             let tls = self.tls.clone();
             let token = Arc::clone(&self.token);
             let registry = Arc::clone(&self.registry);

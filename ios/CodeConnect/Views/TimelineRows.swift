@@ -25,6 +25,12 @@ struct TimelineRow: View {
     /// whether an absent `risk_class` means "medium" or "this daemon never
     /// said".
     let profile: DaemonProfile
+    /// Fired after a long message collapses, with this row's own id, so the
+    /// screen can bring the row back under the viewport — see `AgentMessageRow`.
+    var onCollapse: ((String) -> Void)? = nil
+    /// Fired the instant a long message expands: the reader has chosen to
+    /// read history, and the screen's tail-following must know *now*.
+    var onExpand: (() -> Void)? = nil
     let onOpenApproval: (ApprovalItem) -> Void
 
     var body: some View {
@@ -32,7 +38,8 @@ struct TimelineRow: View {
         case .userMessage(let text):
             UserMessageRow(text: text, date: item.date)
         case .agentMessage(let text):
-            AgentMessageRow(text: text)
+            AgentMessageRow(
+                text: text, onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
         case .tool(let tool):
             ToolRow(tool: tool)
         case .approval(let approval):
@@ -133,6 +140,13 @@ struct UserMessageRow: View {
 /// grows downward from the button, never yanking the reader upward.
 struct AgentMessageRow: View {
     let text: String
+    /// Fired after "Show less". Collapsing removes a screen or more of height
+    /// in place, and the scroll view keeps its offset — which lands the reader
+    /// in the blank space where the text used to be, with nothing visible
+    /// until they scroll back by hand. The screen re-anchors to this row.
+    var onCollapse: (() -> Void)? = nil
+    /// Fired synchronously from the expand tap, before any layout moves.
+    var onExpand: (() -> Void)? = nil
     @State private var expanded = false
 
     private var isLong: Bool { text.count > 280 || text.split(separator: "\n").count > 4 }
@@ -194,7 +208,17 @@ struct AgentMessageRow: View {
             }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
-                    withAnimation(CC.motion.small) { expanded.toggle() }
+                    let collapsing = expanded
+                    if !collapsing { onExpand?() }
+                    // The re-anchor waits for the collapse to *land*: fired
+                    // early, its scroll target resolves against mid-animation
+                    // layout and the viewport still ends up in the blank the
+                    // collapse made — measured at full fixture size.
+                    withAnimation(CC.motion.small, completionCriteria: .logicallyComplete) {
+                        expanded.toggle()
+                    } completion: {
+                        if collapsing { onCollapse?() }
+                    }
                 }
                 .padding(.leading, -CC.space.sm)
             }
@@ -207,8 +231,18 @@ struct AgentMessageRow: View {
         // perfectly. It has no glyph to hang in the gutter, so it pays the same
         // step the gutter would have cost it.
         .padding(.leading, TimelineSpine.content)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Agent said: \(text)")
+        // **Combined only while collapsed.** The collapsed preview is one
+        // clamped Text, and "Agent said: …" makes it one clean VoiceOver
+        // stop. Expanded, the message can be arbitrarily long — folding the
+        // whole of it into a single synthetic label while its selectable
+        // segments are also combined makes the accessibility element's cost
+        // proportional to the message squared: measured as UI-test snapshot
+        // queries timing out at 30s apiece over one expanded message, and a
+        // VoiceOver user pays the same bill. Expanded, the segments stand as
+        // their own elements and read in order, which is also how a long
+        // document should sound.
+        .accessibilityElement(children: expanded ? .contain : .combine)
+        .accessibilityLabel(expanded ? "" : "Agent said: \(text)")
     }
 }
 

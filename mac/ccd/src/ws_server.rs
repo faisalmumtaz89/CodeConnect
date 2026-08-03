@@ -447,6 +447,9 @@ where
                                 let session_uid = event.session_uid.clone();
                                 let seq = event.seq;
                                 send(&mut sink, &ServerMessage::Event { event }).await?;
+                                if let Some(device) = device_id.as_deref() {
+                                    daemon.push_gate.note_delivered(device, &session_uid, seq);
+                                }
                                 watermarks.insert(session_uid, seq);
                             }
                             Live::AlreadySent => {}
@@ -459,7 +462,7 @@ where
                                 send(&mut sink, &ServerMessage::Event {
                                     event: gap_marker(&event, watermark),
                                 }).await?;
-                                replay(&daemon, &mut sink, &mut watermarks, &session_uid).await?;
+                                replay(&daemon, &mut sink, &mut watermarks, device_id.as_deref(), &session_uid).await?;
                             }
                         }
                     }
@@ -478,7 +481,7 @@ where
                             send(&mut sink, &ServerMessage::Event {
                                 event: resync_marker(&session_uid, &name, skipped),
                             }).await?;
-                            replay(&daemon, &mut sink, &mut watermarks, &session_uid).await?;
+                            replay(&daemon, &mut sink, &mut watermarks, device_id.as_deref(), &session_uid).await?;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -658,7 +661,7 @@ where
         } => match daemon.resolve(&session_id).await {
             Ok(row) => {
                 watermarks.insert(row.session_uid.clone(), after_seq);
-                replay(daemon, sink, watermarks, &row.session_uid).await?;
+                replay(daemon, sink, watermarks, device_id, &row.session_uid).await?;
             }
             Err(err) => {
                 send(
@@ -963,6 +966,10 @@ async fn replay<S>(
     daemon: &Arc<Daemon>,
     sink: &mut S,
     watermarks: &mut HashMap<String, u64>,
+    // The authenticated device, when there is one, so each successful send can
+    // be recorded against it — the push gate's seen-filter is only as true as
+    // this bookkeeping.
+    device_id: Option<&str>,
     session_uid: &str,
 ) -> Result<()>
 where
@@ -982,6 +989,11 @@ where
             let seq = event.seq;
             send(sink, &ServerMessage::Event { event }).await?;
             watermarks.insert(session_uid.to_string(), seq);
+            // After the successful send, never before: "written to the socket"
+            // is the only delivery this side can attest.
+            if let Some(device) = device_id {
+                daemon.push_gate.note_delivered(device, session_uid, seq);
+            }
         }
     }
 }

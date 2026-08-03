@@ -275,11 +275,17 @@
                 "kind":"user_message","source":"transcript",\
                 "payload":{"message":{"content":"Run the soak test and tell me what breaks."}}}}
                 """,
+                // **Long on purpose.** Collapsed, the 4-line clamp makes this
+                // row the same height at any length — nothing below it moves.
+                // Expanded, it is taller than a screen, which is the only
+                // geometry in which "Show less" can strand the viewport in
+                // blank space and scrolling can leave the tail at all — the
+                // two behaviours `SessionFollowUITests` exists to prove.
                 """
                 {"type":"event","event":{"seq":13,"session_id":"fx-5","ts":"\(stamp)",\
                 "kind":"agent_message","source":"transcript",\
                 "payload":{"message":{"content":[{"type":"text",\
-                "text":"## Soak status\\nStarting now — **auto-answer lands after ~60 seconds**, and the config in `~/.codeconnect/config.json` holds (~$0 cost). First failure with its seed:\\n```swift\\nlet seed = 0x5eed\\n```\\nWatching."}]}}}}
+                "text":"## Soak status\\nStarting now — **auto-answer lands after ~60 seconds**, and the config in `~/.codeconnect/config.json` holds (~$0 cost). First failure with its seed:\\n```swift\\nlet seed = 0x5eed\\n```\\nWatching.\\n\\nEvery pass so far, oldest first:\\nPass 1 — daemon killed mid-turn; the log replayed gap-free on restart.\\nPass 2 — duplicate PreToolUse hooks; the second was refused as a replay.\\nPass 3 — approval answered on the phone while the Mac prompt was open.\\nPass 4 — connection flapped during a diff; the capture was re-served.\\nPass 5 — tmux server restarted; the session re-adopted its identity.\\nPass 6 — two approvals stormed concurrently; both resolved exactly once.\\nPass 7 — the transcript rotated mid-read; the tailer followed the inode.\\nPass 8 — a stale watermark was rejected and the client replayed cleanly.\\nNo holes, no duplicates, no silent answers. Still watching."}]}}}}
                 """,
                 """
                 {"type":"event","event":{"seq":14,"session_id":"fx-5","ts":"\(stamp)",\
@@ -305,6 +311,60 @@
                 "kind":"tool_call","source":"hook",\
                 "payload":{"tool_use_id":"toolu_fixture_multi","tool_name":"MultiEdit",\
                 "tool_input":{"file_path":"/Users/dev/app/Sources/Router.swift"}}}}
+                """,
+                // **Depth below the long message, so a collapse has somewhere
+                // wrong to land.** With the timeline ending at the tools
+                // above, the post-collapse content fits one screen and every
+                // scroll position looks correct — the follow tests could not
+                // tell the re-anchor from the scroll view's own clamp until
+                // these rows made the difference visible.
+                """
+                {"type":"event","event":{"seq":17,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak1","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 1"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":18,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak2","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 2"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":19,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak3","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 3"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":20,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak4","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 4"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":21,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak5","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 5"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":22,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak6","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 6"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":23,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak7","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 7"}}}}
+                """,
+                """
+                {"type":"event","event":{"seq":24,"session_id":"fx-5","ts":"\(stamp)",\
+                "kind":"tool_call","source":"hook",\
+                "payload":{"tool_use_id":"toolu_fixture_soak8","tool_name":"Bash",\
+                "tool_input":{"command":"./soak/run.sh --pass 8"}}}}
                 """,
             ]
         }

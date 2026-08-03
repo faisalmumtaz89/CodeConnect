@@ -37,7 +37,10 @@ pub enum TestDelivery {
 }
 
 pub trait PushSender: Send + Sync {
-    fn send(&self, hint: &PushHint);
+    /// `excluded` is the seen-filter's verdict: devices whose live socket
+    /// already delivered the fact this push announces. Computed by the caller
+    /// at dispatch time; the sender's only job is to honour it in the fan-out.
+    fn send(&self, hint: &PushHint, excluded: &[String]);
     /// One real notification to **one named device**, with the outcome
     /// reported. `send` is deliberately fire-and-forget spray; a test whose
     /// result nobody can see would prove nothing, so this one answers on the
@@ -76,13 +79,14 @@ impl LoggingPushSender {
 }
 
 impl PushSender for LoggingPushSender {
-    fn send(&self, hint: &PushHint) {
+    fn send(&self, hint: &PushHint, excluded: &[String]) {
         let body = coalesce(hint);
         crate::log_info!(
-            "push[stub] session={} title={:?} body={:?}",
+            "push[stub] session={} title={:?} body={:?} excluded={}",
             hint.session_id,
             hint.title,
-            body
+            body,
+            excluded.len()
         );
         *self.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(hint.clone());
     }
@@ -125,7 +129,7 @@ mod tests {
     fn stub_records_but_reports_itself_as_not_live() {
         let sender = LoggingPushSender::new();
         assert!(!sender.is_live());
-        sender.send(&hint(2));
+        sender.send(&hint(2), &[]);
         assert_eq!(sender.last().unwrap().blocked_sessions, 2);
     }
 }
