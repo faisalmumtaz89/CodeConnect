@@ -388,6 +388,227 @@ final class AgentProseTests: XCTestCase {
     }
 }
 
+/// The table grammar: a conservative GFM subset that recognizes the shape
+/// agents actually emit without ever swallowing prose — and never silently
+/// discards a cell.
+final class AgentTableTests: XCTestCase {
+
+    private func onlyTable(
+        _ text: String, file: StaticString = #filePath, line: UInt = #line
+    ) -> MarkdownTable? {
+        for segment in AgentProse.segments(text) {
+            if case .table(let table) = segment { return table }
+        }
+        XCTFail("no table in \(AgentProse.segments(text))", file: file, line: line)
+        return nil
+    }
+
+    private func hasTable(_ text: String) -> Bool {
+        AgentProse.segments(text).contains {
+            if case .table = $0 { return true } else { return false }
+        }
+    }
+
+    func testStandardTableParsesWithAlignmentsAndVerbatimRaw() {
+        let text = """
+            Results:
+
+            | Command | Description | Status |
+            | --- | :---: | ---: |
+            | `git status` | lists files | ok |
+            | push | publishes | blocked |
+
+            Done.
+            """
+        let segments = AgentProse.segments(text)
+        guard case .table(let table)? = segments.dropFirst().first else {
+            return XCTFail("\(segments)")
+        }
+        XCTAssertEqual(table.headers, ["Command", "Description", "Status"])
+        XCTAssertEqual(table.alignments, [.leading, .center, .trailing])
+        XCTAssertEqual(
+            table.rows,
+            [["`git status`", "lists files", "ok"], ["push", "publishes", "blocked"]])
+        XCTAssertEqual(
+            table.raw,
+            "| Command | Description | Status |\n| --- | :---: | ---: |\n"
+                + "| `git status` | lists files | ok |\n| push | publishes | blocked |",
+            "raw is the source, verbatim")
+        guard case .prose(let after)? = segments.last else { return XCTFail("\(segments)") }
+        XCTAssertTrue(after.contains("Done."), "prose after the table survives")
+    }
+
+    func testOuterPipesAreIndependentlyOptionalPerRow() {
+        let table = onlyTable("Name | Role\n--- | ---\n| Ada | eng |\nBo | ops")
+        XCTAssertEqual(table?.headers, ["Name", "Role"])
+        XCTAssertEqual(table?.rows, [["Ada", "eng"], ["Bo", "ops"]])
+    }
+
+    /// `:---` and bare `---` are both leading — there is no distinct
+    /// "default" rendering to preserve — and a header + delimiter with no
+    /// body rows is still a table.
+    func testLeadingColonAndNoColonBothReadLeadingAndHeaderOnlyParses() {
+        let table = onlyTable("| a | b |\n|:---|----|")
+        XCTAssertEqual(table?.alignments, [.leading, .leading])
+        XCTAssertEqual(table?.rows, [])
+    }
+
+    func testTwoHyphenDelimitersStayProse() {
+        XCTAssertFalse(hasTable("| a | b |\n| -- | -- |"), "three hyphens minimum")
+    }
+
+    func testHeaderDelimiterWidthMismatchStaysProse() {
+        XCTAssertFalse(hasTable("| a | b | c |\n| --- | --- |"))
+    }
+
+    func testAPipeLineWithoutADelimiterIsProse() {
+        XCTAssertEqual(AgentProse.segments("a | b"), [.prose("a | b")])
+    }
+
+    /// The false positive the boundary rule exists to exclude: pipes inside
+    /// hard-wrapped prose never become a table.
+    func testACandidateInsideHardWrappedProseStaysProse() {
+        let text = "wrapped prose line\n| a | b |\n| --- | --- |\n| c | d |"
+        XCTAssertEqual(AgentProse.segments(text), [.prose(text)])
+    }
+
+    /// A heading is a block edge, not prose — `### Results` directly over a
+    /// table is how agents write them.
+    func testAHeadingDirectlyAboveIsABoundary() {
+        let segments = AgentProse.segments("## Results\n| a | b |\n| --- | --- |\n| c | d |")
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments.first, .heading("Results"))
+        guard case .table(let table)? = segments.last else { return XCTFail("\(segments)") }
+        XCTAssertEqual(table.rows, [["c", "d"]])
+    }
+
+    func testAClosedFenceDirectlyAboveIsABoundary() {
+        let segments = AgentProse.segments("```\nx\n```\n| a | b |\n| --- | --- |")
+        XCTAssertEqual(segments.first, .code("x"))
+        guard case .table? = segments.last else { return XCTFail("\(segments)") }
+    }
+
+    func testOneColumnStaysProse() {
+        XCTAssertFalse(hasTable("| a |\n| --- |"), "a table is at least two columns")
+    }
+
+    func testHeadersMustNotAllBeEmptyButOneEmptyCornerIsFine() {
+        XCTAssertFalse(hasTable("|  |  |\n| --- | --- |"))
+        let table = onlyTable("|  | Lang |\n| --- | --- |\n| app | Swift |")
+        XCTAssertEqual(table?.headers, ["", "Lang"])
+    }
+
+    /// Escaped pipes stay inside their cell — including in code spans, where
+    /// GFM likewise requires `\|` — and an even backslash run does not escape.
+    func testEscapedPipesStayInTheirCells() {
+        let table = onlyTable(#"| a \| b | c |"# + "\n| --- | --- |\n" + #"| `x \| y` | z |"#)
+        XCTAssertEqual(table?.headers, [#"a \| b"#, "c"])
+        XCTAssertEqual(table?.rows, [[#"`x \| y`"#, "z"]])
+
+        let even = onlyTable(#"p \\| q"# + "\n--- | ---")
+        XCTAssertEqual(
+            even?.headers, [#"p \\"#, "q"],
+            "two backslashes escape each other, not the pipe")
+    }
+
+    func testTableShapedContentInsideAClosedFenceStaysCode() {
+        XCTAssertEqual(
+            AgentProse.segments("```\n| a | b |\n| --- | --- |\n```"),
+            [.code("| a | b |\n| --- | --- |")])
+    }
+
+    func testTableShapedContentInsideAnUnclosedFenceStaysLiteralProse() {
+        let segments = AgentProse.segments("```swift\n| a | b |\n| --- | --- |")
+        XCTAssertEqual(segments.count, 1)
+        guard case .prose(let prose)? = segments.first else { return XCTFail("\(segments)") }
+        XCTAssertTrue(prose.contains("```swift"), "an unclosed fence renders literally")
+        XCTAssertTrue(prose.contains("| a | b |"))
+    }
+
+    /// A fence opener whose info string carries a pipe is exactly wide enough
+    /// to impersonate a body row — block starts outrank rows inside the body
+    /// scan too, or the code after the fence loses its rendering.
+    func testAFenceOpenerEndsTheTableAndStillOpensItsFence() {
+        let segments = AgentProse.segments(
+            "| A | B |\n|---|---|\n| 1 | 2 |\n```swift | metadata\nlet x = 1\n```")
+        guard case .table(let table)? = segments.first else { return XCTFail("\(segments)") }
+        XCTAssertEqual(table.rows, [["1", "2"]], "the fence opener is not a row")
+        XCTAssertEqual(segments.last, .code("let x = 1"), "the fence still renders as code")
+    }
+
+    func testAHeadingShapedLineEndsTheTableAndStaysAHeading() {
+        let segments = AgentProse.segments(
+            "| a | b |\n|---|---|\n| 1 | 2 |\n# Result | Detail\ntail")
+        guard case .table(let table)? = segments.first else { return XCTFail("\(segments)") }
+        XCTAssertEqual(table.rows, [["1", "2"]])
+        XCTAssertEqual(segments.dropFirst().first, .heading("Result | Detail"))
+        XCTAssertEqual(segments.last, .prose("tail"))
+    }
+
+    /// Stricter than GFM, which pads and discards: a wrong-width row ends the
+    /// table and is *not consumed* — every cell the agent wrote stays visible.
+    func testAWrongWidthBodyRowEndsTheTableUnconsumed() {
+        let segments = AgentProse.segments(
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 1 | 2 | 3 |\ntail")
+        guard case .table(let table)? = segments.first else { return XCTFail("\(segments)") }
+        XCTAssertEqual(table.rows, [["1", "2"]])
+        XCTAssertEqual(
+            segments.last, .prose("| 1 | 2 | 3 |\ntail"),
+            "the offending row and everything after it segment normally")
+    }
+
+    func testABlankLineEndsTheTableAndFollowingProseSurvives() {
+        let segments = AgentProse.segments("| a | b |\n| --- | --- |\n| 1 | 2 |\n\nafter")
+        guard case .table(let table)? = segments.first else { return XCTFail("\(segments)") }
+        XCTAssertEqual(table.rows, [["1", "2"]])
+        XCTAssertEqual(segments.last, .prose("\nafter"))
+    }
+
+    func testCRLFInputParsesClean() {
+        let table = onlyTable("intro\r\n\r\n| a | b |\r\n| --- | --- |\r\n| 1 | 2 |\r")
+        XCTAssertEqual(table?.headers, ["a", "b"])
+        XCTAssertEqual(table?.rows, [["1", "2"]], "no carriage return reaches a cell")
+    }
+
+    /// GFM's indented-code threshold: three leading spaces are a row, four —
+    /// or a tab — are not.
+    func testIndentationRules() {
+        XCTAssertNotNil(onlyTable("   | a | b |\n   | --- | --- |"))
+        XCTAssertFalse(hasTable("    | a | b |\n| --- | --- |"))
+        XCTAssertFalse(hasTable("\t| a | b |\n| --- | --- |"))
+    }
+
+    // MARK: Preview and speech
+
+    /// The collapsed preview never shows pipe art: one semantic line, headers
+    /// rendered plain, row count honest down to its plural.
+    func testThePreviewLineReplacesPipeArt() {
+        let source = AgentProse.previewSource(
+            "| **Command** | Status |\n| --- | --- |\n| build | ok |\n| test | ok |")
+        XCTAssertEqual(source, "Table: Command, Status — 2 rows")
+
+        let one = onlyTable("| a | b |\n| --- | --- |\n| 1 | 2 |")!
+        XCTAssertEqual(AgentProse.tablePreviewLine(one), "Table: a, b — 1 row")
+        let none = onlyTable("| a | b |\n| --- | --- |")!
+        XCTAssertEqual(AgentProse.tablePreviewLine(none), "Table: a, b — 0 rows")
+    }
+
+    /// VoiceOver's three stops: shape, columns, then one label per row with
+    /// every cell paired to its header — markdown resolved, escapes unescaped,
+    /// and an empty cell said aloud instead of skipped.
+    func testSpokenLabelsPairCellsWithHeaders() {
+        let table = onlyTable(
+            "| **Ready** | `cmd` |\n| --- | --- |\n"
+                + #"| a \| b | run |"# + "\n|  | stop |")!
+        XCTAssertEqual(AgentProse.tableSummary(table), "Table, 2 columns, 2 rows.")
+        XCTAssertEqual(AgentProse.tableColumnsLabel(table), "Columns: Ready, cmd.")
+        XCTAssertEqual(
+            AgentProse.tableRowLabel(table, row: 0), "Row 1. Ready: a | b. cmd: run.")
+        XCTAssertEqual(
+            AgentProse.tableRowLabel(table, row: 1), "Row 2. Ready: empty. cmd: stop.")
+    }
+}
+
 /// The composer chips: exact labels, exact order, and the reason "Stop" is
 /// absent is a product fact — injection cannot interrupt a running turn.
 final class ComposerTemplateTests: XCTestCase {

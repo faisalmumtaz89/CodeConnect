@@ -1027,10 +1027,11 @@ private struct SessionComposeBar: View {
                 field
             }
             HStack(alignment: .center, spacing: CC.space.xs) {
-                if dictation.isRecording {
-                    RecordingStrip(
-                        startedAt: dictation.startedAt ?? .now, level: dictation.level)
-                } else {
+                // While the mic is hot the row carries no meters or clocks:
+                // the live transcript above is proof the mic hears you, and
+                // the button's stop face is the recording state. Chrome that
+                // restates both was removed at the owner's call.
+                if !dictation.isRecording {
                     templateChips
                 }
                 Spacer(minLength: 0)
@@ -1273,66 +1274,6 @@ private struct SessionComposeBar: View {
             return reason
         }
         return nil
-    }
-}
-
-// MARK: - Recording strip
-
-/// The compose bar while the mic is hot: a pulsing `danger` dot — the one
-/// universal meaning of a red dot — the elapsed time in mono, and a level
-/// meter. The meter is not decoration: movement is the proof the mic actually
-/// hears you, which at 2am in a quiet room is the difference between "it's
-/// working" and "is it working?".
-private struct RecordingStrip: View {
-    let startedAt: Date
-    let level: Float
-
-    var body: some View {
-        HStack(spacing: CC.space.xs) {
-            CCStatusDot(
-                color: CC.color.danger, pulses: true, accessibilityText: "Recording")
-            // Ticks alone, like every clock reader on this screen: a periodic
-            // TimelineView mounted only while the strip exists.
-            TimelineView(.periodic(from: startedAt, by: 1)) { context in
-                Text(Self.elapsed(from: startedAt, to: context.date))
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.secondary)
-            }
-            LevelMeter(level: level)
-        }
-    }
-
-    private static func elapsed(from: Date, to: Date) -> String {
-        let seconds = max(0, Int(to.timeIntervalSince(from)))
-        return "\(seconds / 60):" + String(format: "%02d", seconds % 60)
-    }
-}
-
-/// Sixteen 2pt capsules scaled by the input level. Fixed per-bar weights give
-/// the meter a shape; the level gives it life. Hidden from VoiceOver — the
-/// recording dot already says what this shows.
-private struct LevelMeter: View {
-    let level: Float
-
-    private static let weights: [CGFloat] = [
-        0.35, 0.7, 0.5, 1.0, 0.6, 0.85, 0.4, 0.75,
-        0.55, 0.95, 0.45, 0.8, 0.6, 0.35, 0.7, 0.5,
-    ]
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<Self.weights.count, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(CC.text.tertiary)
-                    .frame(
-                        width: 2,
-                        height: 4 + Self.weights[index]
-                            * CGFloat(min(1, max(0, level))) * 14)
-            }
-        }
-        .frame(height: 22)
-        .ccAnimation(CC.motion.micro, value: level)
-        .accessibilityHidden(true)
     }
 }
 

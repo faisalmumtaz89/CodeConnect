@@ -149,7 +149,13 @@ struct AgentMessageRow: View {
     var onExpand: (() -> Void)? = nil
     @State private var expanded = false
 
-    private var isLong: Bool { text.count > 280 || text.split(separator: "\n").count > 4 }
+    // CRLF is one grapheme to Swift, so counting "\n" alone misses every
+    // line of a CRLF message — the same measured fact AgentProse.segments
+    // splits around, applied to the collapse threshold.
+    private var isLong: Bool {
+        text.count > 280
+            || text.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" }).count > 4
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -192,6 +198,8 @@ struct AgentMessageRow: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     case .code(let code):
                         CCMonoBlock(code, lineLimit: 12)
+                    case .table(let table):
+                        AgentTableView(table: table)
                     case .heading(let heading):
                         // One style for all six levels; the marker's job was
                         // hierarchy in a document, and here it is a title over
@@ -242,7 +250,10 @@ struct AgentMessageRow: View {
         // their own elements and read in order, which is also how a long
         // document should sound.
         .accessibilityElement(children: expanded ? .contain : .combine)
-        .accessibilityLabel(expanded ? "" : "Agent said: \(text)")
+        // The semantic preview, not the raw text: while collapsed, VoiceOver
+        // should say "Table: Command, Status — 4 rows", never recite pipe
+        // delimiters, and heading markers are noise read aloud too.
+        .accessibilityLabel(expanded ? "" : "Agent said: \(AgentProse.previewSource(text))")
     }
 }
 

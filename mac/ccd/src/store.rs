@@ -1286,12 +1286,33 @@ impl Store {
     /// Keyed on the device, so re-registering replaces rather than accumulates:
     /// APNs reissues a token on reinstall and on restore-from-backup, and a
     /// stale one left beside it would be pushed to forever.
+    /// A push token names one physical phone, so registering it here strips
+    /// it from every other device row first — in the same transaction, so no
+    /// interleaving can observe two rows holding it. Without this, a re-pair
+    /// left the old row's copy in place and every doorbell rang the same
+    /// phone twice: measured live, one production token on two rows, twin
+    /// notifications at the same instant.
+    /// The strip only ever commits alongside a successful claim: if the
+    /// claiming row is missing or was revoked after the caller's own check,
+    /// the transaction rolls back whole rather than leaving the token owned
+    /// by no active row.
     pub fn set_push_token(&self, device_id: &str, token: &str, environment: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE devices SET push_token = ?2, push_environment = ?3 WHERE device_id = ?1",
+        let mut conn = self.write();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE devices SET push_token = NULL, push_environment = NULL
+              WHERE push_token = ?1 AND device_id <> ?2",
+            params![token, device_id],
+        )?;
+        let claimed = tx.execute(
+            "UPDATE devices SET push_token = ?2, push_environment = ?3
+              WHERE device_id = ?1 AND revoked_at IS NULL",
             params![device_id, token, environment],
         )?;
+        if claimed != 1 {
+            anyhow::bail!("push registration for unknown or revoked device {device_id}");
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -4005,5 +4026,87 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());
+    }
+
+    /// The measured twin-notification defect: one phone re-paired, its token
+    /// registered under the new device row while the old row kept a copy,
+    /// and every doorbell fanned out to both. A token is one phone;
+    /// registering it anywhere strips it everywhere else, atomically.
+    #[test]
+    fn a_push_token_lives_on_exactly_one_device_row() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("dev-old", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            // The same physical phone re-pairing arrives as a *new* device
+            // row with a fresh name — names are unique.
+            .insert_device("dev-new", "iPhone 2", "hash-b", "2026-08-02T00:00:00Z")
+            .unwrap();
+
+        store
+            .set_push_token("dev-old", "tok-same", "production")
+            .unwrap();
+        store
+            .set_push_token("dev-new", "tok-same", "production")
+            .unwrap();
+
+        let targets = store.push_targets().unwrap();
+        assert_eq!(
+            targets.len(),
+            1,
+            "one physical phone must be one push target: {targets:?}"
+        );
+        assert_eq!(
+            targets[0].0, "dev-new",
+            "the latest registration owns the token"
+        );
+
+        // A different phone's different token is untouched.
+        store
+            .set_push_token("dev-old", "tok-other", "production")
+            .unwrap();
+        assert_eq!(store.push_targets().unwrap().len(), 2);
+    }
+
+    /// The strip must never commit without its claim: registering against a
+    /// device row that does not exist (or was revoked in the race window
+    /// after the caller's check) errors, and the current owner keeps the
+    /// token — the transaction rolled back whole.
+    #[test]
+    fn a_failed_claim_rolls_back_the_strip() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("dev-live", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            .set_push_token("dev-live", "tok-live", "production")
+            .unwrap();
+
+        assert!(
+            store
+                .set_push_token("dev-ghost", "tok-live", "production")
+                .is_err(),
+            "an unknown device cannot claim a token"
+        );
+        let targets = store.push_targets().unwrap();
+        assert_eq!(targets.len(), 1, "the owner survived: {targets:?}");
+        assert_eq!(targets[0].0, "dev-live");
+
+        // A revoked device is no better than an unknown one — the claim's
+        // `revoked_at IS NULL` is load-bearing, not decoration.
+        store
+            .insert_device("dev-revoked", "iPhone 2", "hash-b", "2026-08-02T00:00:00Z")
+            .unwrap();
+        store
+            .revoke_device("dev-revoked", "2026-08-03T00:00:00Z")
+            .unwrap();
+        assert!(
+            store
+                .set_push_token("dev-revoked", "tok-live", "production")
+                .is_err(),
+            "a revoked device cannot claim a token"
+        );
+        assert_eq!(store.push_targets().unwrap()[0].0, "dev-live");
     }
 }

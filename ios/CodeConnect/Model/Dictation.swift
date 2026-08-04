@@ -57,9 +57,6 @@ final class DictationController {
     /// The recognizer's current hypothesis. Rendered `textTertiary`, replaced
     /// as it solidifies.
     private(set) var volatileText = ""
-    /// Smoothed input level, 0…1, for the meter. Proof the mic hears you.
-    private(set) var level: Float = 0
-    private(set) var startedAt: Date?
 
     var isRecording: Bool { phase == .recording }
     var isStarting: Bool { phase == .starting }
@@ -150,7 +147,7 @@ final class DictationController {
         static func makeStubSessionForTesting() -> Session {
             let stub = Session(
                 engine: AVAudioEngine(),
-                relay: AudioTapRelay(onLevel: { _ in }, onBuffer: { _ in }),
+                relay: AudioTapRelay(onBuffer: { _ in }),
                 isAnalyzer: false)
             stub.ownsAudioClaim = (try? claimAudioSession()) != nil
             return stub
@@ -168,7 +165,6 @@ final class DictationController {
         let owned = generation
         finalizedText = ""
         volatileText = ""
-        level = 0
 
         // Built off to the side, installed only if this start still owns the
         // controller. A stale build — cancelled mid-download, superseded by
@@ -202,7 +198,6 @@ final class DictationController {
             return
         }
         session = built
-        startedAt = Date()
         phase = .recording
     }
 
@@ -376,15 +371,11 @@ final class DictationController {
         }
 
         let converter = BufferConverter(to: format)
-        let relay = AudioTapRelay(
-            onLevel: { [weak self] value in
-                Task { @MainActor in self?.absorb(level: value) }
-            },
-            onBuffer: { buffer in
-                if let converted = converter.convert(buffer) {
-                    continuation.yield(AnalyzerInput(buffer: converted))
-                }
-            })
+        let relay = AudioTapRelay(onBuffer: { buffer in
+            if let converted = converter.convert(buffer) {
+                continuation.yield(AnalyzerInput(buffer: converted))
+            }
+        })
         let engine: AVAudioEngine
         do {
             engine = try Self.makeEngine(relay: relay)
@@ -449,11 +440,7 @@ final class DictationController {
             request.requiresOnDeviceRecognition = true
         }
 
-        let relay = AudioTapRelay(
-            onLevel: { [weak self] value in
-                Task { @MainActor in self?.absorb(level: value) }
-            },
-            onBuffer: { request.append($0) })
+        let relay = AudioTapRelay(onBuffer: { request.append($0) })
         let built = Session(
             engine: try Self.makeEngine(relay: relay), relay: relay, isAnalyzer: false)
         built.ownsAudioClaim = true
@@ -524,14 +511,6 @@ final class DictationController {
         session = nil
         finalizedText = ""
         volatileText = ""
-        level = 0
-        startedAt = nil
-    }
-
-    private func absorb(level newValue: Float) {
-        guard isRecording else { return }
-        // Smoothed, or the meter strobes with every buffer.
-        level = level * 0.55 + newValue * 0.45
     }
 
     private func absorb(text: String, isFinal: Bool) {
@@ -562,39 +541,20 @@ final class DictationController {
 // MARK: - The audio thread's world
 
 /// Everything the tap callback touches, and nothing it must not. Core Audio
-/// calls `handle` on its own realtime thread; the two closures forward work
-/// out — buffers to whichever recognizer is live, levels to the main actor.
+/// calls `handle` on its own realtime thread; the closure forwards buffers
+/// to whichever recognizer is live.
 ///
-/// `@unchecked Sendable` is load-bearing and narrow: the closures are set once
+/// `@unchecked Sendable` is load-bearing and narrow: the closure is set once
 /// before the engine starts and never mutated while it runs.
 private final class AudioTapRelay: @unchecked Sendable {
-    private let onLevel: @Sendable (Float) -> Void
     private let onBuffer: (AVAudioPCMBuffer) -> Void
 
-    init(
-        onLevel: @escaping @Sendable (Float) -> Void,
-        onBuffer: @escaping (AVAudioPCMBuffer) -> Void
-    ) {
-        self.onLevel = onLevel
+    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
         self.onBuffer = onBuffer
     }
 
     func handle(_ buffer: AVAudioPCMBuffer) {
         onBuffer(buffer)
-        onLevel(Self.rms(of: buffer))
-    }
-
-    /// Root-mean-square of the buffer, scaled into 0…1 for the meter.
-    private static func rms(of buffer: AVAudioPCMBuffer) -> Float {
-        guard let data = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
-        var sum: Float = 0
-        for i in 0..<Int(buffer.frameLength) {
-            sum += data[i] * data[i]
-        }
-        let value = (sum / Float(buffer.frameLength)).squareRoot()
-        // Speech at a phone's arm length sits around 0.01–0.1 RMS; the ×8
-        // puts conversation mid-meter instead of pinning it to the floor.
-        return min(1, value * 8)
     }
 }
 
