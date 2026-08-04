@@ -33,6 +33,12 @@ done
 echo "installed to $bin"
 echo
 
+# Remember which clone produced these binaries, so `codeconnect update` can
+# pull and reinstall without asking the user where their checkout lives.
+repo_root="$(dirname "$here")"
+printf '%s\n' "$repo_root" > "$prefix/source-checkout"
+
+
 # **The restart is part of the install, not advice at the bottom of it.**
 #
 # This script used to end with "already installed? \`codeconnect daemon

@@ -178,25 +178,112 @@ pub fn attempt_due(cache: &UpdateCache, now_unix: u64) -> bool {
 
 // ----------------------------------------------------------------- notice
 
-/// The launch notice, or `None` while this binary is current (or nothing
-/// validated is known). Pure, so the copy and the comparison are pinned.
-pub fn notice(cache: &UpdateCache, installed: (u64, u64, u64)) -> Option<String> {
+/// The fact an update surface renders: what is installed, what exists.
+/// Semantic on purpose — the pre-attach slot and `daemon status` style for
+/// different streams, so the *data* is shared and the rendering is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAdvisory {
+    pub installed: (u64, u64, u64),
+    pub latest: String,
+}
+
+/// The advisory, or `None` while this binary is current (or nothing
+/// validated is known). Pure, so the comparison is pinned.
+pub fn update_advisory(cache: &UpdateCache, installed: (u64, u64, u64)) -> Option<UpdateAdvisory> {
     let latest_raw = cache.latest.as_deref()?;
     let latest = parse_version(latest_raw)?;
     if latest <= installed {
         return None;
     }
-    let (a, b, c) = installed;
-    Some(format!(
-        "  note: CodeConnect {a}.{b}.{c} is installed; {latest_raw} is available.\n\n  \
-         from the root of your CodeConnect checkout, run:\n\n      \
-         git pull --ff-only && cd mac && ./install.sh"
-    ))
+    Some(UpdateAdvisory {
+        installed,
+        latest: latest_raw.to_string(),
+    })
 }
 
-/// The notice for the current install, from the cache on disk.
-pub fn cached_notice() -> Option<String> {
-    notice(&read_cache(), installed_version())
+/// The advisory for the current install, from the cache on disk.
+pub fn cached_advisory() -> Option<UpdateAdvisory> {
+    update_advisory(&read_cache(), installed_version())
+}
+
+/// How a terminal advisory may dress itself. Decided per destination
+/// stream, never globally: pre-attach writes stderr, `daemon status` writes
+/// stdout, and each answers for its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// A TTY that took no styling opt-outs: SGR bold plus typographic
+    /// unicode.
+    Styled,
+    /// A TTY under `NO_COLOR`: the convention disables SGR — all of it,
+    /// bold included — but says nothing about characters, so the
+    /// typography stays.
+    PlainUnicode,
+    /// Not a TTY, or `TERM=dumb`: pure ASCII, no escapes, fit for logs and
+    /// pipes.
+    Ascii,
+}
+
+/// The one styling decision, from the three documented signals. `NO_COLOR`
+/// counts when *present*, even empty — that is the convention's own rule.
+pub fn style_for(is_tty: bool, term: Option<&str>, no_color_present: bool) -> Style {
+    if !is_tty || term == Some("dumb") {
+        return Style::Ascii;
+    }
+    if no_color_present {
+        return Style::PlainUnicode;
+    }
+    Style::Styled
+}
+
+/// `style_for`, fed from an environment lookup — injected, so the adapter
+/// itself is testable without mutating the process environment (a race
+/// against every parallel test). Production passes the real environment.
+pub fn style_from_env(is_tty: bool, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Style {
+    let term = env("TERM").map(|value| value.to_string_lossy().into_owned());
+    style_for(is_tty, term.as_deref(), env("NO_COLOR").is_some())
+}
+
+/// The production adapter: the real environment for a given stream.
+pub fn style_for_stream(is_tty: bool) -> Style {
+    style_from_env(is_tty, |name| std::env::var_os(name))
+}
+
+const BOLD: &str = "\u{1b}[1m";
+const RESET: &str = "\u{1b}[0m";
+
+/// The `daemon status` block for the advisory: rendered for *stdout*'s own
+/// styling signals, and by construction free of any countdown — status is a
+/// listing, not a doorway, and it never holds anyone.
+pub fn status_update_block(
+    advisory: &UpdateAdvisory,
+    stdout_is_tty: bool,
+    term: Option<&str>,
+    no_color_present: bool,
+) -> String {
+    render_update(advisory, style_for(stdout_is_tty, term, no_color_present))
+}
+
+/// Render the update advisory for one stream.
+///
+/// The block is margin-free and label-free: a fact line, a blank line, and
+/// the command alone — nothing for the eye to climb over. Bold is the only
+/// emphasis; an available update is news, not a warning, so no colour.
+pub fn render_update(advisory: &UpdateAdvisory, style: Style) -> String {
+    let (a, b, c) = advisory.installed;
+    let latest = &advisory.latest;
+    match style {
+        Style::Styled => format!(
+            "{BOLD}CodeConnect update available{RESET} \u{b7} {a}.{b}.{c} \u{2192} {latest}\n\n\
+             {BOLD}codeconnect update{RESET}"
+        ),
+        Style::PlainUnicode => format!(
+            "CodeConnect update available \u{b7} {a}.{b}.{c} \u{2192} {latest}\n\n\
+             codeconnect update"
+        ),
+        Style::Ascii => {
+            format!("CodeConnect update available: {a}.{b}.{c} -> {latest}\n\ncodeconnect update")
+        }
+    }
 }
 
 // ---------------------------------------------------------------- checker
@@ -324,6 +411,202 @@ pub fn parse_release_tag(body: &[u8]) -> Option<String> {
     Some(release.tag_name)
 }
 
+// ------------------------------------------------------------------- hold
+
+/// One countdown frame: carriage return, erase-line, the sentence. The
+/// cursor controls are not SGR, so `NO_COLOR` does not touch them.
+pub fn countdown_frame(seconds_left: u64) -> String {
+    format!("\r\u{1b}[2KContinuing in {seconds_left}s\u{2026} Press Return to continue now.")
+}
+
+/// The erase that removes the countdown before the attach takes the screen.
+pub const COUNTDOWN_CLEAR: &str = "\r\u{1b}[2K";
+
+/// Hold the terminal for reading, honestly: a countdown, because nothing is
+/// working — the session already exists, and the pause exists for the
+/// reader. `10` shows immediately; frames follow *elapsed monotonic time*
+/// (a delayed tick shows the true remainder, never replays missed numbers);
+/// `0` is never shown; Return — or stdin closing — ends the hold at once.
+pub fn hold_for_reading(
+    total: std::time::Duration,
+    skip: &std::sync::mpsc::Receiver<()>,
+    out: &mut dyn std::io::Write,
+    mut now: impl FnMut() -> std::time::Instant,
+) {
+    let start = now();
+    let mut last_shown: Option<u64> = None;
+    loop {
+        let elapsed = now().saturating_duration_since(start);
+        if elapsed >= total {
+            break;
+        }
+        let remainder = total - elapsed;
+        let left = (remainder.as_secs_f64().ceil() as u64).max(1);
+        // A timer that wakes a millisecond shy of the boundary recomputes
+        // the same number; re-emitting it would double a frame. The number
+        // is the frame's identity — an unchanged number writes nothing.
+        if last_shown != Some(left) {
+            last_shown = Some(left);
+            let _ = write!(out, "{}", countdown_frame(left));
+            let _ = out.flush();
+        }
+        // Sleep until the displayed number is due to change — remainder
+        // minus the whole seconds the current frame still covers — never a
+        // fixed distance to a boundary the wake-up jitter can straddle.
+        let until_change =
+            remainder.saturating_sub(std::time::Duration::from_secs(left.saturating_sub(1)));
+        let wait = until_change.max(std::time::Duration::from_millis(1));
+        match skip.recv_timeout(wait) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = write!(out, "{COUNTDOWN_CLEAR}");
+    let _ = out.flush();
+}
+
+/// The Return listener: canonical input, no raw mode — a completed line
+/// *or EOF* is the signal (both return from `read_line`, both send). The
+/// reader is injected so tests drive the real listener with real input
+/// shapes; production hands it stdin. The thread parks in `read_line`;
+/// when the hold ends first, the exec replaces this image, thread included.
+pub fn spawn_line_listener(
+    reader: impl std::io::Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let mut reader = std::io::BufReader::new(reader);
+        let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+        let _ = tx.send(());
+    });
+    rx
+}
+
+// ----------------------------------------------------------------- update
+
+/// Where `install.sh` records the checkout it ran from, so `codeconnect
+/// update` never has to ask the user where their clone lives.
+fn checkout_record_path() -> PathBuf {
+    protocol::root_dir().join("source-checkout")
+}
+
+/// The recorded checkout, if it still looks like one. Takes the record path
+/// explicitly so tests exercise it against temp directories — mutating the
+/// process environment in a parallel test suite races every other test that
+/// reads the home directory.
+fn recorded_checkout_at(record: &std::path::Path) -> std::result::Result<PathBuf, String> {
+    let Ok(raw) = std::fs::read_to_string(record) else {
+        return Err(format!(
+            "no checkout is recorded at {} — this codeconnect was not \
+             installed by ./install.sh from a clone on this machine",
+            record.display()
+        ));
+    };
+    let root = PathBuf::from(raw.trim());
+    if !root.join("mac/install.sh").is_file() {
+        return Err(format!(
+            "the recorded checkout {} no longer contains mac/install.sh",
+            root.display()
+        ));
+    }
+    // Captured, not just exit-checked: `rev-parse --is-inside-work-tree`
+    // exits 0 while printing `false` inside a bare repository. Only the
+    // literal answer counts.
+    let inside = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(&root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
+        .unwrap_or(false);
+    if !inside {
+        return Err(format!(
+            "the recorded checkout {} is not a git work tree any more",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
+/// Whether the checkout has no local changes at all — tracked edits and
+/// untracked files both count. `git pull --ff-only` alone is not this
+/// check: a fast-forward can succeed over unrelated local edits, and the
+/// installer would then build a tree that is neither the release nor the
+/// user's own work.
+fn checkout_is_clean(root: &std::path::Path) -> std::result::Result<bool, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("running git status: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("git status failed in {}", root.display()));
+    }
+    Ok(output.stdout.is_empty())
+}
+
+/// `codeconnect update`: pull the recorded checkout fast-forward-only, then
+/// run its installer — which builds, installs, and restarts a managed
+/// daemon. One command, because "find your clone and run a git chain" is
+/// developer choreography no user should have to remember.
+///
+/// Failures stay loud and stop the chain: a dirty or diverged clone makes
+/// `git pull --ff-only` refuse, and that refusal — git's own words — is
+/// exactly what the user needs to see. Nothing here force-anythings.
+pub fn run_update() -> Result<()> {
+    let root = match recorded_checkout_at(&checkout_record_path()) {
+        Ok(root) => root,
+        Err(why) => {
+            eprintln!("cannot update automatically: {why}.");
+            eprintln!();
+            eprintln!("update it the way it was installed — from your CodeConnect clone:");
+            eprintln!();
+            eprintln!("    git pull --ff-only && cd mac && ./install.sh");
+            anyhow::bail!("no usable checkout record");
+        }
+    };
+    // Refused outright, before any pull: a fast-forward would happily land
+    // on top of unrelated local edits, and the build that followed would be
+    // a mixture nobody asked for. The user's own changes are the user's —
+    // update never decides what happens to them.
+    if !checkout_is_clean(&root).map_err(|why| anyhow::anyhow!(why))? {
+        eprintln!(
+            "your checkout at {} has local changes (see `git status`).",
+            root.display()
+        );
+        eprintln!("update refuses to build a mixed tree — commit or stash them, then rerun.");
+        anyhow::bail!("checkout has local changes");
+    }
+    println!("updating from {}", root.display());
+    let pulled = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(&root)
+        .args(["pull", "--ff-only"])
+        .status()
+        .context("running git pull")?;
+    if !pulled.success() {
+        anyhow::bail!(
+            "git pull --ff-only refused (see above); resolve it in {} and rerun",
+            root.display()
+        );
+    }
+    let installed = std::process::Command::new("/bin/bash")
+        .arg(root.join("mac/install.sh"))
+        .status()
+        .context("running install.sh")?;
+    if !installed.success() {
+        anyhow::bail!("install.sh failed (see above)");
+    }
+    Ok(())
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -393,9 +676,12 @@ mod tests {
             last_attempt_unix: 0,
             latest: Some("0.2.0".into()),
         };
-        let notice = notice(&cache, (0, 1, 0)).unwrap();
-        assert!(!notice.contains("PWNED"));
-        assert!(!notice.contains("evil.example"));
+        let advisory = update_advisory(&cache, (0, 1, 0)).unwrap();
+        for style in [Style::Styled, Style::PlainUnicode, Style::Ascii] {
+            let text = render_update(&advisory, style);
+            assert!(!text.contains("PWNED"));
+            assert!(!text.contains("evil.example"));
+        }
     }
 
     #[test]
@@ -462,7 +748,53 @@ mod tests {
             cache.last_attempt_unix, 5,
             "the throttle stamp is untainted"
         );
-        assert_eq!(notice(&cache, (0, 1, 0)), None);
+        assert_eq!(update_advisory(&cache, (0, 1, 0)), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------- update
+
+    /// The two honest refusals: no record at all, and a record whose
+    /// checkout has stopped being one. Both name the path and both leave
+    /// The honest refusals, each against a real filesystem shape and none
+    /// touching process environment: no record; a record pointing at a
+    /// directory that is not a checkout; a checkout that is not a git work
+    /// tree — and then the acceptance, against a real `git init` work tree.
+    #[test]
+    fn the_checkout_record_is_validated_never_trusted() {
+        let dir = temp_dir("checkout");
+        let record = dir.join("source-checkout");
+
+        let why = recorded_checkout_at(&record).expect_err("no record file yet");
+        assert!(why.contains("no checkout is recorded"), "{why}");
+
+        // A record pointing somewhere without the installer.
+        let fake = dir.join("not-a-checkout");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(&record, fake.to_string_lossy().as_bytes()).unwrap();
+        let why = recorded_checkout_at(&record).expect_err("no installer, no checkout");
+        assert!(why.contains("install.sh"), "{why}");
+
+        // The installer exists but there is no git work tree around it.
+        std::fs::create_dir_all(fake.join("mac")).unwrap();
+        std::fs::write(fake.join("mac/install.sh"), b"#!/bin/bash\n").unwrap();
+        let why = recorded_checkout_at(&record).expect_err("not a work tree");
+        assert!(why.contains("work tree"), "{why}");
+
+        // A real work tree: accepted, and its cleanliness is readable.
+        assert!(std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&fake)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        let root = recorded_checkout_at(&record).expect("a real checkout validates");
+        assert_eq!(root, fake);
+        assert!(
+            !checkout_is_clean(&root).unwrap(),
+            "the untracked installer counts as local state"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -553,19 +885,315 @@ mod tests {
 
     // ------------------------------------------------------------- notice
 
+    fn advisory() -> UpdateAdvisory {
+        UpdateAdvisory {
+            installed: (0, 1, 0),
+            latest: "0.2.0".into(),
+        }
+    }
+
+    /// The exact styled payload, byte for byte: bold on the headline and on
+    /// the lone command, typographic separators, nothing else.
     #[test]
-    fn the_notice_names_both_versions_and_the_exact_command() {
-        let cache = UpdateCache {
-            last_attempt_unix: 0,
-            latest: Some("0.2.0".into()),
-        };
-        let text = notice(&cache, (0, 1, 0)).unwrap();
+    fn the_styled_rendering_is_exact() {
+        assert_eq!(
+            render_update(&advisory(), Style::Styled),
+            "\u{1b}[1mCodeConnect update available\u{1b}[0m \u{b7} 0.1.0 \u{2192} 0.2.0\n\n\
+             \u{1b}[1mcodeconnect update\u{1b}[0m"
+        );
+    }
+
+    /// `NO_COLOR` kills every escape — bold included — and touches nothing
+    /// typographic.
+    #[test]
+    fn no_color_keeps_the_typography_and_drops_all_sgr() {
+        let text = render_update(&advisory(), Style::PlainUnicode);
         assert_eq!(
             text,
-            "  note: CodeConnect 0.1.0 is installed; 0.2.0 is available.\n\n  \
-             from the root of your CodeConnect checkout, run:\n\n      \
-             git pull --ff-only && cd mac && ./install.sh"
+            "CodeConnect update available \u{b7} 0.1.0 \u{2192} 0.2.0\n\ncodeconnect update"
         );
+        assert!(!text.contains('\u{1b}'));
+    }
+
+    /// Logs, pipes and dumb terminals get pure ASCII: no escapes, no
+    /// multi-byte characters, no trailing spaces, everything under 80 cols.
+    #[test]
+    fn the_ascii_rendering_is_pure_ascii() {
+        let text = render_update(&advisory(), Style::Ascii);
+        assert_eq!(
+            text,
+            "CodeConnect update available: 0.1.0 -> 0.2.0\n\ncodeconnect update"
+        );
+        assert!(text.is_ascii());
+        for line in text.lines() {
+            assert!(line.len() < 80);
+            assert_eq!(line, line.trim_end());
+        }
+    }
+
+    /// The one styling decision: not-a-TTY or `TERM=dumb` forces ASCII;
+    /// `NO_COLOR` — present even when empty — strips SGR but keeps the TTY
+    /// typography; otherwise styled.
+    #[test]
+    fn styling_is_decided_by_the_three_documented_signals() {
+        assert_eq!(
+            style_for(false, Some("xterm-256color"), false),
+            Style::Ascii
+        );
+        assert_eq!(style_for(true, Some("dumb"), false), Style::Ascii);
+        assert_eq!(style_for(true, Some("dumb"), true), Style::Ascii);
+        assert_eq!(
+            style_for(true, Some("xterm-256color"), true),
+            Style::PlainUnicode
+        );
+        assert_eq!(style_for(true, None, true), Style::PlainUnicode);
+        assert_eq!(
+            style_for(true, Some("xterm-256color"), false),
+            Style::Styled
+        );
+    }
+
+    /// The countdown speaks whole seconds, `10` first, never `0`, each
+    /// frame erasing the last; the deadline is monotonic elapsed time, so a
+    /// delayed tick shows the true remainder instead of replaying numbers.
+    #[test]
+    fn the_countdown_counts_real_time_down_and_never_says_zero() {
+        assert_eq!(
+            countdown_frame(10),
+            "\r\u{1b}[2KContinuing in 10s\u{2026} Press Return to continue now."
+        );
+
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let mut out: Vec<u8> = Vec::new();
+        // A fake clock: the first frame reads zero elapsed — "display 10
+        // immediately" — and every later observation has jumped three
+        // seconds. Elapsed time rules, so frames skip numbers (10, 7, 4, 1)
+        // rather than replaying the ones the delay swallowed.
+        let start = std::time::Instant::now();
+        let mut observations = 0u64;
+        hold_for_reading(
+            std::time::Duration::from_secs(10),
+            &rx,
+            &mut out,
+            move || {
+                let elapsed = observations.saturating_sub(1) * 3;
+                observations += 1;
+                start + std::time::Duration::from_secs(elapsed)
+            },
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\r\u{1b}[2KContinuing in 10s"));
+        assert!(text.contains("in 7s"), "a 3s-late tick shows the remainder");
+        assert!(!text.contains("in 0s"), "zero is never shown");
+        assert!(
+            text.ends_with(COUNTDOWN_CLEAR),
+            "the line is erased before attach"
+        );
+    }
+
+    /// Return — or stdin closing — ends the hold at once, with the line
+    /// cleared; the ten seconds are never served blind.
+    #[test]
+    fn return_or_eof_ends_the_hold_immediately() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        tx.send(()).unwrap();
+        let mut out: Vec<u8> = Vec::new();
+        let begun = std::time::Instant::now();
+        hold_for_reading(
+            std::time::Duration::from_secs(10),
+            &rx,
+            &mut out,
+            std::time::Instant::now,
+        );
+        assert!(begun.elapsed() < std::time::Duration::from_secs(2));
+        assert!(String::from_utf8(out).unwrap().ends_with(COUNTDOWN_CLEAR));
+
+        // Disconnected sender = stdin reader gone (EOF): same immediate end.
+        let (tx2, rx2) = std::sync::mpsc::channel::<()>();
+        drop(tx2);
+        let begun = std::time::Instant::now();
+        hold_for_reading(
+            std::time::Duration::from_secs(10),
+            &rx2,
+            &mut Vec::new(),
+            std::time::Instant::now,
+        );
+        assert!(begun.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// The exhaustive styling truth table — every combination of the three
+    /// signals — plus the real environment adapter driven with an injected
+    /// lookup, including the convention's sharpest edge: an *empty*
+    /// `NO_COLOR` still counts as present.
+    #[test]
+    fn every_styling_combination_lands_where_the_conventions_say() {
+        for tty in [true, false] {
+            for term in [Some("dumb"), Some("xterm-256color"), None] {
+                for no_color in [true, false] {
+                    let expected = if !tty || term == Some("dumb") {
+                        Style::Ascii
+                    } else if no_color {
+                        Style::PlainUnicode
+                    } else {
+                        Style::Styled
+                    };
+                    assert_eq!(style_for(tty, term, no_color), expected);
+                }
+            }
+        }
+
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| -> Option<std::ffi::OsString> {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        assert_eq!(
+            style_from_env(true, env(&[("TERM", "xterm"), ("NO_COLOR", "")])),
+            Style::PlainUnicode,
+            "empty NO_COLOR is still NO_COLOR"
+        );
+        assert_eq!(style_from_env(true, env(&[("TERM", "dumb")])), Style::Ascii);
+        assert_eq!(
+            style_from_env(true, env(&[("TERM", "xterm")])),
+            Style::Styled
+        );
+        assert_eq!(style_from_env(false, env(&[])), Style::Ascii);
+    }
+
+    /// The full countdown transcript under a 3s-per-tick clock, byte for
+    /// byte, with exactly one flush per frame plus one for the clear — no
+    /// buffered frame can lag the second it names.
+    #[test]
+    fn the_countdown_transcript_and_flush_discipline_are_exact() {
+        struct CountingSink {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+        impl std::io::Write for CountingSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let mut sink = CountingSink {
+            bytes: Vec::new(),
+            flushes: 0,
+        };
+        let start = std::time::Instant::now();
+        let mut observations = 0u64;
+        hold_for_reading(
+            std::time::Duration::from_secs(10),
+            &rx,
+            &mut sink,
+            move || {
+                let elapsed = observations.saturating_sub(1) * 3;
+                observations += 1;
+                start + std::time::Duration::from_secs(elapsed)
+            },
+        );
+        let expected: String = [10u64, 7, 4, 1]
+            .iter()
+            .map(|n| countdown_frame(*n))
+            .collect::<String>()
+            + COUNTDOWN_CLEAR;
+        assert_eq!(String::from_utf8(sink.bytes).unwrap(), expected);
+        assert_eq!(sink.flushes, 5, "four frames and the clear, each flushed");
+    }
+
+    /// The *real* listener, fed real input shapes: a completed Return line
+    /// signals, and true EOF — `read_line` returning zero bytes — signals
+    /// identically. Neither can leave the hold waiting out its ten seconds.
+    #[test]
+    fn the_line_listener_signals_on_return_and_on_real_eof() {
+        for input in [&b"\n"[..], &b""[..]] {
+            let rx = spawn_line_listener(std::io::Cursor::new(input.to_vec()));
+            let begun = std::time::Instant::now();
+            hold_for_reading(
+                std::time::Duration::from_secs(10),
+                &rx,
+                &mut Vec::new(),
+                std::time::Instant::now,
+            );
+            assert!(
+                begun.elapsed() < std::time::Duration::from_secs(3),
+                "input {input:?} must end the hold immediately"
+            );
+        }
+    }
+
+    /// `daemon status` renders for stdout's own signals and never counts
+    /// down — the block cannot contain the countdown sentence by
+    /// construction, and this pins it.
+    #[test]
+    fn the_status_block_styles_for_stdout_and_never_counts_down() {
+        let advisory = advisory();
+        let styled = status_update_block(&advisory, true, Some("xterm"), false);
+        assert!(styled.contains("\u{1b}[1m"));
+        let piped = status_update_block(&advisory, false, Some("xterm"), false);
+        assert!(piped.is_ascii());
+        for text in [styled, piped] {
+            assert!(!text.contains("Continuing in"), "status never holds anyone");
+        }
+    }
+
+    /// The boundary races, pinned: a wake 1ms *before* a whole second
+    /// recomputes the same number and must write nothing; landing exactly
+    /// on the boundary, and 1ms after it, each produce their frame exactly
+    /// once. Frame identity is the number, not the timer.
+    #[test]
+    fn boundary_jitter_never_doubles_a_frame() {
+        struct CountingSink {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+        impl std::io::Write for CountingSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let mut sink = CountingSink {
+            bytes: Vec::new(),
+            flushes: 0,
+        };
+        // Observations, in seconds: the early wake (0.999), the exact
+        // boundary (1.0), a late wake (2.001), then out.
+        let offsets = [0.0, 0.0, 0.999, 1.0, 2.001, 10.0];
+        let start = std::time::Instant::now();
+        let mut calls = 0usize;
+        hold_for_reading(
+            std::time::Duration::from_secs(10),
+            &rx,
+            &mut sink,
+            move || {
+                let offset = offsets[calls.min(offsets.len() - 1)];
+                calls += 1;
+                start + std::time::Duration::from_secs_f64(offset)
+            },
+        );
+        let expected: String = [10u64, 9, 8]
+            .iter()
+            .map(|n| countdown_frame(*n))
+            .collect::<String>()
+            + COUNTDOWN_CLEAR;
+        assert_eq!(
+            String::from_utf8(sink.bytes).unwrap(),
+            expected,
+            "10 once (early wake writes nothing), 9 at the boundary, 8 after"
+        );
+        assert_eq!(sink.flushes, 4, "three frames and the clear");
     }
 
     #[test]
@@ -574,15 +1202,19 @@ mod tests {
             last_attempt_unix: 0,
             latest: Some(latest.into()),
         };
-        assert_eq!(notice(&cache("0.1.0"), (0, 1, 0)), None, "equal is current");
         assert_eq!(
-            notice(&cache("0.0.9"), (0, 1, 0)),
+            update_advisory(&cache("0.1.0"), (0, 1, 0)),
+            None,
+            "equal is current"
+        );
+        assert_eq!(
+            update_advisory(&cache("0.0.9"), (0, 1, 0)),
             None,
             "older is not news"
         );
-        assert!(notice(&cache("0.1.1"), (0, 1, 0)).is_some());
+        assert!(update_advisory(&cache("0.1.1"), (0, 1, 0)).is_some());
         assert_eq!(
-            notice(&UpdateCache::default(), (0, 1, 0)),
+            update_advisory(&UpdateCache::default(), (0, 1, 0)),
             None,
             "no validated answer, no claim"
         );

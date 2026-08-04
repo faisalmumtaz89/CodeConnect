@@ -47,6 +47,7 @@ fn main() -> Result<()> {
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),
+        "update" => update_check::run_update(),
         "--version" | "version" => {
             println!("codeconnect {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -81,6 +82,8 @@ cc — CodeConnect shim
   codeconnect ls                  list what tmux is running (works with ccd down)
   codeconnect sessions            list what the event log knows, with lifecycle
   codeconnect sessions prune      remove ended sessions and their events (--dry-run first)
+
+  codeconnect update              pull the recorded checkout and reinstall (daemon restarts)
 
   codeconnect daemon install      install and start the ccd LaunchAgent
   codeconnect daemon status       plist, launchd job and live daemon
@@ -154,22 +157,38 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
     // promising is unaffected — Claude is already running while this is
     // read. One hold however many notes apply; reachability first, because
     // a phone that cannot connect at all outranks a version it would fetch.
-    let mut notes: Vec<String> = Vec::new();
-    if let Some(note) = phone_unreachable_note() {
-        notes.push(note);
-    }
-    if config.update_check {
-        if let Some(note) = update_check::cached_notice() {
-            notes.push(note);
+    // Styling answers for stderr — this envelope's stream — and the whole
+    // group shares one decision. Reachability first: a phone that cannot
+    // connect at all outranks a version it would fetch.
+    {
+        use std::io::IsTerminal;
+        let style = update_check::style_for_stream(std::io::stderr().is_terminal());
+        let reachability = phone_unreachable_note(style);
+        let update = config
+            .update_check
+            .then(update_check::cached_advisory)
+            .flatten()
+            .map(|advisory| update_check::render_update(&advisory, style));
+        if let Some(group) = advisory_envelope(reachability, update) {
+            eprint!("{group}");
+            // The hold exists for a reader: only a real person at a real
+            // terminal gets one, and it is a countdown — not a spinner,
+            // because nothing is working; the session already exists and
+            // the pause is for reading. Return skips it.
+            if hold_permitted(
+                std::io::stderr().is_terminal(),
+                std::io::stdin().is_terminal(),
+                std::env::var("TERM").ok().as_deref(),
+            ) {
+                let skip = update_check::spawn_line_listener(std::io::stdin());
+                update_check::hold_for_reading(
+                    std::time::Duration::from_secs(10),
+                    &skip,
+                    &mut std::io::stderr(),
+                    std::time::Instant::now,
+                );
+            }
         }
-    }
-    if !notes.is_empty() {
-        eprintln!();
-        for note in &notes {
-            eprintln!("{note}");
-            eprintln!();
-        }
-        std::thread::sleep(std::time::Duration::from_secs(3));
     }
     // Fire-and-forget, after the notices so its spawn cost cannot delay
     // them. The network belongs entirely to the detached child, so the
@@ -195,8 +214,8 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 /// The "your phone cannot reach this Mac" note, or `None` while it can —
 /// the same fact the app shows as its "Connect Tailscale" banner, told in
 /// the same words at the other keyboard. Printed by `start_claude` in the
-/// shared pre-attach advisory slot (one 3-second hold however many notes
-/// apply).
+/// shared pre-attach advisory slot (one 10-second countdown however many
+/// notes apply).
 ///
 /// Three states earn it, distinguished because their fixes differ:
 ///
@@ -218,7 +237,7 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 /// with no pause is a warning nobody has ever seen — the tmux client erases
 /// the terminal microseconds after `exec_attach` (measured; see the note
 /// there).
-fn phone_unreachable_note() -> Option<String> {
+fn phone_unreachable_note(style: update_check::Style) -> Option<String> {
     // No daemon, no claim: a daemon that is not running is a different
     // conversation, and its absence already has its own surfaces. The
     // timeout is advisory-sized — this check must never make a healthy
@@ -233,7 +252,7 @@ fn phone_unreachable_note() -> Option<String> {
         None => TailscaleSignal::NotInstalled,
         Some(bin) => probe_tailscale(&bin),
     };
-    phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal)
+    phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal, style)
 }
 
 /// What this Mac's Tailscale is doing right now, as far as an advisory may
@@ -338,41 +357,102 @@ fn phone_reachability_note(
     endpoint_host: &str,
     bind_ip: Option<&str>,
     signal: TailscaleSignal,
+    style: update_check::Style,
 ) -> Option<String> {
-    if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {
-        let fix = match signal {
-            TailscaleSignal::NotInstalled => {
-                "  set up Tailscale on this Mac — CodeConnect reaches phones only over\n  \
-                 your tailnet:\n\n      \
-                 https://tailscale.com/download\n\n  \
-                 then `codeconnect daemon restart`"
-            }
-            _ => {
-                "  connect Tailscale on this Mac (menu bar, or `tailscale up`), then:\n\n      \
-                 codeconnect daemon restart"
-            }
+    // Shared grammar with the update advisory: a heading, the state's own
+    // explanation, a blank line, the state's own remedy (its command or URL
+    // isolated on its own line), a blank line, the assurance. Bold yellow on
+    // the heading — this one *is* a current impairment, which is exactly
+    // what the app's amber means — and bold alone on an isolated command.
+    let heading = "Phone unreachable";
+    let assurance = "This session is unaffected \u{2014} it is already running and recording.\n\
+                     The phone catches up when the tailnet is back.";
+
+    let (explanation, remedy) =
+        if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {
+            // The address is data, not prose: isolated on its own line, the
+            // sentence around it stays inside its 76 columns however long a
+            // MagicDNS name grows.
+            let explanation = format!(
+                "The daemon is listening on an address no phone can reach:\n\n\
+             {endpoint_host}\n\n\
+             It {problem}."
+            );
+            let remedy = match signal {
+                TailscaleSignal::NotInstalled => format!(
+                    "Set up Tailscale \u{2014} CodeConnect reaches phones only over your\n\
+                 tailnet \u{2014} then restart the daemon:\n\n\
+                 {}\n\
+                 {}",
+                    emphasized("https://tailscale.com/download", style),
+                    emphasized("codeconnect daemon restart", style)
+                ),
+                _ => format!(
+                    "Connect Tailscale (menu bar, or `tailscale up`), then:\n\n\
+                 {}",
+                    emphasized("codeconnect daemon restart", style)
+                ),
+            };
+            (explanation, remedy)
+        } else if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
+            let explanation = "Tailscale is off on this Mac.".to_string();
+            let remedy = format!(
+                "Connect Tailscale (menu bar), or run:\n\n\
+             {}\n\n\
+             The daemon keeps its tailnet address and is reachable again the\n\
+             moment the tunnel is back. Nothing needs restarting.",
+                emphasized("tailscale up", style)
+            );
+            (explanation, remedy)
+        } else {
+            return None;
         };
-        return Some(format!(
-            "  note: your phone cannot reach this Mac right now. The daemon is\n  \
-             listening on {endpoint_host}, which {problem}.\n\n\
-             {fix}\n\n  \
-             This session is unaffected — it is already running and recording;\n  \
-             the phone catches up when the tailnet is back."
-        ));
+
+    let heading = match style {
+        update_check::Style::Styled => format!("\u{1b}[1;33m{heading}\u{1b}[0m"),
+        update_check::Style::PlainUnicode | update_check::Style::Ascii => heading.to_string(),
+    };
+    let text = format!("{heading}\n{explanation}\n\n{remedy}\n\n{assurance}");
+    Some(match style {
+        update_check::Style::Ascii => asciify(&text),
+        _ => text,
+    })
+}
+
+/// The advisory group as one write: a leading blank line, the advisories —
+/// reachability always first — separated by exactly two blank lines, and a
+/// trailing blank line before whatever follows. `None` when there is
+/// nothing to say, so a healthy launch writes nothing at all.
+fn advisory_envelope(reachability: Option<String>, update: Option<String>) -> Option<String> {
+    let notes: Vec<String> = [reachability, update].into_iter().flatten().collect();
+    if notes.is_empty() {
+        return None;
     }
-    if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
-        return Some(
-            "  note: Tailscale is off on this Mac, so your phone cannot reach it\n  \
-             right now.\n\n  \
-             connect Tailscale (menu bar, or `tailscale up`) — the daemon keeps\n  \
-             its tailnet address and is reachable again the moment the tunnel\n  \
-             is back. Nothing needs restarting.\n\n  \
-             This session is unaffected — it is already running and recording;\n  \
-             the phone catches up when the tailnet is back."
-                .to_string(),
-        );
+    Some(format!("\n{}\n\n", notes.join("\n\n\n")))
+}
+
+/// Whether the reading hold may run: a real person at a real terminal on
+/// both streams, and not a terminal that has disclaimed control sequences.
+fn hold_permitted(stderr_tty: bool, stdin_tty: bool, term: Option<&str>) -> bool {
+    stderr_tty && stdin_tty && term != Some("dumb")
+}
+
+/// Bold when styling is on; bare otherwise. For an isolated command or URL
+/// line — the thing the reader is meant to act on.
+fn emphasized(line: &str, style: update_check::Style) -> String {
+    match style {
+        update_check::Style::Styled => format!("\u{1b}[1m{line}\u{1b}[0m"),
+        update_check::Style::PlainUnicode | update_check::Style::Ascii => line.to_string(),
     }
-    None
+}
+
+/// The ASCII degradation for logs, pipes and `TERM=dumb`: typography maps
+/// to its plain equivalents, so no escape or multi-byte character survives.
+fn asciify(text: &str) -> String {
+    text.replace('\u{2014}', "--")
+        .replace('\u{2192}', "->")
+        .replace('\u{b7}', ":")
+        .replace('\u{2026}', "...")
 }
 
 /// Launch the supervisor so it outlives this process *and* the terminal tab.
@@ -642,41 +722,150 @@ mod tests {
     /// The pre-attach warning across its states, in the app's own vocabulary
     /// ("connect Tailscale" / "set up Tailscale") so the two screens the same
     /// person is looking at never disagree — and each state names *its* fix,
-    /// because they differ.
+    /// The envelope, exactly: nothing at all when there is nothing to say;
+    /// a leading blank line; reachability before the update; exactly two
+    /// blank lines between advisories; one trailing blank line.
+    #[test]
+    fn the_advisory_envelope_spaces_and_orders_exactly() {
+        assert_eq!(
+            advisory_envelope(None, None),
+            None,
+            "healthy launches write nothing"
+        );
+        assert_eq!(
+            advisory_envelope(Some("REACH".into()), None).as_deref(),
+            Some("\nREACH\n\n")
+        );
+        assert_eq!(
+            advisory_envelope(None, Some("UPDATE".into())).as_deref(),
+            Some("\nUPDATE\n\n")
+        );
+        assert_eq!(
+            advisory_envelope(Some("REACH".into()), Some("UPDATE".into())).as_deref(),
+            Some("\nREACH\n\n\nUPDATE\n\n"),
+            "reachability first; exactly two blank lines between; one hold-worthy group"
+        );
+    }
+
+    /// The hold's admission rule: both streams must be a person's terminal,
+    /// and a terminal that disclaimed control sequences gets no countdown.
+    #[test]
+    fn the_hold_needs_two_ttys_and_a_capable_terminal() {
+        assert!(hold_permitted(true, true, Some("xterm-256color")));
+        assert!(hold_permitted(true, true, None));
+        assert!(!hold_permitted(false, true, Some("xterm")));
+        assert!(!hold_permitted(true, false, Some("xterm")));
+        assert!(!hold_permitted(true, true, Some("dumb")));
+    }
+
+    /// Every asciify mapping, and the guarantee that matters: no state's
+    /// ASCII rendering carries a single non-ASCII byte, an escape, a
+    /// trailing space, or a line at 80 columns or more.
+    #[test]
+    fn ascii_renderings_are_pure_for_every_reachability_state() {
+        assert_eq!(
+            asciify("a \u{2014} b \u{2192} c \u{b7} d \u{2026}"),
+            "a -- b -> c : d ..."
+        );
+
+        use update_check::Style;
+        use TailscaleSignal::*;
+        let all = [
+            phone_reachability_note("127.0.0.1", Some("127.0.0.1"), Up, Style::Ascii),
+            phone_reachability_note("127.0.0.1", Some("127.0.0.1"), NotInstalled, Style::Ascii),
+            phone_reachability_note("mac.tailnet.ts.net", Some("100.64.0.7"), Down, Style::Ascii),
+        ];
+        for note in all.into_iter().flatten() {
+            assert!(note.is_ascii(), "non-ascii survived: {note}");
+            assert!(!note.contains('\u{1b}'));
+            for line in note.lines() {
+                assert!(line.len() < 80, "over 80 cols: {line}");
+                assert_eq!(line, line.trim_end(), "trailing space: {line:?}");
+            }
+        }
+    }
+
+    /// The toggled-off state's exact ASCII grammar, top to bottom — the
+    /// heading, the explanation, the isolated command, the retained
+    /// "Nothing needs restarting", and the assurance pair.
+    #[test]
+    fn the_toggled_off_note_reads_exactly_as_designed() {
+        let note = phone_reachability_note(
+            "mac.tailnet.ts.net",
+            Some("100.64.0.7"),
+            TailscaleSignal::Down,
+            update_check::Style::Ascii,
+        )
+        .unwrap();
+        assert_eq!(
+            note,
+            "Phone unreachable\n\
+             Tailscale is off on this Mac.\n\
+             \n\
+             Connect Tailscale (menu bar), or run:\n\
+             \n\
+             tailscale up\n\
+             \n\
+             The daemon keeps its tailnet address and is reachable again the\n\
+             moment the tunnel is back. Nothing needs restarting.\n\
+             \n\
+             This session is unaffected -- it is already running and recording.\n\
+             The phone catches up when the tailnet is back."
+        );
+    }
+
+    /// The pre-attach warning across its states, in the shared advisory
+    /// grammar: one heading, the state's own explanation, the state's own
+    /// remedy with its command isolated, the assurance — and each state
+    /// names *its* fix, because they differ.
     #[test]
     fn the_phone_reachability_note_matches_the_apps_vocabulary() {
+        use update_check::Style;
         use TailscaleSignal::*;
-        let note = phone_reachability_note;
+        let note = |host: &str, bind: Option<&str>, signal| {
+            phone_reachability_note(host, bind, signal, Style::Ascii)
+        };
 
         // Bound wrong (daemon started before the tailnet): restart required.
         let bound_wrong = note("127.0.0.1", Some("127.0.0.1"), Up).expect("loopback warns");
+        assert!(bound_wrong.starts_with("Phone unreachable\n"));
         assert!(bound_wrong.contains("127.0.0.1"));
-        assert!(bound_wrong.contains("connect Tailscale"));
+        assert!(bound_wrong.contains("Connect Tailscale"));
         assert!(bound_wrong.contains("codeconnect daemon restart"));
         assert!(
             bound_wrong.contains("unaffected"),
             "the note must say the session itself is fine: {bound_wrong}"
         );
+        assert!(bound_wrong.is_ascii(), "ascii style stays ascii");
 
-        // Tailscale absent entirely: set-up instruction.
+        // Tailscale absent entirely: set-up instruction, URL isolated.
         let missing = note("127.0.0.1", Some("127.0.0.1"), NotInstalled).expect("loopback warns");
-        assert!(missing.contains("set up Tailscale"));
-        assert!(missing.contains("https://tailscale.com/download"));
+        assert!(missing.contains("Set up Tailscale"));
+        assert!(missing.contains("\nhttps://tailscale.com/download\n"));
 
         // Bound to the tailnet, backend stopped afterwards: connect it back
-        // and nothing else — the standing bind revives with the tunnel
-        // (measured: one daemon held its 100.x listener across a full off/on
-        // toggle and accepted connections again, same pid). Keyed on the
-        // *bind*: under TLS the endpoint is a MagicDNS name whatever the
-        // operator bound.
+        // and nothing else — the standing bind revives with the tunnel.
         let toggled_off =
             note("mac.tailnet.ts.net", Some("100.64.0.7"), Down).expect("dead tailnet warns");
         assert!(toggled_off.contains("Tailscale is off on this Mac"));
         assert!(toggled_off.contains("Nothing needs restarting"));
+        assert!(toggled_off.contains("\ntailscale up\n"));
         assert!(
             !toggled_off.contains("codeconnect daemon restart"),
             "no restart instruction when the bind is fine: {toggled_off}"
         );
+
+        // Styled: the heading carries the impairment colour; the command is
+        // bold; the ascii variant carries neither.
+        let styled = phone_reachability_note(
+            "mac.tailnet.ts.net",
+            Some("100.64.0.7"),
+            Down,
+            Style::Styled,
+        )
+        .unwrap();
+        assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
+        assert!(styled.contains("\u{1b}[1mtailscale up\u{1b}[0m"));
 
         // Silence, each for its own reason.
         assert_eq!(
@@ -687,8 +876,7 @@ mod tests {
         assert_eq!(
             note("mac.tailnet.ts.net", Some("192.168.1.20"), Down),
             None,
-            "an operator's explicit LAN bind gets no Tailscale advice, even \
-             though TLS put a MagicDNS name on the endpoint"
+            "an operator's explicit LAN bind gets no Tailscale advice"
         );
         assert_eq!(
             note("mac.tailnet.ts.net", None, Down),

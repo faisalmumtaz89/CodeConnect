@@ -310,15 +310,26 @@ fn status() -> Result<()> {
         ),
     }
     println!("logs     {}", protocol::logs_dir().display());
-    // The cached upgrade answer, read-only: no fetch, no hold — status is a
-    // question about now, and the cache is what is known now. The launch
-    // path owns refreshing it. `update_check: false` silences this surface
-    // too: the switch disables the feature everywhere, not merely its
-    // network half.
+    // The cached upgrade answer, read-only: no fetch, no hold, no countdown
+    // — status is a question about now, and the cache is what is known now.
+    // The launch path owns refreshing it. `update_check: false` silences
+    // this surface too: the switch disables the feature everywhere, not
+    // merely its network half. Styling answers for *stdout*, this command's
+    // own stream — never stderr's.
     if protocol::config::Config::load().update_check {
-        if let Some(note) = crate::update_check::cached_notice() {
+        if let Some(advisory) = crate::update_check::cached_advisory() {
+            use std::io::IsTerminal;
+            let term = std::env::var("TERM").ok();
             println!();
-            println!("{note}");
+            println!(
+                "{}",
+                crate::update_check::status_update_block(
+                    &advisory,
+                    std::io::stdout().is_terminal(),
+                    term.as_deref(),
+                    std::env::var_os("NO_COLOR").is_some(),
+                )
+            );
         }
     }
     Ok(())
