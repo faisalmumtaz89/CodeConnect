@@ -40,6 +40,11 @@ struct DictationError: Error {
 final class DictationController {
     enum Phase: Equatable {
         case idle
+        /// Between the tap and the first live buffer: permission prompts and
+        /// — on a locale's first use — Apple's model download happen here.
+        /// Its own state, because during a download the old `idle` looked
+        /// inert, invited more taps, and each tap raced another engine up.
+        case starting
         case recording
         /// Rendered as a visible line above the composer — the same rule as a
         /// blocked send: a control that cannot act says why, on screen.
@@ -57,6 +62,12 @@ final class DictationController {
     private(set) var startedAt: Date?
 
     var isRecording: Bool { phase == .recording }
+    var isStarting: Bool { phase == .starting }
+
+    /// Bumped by every teardown; a start that resumes from its awaits into a
+    /// generation it does not own was cancelled mid-flight and must build
+    /// nothing on the rubble.
+    private var generation = 0
 
     /// Everything heard so far, volatile tail included. The tail is *meant* to
     /// be taken: the words land in an editable field for review, so a
@@ -78,23 +89,34 @@ final class DictationController {
     // MARK: Lifecycle
 
     func start() async {
-        guard !isRecording else { return }
+        guard phase != .recording, phase != .starting else { return }
+        phase = .starting
+        let owned = generation
         finalizedText = ""
         volatileText = ""
         level = 0
 
         guard await AVAudioApplication.requestRecordPermission() else {
+            guard generation == owned else { return }
             phase = .failed(
                 reason: "Microphone access is off, so there is nothing to transcribe.",
                 needsSettings: true)
             return
         }
+        guard generation == owned, phase == .starting else { return }
 
         do {
             if #available(iOS 26.0, *) {
                 try await startAnalyzer()
             } else {
                 try await startLegacy()
+            }
+            // A stop or cancel that landed during the awaits above already
+            // tore the session down; the machinery this start built on top
+            // of the rubble must follow it.
+            guard generation == owned, phase == .starting else {
+                teardown()
+                return
             }
             startedAt = Date()
             phase = .recording
@@ -130,20 +152,105 @@ final class DictationController {
         if case .failed = phase { phase = .idle }
     }
 
+    // MARK: Locale resolution
+
+    /// The locale recognition should run in, chosen from what the engine
+    /// supports and what this user actually speaks — never by demanding an
+    /// exact match on `Locale.current`.
+    ///
+    /// Exact matching was the shipped bug: engines publish a fixed set of
+    /// language-region pairs (`en-US`, `en-GB`, `ar-SA`, …), while a real
+    /// device fuses UI language with residence region — an English speaker
+    /// in Riyadh is `en-SA`, a pair no list will ever contain — so the mic
+    /// refused before listening, blaming a "language" Apple supports fine.
+    ///
+    /// The ladder, per candidate (current locale first, then the user's
+    /// ordered language list): exact BCP-47; else same language *and
+    /// script* (so Traditional Chinese never silently becomes Simplified),
+    /// preferring the candidate's own region, then the language's likely
+    /// region (`en` maximizes to `en-Latn-US`, so plain English lands on
+    /// `en-US`), then the sorted first for determinism. `nil` means the
+    /// user's language genuinely is not shipped — the one honest time to
+    /// say so.
+    static func resolveRecognitionLocale(
+        supported: [Locale], current: Locale, preferred: [Locale]
+    ) -> Locale? {
+        let tag = { (locale: Locale) in locale.identifier(.bcp47).lowercased() }
+        let languageScript = { (locale: Locale) -> (String, String) in
+            // `maximalIdentifier` fills in likely subtags (en → en-Latn-US),
+            // giving every locale a comparable script even when unstated.
+            let maximal = Locale.Language(identifier: locale.language.maximalIdentifier)
+            return (
+                maximal.languageCode?.identifier.lowercased() ?? "",
+                maximal.script?.identifier.lowercased() ?? ""
+            )
+        }
+        for candidate in [current] + preferred {
+            if let exact = supported.first(where: { tag($0) == tag(candidate) }) {
+                return exact
+            }
+            let wanted = languageScript(candidate)
+            guard !wanted.0.isEmpty else { continue }
+            let speakers = supported.filter { languageScript($0) == wanted }
+            guard !speakers.isEmpty else { continue }
+            if let region = candidate.region,
+                let sameRegion = speakers.first(where: { $0.region == region })
+            {
+                return sameRegion
+            }
+            // The likely region of the candidate's language *with its
+            // script*: bare `zh` maximizes to Hans-CN and would send a
+            // Traditional-script speaker to the wrong likely home; zh-Hant
+            // maximizes to TW.
+            let maximal = Locale.Language(identifier: candidate.language.maximalIdentifier)
+            let likely = Locale.Language(
+                identifier: Locale.Language(
+                    languageCode: maximal.languageCode, script: maximal.script, region: nil
+                ).maximalIdentifier
+            ).region
+            if let likely, let home = speakers.first(where: { $0.region == likely }) {
+                return home
+            }
+            return speakers.min { tag($0) < tag($1) }
+        }
+        return nil
+    }
+
+    /// The refusal for a language no engine ships, named in the user's own
+    /// terms — the old copy blamed "this language" while refusing English.
+    private static func unsupportedLanguage(current: Locale) -> DictationError {
+        let code = current.language.languageCode?.identifier
+        let name = code.flatMap { current.localizedString(forLanguageCode: $0) }
+        return DictationError(
+            reason: "Dictation does not support \(name ?? "this language") yet.",
+            needsSettings: false)
+    }
+
     // MARK: iOS 26 — SpeechAnalyzer
 
     @available(iOS 26.0, *)
     private func startAnalyzer() async throws {
-        let locale = Locale.current
         let supported = await SpeechTranscriber.supportedLocales
+        guard !supported.isEmpty else {
+            // Measured: the simulator ships `SpeechAnalyzer` with an empty
+            // locale catalogue, so *every* start died here blaming the
+            // user's language. An engine with no languages at all is not
+            // that — it is an engine that cannot serve anyone; the legacy
+            // recognizer keeps its own catalogue even there.
+            try await startLegacy()
+            return
+        }
         guard
-            supported.contains(where: {
-                $0.identifier(.bcp47) == locale.identifier(.bcp47)
-            })
+            let locale = Self.resolveRecognitionLocale(
+                supported: supported,
+                current: .current,
+                preferred: Locale.preferredLanguages.map(Locale.init))
         else {
-            throw DictationError(
-                reason: "On-device dictation does not support this language yet.",
-                needsSettings: false)
+            // The analyzer not shipping this language is not the last word —
+            // the legacy engine carries its own, larger catalogue, and its
+            // resolver issues the honest refusal if it cannot serve either.
+            try await startLegacy()
+            return
         }
 
         let transcriber = SpeechTranscriber(
@@ -233,11 +340,18 @@ final class DictationController {
                 reason: "Speech recognition access is off, so dictation cannot run.",
                 needsSettings: true)
         }
-        guard let recognizer = SFSpeechRecognizer(locale: .current) ?? SFSpeechRecognizer(),
-            recognizer.isAvailable
+        guard
+            let locale = Self.resolveRecognitionLocale(
+                supported: Array(SFSpeechRecognizer.supportedLocales()),
+                current: .current,
+                preferred: Locale.preferredLanguages.map(Locale.init))
+        else {
+            throw Self.unsupportedLanguage(current: .current)
+        }
+        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable
         else {
             throw DictationError(
-                reason: "Speech recognition is not available for this language right now.",
+                reason: "Speech recognition is not available right now.",
                 needsSettings: false)
         }
 
@@ -288,6 +402,7 @@ final class DictationController {
     }
 
     private func teardown() {
+        generation += 1
         if #available(iOS 26.0, *), let session = analyzerSession as? AnalyzerSession {
             session.finish()
         }

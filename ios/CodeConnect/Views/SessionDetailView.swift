@@ -1092,7 +1092,10 @@ private struct SessionComposeBar: View {
     // MARK: The circle's state
 
     private var phase: CCVoiceButtonPhase {
-        if dictation.isRecording { return .stop }
+        // Starting reads as stop on purpose: during a first-use model
+        // download the tap must have a visible consequence, and the honest
+        // one is "this cancels what you started".
+        if dictation.isRecording || dictation.isStarting { return .stop }
         if sending { return .sending }
         if sentFlash { return .sent }
         return text.isEmpty ? .dictate : .send
