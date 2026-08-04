@@ -84,6 +84,15 @@ final class SessionState {
     private(set) var permissionMode: String?
     private var permissionModeSeq: UInt64 = 0
 
+    /// The last model this session *confirmed*, and how we know. Seeded by
+    /// the SessionStart hook's `model` field; replaced whenever Claude Code's
+    /// own local-command stdout says "Set model to X…" or "Kept model as X".
+    /// Deliberately named "confirmed", never "current": a picker change made
+    /// at the Mac's keyboard with `s` (session-only) may be unobservable,
+    /// and this app does not present what it cannot know.
+    private(set) var lastConfirmedModel: ConfirmedModel?
+    private var lastConfirmedModelSeq: UInt64 = 0
+
     /// What to tell the reader when this run will never ask them anything.
     ///
     /// `nil` for every mode that can still raise a card, including an unknown one:
@@ -101,6 +110,19 @@ final class SessionState {
         permissionMode == "bypassPermissions"
             ? "Permissions bypassed - this run decides for itself and will not ask you"
             : nil
+    }
+
+    /// What one event says about the session's model, if anything.
+    private static func modelFact(of event: Event) -> ConfirmedModel? {
+        if event.kind == .sessionStart, let name = event.modelName, !name.isEmpty {
+            return ConfirmedModel(name: name, source: "Session start", at: event.date)
+        }
+        if case .output(let line)? = event.localCommand,
+            let name = ModelConfirmation.parse(line)
+        {
+            return ConfirmedModel(name: name, source: "Command confirmation", at: event.date)
+        }
+        return nil
     }
 
     /// Events that arrived at or below the tail — a replay — held back until the
@@ -165,6 +187,13 @@ final class SessionState {
             permissionMode = moded.permissionModeChange
             permissionModeSeq = moded.seq
         }
+        if let confirmed = cached.events.reversed()
+            .compactMap({ event in Self.modelFact(of: event).map { (event.seq, $0) } })
+            .first
+        {
+            lastConfirmedModel = confirmed.1
+            lastConfirmedModelSeq = confirmed.0
+        }
         rebuildTimeline()
     }
 
@@ -203,6 +232,10 @@ final class SessionState {
             if let mode = event.permissionModeChange {
                 permissionMode = mode
                 permissionModeSeq = event.seq
+            }
+            if let fact = Self.modelFact(of: event) {
+                lastConfirmedModel = fact
+                lastConfirmedModelSeq = event.seq
             }
         }
 
@@ -258,6 +291,8 @@ final class SessionState {
         aiTitleSeq = 0
         permissionMode = nil
         permissionModeSeq = 0
+        lastConfirmedModel = nil
+        lastConfirmedModelSeq = 0
         gap = notice
     }
 
@@ -366,6 +401,12 @@ final class SessionState {
             if let mode = event.permissionModeChange {
                 permissionMode = mode
                 permissionModeSeq = event.seq
+            }
+        }
+        for event in incoming where event.seq > lastConfirmedModelSeq {
+            if let fact = Self.modelFact(of: event) {
+                lastConfirmedModel = fact
+                lastConfirmedModelSeq = event.seq
             }
         }
         if events.first?.seq == 1 { headTruncated = false }

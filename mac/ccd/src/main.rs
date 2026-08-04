@@ -9,6 +9,7 @@
 mod apns;
 mod apns_sender;
 mod apns_token;
+mod catalog;
 mod db;
 #[cfg(test)]
 mod fixture_replay;

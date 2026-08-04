@@ -116,7 +116,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     capability — one real APNs notification to the requesting device, so
 ///     the doorbell can be proven rather than trusted. Refused for
 ///     static-token connections and rate-limited per device.
-pub const PROTOCOL_MINOR: u32 = 7;
+///
+///   * `8` — a client can ask which slash commands the session's Claude Code
+///     actually has. [`ws::ClientMessage::GetCommandCatalog`], answered by
+///     [`ws::ServerMessage::CommandCatalog`], gated by the `command_catalog`
+///     capability. The list is read from the installed binary's own
+///     machine-readable init message and cached per binary fingerprint —
+///     never hand-maintained, so a Claude Code upgrade changes the answer
+///     instead of rotting a copy. `unavailable` is a complete answer: the
+///     phone falls back to its conservative static policy, never to guessing.
+pub const PROTOCOL_MINOR: u32 = 8;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

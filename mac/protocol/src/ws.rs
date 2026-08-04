@@ -153,6 +153,17 @@ pub enum ClientMessage {
     GetDiff {
         session_id: String,
     },
+    /// "Which slash commands does this session's Claude Code actually have?"
+    ///
+    /// Answered from the installed binary's own machine-readable init message,
+    /// never from a hand-maintained list — the phone uses it to label commands
+    /// honestly and to refuse, client-side, the picker-shaped ones that would
+    /// open a dialog on the Mac's screen and lock the composer. Session-scoped
+    /// because the binary is: each run registered the executable it was
+    /// launched with, and two sessions may straddle an upgrade.
+    GetCommandCatalog {
+        session_id: String,
+    },
     /// "Push me here." Sent after the phone has been granted notification
     /// permission and Apple has issued a token.
     ///
@@ -236,6 +247,10 @@ pub enum ServerMessage {
     CaptureResult {
         session_id: String,
         text: String,
+    },
+    CommandCatalog {
+        session_id: String,
+        result: CommandCatalogResult,
     },
     Diff {
         session_id: String,
@@ -322,6 +337,11 @@ pub struct Capabilities {
     /// approval as best-effort.
     #[serde(default)]
     pub prompt_identity: bool,
+    /// `get_command_catalog` is answerable. False means the phone has no way
+    /// to know which slash commands the Mac's Claude Code has, and must treat
+    /// typed built-ins by its own static policy alone.
+    #[serde(default)]
+    pub command_catalog: bool,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
@@ -397,6 +417,28 @@ pub struct AnswerOutcome {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// What the daemon knows about the installed Claude Code's slash commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CommandCatalogResult {
+    /// The binary's own inventory, read from its init message. Names come
+    /// without the leading slash, exactly as emitted — the daemon adds and
+    /// invents nothing.
+    Available {
+        commands: Vec<String>,
+        /// The version the init message reported, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude_version: Option<String>,
+        /// When this list was actually read from the binary. A cache hit
+        /// reports the original probe time, not the request time — the age of
+        /// a fact is part of the fact.
+        probed_at: String,
+    },
+    /// No list. A complete answer, not an error: the phone must fall back to
+    /// treating built-ins conservatively, never to guessing.
+    Unavailable { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,10 +704,16 @@ mod tests {
             "`delete_session` — the phone's first and only destructive verb, and \
              the `delete_session` capability that gates it — is minor 7"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 8,
+            "`get_command_catalog` — the phone asking which slash commands the \
+             installed Claude Code actually has, and the `command_catalog` \
+             capability that gates it — is minor 8"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 7);
+        assert_eq!(crate::PROTOCOL_MINOR, 8);
     }
 
     /// **The tags, pinned on this side too.**
@@ -963,7 +1011,51 @@ mod tests {
             session_uid: true,
             send_text_idempotent: true,
             prompt_identity: true,
+            command_catalog: true,
         }
+    }
+
+    #[test]
+    fn command_catalog_round_trips_both_ways() {
+        let ask = ClientMessage::GetCommandCatalog {
+            session_id: "u-1".into(),
+        };
+        let encoded = serde_json::to_string(&ask).unwrap();
+        assert!(
+            encoded.contains(r#""type":"get_command_catalog""#),
+            "{encoded}"
+        );
+        match serde_json::from_str::<ClientMessage>(&encoded).unwrap() {
+            ClientMessage::GetCommandCatalog { session_id } => assert_eq!(session_id, "u-1"),
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        let available = ServerMessage::CommandCatalog {
+            session_id: "u-1".into(),
+            result: CommandCatalogResult::Available {
+                commands: vec!["model".into(), "clear".into()],
+                claude_version: Some("2.1.221".into()),
+                probed_at: "2026-08-04T20:00:00Z".into(),
+            },
+        };
+        let encoded = serde_json::to_string(&available).unwrap();
+        assert!(encoded.contains(r#""status":"available""#), "{encoded}");
+        match serde_json::from_str::<ServerMessage>(&encoded).unwrap() {
+            ServerMessage::CommandCatalog {
+                result: CommandCatalogResult::Available { commands, .. },
+                ..
+            } => assert_eq!(commands, vec!["model".to_string(), "clear".to_string()]),
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        let unavailable = ServerMessage::CommandCatalog {
+            session_id: "u-1".into(),
+            result: CommandCatalogResult::Unavailable {
+                reason: "no binary".into(),
+            },
+        };
+        let encoded = serde_json::to_string(&unavailable).unwrap();
+        assert!(encoded.contains(r#""status":"unavailable""#), "{encoded}");
     }
 
     #[test]

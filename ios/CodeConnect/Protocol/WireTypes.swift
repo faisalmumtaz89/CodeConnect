@@ -373,6 +373,11 @@ struct Capabilities: Codable, Sendable, Hashable {
 
     /// `get_diff` is answerable.
     var servesDiff: Bool { advertises(["diff", "get_diff", "diffs"]) }
+    /// `send_text` accepts `request_id` + `payload_hash` and replays a retry's
+    /// original outcome instead of typing twice.
+    var sendTextIdempotent: Bool { advertises(["send_text_idempotent"]) }
+    /// `get_command_catalog` is answerable.
+    var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
@@ -581,18 +586,39 @@ enum SendTextResult: Sendable, Hashable {
     /// `matched` is the prompt-presence needle that authorised the keystrokes.
     case sent(matched: String)
     case refused(reason: String)
+    /// This exact mutation already landed once; the daemon replayed the
+    /// original outcome instead of typing twice. Only reachable when the
+    /// request carried an identity.
+    case duplicate(matched: String, appliedAt: String)
+    /// The daemon never found out whether the keystrokes landed. Not a
+    /// refusal: a refusal promises nothing was typed, and this promises
+    /// nothing at all.
+    case indeterminate(reason: String)
 }
 
 extension SendTextResult: Codable {
-    private enum CodingKeys: String, CodingKey { case status, matched, reason }
+    private enum CodingKeys: String, CodingKey {
+        case status, matched, reason
+        case appliedAt = "applied_at"
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "sent": self = .sent(matched: try c.decode(String.self, forKey: .matched))
         case "refused": self = .refused(reason: try c.decode(String.self, forKey: .reason))
+        case "duplicate":
+            self = .duplicate(
+                matched: try c.decode(String.self, forKey: .matched),
+                appliedAt: try c.decode(String.self, forKey: .appliedAt))
+        case "indeterminate":
+            self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
         case let other:
-            self = .refused(reason: "unrecognised send_text status: \(other)")
+            // A status this build has never seen is a mutation result it
+            // cannot vouch for. "Refused" would promise nothing was typed —
+            // a promise on the daemon's behalf — so the unknown decodes as
+            // the case that promises nothing.
+            self = .indeterminate(reason: "unrecognised send_text status: \(other)")
         }
     }
 
@@ -604,6 +630,13 @@ extension SendTextResult: Codable {
             try c.encode(matched, forKey: .matched)
         case .refused(let reason):
             try c.encode("refused", forKey: .status)
+            try c.encode(reason, forKey: .reason)
+        case .duplicate(let matched, let appliedAt):
+            try c.encode("duplicate", forKey: .status)
+            try c.encode(matched, forKey: .matched)
+            try c.encode(appliedAt, forKey: .appliedAt)
+        case .indeterminate(let reason):
+            try c.encode("indeterminate", forKey: .status)
             try c.encode(reason, forKey: .reason)
         }
     }
@@ -775,9 +808,12 @@ enum ClientMessage: Sendable {
     /// same `request_id`.
     case answer(
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?)
-    case sendText(session: String, text: String, require: PromptPresence?, submit: Bool)
+    case sendText(
+        session: String, text: String, require: PromptPresence?, submit: Bool,
+        requestID: String?, payloadHash: String?)
     case capture(session: String, lines: UInt32?)
     case getDiff(session: String)
+    case getCommandCatalog(session: String)
     /// "Push me here." Sent whenever Apple issues a token, not only at
     /// handshake: permission can be granted mid-session and the token is
     /// reissued on reinstall and on restore-from-backup.
@@ -831,6 +867,9 @@ extension ClientMessage: Encodable {
         case .getDiff(let session):
             try c.encode("get_diff", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+        case .getCommandCatalog(let session):
+            try c.encode("get_command_catalog", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
         case .sessions:
             try c.encode("sessions", forKey: .type)
         case .subscribe(let session, let afterSeq):
@@ -855,12 +894,17 @@ extension ClientMessage: Encodable {
             // to: `ws.rs` reads `Option<String>`, and a null would decode as
             // "no scope" anyway while making the frame wrong to read.
             try c.encodeIfPresent(session, forKey: .sessionID)
-        case .sendText(let session, let text, let require, let submit):
+        case .sendText(
+            let session, let text, let require, let submit, let requestID, let payloadHash):
             try c.encode("send_text", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(text, forKey: .text)
             try c.encodeIfPresent(require, forKey: .require)
             try c.encode(submit, forKey: .submit)
+            // Omitted, never null: the daemon reads `Option<String>` and a
+            // null would say "present but empty".
+            try c.encodeIfPresent(requestID, forKey: .requestID)
+            try c.encodeIfPresent(payloadHash, forKey: .payloadHash)
         case .capture(let session, let lines):
             try c.encode("capture", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -1006,6 +1050,55 @@ enum TestPushResult: Decodable, Sendable, Hashable {
     }
 }
 
+/// What the Mac knows about its Claude Code's slash commands.
+enum CommandCatalogResult: Sendable, Hashable {
+    /// The binary's own inventory — names without the leading slash, exactly
+    /// as it emitted them. `probedAt` is when the list was actually read; a
+    /// cache hit keeps the original stamp because the age of a fact is part
+    /// of the fact.
+    case available(commands: [String], claudeVersion: String?, probedAt: String)
+    /// A complete answer, not an error: the phone falls back to its
+    /// conservative static policy, never to guessing.
+    case unavailable(reason: String)
+}
+
+extension CommandCatalogResult: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case status, commands, reason
+        case claudeVersion = "claude_version"
+        case probedAt = "probed_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "available":
+            self = .available(
+                commands: try c.decode([String].self, forKey: .commands),
+                claudeVersion: try c.decodeIfPresent(String.self, forKey: .claudeVersion),
+                probedAt: try c.decode(String.self, forKey: .probedAt))
+        case "unavailable":
+            self = .unavailable(reason: try c.decode(String.self, forKey: .reason))
+        case let other:
+            self = .unavailable(reason: "unrecognised catalog status: \(other)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .available(let commands, let claudeVersion, let probedAt):
+            try c.encode("available", forKey: .status)
+            try c.encode(commands, forKey: .commands)
+            try c.encodeIfPresent(claudeVersion, forKey: .claudeVersion)
+            try c.encode(probedAt, forKey: .probedAt)
+        case .unavailable(let reason):
+            try c.encode("unavailable", forKey: .status)
+            try c.encode(reason, forKey: .reason)
+        }
+    }
+}
+
 enum ServerMessage: Sendable {
     case helloAck(HelloAck)
     case sessions([SessionSummary])
@@ -1013,6 +1106,7 @@ enum ServerMessage: Sendable {
     case answerResult(requestID: String, result: AnswerResult)
     case sendTextResult(sessionID: String, result: SendTextResult)
     case captureResult(sessionID: String, text: String)
+    case commandCatalog(sessionID: String, result: CommandCatalogResult)
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
@@ -1086,6 +1180,10 @@ extension ServerMessage: Decodable {
             self = .captureResult(
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 text: try c.decode(String.self, forKey: .text))
+        case "command_catalog":
+            self = .commandCatalog(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                result: try c.decode(CommandCatalogResult.self, forKey: .result))
         case "error":
             self = .error(
                 code: try c.decode(String.self, forKey: .code),

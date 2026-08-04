@@ -26,6 +26,13 @@ enum ComposeAttempt: Sendable, Equatable {
     case sent(matched: String)
     case refused(String)
     case failed(String)
+    /// This exact text already landed once — the retry was recognised and
+    /// replayed, not typed twice. As final as `.sent`.
+    case alreadyApplied(appliedAt: String)
+    /// Nobody knows whether it was typed. The composer keeps the text and the
+    /// same identity, so an explicit re-send is a recognisable retry instead
+    /// of a second typing.
+    case indeterminate(String)
 }
 
 /// Why a diff request ended in nothing — and, decisively, **who said so**.
@@ -963,12 +970,16 @@ final class AppModel {
             // The daemon accepted this credential, which is the only proof a
             // hand-typed token ever gets.
             commitPendingPairing()
+            // A failure recorded against the old connection says nothing
+            // about this one — the daemon may have been upgraded under us.
+            commandCatalogFailures.removeAll()
             // A certificate the pairing's address can never validate is a fact
             // worth stating, not a silent downgrade.
             pairing.noteTLSUnusable(
                 ack.capabilities.tls && pairing.endpoint?.hostIsIPLiteral == true)
             startCacheMigration()
-        case .answerResult, .sendTextResult, .captureResult, .diff, .error, .pong, .unknown:
+        case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
+            .pong, .unknown:
             break
         }
     }
@@ -1213,6 +1224,12 @@ final class AppModel {
         states.removeValue(forKey: key)
         diffs.removeValue(forKey: key)
         pendingCacheWrites.remove(key)
+        commandCatalogs.removeValue(forKey: key)
+        commandCatalogFailures.removeValue(forKey: key)
+        // A departed run's unsettled mutations die with it. Left behind, a
+        // reused session *name* would collide a brand-new send with a dead
+        // mutation's identity and the daemon would refuse it as a conflict.
+        pendingSendIdentities = pendingSendIdentities.filter { $0.key.key != key }
         ReviewMarks.forget(sessionKey: key)
         enqueueCacheWork { await $0.clearEvents(key: key) }
     }
@@ -1328,20 +1345,136 @@ final class AppModel {
     /// *now* — and typing into the wrong agent's TTY is not a mistake that can
     /// be taken back.
     func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
+        // The policy stands between EVERY caller and the wire — the composer,
+        // a denial reason, a diff comment. A deny reason that happens to
+        // start with `/config` would otherwise recreate the measured Mac
+        // dialog lockout through the side door.
+        switch ClaudeCommandPolicy.action(for: text, catalog: commandCatalogs[key]) {
+        case .nativeModel:
+            return .refused("/model has its own control in the app — use the Model sheet.")
+        case .blocked(_, let reason):
+            return .refused(reason)
+        case .passThrough:
+            break
+        }
+        return await sendUnchecked(text: text, to: key, submit: submit)
+    }
+
+    /// The native `/model` adapter's own injection — the ONE path that may
+    /// carry a slash command past the policy, because the sheet *is* the
+    /// policy's answer for it.
+    func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
+        await sendUnchecked(text: "/model \(argument)", to: key, submit: true)
+    }
+
+    private func sendUnchecked(
+        text: String, to key: String, submit: Bool
+    ) async -> ComposeAttempt {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
             return .failed("This daemon does not accept typed text.")
         }
+        // Every send carries an identity, so a retry is recognisable instead
+        // of being typed twice. The id is fresh per mutation — except after
+        // an indeterminate outcome, where re-sending the *same mutation*
+        // (same session, text, and submit flag) reuses the original id on
+        // purpose: that is the retry the ledger exists to recognise, and the
+        // daemon replays the settled outcome instead of typing again.
+        let mutation = SendMutationKey(key: key, text: trimmed, submit: submit)
+        let requestID = pendingSendIdentities[mutation] ?? UUID().uuidString.lowercased()
+        let payloadHash = SendTextIdentity.payloadHash(
+            session: key, text: trimmed, submit: submit)
         do {
             let result = try await connection.sendText(
-                session: key, text: trimmed, require: .inputBox, submit: submit)
+                session: key, text: trimmed, require: .inputBox, submit: submit,
+                requestID: requestID, payloadHash: payloadHash)
             switch result {
-            case .sent(let matched): return .sent(matched: matched)
-            case .refused(let reason): return .refused(reason)
+            case .sent(let matched):
+                pendingSendIdentities[mutation] = nil
+                return .sent(matched: matched)
+            case .refused(let reason):
+                // A refusal promises nothing was typed, so the next attempt
+                // is a fresh mutation, not a retry of this one.
+                pendingSendIdentities[mutation] = nil
+                return .refused(reason)
+            case .duplicate(_, let appliedAt):
+                pendingSendIdentities[mutation] = nil
+                return .alreadyApplied(appliedAt: appliedAt)
+            case .indeterminate(let reason):
+                retainIdentityIfListed(mutation, requestID)
+                return .indeterminate(reason)
             }
         } catch {
+            // The transport died before an answer. The mutation may have been
+            // claimed, so the identity is kept for the same reason as above.
+            retainIdentityIfListed(mutation, requestID)
             return .failed(error.localizedDescription)
+        }
+    }
+
+    /// Keeps an unsettled mutation's identity — unless its session departed
+    /// while the send was in flight. The departure sweep already ran; writing
+    /// after it would park a dead identity under a session *name* the next
+    /// run may reuse, and that run's first send would be refused as a
+    /// conflict with a mutation it never made.
+    private func retainIdentityIfListed(_ mutation: SendMutationKey, _ requestID: String) {
+        guard summaries.contains(where: { $0.sessionKey == mutation.key }) else { return }
+        pendingSendIdentities[mutation] = requestID
+    }
+
+    /// Unsettled mutations, each under its full identity key. A dictionary,
+    /// not a slot: an indeterminate send in one session must survive settled
+    /// sends in every other, or the promised retry recognition silently
+    /// stops holding exactly when two sessions are busy.
+    private struct SendMutationKey: Hashable {
+        let key: String
+        let text: String
+        let submit: Bool
+    }
+    private var pendingSendIdentities: [SendMutationKey: String] = [:]
+
+    /// The installed Claude Code's slash-command inventory for one session,
+    /// fetched once and kept. `nil` while never asked; a failure records its
+    /// reason so the palette can say why instead of guessing.
+    private(set) var commandCatalogs: [String: [String]] = [:]
+    private(set) var commandCatalogFailures: [String: String] = [:]
+    private var catalogFetchesInFlight: Set<String> = []
+
+    func fetchCommandCatalog(for key: String) async {
+        if commandCatalogs[key] != nil { return }
+        // One fetch at a time per session: the palette can appear and
+        // disappear faster than a probe answers.
+        guard !catalogFetchesInFlight.contains(key) else { return }
+        catalogFetchesInFlight.insert(key)
+        defer { catalogFetchesInFlight.remove(key) }
+        guard let capabilities = connection.capabilities else {
+            // Handshake still in flight: no claim can be made either way.
+            // The palette's task re-fires when capabilities arrive, so this
+            // is a wait, not a failure — recording one here left the palette
+            // stuck on a lie after reconnects.
+            return
+        }
+        guard capabilities.servesCommandCatalog else {
+            commandCatalogFailures[key] =
+                "This Mac's daemon predates command discovery. Update it with codeconnect update."
+            return
+        }
+        do {
+            let result = try await connection.commandCatalog(session: key)
+            // The session may have departed while the probe ran; writing the
+            // answer back would resurrect state the sweep just removed.
+            guard summaries.contains(where: { $0.sessionKey == key }) else { return }
+            switch result {
+            case .available(let commands, _, _):
+                commandCatalogs[key] = commands
+                commandCatalogFailures[key] = nil
+            case .unavailable(let reason):
+                commandCatalogFailures[key] = reason
+            }
+        } catch {
+            guard summaries.contains(where: { $0.sessionKey == key }) else { return }
+            commandCatalogFailures[key] = error.localizedDescription
         }
     }
 

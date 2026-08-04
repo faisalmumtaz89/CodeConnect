@@ -197,6 +197,7 @@ final class DaemonConnection {
     private var answerWaiters: [String: [Waiter<AnswerResult>]] = [:]
     private var sendTextWaiters: [String: [Waiter<SendTextResult>]] = [:]
     private var captureWaiters: [String: [Waiter<String>]] = [:]
+    private var catalogWaiters: [String: [Waiter<CommandCatalogResult>]] = [:]
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
@@ -734,12 +735,31 @@ final class DaemonConnection {
     /// correlating on the string this app chose is exact whether it is a uid or
     /// a name.
     func sendText(
-        session: String, text: String, require: PromptPresence?, submit: Bool
+        session: String, text: String, require: PromptPresence?, submit: Bool,
+        requestID: String? = nil, payloadHash: String? = nil
     ) async throws -> SendTextResult {
-        try await request(
+        #if DEBUG
+            sendTextIdentities.append((requestID: requestID, payloadHash: payloadHash))
+            if let sendTextStub { return try await sendTextStub(session, text) }
+        #endif
+        return try await request(
             key: session,
             store: \.sendTextWaiters,
-            send: .sendText(session: session, text: text, require: require, submit: submit))
+            send: .sendText(
+                session: session, text: text, require: require, submit: submit,
+                requestID: requestID, payloadHash: payloadHash))
+    }
+
+    /// Which slash commands the session's Claude Code actually has, from the
+    /// daemon's probe of the installed binary.
+    func commandCatalog(session: String) async throws -> CommandCatalogResult {
+        #if DEBUG
+            if let catalogStub { return try await catalogStub(session) }
+        #endif
+        return try await request(
+            key: session,
+            store: \.catalogWaiters,
+            send: .getCommandCatalog(session: session))
     }
 
     /// Ask the Mac to forget one ended run. Keyed by uid, which is also the
@@ -873,6 +893,10 @@ final class DaemonConnection {
         captureWaiters = [:]
         for queue in captures.values { for w in queue { w.continuation?.resume(throwing: error) } }
 
+        let catalogs = catalogWaiters
+        catalogWaiters = [:]
+        for queue in catalogs.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
         let diffs = diffWaiters
         diffWaiters = [:]
         for queue in diffs.values { for w in queue { w.continuation?.resume(throwing: error) } }
@@ -967,6 +991,8 @@ final class DaemonConnection {
             deliver(store: \.sendTextWaiters, key: sessionID, value: result)
         case .captureResult(let sessionID, let text):
             deliver(store: \.captureWaiters, key: sessionID, value: text)
+        case .commandCatalog(let sessionID, let result):
+            deliver(store: \.catalogWaiters, key: sessionID, value: result)
         case .deleteSessionResult(let sessionUID, let result):
             deliver(store: \.deleteWaiters, key: sessionUID, value: result)
         case .testPushResult(let requestID, let result):
@@ -1048,6 +1074,13 @@ final class DaemonConnection {
         var testPushStub: ((String) async throws -> TestPushResult)?
         /// Uids passed to `deleteSession`, in order, whether stubbed or not.
         private(set) var deleteRequests: [String] = []
+        /// Test seam: answer `sendText` locally, and record each request's
+        /// identity — the retry-recognition tests need to see whether two
+        /// attempts carried the same `request_id`, which no result can say.
+        var sendTextStub: ((String, String) async throws -> SendTextResult)?
+        /// Test seam: answer `commandCatalog` locally.
+        var catalogStub: ((String) async throws -> CommandCatalogResult)?
+        private(set) var sendTextIdentities: [(requestID: String?, payloadHash: String?)] = []
 
         /// Test seam: claim a set of capabilities without a handshake.
         ///

@@ -810,6 +810,10 @@ where
                 }
             }
         }
+        ClientMessage::GetCommandCatalog { session_id } => {
+            let result = daemon.command_catalog(&session_id).await;
+            send(sink, &ServerMessage::CommandCatalog { session_id, result }).await?;
+        }
         ClientMessage::GetDiff { session_id } => match daemon.diff(&session_id).await {
             Ok(diff) => {
                 let (unified, truncated) = fit_diff_in_a_frame(diff.unified, diff.truncated);
@@ -1082,6 +1086,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool) -> Capabilities {
         session_uid: true,
         send_text_idempotent: true,
         prompt_identity: true,
+        command_catalog: true,
     }
 }
 

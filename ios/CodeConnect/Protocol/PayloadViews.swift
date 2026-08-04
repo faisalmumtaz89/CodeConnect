@@ -127,6 +127,16 @@ extension Event {
         return payload["permissionMode"]?.stringValue
     }
 
+    /// The transcript's local-command shape, when this user line is one —
+    /// see `LocalCommandLine`. Checked before `userText` by the timeline
+    /// builder, so command markup never renders as a person's words.
+    var localCommand: LocalCommandLine? {
+        guard kind == .userMessage,
+            let content = payload["message"]?["content"]?.stringValue
+        else { return nil }
+        return LocalCommandLine.parse(content)
+    }
+
     /// A user turn's prose. `message.content` is a bare string for typed
     /// prompts and a block array when the CLI attaches context.
     var userText: String? {

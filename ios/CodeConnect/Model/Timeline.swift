@@ -187,7 +187,35 @@ enum TimelineBuilder {
         for event in events {
             switch event.kind {
             case .userMessage:
-                if let text = event.userText {
+                // Local-command lines first: a built-in slash command records
+                // itself as XML-ish markup in user-type lines (measured:
+                // caveat, invocation, stdout), and rendering those as a
+                // person's words shows tag soup under a YOU label. The
+                // invocation renders as the command the user actually issued;
+                // Claude Code's stdout renders as the notice it is; the
+                // caveat is boilerplate addressed to the model, not a message.
+                if let local = event.localCommand {
+                    switch local {
+                    case .caveat:
+                        break
+                    case .invocation:
+                        if let text = local.invocationText {
+                            items.append(event.item(.userMessage(text)))
+                        }
+                    case .output(let text):
+                        if !text.isEmpty {
+                            items.append(
+                                event.item(
+                                    .notice(
+                                        NoticeItem(
+                                            kind: .other,
+                                            symbol: "terminal",
+                                            title: text,
+                                            detail: nil,
+                                            severity: .info))))
+                        }
+                    }
+                } else if let text = event.userText {
                     items.append(event.item(.userMessage(text)))
                 }
 

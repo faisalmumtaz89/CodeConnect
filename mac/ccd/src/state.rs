@@ -286,6 +286,22 @@ struct Inner {
     /// winner's ledger write before it can be told the original outcome, and the
     /// wait spans an await (typing into a TTY).
     answer_locks: HashMap<ApprovalId, Arc<Mutex<()>>>,
+    /// Catalogs already read, keyed by binary fingerprint. One binary, one
+    /// probe: a cache hit answers with the original `probed_at`, because the
+    /// age of a fact is part of the fact. In-memory on purpose — a daemon
+    /// restart re-probing once is cheaper than a persisted cache that can go
+    /// stale invisibly.
+    command_catalogs: HashMap<String, crate::catalog::Catalog>,
+    /// Failed probes, remembered briefly. Without this, "singleflight" is a
+    /// fiction for failures: the waiters queued behind a failed probe each
+    /// find an empty cache and launch their own child, serially. A failure
+    /// is not forever — the binary may be fixed or the load transient — so
+    /// the memory expires instead of poisoning the fingerprint.
+    catalog_failures: HashMap<String, (String, std::time::Instant)>,
+    /// One probe in flight per fingerprint. Two palettes opening at once must
+    /// share a single child process, not race two — the lock is taken across
+    /// the re-check-then-probe, so the loser finds the winner's cache entry.
+    catalog_probes: HashMap<String, Arc<Mutex<()>>>,
     /// `(session_uid, prompt_id, tool_name, input_hash)` -> `tool_use_id`.
     ///
     /// PermissionRequest carries no `tool_use_id` on claude 2.1.220, but the
@@ -314,6 +330,11 @@ pub struct SupervisorHandle {
     tx: mpsc::Sender<DaemonFrame>,
     inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
+    /// The executable this run was launched with, as the supervisor reported
+    /// it. The command catalog is read from *this* binary: two sessions may
+    /// straddle an upgrade, and the phone's palette must describe the one it
+    /// is typing into.
+    claude_bin: Option<String>,
     /// Which registration this handle belongs to. A supervisor that reconnects
     /// registers again under the same uid, so "remove the entry for this uid" is
     /// not the same question as "remove *my* entry".
@@ -2350,6 +2371,131 @@ impl Daemon {
         self.capture_run(&session_uid, lines).await
     }
 
+    /// Which slash commands this session's Claude Code has, from the binary
+    /// itself. `Unavailable` is a complete answer — the phone falls back to
+    /// its conservative static policy — so every failure path returns one
+    /// with its reason rather than an error.
+    pub async fn command_catalog(&self, session_ref: &str) -> protocol::ws::CommandCatalogResult {
+        use protocol::ws::CommandCatalogResult;
+
+        let row = match self.resolve(session_ref).await {
+            Ok(row) => row,
+            Err(err) => {
+                return CommandCatalogResult::Unavailable {
+                    reason: format!("{err}"),
+                }
+            }
+        };
+        let claude_bin = {
+            let inner = self.inner.lock().await;
+            inner
+                .supervisors
+                .get(&row.session_uid)
+                .and_then(|handle| handle.claude_bin.clone())
+        };
+        let Some(claude_bin) = claude_bin else {
+            // An adopted run, an exited one, or a supervisor predating the
+            // field: nothing to probe, and guessing at a path would answer
+            // for a binary this session never ran.
+            return CommandCatalogResult::Unavailable {
+                reason: "this session did not report its Claude Code binary".into(),
+            };
+        };
+        let bin_path = std::path::PathBuf::from(&claude_bin);
+        let fingerprint = match crate::catalog::fingerprint(&bin_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(err) => {
+                return CommandCatalogResult::Unavailable {
+                    reason: format!("{err:#}"),
+                }
+            }
+        };
+
+        // Singleflight: the per-fingerprint lock is held across the cache
+        // re-check and the probe, so a second asker waits for the first's
+        // answer instead of spawning a second child.
+        let flight = {
+            let mut inner = self.inner.lock().await;
+            inner
+                .catalog_probes
+                .entry(fingerprint.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = flight.lock().await;
+        let result = self
+            .command_catalog_locked(&fingerprint, &bin_path, &row.cwd)
+            .await;
+        drop(guard);
+        // The flight entry has done its job on every path; the caches carry
+        // the answer.
+        self.inner.lock().await.catalog_probes.remove(&fingerprint);
+        result
+    }
+
+    /// The half that runs under the fingerprint's flight lock.
+    async fn command_catalog_locked(
+        &self,
+        fingerprint: &str,
+        bin_path: &std::path::Path,
+        cwd: &str,
+    ) -> protocol::ws::CommandCatalogResult {
+        use protocol::ws::CommandCatalogResult;
+
+        /// How long a failed probe answers for its fingerprint. Long enough
+        /// that the waiters queued behind one failure share it instead of
+        /// each spawning a child; short enough that a fixed binary or a
+        /// passing load spike is retried without operator ceremony.
+        const FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+        {
+            let inner = self.inner.lock().await;
+            if let Some(cached) = inner.command_catalogs.get(fingerprint).cloned() {
+                return CommandCatalogResult::Available {
+                    commands: cached.commands,
+                    claude_version: cached.claude_version,
+                    probed_at: cached.probed_at,
+                };
+            }
+            if let Some((reason, at)) = inner.catalog_failures.get(fingerprint) {
+                if at.elapsed() < FAILURE_TTL {
+                    return CommandCatalogResult::Unavailable {
+                        reason: reason.clone(),
+                    };
+                }
+            }
+        }
+
+        // Config-owned budget, clamped: a typo'd 3ms would turn every probe
+        // into a phantom failure, and ten minutes would hang a palette.
+        let deadline =
+            std::time::Duration::from_millis(self.config.catalog_probe_ms.clamp(500, 30_000));
+        match crate::catalog::probe_with(bin_path, std::path::Path::new(cwd), deadline).await {
+            Ok(catalog) => {
+                let result = CommandCatalogResult::Available {
+                    commands: catalog.commands.clone(),
+                    claude_version: catalog.claude_version.clone(),
+                    probed_at: catalog.probed_at.clone(),
+                };
+                let mut inner = self.inner.lock().await;
+                inner.catalog_failures.remove(fingerprint);
+                inner
+                    .command_catalogs
+                    .insert(fingerprint.to_string(), catalog);
+                result
+            }
+            Err(err) => {
+                let reason = format!("{err:#}");
+                let mut inner = self.inner.lock().await;
+                inner.catalog_failures.insert(
+                    fingerprint.to_string(),
+                    (reason.clone(), std::time::Instant::now()),
+                );
+                CommandCatalogResult::Unavailable { reason }
+            }
+        }
+    }
+
     /// A snapshot for a human to read: scrollback included.
     async fn capture_run(&self, session_uid: &str, lines: u32) -> Result<String> {
         self.capture_pane(session_uid, lines, false).await
@@ -2459,6 +2605,7 @@ impl Daemon {
                     next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                     epoch,
                     protocol_minor: info.protocol_minor,
+                    claude_bin: info.claude_bin.clone(),
                 },
             );
             inner
@@ -4559,6 +4706,164 @@ mod tests {
             )
             .await
             .expect("registration must succeed")
+    }
+
+    /// The same, reporting the executable it launched — what the command
+    /// catalog reads.
+    async fn register_with_claude_bin(
+        daemon: &Arc<Daemon>,
+        name: &str,
+        uid: Option<&str>,
+        claude_bin: &std::path::Path,
+    ) -> Registration {
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: name.to_string(),
+                    session_uid: uid.map(str::to_string),
+                    tmux_session: name.to_string(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".to_string(),
+                    supervisor_pid: 4242,
+                    claude_bin: Some(claude_bin.display().to_string()),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("registration must succeed")
+    }
+
+    #[tokio::test]
+    async fn the_command_catalog_is_read_once_per_binary_and_cached() {
+        let daemon = test_daemon();
+        // The fake counts its own invocations, so the cache claim is a
+        // measured fact rather than an implementation hope.
+        let bin = crate::catalog::test_bin::answering_binary();
+        let count = bin.parent().unwrap().join("count");
+        let script = format!(
+            "echo run >> {}\ncat <<'CCEOF'\n{}\nCCEOF\nsleep 30\n",
+            count.display(),
+            crate::catalog::test_bin::MEASURED_INIT.trim_end()
+        );
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}")).unwrap();
+
+        let registration = register_with_claude_bin(&daemon, "cc-7", None, &bin).await;
+        let uid = registration.session.uid.clone();
+
+        let first = daemon.command_catalog(&uid).await;
+        let protocol::ws::CommandCatalogResult::Available {
+            commands,
+            claude_version,
+            probed_at,
+        } = first
+        else {
+            panic!("first read must be available: {first:?}");
+        };
+        assert!(commands.iter().any(|c| c == "model"));
+        assert_eq!(claude_version.as_deref(), Some("2.1.221"));
+
+        let second = daemon.command_catalog(&uid).await;
+        let protocol::ws::CommandCatalogResult::Available {
+            probed_at: second_probed_at,
+            ..
+        } = second
+        else {
+            panic!("second read must be available");
+        };
+        assert_eq!(
+            probed_at, second_probed_at,
+            "a cache hit reports when the fact was read, not when it was asked for"
+        );
+        let runs = std::fs::read_to_string(&count).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 1, "one binary, one probe: {runs:?}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_catalog_asks_share_one_probe() {
+        let daemon = test_daemon();
+        let bin = crate::catalog::test_bin::answering_binary();
+        let count = bin.parent().unwrap().join("count");
+        let script = format!(
+            "echo run >> {}\nsleep 0.2\ncat <<'CCEOF'\n{}\nCCEOF\nsleep 30\n",
+            count.display(),
+            crate::catalog::test_bin::MEASURED_INIT.trim_end()
+        );
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}")).unwrap();
+
+        let registration = register_with_claude_bin(&daemon, "cc-9", None, &bin).await;
+        let uid = registration.session.uid.clone();
+
+        let (first, second) =
+            tokio::join!(daemon.command_catalog(&uid), daemon.command_catalog(&uid));
+        for result in [first, second] {
+            assert!(
+                matches!(result, protocol::ws::CommandCatalogResult::Available { .. }),
+                "{result:?}"
+            );
+        }
+        let runs = std::fs::read_to_string(&count).unwrap_or_default();
+        assert_eq!(
+            runs.lines().count(),
+            1,
+            "two simultaneous askers must share one child: {runs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_failed_asks_share_one_probe_too() {
+        let daemon = test_daemon();
+        let bin = crate::catalog::test_bin::answering_binary();
+        let count = bin.parent().unwrap().join("count");
+        // Counts its runs, then exits without ever saying init: a failure.
+        let script = format!("echo run >> {}\nsleep 0.2\nexit 0\n", count.display());
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}")).unwrap();
+
+        let registration = register_with_claude_bin(&daemon, "cc-10", None, &bin).await;
+        let uid = registration.session.uid.clone();
+
+        let (first, second) =
+            tokio::join!(daemon.command_catalog(&uid), daemon.command_catalog(&uid));
+        for result in [first, second] {
+            assert!(
+                matches!(
+                    result,
+                    protocol::ws::CommandCatalogResult::Unavailable { .. }
+                ),
+                "{result:?}"
+            );
+        }
+        let runs = std::fs::read_to_string(&count).unwrap_or_default();
+        assert_eq!(
+            runs.lines().count(),
+            1,
+            "a failure answers its waiters too — one child, not one each: {runs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_reported_binary_gets_a_complete_unavailable() {
+        let daemon = test_daemon();
+        let registration = register(&daemon, "cc-8", None).await;
+        let result = daemon.command_catalog(&registration.session.uid).await;
+        let protocol::ws::CommandCatalogResult::Unavailable { reason } = result else {
+            panic!("no binary, no catalog: {result:?}");
+        };
+        assert!(reason.contains("did not report"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_session_gets_an_unavailable_not_an_error() {
+        let daemon = test_daemon();
+        let result = daemon.command_catalog("u-never-existed").await;
+        assert!(matches!(
+            result,
+            protocol::ws::CommandCatalogResult::Unavailable { .. }
+        ));
     }
 
     // ------------------------------------------------------ fake supervisor

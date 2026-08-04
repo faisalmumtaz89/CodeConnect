@@ -1411,11 +1411,14 @@ private struct DiffCommentSheet: View {
             let attempt = await model.send(text: "\(target.anchor): \(text)", to: key)
             sending = false
             result = attempt
-            if case .sent = attempt {
+            switch attempt {
+            case .sent, .alreadyApplied:
+                // Either way the comment is in the session — an earlier
+                // attempt's landing is a landing.
                 CCHaptic.success.fire()
                 try? await Task.sleep(for: .seconds(0.6))
                 dismiss()
-            } else {
+            case .refused, .failed, .indeterminate:
                 CCHaptic.failure.fire()
             }
         }
@@ -1426,20 +1429,25 @@ private struct DiffCommentSheet: View {
         case .sent: return "Sent"
         case .refused: return "Refused"
         case .failed: return "Failed"
+        case .alreadyApplied: return "Already sent"
+        case .indeterminate: return "Unconfirmed"
         }
     }
 
     private func resultMessage(_ attempt: ComposeAttempt) -> String {
         switch attempt {
         case .sent(let matched): return "The daemon typed it into \(matched)."
-        case .refused(let reason), .failed(let reason): return reason
+        case .refused(let reason), .failed(let reason), .indeterminate(let reason):
+            return reason
+        case .alreadyApplied:
+            return "An earlier attempt already typed this; it was not repeated."
         }
     }
 
     private func resultTone(_ attempt: ComposeAttempt) -> CCTone {
         switch attempt {
-        case .sent: return .success
-        case .refused: return .warning
+        case .sent, .alreadyApplied: return .success
+        case .refused, .indeterminate: return .warning
         case .failed: return .danger
         }
     }

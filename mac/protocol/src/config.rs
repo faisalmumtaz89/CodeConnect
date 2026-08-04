@@ -32,6 +32,12 @@ fn default_stale_after_ms() -> u64 {
 fn default_send_keys_delay_ms() -> u64 {
     120
 }
+fn default_catalog_probe_ms() -> u64 {
+    // The measured probe answers in well under a second on an idle machine;
+    // the margin is for a Mac that is busy compiling. A phone palette is
+    // waiting, so this is seconds, not minutes.
+    5_000
+}
 fn default_max_payload_bytes() -> usize {
     512 * 1024
 }
@@ -176,6 +182,11 @@ pub struct Config {
     pub stale_after_ms: u64,
     #[serde(default = "default_send_keys_delay_ms")]
     pub send_keys_delay_ms: u64,
+    /// How long `get_command_catalog` gives the Claude binary to emit its
+    /// init message before the probe is abandoned and the phone told
+    /// `unavailable`.
+    #[serde(default = "default_catalog_probe_ms")]
+    pub catalog_probe_ms: u64,
     #[serde(default = "default_supervisor_timeout_ms")]
     pub supervisor_timeout_ms: u64,
     #[serde(default = "default_max_payload_bytes")]
@@ -367,6 +378,7 @@ impl Default for Config {
             tail_poll_ms: default_tail_poll_ms(),
             stale_after_ms: default_stale_after_ms(),
             send_keys_delay_ms: default_send_keys_delay_ms(),
+            catalog_probe_ms: default_catalog_probe_ms(),
             supervisor_timeout_ms: default_supervisor_timeout_ms(),
             max_payload_bytes: default_max_payload_bytes(),
             input_box_needles: Vec::new(),

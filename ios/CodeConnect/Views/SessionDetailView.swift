@@ -226,6 +226,8 @@ struct SessionDetailView: View {
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
     @State private var composeResult: ComposeAttempt?
+    @State private var showModelSheet = false
+    @State private var modelSheetPrefill = ""
     @State private var composeResultClearTask: Task<Void, Never>?
     @State private var sending = false
     /// The tail-following verdict — a box read only by `TailPill`, never by
@@ -329,16 +331,46 @@ struct SessionDetailView: View {
             // are already typing at the TTY, so a second text field there would
             // be two ways to say the same thing with different consequences.
             if surface == .timeline {
-                SessionComposeBar(
-                    text: $composeText,
-                    result: composeResult,
-                    sending: sending,
-                    displayName: displayName,
-                    summary: summary,
-                    onWhy: { showLinkDetail = true },
-                    onSend: send,
-                    focused: $composerFocused)
+                VStack(spacing: 0) {
+                    if composerShowsPalette {
+                        CommandPalette(
+                            typed: composeText,
+                            catalog: model.commandCatalogs[key],
+                            failure: model.commandCatalogFailures[key],
+                            onModel: {
+                                modelSheetPrefill = ""
+                                showModelSheet = true
+                            },
+                            onBlocked: { reason in
+                                noteComposeResult(.refused(reason))
+                            })
+                    }
+                    SessionComposeBar(
+                        text: $composeText,
+                        result: composeResult,
+                        sending: sending,
+                        displayName: displayName,
+                        summary: summary,
+                        onWhy: { showLinkDetail = true },
+                        onSend: send,
+                        focused: $composerFocused)
+                }
+                .task(id: paletteFetchKey) {
+                    // Re-fires when the palette appears AND when the
+                    // handshake lands mid-palette: a reconnect while "/" is
+                    // typed must not strand "Reading…" forever.
+                    guard composerShowsPalette else { return }
+                    await model.fetchCommandCatalog(for: key)
+                }
             }
+        }
+        .sheet(isPresented: $showModelSheet) {
+            ModelSheet(
+                sessionKey: key,
+                prefill: modelSheetPrefill,
+                onOpenTerminal: { surface = .terminal }
+            )
+            .environment(model)
         }
         .sheet(item: $openApproval) { approval in
             DecisionCardSheet(approval: approval)
@@ -769,8 +801,58 @@ struct SessionDetailView: View {
 
     // MARK: Compose
 
+    /// What makes the catalog fetch re-run: the palette's visibility and the
+    /// connection's readiness to answer. Tri-state on purpose — a handshake
+    /// still in flight ("waiting") and an older daemon that answered without
+    /// the capability ("unsupported") are different facts, and collapsing
+    /// them to one boolean left the palette stuck on "Reading…" whenever the
+    /// answer arrived as *no*.
+    private var paletteFetchKey: String {
+        let readiness: String
+        switch model.connection.capabilities?.servesCommandCatalog {
+        case .none: readiness = "waiting"
+        case .some(true): readiness = "supported"
+        case .some(false): readiness = "unsupported"
+        }
+        return "\(composerShowsPalette)|\(readiness)"
+    }
+
+    /// The composer starts with `/` and the keyboard is up: the palette's
+    /// moment, and the trigger for the one lazy catalog fetch.
+    private var composerShowsPalette: Bool {
+        composerFocused
+            && composeText.trimmingCharacters(in: .whitespaces).hasPrefix("/")
+    }
+
+    /// One place to show a compose outcome that did not go through `send()` —
+    /// the same note strip, the same 4-second clear.
+    private func noteComposeResult(_ result: ComposeAttempt) {
+        withAnimation(CC.motion.micro) { composeResult = result }
+        composeResultClearTask?.cancel()
+        composeResultClearTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            withAnimation(CC.motion.medium) { composeResult = nil }
+        }
+    }
+
     private func send() {
         let text = composeText
+        // Slash commands answer to the policy before anything reaches the
+        // Mac: `/model` opens the native sheet (measured: its picker form
+        // locks the composer), other built-ins get the honest refusal, and
+        // everything else — prose, custom skills — passes through untouched.
+        switch ClaudeCommandPolicy.action(for: text, catalog: model.commandCatalogs[key]) {
+        case .nativeModel(let prefillArgs):
+            modelSheetPrefill = prefillArgs
+            showModelSheet = true
+            return
+        case .blocked(_, let reason):
+            noteComposeResult(.refused(reason))
+            return
+        case .passThrough:
+            break
+        }
         sending = true
         composeResult = nil
         composeResultClearTask?.cancel()
@@ -778,11 +860,21 @@ struct SessionDetailView: View {
             let result = await model.send(text: text, to: key)
             sending = false
             withAnimation(CC.motion.micro) { composeResult = result }
-            if case .sent = result {
-                // Never optimistic: the field clears only on `.sent`.
+            switch result {
+            case .sent:
+                // Never optimistic: the field clears only on a landed
+                // mutation. Speaking is following: the reply lands at the tail.
                 composeText = ""
-                // Speaking is following: the reply lands at the tail.
                 tailWatch.arrive()
+            case .alreadyApplied:
+                // As final as `.sent` — the original attempt landed.
+                composeText = ""
+                tailWatch.arrive()
+            case .refused, .failed, .indeterminate:
+                // The text stays. For `.indeterminate` specifically, the model
+                // kept the identity, so pressing send again is a recognisable
+                // retry the daemon can answer from its ledger.
+                break
             }
             composeResultClearTask = Task {
                 try? await Task.sleep(for: .seconds(4))
@@ -1251,6 +1343,15 @@ private struct SessionComposeBar: View {
                 glyph: "exclamationmark.triangle.fill")
         case .failed(let reason):
             ComposeNote(text: reason, tone: .danger, glyph: "xmark.octagon.fill")
+        case .alreadyApplied:
+            ComposeNote(
+                text: "Already typed by an earlier attempt — not repeated",
+                tone: .success, glyph: "checkmark")
+        case .indeterminate(let reason):
+            ComposeNote(
+                text: "CodeConnect can't tell whether this landed: \(reason) "
+                    + "Sending again is safe — a retry is recognised, not retyped.",
+                tone: .warning, glyph: "questionmark.circle.fill")
         }
     }
 

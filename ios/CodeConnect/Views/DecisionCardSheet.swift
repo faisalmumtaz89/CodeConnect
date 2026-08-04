@@ -80,6 +80,14 @@ struct ResolutionBanner: View {
             line(
                 "Denied, but the reason failed to send: \(reason)", tone: .warning,
                 glyph: "xmark.octagon.fill")
+        case .alreadyApplied:
+            line(
+                "Your reason was already typed by an earlier attempt.", tone: .success,
+                glyph: "checkmark")
+        case .indeterminate(let reason):
+            line(
+                "Denied; whether the reason was typed is unknown: \(reason)", tone: .warning,
+                glyph: "questionmark.circle.fill")
         }
     }
 

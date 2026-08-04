@@ -114,6 +114,17 @@ mod tests {
         );
     }
 
+    /// The exact vector the iOS client pins too (SendTextIdentityTests): one
+    /// literal on each side is what proves the two implementations are the
+    /// same function rather than two functions that agree on easy inputs.
+    #[test]
+    fn send_text_hash_matches_the_cross_language_vector() {
+        assert_eq!(
+            send_text_hash("cc-1", "hi", true),
+            "832d56d28203c01645209f9b61d192de468301d1c2bdb6090a607b15ab8026a9"
+        );
+    }
+
     #[test]
     fn send_text_hash_covers_every_part_of_the_mutation() {
         let base = send_text_hash("cc-1", "deploy to prod", true);

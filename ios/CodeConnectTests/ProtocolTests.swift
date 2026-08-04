@@ -262,6 +262,104 @@ final class TestPushWireTests: XCTestCase {
 }
 
 
+/// The send_text and catalog wire shapes, pinned byte-for-byte against what
+/// `protocol/src/ws.rs` ships.
+final class SendTextWireTests: XCTestCase {
+
+    private func encoded(_ message: ClientMessage) -> String {
+        String(data: try! JSONEncoder().encode(message), encoding: .utf8)!
+    }
+
+    func testSendTextCarriesItsIdentityAndOmitsAnAbsentOne() {
+        let with = encoded(
+            .sendText(
+                session: "u-1", text: "hi", require: nil, submit: true,
+                requestID: "st-1", payloadHash: "abc123"))
+        XCTAssertTrue(with.contains(#""request_id":"st-1""#), with)
+        XCTAssertTrue(with.contains(#""payload_hash":"abc123""#), with)
+
+        let without = encoded(
+            .sendText(
+                session: "u-1", text: "hi", require: nil, submit: true,
+                requestID: nil, payloadHash: nil))
+        XCTAssertFalse(without.contains("request_id"), "omitted, never null: \(without)")
+        XCTAssertFalse(without.contains("payload_hash"), without)
+    }
+
+    func testGetCommandCatalogEncodesItsType() {
+        let json = encoded(.getCommandCatalog(session: "u-1"))
+        XCTAssertTrue(json.contains(#""type":"get_command_catalog""#), json)
+        XCTAssertTrue(json.contains(#""session_id":"u-1""#), json)
+    }
+
+    private func decodeResult(_ json: String) -> SendTextResult {
+        try! JSONDecoder().decode(SendTextResult.self, from: Data(json.utf8))
+    }
+
+    func testTheFourStatusesDecode() {
+        XCTAssertEqual(
+            decodeResult(#"{"status":"sent","matched":"foragents"}"#),
+            .sent(matched: "foragents"))
+        XCTAssertEqual(
+            decodeResult(#"{"status":"refused","reason":"no composer"}"#),
+            .refused(reason: "no composer"))
+        XCTAssertEqual(
+            decodeResult(
+                #"{"status":"duplicate","matched":"foragents","applied_at":"2026-08-04T20:00:00Z"}"#
+            ),
+            .duplicate(matched: "foragents", appliedAt: "2026-08-04T20:00:00Z"))
+        XCTAssertEqual(
+            decodeResult(#"{"status":"indeterminate","reason":"never confirmed"}"#),
+            .indeterminate(reason: "never confirmed"))
+    }
+
+    /// A status this build has never seen is a mutation result it cannot vouch
+    /// for. "Refused" would promise nothing was typed — a promise made on the
+    /// daemon's behalf — so unknown decodes as the case that promises nothing.
+    func testAnUnknownStatusPromisesNothing() {
+        guard case .indeterminate(let reason) = decodeResult(#"{"status":"teleported"}"#) else {
+            return XCTFail("unknown must decode as indeterminate")
+        }
+        XCTAssertTrue(reason.contains("teleported"), reason)
+    }
+
+    func testTheCommandCatalogDecodesBothAnswers() throws {
+        let payload = #"""
+            {"type":"command_catalog","session_id":"u-1","result":{"status":"available",
+            "commands":["model","clear"],"claude_version":"2.1.221",
+            "probed_at":"2026-08-04T20:00:00Z"}}
+            """#
+        guard
+            case .commandCatalog(let session, .available(let commands, let version, let probedAt)) =
+                try JSONDecoder().decode(ServerMessage.self, from: Data(payload.utf8))
+        else { return XCTFail("wrong decode") }
+        XCTAssertEqual(session, "u-1")
+        XCTAssertEqual(commands, ["model", "clear"])
+        XCTAssertEqual(version, "2.1.221")
+        XCTAssertEqual(probedAt, "2026-08-04T20:00:00Z")
+
+        let unavailable = #"{"type":"command_catalog","session_id":"u-1","result":{"status":"unavailable","reason":"no binary"}}"#
+        guard
+            case .commandCatalog(_, .unavailable(let reason)) = try JSONDecoder().decode(
+                ServerMessage.self, from: Data(unavailable.utf8))
+        else { return XCTFail("wrong decode") }
+        XCTAssertEqual(reason, "no binary")
+    }
+
+    func testTheNewCapabilitiesRead() throws {
+        let caps = try JSONDecoder().decode(
+            Capabilities.self,
+            from: Data(
+                #"{"send_text":true,"send_text_idempotent":true,"command_catalog":true}"#.utf8))
+        XCTAssertTrue(caps.sendTextIdempotent)
+        XCTAssertTrue(caps.servesCommandCatalog)
+        let bare = try JSONDecoder().decode(
+            Capabilities.self, from: Data(#"{"send_text":true}"#.utf8))
+        XCTAssertFalse(bare.sendTextIdempotent, "unknown is always false")
+        XCTAssertFalse(bare.servesCommandCatalog)
+    }
+}
+
 /// The agent-prose renderer's model half: what becomes a code block, what
 /// stays prose, and the rule that malformed fences lose nothing.
 final class AgentProseTests: XCTestCase {
