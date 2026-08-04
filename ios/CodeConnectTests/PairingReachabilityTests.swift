@@ -58,7 +58,7 @@ final class PairingReachabilityTests: XCTestCase {
     func testAnythingThatMightWorkIsStillAccepted() {
         for host in [
             // The ordinary cases: a tailnet address and a MagicDNS name.
-            "100.117.103.23",
+            "100.101.102.103",
             "some-mac.tailnet-example.ts.net",
             // Unfamiliar is not broken. A tailnet with its own domain, or an
             // operator who pinned `ws_bind` to something reachable on purpose.

@@ -220,6 +220,15 @@ pub struct DaemonInfo {
     /// Optional so a newer CLI still reads an older daemon's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_ip: Option<String>,
+    /// The running executable's path and content hash, captured at startup.
+    /// `codeconnect daemon status` re-hashes the file and says so when the
+    /// binary on disk has changed under a still-running daemon — the silent
+    /// state two stale deploys in one day proved needs a voice. Optional so
+    /// a newer CLI still reads an older daemon's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_sha: Option<String>,
     pub sessions: usize,
 }
 
@@ -748,6 +757,8 @@ mod tests {
             launchd_label: Some(crate::LAUNCHD_LABEL.to_string()),
             endpoint_host: "host.ts.net".into(),
             bind_ip: Some("100.64.0.7".into()),
+            exe_path: Some("/Users/dev/.codeconnect/bin/ccd".into()),
+            exe_sha: Some("abc123".into()),
             endpoint_port: 8787,
             tls: true,
             sessions: 2,

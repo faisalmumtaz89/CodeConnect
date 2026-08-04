@@ -291,6 +291,9 @@ fn status() -> Result<()> {
                 info.endpoint_port,
                 info.sessions
             );
+            if let Some(line) = stale_binary_line(&info) {
+                println!("{line}");
+            }
             println!(
                 "managed  {}",
                 match &info.launchd_label {
@@ -307,6 +310,17 @@ fn status() -> Result<()> {
         ),
     }
     println!("logs     {}", protocol::logs_dir().display());
+    // The cached upgrade answer, read-only: no fetch, no hold — status is a
+    // question about now, and the cache is what is known now. The launch
+    // path owns refreshing it. `update_check: false` silences this surface
+    // too: the switch disables the feature everywhere, not merely its
+    // network half.
+    if protocol::config::Config::load().update_check {
+        if let Some(note) = crate::update_check::cached_notice() {
+            println!();
+            println!("{note}");
+        }
+    }
     Ok(())
 }
 
@@ -501,6 +515,21 @@ fn locate(tool: &str) -> Option<PathBuf> {
         .or_else(|| crate::tmux::search_path(tool))
 }
 
+/// The staleness line for `daemon status`, or `None` while the running
+/// daemon and the file on disk agree (or an older daemon has nothing to
+/// compare). The one sentence that would have named both silent stale
+/// deploys this line exists because of.
+fn stale_binary_line(info: &DaemonInfo) -> Option<String> {
+    let (path, running_sha) = (info.exe_path.as_deref()?, info.exe_sha.as_deref()?);
+    let on_disk = protocol::hash::sha256_hex(&std::fs::read(path).ok()?);
+    (on_disk != running_sha).then(|| {
+        format!(
+            "         STALE: the binary at {path} has changed since this daemon \
+             started — `codeconnect daemon restart` picks it up"
+        )
+    })
+}
+
 /// Ask the running daemon who it is. `None` means nothing is answering.
 fn daemon_info() -> Option<DaemonInfo> {
     match crate::daemon::request(&ClientFrame::DaemonInfo) {
@@ -529,6 +558,8 @@ fn legacy_daemon_probe() -> Option<DaemonInfo> {
         launchd_label: None,
         endpoint_host: String::new(),
         bind_ip: None,
+        exe_path: None,
+        exe_sha: None,
         endpoint_port: 0,
         tls: false,
         sessions: 0,
@@ -893,5 +924,45 @@ mod tests {
             "{path:?}"
         );
         assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn the_stale_line_speaks_only_on_a_real_mismatch() {
+        let dir = std::env::temp_dir().join(format!("cc-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ccd");
+        std::fs::write(&path, b"generation one").unwrap();
+        let sha = protocol::hash::sha256_hex(b"generation one");
+        let info = |exe_sha: Option<String>| DaemonInfo {
+            pid: 1,
+            version: "0".into(),
+            protocol_version: 1,
+            protocol_minor: 0,
+            started_at: String::new(),
+            launchd_label: None,
+            endpoint_host: String::new(),
+            endpoint_port: 0,
+            tls: false,
+            bind_ip: None,
+            exe_path: Some(path.to_string_lossy().to_string()),
+            exe_sha,
+            sessions: 0,
+        };
+
+        assert!(
+            stale_binary_line(&info(Some(sha.clone()))).is_none(),
+            "matching bytes stay silent"
+        );
+
+        std::fs::write(&path, b"generation two").unwrap();
+        let line = stale_binary_line(&info(Some(sha))).expect("changed bytes speak");
+        assert!(line.contains("STALE"));
+        assert!(line.contains("codeconnect daemon restart"));
+
+        assert!(
+            stale_binary_line(&info(None)).is_none(),
+            "an older daemon with no hash gets no accusation"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

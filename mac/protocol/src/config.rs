@@ -277,6 +277,15 @@ pub struct Config {
     #[serde(default = "default_tmux_history_limit")]
     pub tmux_history_limit: u32,
 
+    /// Whether `codeconnect claude` may check GitHub's public Releases API
+    /// (in a detached background child, at most once per 24 hours) for a
+    /// newer CodeConnect version, and show the cached answer at launch.
+    /// `false` disables both the network attempt and the cached notice.
+    /// The daemon never phones home either way — this belongs to the CLI a
+    /// human just invoked. See the README's privacy note.
+    #[serde(default = "default_true")]
+    pub update_check: bool,
+
     /// How many tailnet WebSocket connections may exist at once.
     ///
     /// The accept loop used to `spawn` unconditionally, so anything that could
@@ -379,6 +388,7 @@ impl Default for Config {
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
             tmux_history_limit: default_tmux_history_limit(),
+            update_check: true,
             tmux_status: false,
             ws_max_connections: default_ws_max_connections(),
             ws_max_per_peer: default_ws_max_per_peer(),

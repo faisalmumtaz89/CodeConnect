@@ -15,5 +15,7 @@ path = "src/main.rs"
 [dependencies]
 protocol = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 qrcode = { workspace = true }

@@ -152,6 +152,9 @@ pub struct Daemon {
     /// the tests — which never open a real listener — say nothing instead of
     /// inventing an address.
     pub bind_ip: std::sync::OnceLock<String>,
+    /// (path, sha256) of the executable this process is running, captured by
+    /// `main` at startup for the staleness line in `daemon status`.
+    pub exe_identity: std::sync::OnceLock<(String, String)>,
     /// When this process started, and which launchd job it belongs to. Captured
     /// once at construction: `XPC_SERVICE_NAME` is set by launchd at exec, and
     /// reading it later would be reading whatever the environment has become.
@@ -454,6 +457,7 @@ impl Daemon {
             push_gate: Arc::new(crate::push_gate::PushGate::new()),
             endpoint,
             bind_ip: std::sync::OnceLock::new(),
+            exe_identity: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
             launchd_label: launchd_label(),
             inner: Mutex::new(Inner::default()),
@@ -654,6 +658,8 @@ impl Daemon {
             endpoint_port: self.endpoint.port,
             tls: self.endpoint.tls,
             bind_ip: self.bind_ip.get().cloned(),
+            exe_path: self.exe_identity.get().map(|(path, _)| path.clone()),
+            exe_sha: self.exe_identity.get().map(|(_, sha)| sha.clone()),
             sessions: self.inner.lock().await.supervisors.len(),
         }
     }

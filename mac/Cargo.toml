@@ -3,7 +3,7 @@ resolver = "2"
 members = ["protocol", "cc-hook", "ccd", "codeconnect", "soak"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -15,6 +15,10 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# One symbol: flock(2), for the update checker's cross-process throttle. The
+# kernel releases the lock when the holder dies, which is what deletes the
+# entire corpse/staleness/takeover protocol a file-based lock would need.
+libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = [
     "rt-multi-thread",

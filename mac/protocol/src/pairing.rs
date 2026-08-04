@@ -322,7 +322,7 @@ mod tests {
     fn anything_that_might_work_is_allowed_through() {
         for host in [
             // A tailnet address and a MagicDNS name — the ordinary case.
-            "100.117.103.23",
+            "100.101.102.103",
             "some-mac.tailnet-example.ts.net",
             // A tailnet with its own domain, and an operator who pinned `ws_bind`
             // to something reachable on purpose. Unfamiliar is not broken.

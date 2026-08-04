@@ -16,6 +16,7 @@ mod sessions;
 mod settings;
 mod supervisor;
 mod tmux;
+mod update_check;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -43,6 +44,9 @@ fn main() -> Result<()> {
         "daemon" => launchd::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
+        // Hidden: the detached update checker `codeconnect claude` spawns.
+        // Not in --help on purpose — it is machinery, not a command.
+        "__update-check" => update_check::run_checker(),
         "--version" | "version" => {
             println!("codeconnect {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -145,10 +149,34 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
 
-    // After the session and supervisor exist, before the alternate screen: the
-    // hold below must delay only the *display*, never the session it is
-    // promising is unaffected — Claude is already running while this is read.
-    warn_if_phone_unreachable();
+    // After the session and supervisor exist, before the alternate screen:
+    // the hold below delays only the *display*, never the session it is
+    // promising is unaffected — Claude is already running while this is
+    // read. One hold however many notes apply; reachability first, because
+    // a phone that cannot connect at all outranks a version it would fetch.
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(note) = phone_unreachable_note() {
+        notes.push(note);
+    }
+    if config.update_check {
+        if let Some(note) = update_check::cached_notice() {
+            notes.push(note);
+        }
+    }
+    if !notes.is_empty() {
+        eprintln!();
+        for note in &notes {
+            eprintln!("{note}");
+            eprintln!();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    // Fire-and-forget, after the notices so its spawn cost cannot delay
+    // them. The network belongs entirely to the detached child, so the
+    // attach below proceeds without waiting on it.
+    if config.update_check {
+        update_check::spawn_checker_if_due();
+    }
 
     // **Nothing is printed here.**
     //
@@ -164,10 +192,11 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
     unreachable!("exec replaces the process")
 }
 
-/// One warning, printed after the session and supervisor already exist and
-/// held for a beat before the alternate screen takes the terminal, when the
-/// phone cannot reach this Mac — the same fact the app shows as its "Connect
-/// Tailscale" banner, told in the same words at the other keyboard.
+/// The "your phone cannot reach this Mac" note, or `None` while it can —
+/// the same fact the app shows as its "Connect Tailscale" banner, told in
+/// the same words at the other keyboard. Printed by `start_claude` in the
+/// shared pre-attach advisory slot (one 3-second hold however many notes
+/// apply).
 ///
 /// Three states earn it, distinguished because their fixes differ:
 ///
@@ -189,7 +218,7 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 /// with no pause is a warning nobody has ever seen — the tmux client erases
 /// the terminal microseconds after `exec_attach` (measured; see the note
 /// there).
-fn warn_if_phone_unreachable() {
+fn phone_unreachable_note() -> Option<String> {
     // No daemon, no claim: a daemon that is not running is a different
     // conversation, and its absence already has its own surfaces. The
     // timeout is advisory-sized — this check must never make a healthy
@@ -198,20 +227,13 @@ fn warn_if_phone_unreachable() {
         &protocol::ipc::ClientFrame::DaemonInfo,
         std::time::Duration::from_millis(400),
     ) else {
-        return;
+        return None;
     };
     let signal = match protocol::pairing::tailscale_bin() {
         None => TailscaleSignal::NotInstalled,
         Some(bin) => probe_tailscale(&bin),
     };
-    let Some(note) = phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal)
-    else {
-        return;
-    };
-    eprintln!();
-    eprintln!("{note}");
-    eprintln!();
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal)
 }
 
 /// What this Mac's Tailscale is doing right now, as far as an advisory may
@@ -719,7 +741,7 @@ mod tests {
     #[test]
     fn tailnet_shaped_ips_are_cgnat_and_the_tailscale_48_only() {
         assert!(tailnet_shaped_ip("100.64.0.1"));
-        assert!(tailnet_shaped_ip("100.117.103.23"));
+        assert!(tailnet_shaped_ip("100.101.102.103"));
         assert!(tailnet_shaped_ip("100.127.255.254"));
         assert!(
             !tailnet_shaped_ip("100.128.0.1"),

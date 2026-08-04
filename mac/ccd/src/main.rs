@@ -76,6 +76,17 @@ async fn main() -> Result<()> {
     // to the CLI's reachability advisory, which must reason about the socket
     // that exists, not the name the QR advertises.
     let _ = daemon.bind_ip.set(bind.ip().to_string());
+    // Its own bytes, hashed now: the file at this path can change under a
+    // running process (that is the whole point of recording it), so the hash
+    // must be of what was actually loaded, as close to exec as we get.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(bytes) = std::fs::read(&exe) {
+            let _ = daemon.exe_identity.set((
+                exe.to_string_lossy().to_string(),
+                protocol::hash::sha256_hex(&bytes),
+            ));
+        }
+    }
 
     crate::log_info!(
         "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} gate={} hold_ms={} managed={}",

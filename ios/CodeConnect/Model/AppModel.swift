@@ -159,11 +159,20 @@ final class AppModel {
         self.cache = cache
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
-        connection.onConnected = { [weak self] in self?.resubscribeAll() }
+        connection.onConnected = { [weak self] in
+            self?.resubscribeAll()
+            // After every handshake, not only after a pairing: a phone that
+            // paired before push existed must start registering the first
+            // time an upgraded daemon advertises it — and the capability is
+            // only knowable here, once `hello_ack` has landed. Idempotent:
+            // re-registration replaces, the daemon keys on the device.
+            self?.enablePush()
+        }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
             self?.pairing.noteTransport(useTLS: useTLS)
         }
+        installPushWiring()
     }
 
     // MARK: - Lifecycle
@@ -171,6 +180,25 @@ final class AppModel {
     /// Asking iOS for notification permission, and telling the daemon where to
     /// push once Apple issues a token.
     private let pushRegistrar = PushRegistration()
+    #if DEBUG
+        /// Test seams: observe that registration was *requested* and that a
+        /// token delivery was *attempted* — the two separate decisions the
+        /// gates control. Attempted, not completed: the seam fires at the
+        /// post-recheck decision point, before the socket write, because the
+        /// gates are what these tests pin — transport success is the
+        /// connection's own tested concern.
+        /// The real registrar's answer arrives through async system callbacks
+        /// a unit test can neither await nor distinguish from silence —
+        /// an assertion on the authorization outcome passed identically with
+        /// the gate deleted, which is what these seams exist to prevent.
+        var onPushRegistrationRequested: (() -> Void)?
+        var onPushDeliveryAttempted: ((String) -> Void)?
+
+        /// Inject the token Apple would have issued, through the same path.
+        func simulatePushTokenForTesting(_ token: String, environment: String) {
+            acceptPushToken(token, environment: environment)
+        }
+    #endif
     /// What the user actually decided, so the UI can say so rather than imply
     /// it. `nil` until asked.
     private(set) var pushAuthorized: Bool?
@@ -184,23 +212,28 @@ final class AppModel {
         await pushRegistrar.authorizationStatus()
     }
 
-    /// Ask once the phone is paired: a token is worthless before there is a
-    /// device row to store it against, and a permission prompt on the pairing
-    /// screen is a prompt with no context.
-    func enablePush() {
+    /// Whether this launch has already asked iOS for permission and an APNs
+    /// token. Once is enough — Apple re-issues through `onToken` if the token
+    /// rotates. **Requesting and delivering are separate states**: conflated
+    /// into one latch, a re-pair to another Mac in the same launch got no
+    /// token at all (Apple's callback had already come and gone), and a
+    /// delivery that failed mid-flap was never retried.
+    private var pushRequestedThisLaunch = false
+    /// The latest token Apple issued, kept so delivery is repeatable on
+    /// demand: Apple's callback fires when Apple pleases, but the device row
+    /// that needs the token is whichever daemon is connected *now*.
+    private var latestPushToken: (token: String, environment: String)?
+
+    /// The registrar's callbacks and the failure observer, installed exactly
+    /// once. This used to live inside `enablePush`, which is called per
+    /// handshake — every reconnect stacked another observer and another
+    /// pair of closures.
+    private func installPushWiring() {
         pushRegistrar.onAuthorization = { [weak self] granted in
             self?.pushAuthorized = granted
         }
         pushRegistrar.onToken = { [weak self] token, environment in
-            guard let self else { return }
-            Task {
-                do {
-                    try await self.connection.send(
-                        .registerPush(token: token, environment: environment))
-                } catch {
-                    self.pushFailure = error.localizedDescription
-                }
-            }
+            self?.acceptPushToken(token, environment: environment)
         }
         NotificationCenter.default.addObserver(
             forName: PushWire.failureNotification, object: nil, queue: .main
@@ -211,7 +244,75 @@ final class AppModel {
             let reason = note.object as? String
             MainActor.assumeIsolated { self?.pushFailure = reason }
         }
-        pushRegistrar.requestAndRegister()
+    }
+
+    /// Apple issued (or re-issued) a token: remember it, then hand it to
+    /// whichever daemon is connected right now.
+    private func acceptPushToken(_ token: String, environment: String) {
+        latestPushToken = (token, environment)
+        deliverPushToken()
+    }
+
+    /// Whether the *current* connection can accept a push registration: the
+    /// daemon advertises push, and this session has a device row to store
+    /// the token against. One definition, consulted by both the ask and the
+    /// delivery — Apple's callback arrives whenever Apple pleases, including
+    /// after a switch to a Mac this predicate says no to.
+    private var pushEligible: Bool {
+        connection.capabilities?.push == true && connection.helloAck?.deviceID != nil
+    }
+
+    /// Send the cached token to the current connection's device row. Safe to
+    /// repeat: the daemon upserts by device, so re-delivery replaces rather
+    /// than accumulates — which is exactly what a re-pair or a retried flap
+    /// needs. Gated here, at the single choke point, not only at the
+    /// callers: the APNs callback path used to deliver unconditionally, and
+    /// a token that began its journey against an eligible Mac would land on
+    /// whatever ineligible daemon was connected by the time Apple answered.
+    private func deliverPushToken() {
+        guard let latest = latestPushToken, pushEligible else { return }
+        // The send happens a hop later, and the connection can change inside
+        // that hop — a re-pair completing, a handshake replacing the socket.
+        // The eligibility that mattered at the guard is re-established at the
+        // moment of sending, bound to this connection's generation so a
+        // *newer* connection is never handed a delivery that was judged
+        // against an older one. The observation seam sits at this recheck —
+        // the real decision point — not at the guard above.
+        let generation = connection.generation
+        Task {
+            guard connection.generation == generation, pushEligible else { return }
+            #if DEBUG
+                onPushDeliveryAttempted?(latest.token)
+            #endif
+            do {
+                try await connection.send(
+                    .registerPush(token: latest.token, environment: latest.environment))
+            } catch {
+                pushFailure = error.localizedDescription
+            }
+        }
+    }
+
+    /// Runs after every handshake via `onConnected`, gated on the daemon
+    /// being able to ring **this device**: `capabilities.push` alone is
+    /// server-global, and a static-token session has no device row — the
+    /// daemon refuses its registration outright (a push stream no revocation
+    /// could switch off), so asking the user to authorise it would be a
+    /// prompt nothing can honour. The *permission request* happens once per
+    /// launch; the *token delivery* repeats on every eligible handshake, so
+    /// a same-launch re-pair hands the new Mac the token Apple already
+    /// issued, and a delivery that failed while the link flapped is retried
+    /// by the next handshake.
+    func enablePush() {
+        guard pushEligible else { return }
+        if !pushRequestedThisLaunch {
+            pushRequestedThisLaunch = true
+            #if DEBUG
+                onPushRegistrationRequested?()
+            #endif
+            pushRegistrar.requestAndRegister()
+        }
+        deliverPushToken()
     }
 
     func bootstrap() {
@@ -234,12 +335,11 @@ final class AppModel {
         // would spend the single-use code twice.
         if !pairedByCode, let endpoint = pairing.endpoint {
             connect(to: endpoint)
-            // A phone that paired before push existed would otherwise never
-            // register: `adopt(deviceToken:)` only fires on a *new* pairing.
-            // Re-registering is cheap and necessary anyway — APNs reissues the
-            // token on reinstall and on restore-from-backup, and the daemon
-            // keys on the device so this replaces rather than accumulates.
-            enablePush()
+            // Push registration deliberately does NOT happen here: before the
+            // handshake the daemon's capabilities are unknown, and asking for
+            // notification permission on behalf of a daemon that may not
+            // advertise push is a system prompt nothing can honour.
+            // `onConnected` registers once the `hello_ack` says it can ring.
         }
     }
 
@@ -259,10 +359,9 @@ final class AppModel {
         guard let endpoint = pendingPairing ?? pairing.endpoint else { return }
         pairing.adopt(deviceToken: deviceToken, from: endpoint)
         pendingPairing = nil
-        // Only now. A push token has nowhere to live until the device row that
-        // owns it exists, and asking for notification permission on the pairing
-        // screen is a system prompt with no context behind it.
-        enablePush()
+        // No push call here: `onConnected` fires for this same handshake and
+        // is the one registration site — a second call from the pairing path
+        // was a duplicate workflow, measured as stacked observers.
     }
 
     #if DEBUG
@@ -498,7 +597,7 @@ final class AppModel {
         guard let endpoint = pendingPairing, case .token = endpoint.credential else { return }
         pairing.save(endpoint)
         pendingPairing = nil
-        enablePush()
+        // No push call here either — same handshake, same `onConnected`.
     }
 
     /// A different Mac may identify its runs differently, so nothing about the

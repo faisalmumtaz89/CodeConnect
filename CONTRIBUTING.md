@@ -38,6 +38,11 @@ Two traps, both of which have produced false findings here:
 
 Adding or removing a user-visible screen, or a state that concerns safety or honesty, means updating the render catalog in the same change.
 
+## Releasing
+
+Maintainer-only. The exact steps — and the contract behind them, which the
+in-app update checker depends on — live in [`RELEASING.md`](RELEASING.md).
+
 ## Commits
 
 Present tense, and say what changed and why. If a change is driven by a measurement, put the measurement in the message or the comment — the numbers in this codebase are load-bearing.

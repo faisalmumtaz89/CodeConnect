@@ -611,6 +611,17 @@ final class DaemonConnection {
                 continue
             }
 
+            if case .helloAck(let ack) = decoded,
+                let refusal = Self.incompatibility(of: ack)
+            {
+                // The daemon's own `protocol_mismatch` frame handles daemons
+                // new enough to send one; this is the client's half, for a
+                // legacy daemon that predates the frame and answers a
+                // mismatched `hello_ack` as if nothing were wrong. Without
+                // it the app marked itself connected and merely *recorded*
+                // the mismatch — a terminal state presented as a working one.
+                throw ConnectionError.incompatible(refusal)
+            }
             if case .error(let code, let message) = decoded {
                 switch code {
                 case "unauthorized":
@@ -879,6 +890,16 @@ final class DaemonConnection {
         for queue in tests.values { for w in queue { w.continuation?.resume(throwing: error) } }
     }
 
+    /// Why this `hello_ack` cannot be accepted, or `nil` when it can. Pure,
+    /// so the rule is pinned by tests: the *major* version is the breaking
+    /// axis and must match exactly; minors are feature-gated per surface and
+    /// never refused.
+    static func incompatibility(of ack: HelloAck) -> String? {
+        guard ack.protocolVersion != Wire.protocolVersion else { return nil }
+        return
+            "This Mac helper speaks protocol \(ack.protocolVersion); this app speaks \(Wire.protocolVersion). Update CodeConnect on the Mac and try again."
+    }
+
     // MARK: - Inbound
 
     private func handle(_ message: ServerMessage) {
@@ -896,11 +917,11 @@ final class DaemonConnection {
             dialFailure = nil
             isRedial = false
             ledger.reset()
-            lastErrorMessage =
-                ack.protocolVersion == Wire.protocolVersion
-                ? nil
-                : "Daemon speaks protocol \(ack.protocolVersion); this app speaks \(Wire.protocolVersion)"
-            lastErrorAt = lastErrorMessage == nil ? nil : Date()
+            // A mismatched major never reaches this handler — the receive
+            // loop refuses it as incompatible before dispatch — so arriving
+            // here clears any standing complaint.
+            lastErrorMessage = nil
+            lastErrorAt = nil
             // This scheme worked, so it is no longer "the alternate" — it is the
             // answer. Persisting it means the next launch starts on the right
             // one instead of paying for the ladder again.
@@ -1034,11 +1055,17 @@ final class DaemonConnection {
         /// exercise a capability gate has to be able to set both sides of it —
         /// otherwise "the daemon cannot delete" is indistinguishable from "there
         /// is no daemon".
-        func simulateCapabilitiesForTesting(_ capabilities: Capabilities, minor: UInt32) {
+        /// `deviceID` defaults to a real-looking id because that is what a
+        /// paired connection has; pass `nil` to model a static-token session,
+        /// which has no device row and whose push registration the daemon
+        /// refuses outright.
+        func simulateCapabilitiesForTesting(
+            _ capabilities: Capabilities, minor: UInt32, deviceID: String? = "dev-test"
+        ) {
             helloAck = HelloAck(
                 protocolVersion: Wire.protocolVersion, protocolMinor: minor,
                 serverTime: "", capabilities: capabilities, deviceToken: nil,
-                deviceID: nil, deviceName: nil, sshKeyInstalled: nil)
+                deviceID: deviceID, deviceName: nil, sshKeyInstalled: nil)
             self.capabilities = capabilities
         }
     #endif
