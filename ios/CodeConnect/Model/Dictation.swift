@@ -77,14 +77,88 @@ final class DictationController {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var engine: AVAudioEngine?
-    private var relay: AudioTapRelay?
-    private var legacyRecognizer: SFSpeechRecognizer?
-    private var legacyTask: SFSpeechRecognitionTask?
-    /// `AnalyzerSession` on iOS 26. Typed `Any` so the stored property does
-    /// not need the availability its class has.
-    private var analyzerSession: Any?
-    private var resultsTask: Task<Void, Never>?
+    /// Everything one recognition run owns — engine, tap relay, recognizer
+    /// machinery — built *off* the controller and installed only if the
+    /// start that built it is still the current one. A stale start disposes
+    /// what it built and touches nothing shared: the race this closes had a
+    /// cancelled start's failure overwriting a newer start's state, and its
+    /// cleanup bulldozing whichever session currently owned the controller.
+    @MainActor
+    final class Session {
+        let engine: AVAudioEngine
+        fileprivate let relay: AudioTapRelay
+        let isAnalyzer: Bool
+        var legacyRecognizer: SFSpeechRecognizer?
+        var legacyTask: SFSpeechRecognitionTask?
+        /// Finishes the iOS 26 analyzer stream, when this is that kind.
+        var finishAnalyzer: (() -> Void)?
+        var resultsTask: Task<Void, Never>?
+        /// Whether this session holds one claim on the shared audio session
+        /// — set by the builder that claimed, consumed by `dispose`.
+        fileprivate var ownsAudioClaim = false
+        private var disposed = false
+        #if DEBUG
+            private(set) var disposeCount = 0
+        #endif
+
+        fileprivate init(engine: AVAudioEngine, relay: AudioTapRelay, isAnalyzer: Bool) {
+            self.engine = engine
+            self.relay = relay
+            self.isAnalyzer = isAnalyzer
+        }
+
+        /// Idempotent, and the only teardown there is: whoever holds the
+        /// session — the controller, or the stale start that built it —
+        /// calls this exactly where it stands. Releases exactly the claims
+        /// it owns: the audio session is shared, and deactivating it
+        /// outright would silence whoever holds it now.
+        func dispose() {
+            guard !disposed else { return }
+            disposed = true
+            #if DEBUG
+                disposeCount += 1
+            #endif
+            finishAnalyzer?()
+            finishAnalyzer = nil
+            resultsTask?.cancel()
+            resultsTask = nil
+            // `cancel`, not `finish`: a final result arriving afterwards
+            // would mutate text the user is now editing.
+            legacyTask?.cancel()
+            legacyTask = nil
+            legacyRecognizer = nil
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            if ownsAudioClaim {
+                ownsAudioClaim = false
+                DictationController.releaseAudioSession()
+            }
+        }
+    }
+
+    private var session: Session?
+    #if DEBUG
+        /// Test seams: replace the real engine builders (which need a live
+        /// audio stack and permission prompts no test host has) with a
+        /// controlled backend, and observe what is currently installed.
+        var sessionBackendForTesting: (@MainActor () async throws -> Session)?
+        var installedSessionForTesting: Session? { session }
+
+        /// A minimal session for the race tests: a never-started engine and
+        /// a relay that goes nowhere. It claims the shared audio session the
+        /// way a real build does, so claim accounting is observable.
+        static func makeStubSessionForTesting() -> Session {
+            let stub = Session(
+                engine: AVAudioEngine(),
+                relay: AudioTapRelay(onLevel: { _ in }, onBuffer: { _ in }),
+                isAnalyzer: false)
+            stub.ownsAudioClaim = (try? claimAudioSession()) != nil
+            return stub
+        }
+
+        /// The live claim count, for the reverse-order supersession test.
+        static var audioClaimsForTesting: Int { audioClaims }
+    #endif
 
     // MARK: Lifecycle
 
@@ -96,39 +170,57 @@ final class DictationController {
         volatileText = ""
         level = 0
 
-        guard await AVAudioApplication.requestRecordPermission() else {
-            guard generation == owned else { return }
-            phase = .failed(
-                reason: "Microphone access is off, so there is nothing to transcribe.",
-                needsSettings: true)
+        // Built off to the side, installed only if this start still owns the
+        // controller. A stale build — cancelled mid-download, superseded by
+        // a newer tap — disposes what it made and *says nothing*: its
+        // failure is not news about the current state, and publishing it
+        // was the race.
+        let built: Session
+        do {
+            #if DEBUG
+                if let backend = sessionBackendForTesting {
+                    built = try await backend()
+                } else {
+                    built = try await buildSession()
+                }
+            #else
+                built = try await buildSession()
+            #endif
+        } catch {
+            guard generation == owned, phase == .starting else { return }
+            if let error = error as? DictationError {
+                phase = .failed(reason: error.reason, needsSettings: error.needsSettings)
+            } else {
+                phase = .failed(
+                    reason: "The microphone could not start: \(error.localizedDescription)",
+                    needsSettings: false)
+            }
             return
         }
-        guard generation == owned, phase == .starting else { return }
-
-        do {
-            if #available(iOS 26.0, *) {
-                try await startAnalyzer()
-            } else {
-                try await startLegacy()
-            }
-            // A stop or cancel that landed during the awaits above already
-            // tore the session down; the machinery this start built on top
-            // of the rubble must follow it.
-            guard generation == owned, phase == .starting else {
-                teardown()
-                return
-            }
-            startedAt = Date()
-            phase = .recording
-        } catch let error as DictationError {
-            teardown()
-            phase = .failed(reason: error.reason, needsSettings: error.needsSettings)
-        } catch {
-            teardown()
-            phase = .failed(
-                reason: "The microphone could not start: \(error.localizedDescription)",
-                needsSettings: false)
+        guard generation == owned, phase == .starting else {
+            built.dispose()
+            return
         }
+        session = built
+        startedAt = Date()
+        phase = .recording
+    }
+
+    /// The real builder: the analyzer engine where the OS and its catalogue
+    /// allow, the legacy engine otherwise.
+    private func buildSession() async throws -> Session {
+        // Permission is the builder's first act, not the controller's: the
+        // injected test backend replaces the *whole* startup, prompts
+        // included — a test host has no microphone to ask about.
+        guard await AVAudioApplication.requestRecordPermission() else {
+            throw DictationError(
+                reason: "Microphone access is off, so there is nothing to transcribe.",
+                needsSettings: true)
+        }
+        if #available(iOS 26.0, *) {
+            return try await buildAnalyzerSession()
+        }
+        return try await buildLegacySession()
     }
 
     /// Ends the session and returns what was heard. The caller stages it in
@@ -229,7 +321,7 @@ final class DictationController {
     // MARK: iOS 26 — SpeechAnalyzer
 
     @available(iOS 26.0, *)
-    private func startAnalyzer() async throws {
+    private func buildAnalyzerSession() async throws -> Session {
         let supported = await SpeechTranscriber.supportedLocales
         guard !supported.isEmpty else {
             // Measured: the simulator ships `SpeechAnalyzer` with an empty
@@ -237,8 +329,7 @@ final class DictationController {
             // user's language. An engine with no languages at all is not
             // that — it is an engine that cannot serve anyone; the legacy
             // recognizer keeps its own catalogue even there.
-            try await startLegacy()
-            return
+            return try await buildLegacySession()
         }
         guard
             let locale = Self.resolveRecognitionLocale(
@@ -249,8 +340,7 @@ final class DictationController {
             // The analyzer not shipping this language is not the last word —
             // the legacy engine carries its own, larger catalogue, and its
             // resolver issues the honest refusal if it cannot serve either.
-            try await startLegacy()
-            return
+            return try await buildLegacySession()
         }
 
         let transcriber = SpeechTranscriber(
@@ -279,6 +369,11 @@ final class DictationController {
 
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         try await analyzer.start(inputSequence: stream)
+        let finishAnalyzer = {
+            continuation.finish()
+            Task { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
+            return
+        }
 
         let converter = BufferConverter(to: format)
         let relay = AudioTapRelay(
@@ -290,10 +385,20 @@ final class DictationController {
                     continuation.yield(AnalyzerInput(buffer: converted))
                 }
             })
-        self.relay = relay
-        engine = try Self.makeEngine(relay: relay)
+        let engine: AVAudioEngine
+        do {
+            engine = try Self.makeEngine(relay: relay)
+        } catch {
+            // The analyzer is already running; a builder that throws must
+            // not leave its own partial machinery humming.
+            finishAnalyzer()
+            throw error
+        }
 
-        resultsTask = Task { [weak self] in
+        let built = Session(engine: engine, relay: relay, isAnalyzer: true)
+        built.ownsAudioClaim = true
+        built.finishAnalyzer = finishAnalyzer
+        built.resultsTask = Task { [weak self] in
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
@@ -306,32 +411,12 @@ final class DictationController {
                 // both visible, so there is nothing further to report.
             }
         }
-
-        analyzerSession = AnalyzerSession(analyzer: analyzer, continuation: continuation)
-    }
-
-    /// The iOS 26 machinery that `stop`/`cancel` must reach. Its own class so
-    /// the controller can store it without carrying the availability.
-    @available(iOS 26.0, *)
-    private final class AnalyzerSession {
-        let analyzer: SpeechAnalyzer
-        let continuation: AsyncStream<AnalyzerInput>.Continuation
-
-        init(analyzer: SpeechAnalyzer, continuation: AsyncStream<AnalyzerInput>.Continuation) {
-            self.analyzer = analyzer
-            self.continuation = continuation
-        }
-
-        func finish() {
-            continuation.finish()
-            let analyzer = self.analyzer
-            Task { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
-        }
+        return built
     }
 
     // MARK: iOS 17–25 — SFSpeechRecognizer
 
-    private func startLegacy() async throws {
+    private func buildLegacySession() async throws -> Session {
         let status = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
@@ -369,11 +454,12 @@ final class DictationController {
                 Task { @MainActor in self?.absorb(level: value) }
             },
             onBuffer: { request.append($0) })
-        self.relay = relay
-        engine = try Self.makeEngine(relay: relay)
+        let built = Session(
+            engine: try Self.makeEngine(relay: relay), relay: relay, isAnalyzer: false)
+        built.ownsAudioClaim = true
 
-        legacyRecognizer = recognizer
-        legacyTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
+        built.legacyRecognizer = recognizer
+        built.legacyTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
             // Only Sendable values cross to the main actor: the result object
             // stays on whatever queue Speech called us on.
             guard let result else { return }
@@ -381,46 +467,61 @@ final class DictationController {
             let isFinal = result.isFinal
             Task { @MainActor in self?.absorb(text: text, isFinal: isFinal) }
         }
+        return built
     }
 
     // MARK: Shared plumbing
 
-    private static func makeEngine(relay: AudioTapRelay) throws -> AVAudioEngine {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement, options: [.duckOthers])
-        try session.setActive(true, options: [])
+    /// The audio session is process-wide: whoever deactivates it silences
+    /// every holder, so activation is a counted *claim* and only the last
+    /// release deactivates. Without this, a stale build disposing after a
+    /// successor had installed cut the successor's live microphone.
+    private static var audioClaims = 0
 
+    private static func claimAudioSession() throws {
+        let shared = AVAudioSession.sharedInstance()
+        try shared.setCategory(.record, mode: .measurement, options: [.duckOthers])
+        try shared.setActive(true, options: [])
+        audioClaims += 1
+    }
+
+    private static func releaseAudioSession() {
+        audioClaims = max(0, audioClaims - 1)
+        guard audioClaims == 0 else { return }
+        try? AVAudioSession.sharedInstance().setActive(
+            false, options: [.notifyOthersOnDeactivation])
+    }
+
+    /// Failure-transactional: a throw from any step rolls back everything
+    /// this call did — tap, engine, and the audio claim — so a failed build
+    /// leaves no session active and nothing ducked, with no `Session` object
+    /// needed to carry the cleanup.
+    private static func makeEngine(relay: AudioTapRelay) throws -> AVAudioEngine {
+        try claimAudioSession()
         let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
-            relay.handle(buffer)
+        do {
+            let input = engine.inputNode
+            let format = input.outputFormat(forBus: 0)
+            input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
+                relay.handle(buffer)
+            }
+            engine.prepare()
+            try engine.start()
+        } catch {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            releaseAudioSession()
+            throw error
         }
-        engine.prepare()
-        try engine.start()
         return engine
     }
 
     private func teardown() {
+        // The bump is what orphans any start still in flight: it resumes,
+        // sees a generation it does not own, and disposes its own build.
         generation += 1
-        if #available(iOS 26.0, *), let session = analyzerSession as? AnalyzerSession {
-            session.finish()
-        }
-        analyzerSession = nil
-        resultsTask?.cancel()
-        resultsTask = nil
-        // `cancel`, not `finish`: the transcript was already taken (or
-        // deliberately discarded) — a final result arriving afterwards would
-        // mutate text the user is now editing.
-        legacyTask?.cancel()
-        legacyTask = nil
-        legacyRecognizer = nil
-        relay = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
-        engine = nil
-        try? AVAudioSession.sharedInstance().setActive(
-            false, options: [.notifyOthersOnDeactivation])
+        session?.dispose()
+        session = nil
         finalizedText = ""
         volatileText = ""
         level = 0
@@ -439,7 +540,7 @@ final class DictationController {
             // The new engine finalizes in increments; the legacy one restates
             // the whole utterance. Joining handles both: a restatement arrives
             // exactly once, at the end, with nothing finalized before it.
-            if #available(iOS 26.0, *), analyzerSession != nil {
+            if session?.isAnalyzer == true {
                 finalizedText = Self.join(finalizedText, text)
             } else {
                 finalizedText = text
