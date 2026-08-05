@@ -97,7 +97,10 @@ fn run() {
     // `cc-hook --version` from an install script or a terminal would otherwise
     // hang forever waiting for input that is never coming.
     if std::env::args().any(|arg| arg == "--version") {
-        println!("cc-hook {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{}",
+            protocol::build_identity::version_line("cc-hook", env!("CARGO_PKG_VERSION"))
+        );
         return;
     }
 

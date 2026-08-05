@@ -229,6 +229,12 @@ pub struct DaemonInfo {
     pub exe_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe_sha: Option<String>,
+    /// The daemon's build tag — `227f6d4e1791`, with `-dirty` when built
+    /// from an edited tree. Absent when the daemon predates the field or was
+    /// built outside a git checkout; `daemon status` renders that absence as
+    /// `build unknown` rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
     pub sessions: usize,
 }
 
@@ -759,6 +765,7 @@ mod tests {
             bind_ip: Some("100.64.0.7".into()),
             exe_path: Some("/Users/dev/.codeconnect/bin/ccd".into()),
             exe_sha: Some("abc123".into()),
+            build_id: Some("227f6d4e1791".into()),
             endpoint_port: 8787,
             tls: true,
             sessions: 2,

@@ -198,6 +198,42 @@ A line that is not decodable JSON is also a fact now
 map is still skipped without comment: the transcript format grows, and an
 unrecognised entry is not damage.
 
+## Build identity
+
+A version number moves at releases and at capability bumps (every
+`PROTOCOL_MINOR` change moves it — see RELEASING.md), but never on ordinary
+commits — so between those moments it cannot answer "am I running current
+code?", and two different builds happily share one number. Every shipped binary therefore also embeds the git commit
+it was built from, plus a fingerprint of the exact Mac ship-source tree
+(`mac/Cargo.toml`, `mac/Cargo.lock`, and the four crates — iOS, docs and
+`soak/` deliberately excluded):
+
+```
+codeconnect 0.3.0 (227f6d4e1791)         # clean build of that commit
+codeconnect 0.3.0 (227f6d4e1791-dirty)   # built from an edited tree
+codeconnect 0.3.0 (build unknown)        # built outside a git checkout
+```
+
+`daemon status` shows the running daemon's build the same way. On every
+`codeconnect claude` launch, the installed build is compared against the
+recorded checkout (the clone `install.sh` ran from), locally and in under a
+second; exactly one update line can appear, the checkout comparison
+outranking the release check because it is the more specific fact:
+
+```
+CodeConnect checkout is newer · 2 commits not installed   # committed, not installed
+CodeConnect checkout has uninstalled changes              # uncommitted edits
+CodeConnect build differs from its checkout               # behind / diverged / foreign build
+CodeConnect update available · 0.2.0 → 0.3.0              # a newer release, checkout current
+```
+
+Each ends with the one fix: `codeconnect update`, which means "fast-forward
+my checkout's upstream, rebuild, reinstall, restart the daemon" — never
+"fetch a package". Comparison failures (no git, moved checkout, deadline)
+render as silence: an advisory that can be wrong is worse than none. The
+`update_check` config switch disables both advisories; identity stays
+visible through `--version` and `daemon status`.
+
 ## The LaunchAgent
 
 `codeconnect daemon install` writes `~/Library/LaunchAgents/com.codeconnect.ccd.plist`

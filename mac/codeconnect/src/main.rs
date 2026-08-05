@@ -49,7 +49,10 @@ fn main() -> Result<()> {
         "__update-check" => update_check::run_checker(),
         "update" => update_check::run_update(),
         "--version" | "version" => {
-            println!("codeconnect {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "{}",
+                protocol::build_identity::version_line("codeconnect", env!("CARGO_PKG_VERSION"))
+            );
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -164,11 +167,19 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
         use std::io::IsTerminal;
         let style = update_check::style_for_stream(std::io::stderr().is_terminal());
         let reachability = phone_unreachable_note(style);
+        // One update slot. The checkout comparison outranks the release
+        // advisory: it is the more specific fact, and `codeconnect update`
+        // resolves both. Both live behind the same `update_check` switch.
         let update = config
             .update_check
-            .then(update_check::cached_advisory)
-            .flatten()
-            .map(|advisory| update_check::render_update(&advisory, style));
+            .then(|| {
+                update_check::select_update_note(
+                    update_check::checkout_advisory(),
+                    update_check::cached_advisory(),
+                    style,
+                )
+            })
+            .flatten();
         if let Some(group) = advisory_envelope(reachability, update) {
             eprint!("{group}");
             // The hold exists for a reader: only a real person at a real

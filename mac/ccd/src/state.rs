@@ -681,6 +681,13 @@ impl Daemon {
             bind_ip: self.bind_ip.get().cloned(),
             exe_path: self.exe_identity.get().map(|(path, _)| path.clone()),
             exe_sha: self.exe_identity.get().map(|(_, sha)| sha.clone()),
+            build_id: {
+                let identity = protocol::build_identity::installed();
+                identity
+                    .short
+                    .is_some()
+                    .then(protocol::build_identity::build_tag)
+            },
             sessions: self.inner.lock().await.supervisors.len(),
         }
     }

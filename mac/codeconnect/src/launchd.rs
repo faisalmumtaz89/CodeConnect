@@ -281,8 +281,14 @@ fn status() -> Result<()> {
         }
         Some(info) => {
             println!(
-                "daemon   pid {} · version {} · protocol {}.{} · up since {}",
-                info.pid, info.version, info.protocol_version, info.protocol_minor, info.started_at
+                "daemon   pid {} · version {} · build {}",
+                info.pid,
+                info.version,
+                info.build_id.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "         protocol {}.{} · up since {}",
+                info.protocol_version, info.protocol_minor, info.started_at
             );
             println!(
                 "         {}://{}:{} · {} session(s) attached",
@@ -571,6 +577,7 @@ fn legacy_daemon_probe() -> Option<DaemonInfo> {
         bind_ip: None,
         exe_path: None,
         exe_sha: None,
+        build_id: None,
         endpoint_port: 0,
         tls: false,
         sessions: 0,
@@ -957,6 +964,7 @@ mod tests {
             bind_ip: None,
             exe_path: Some(path.to_string_lossy().to_string()),
             exe_sha,
+            build_id: None,
             sessions: 0,
         };
 

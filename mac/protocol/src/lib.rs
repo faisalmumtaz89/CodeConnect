@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 
+pub mod build_identity;
 pub mod config;
 pub mod event;
 pub mod fsperm;

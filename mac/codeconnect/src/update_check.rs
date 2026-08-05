@@ -206,6 +206,109 @@ pub fn cached_advisory() -> Option<UpdateAdvisory> {
     update_advisory(&read_cache(), installed_version())
 }
 
+// ------------------------------------------------------- checkout advisory
+
+/// The local half of "am I current?": how the recorded checkout relates to
+/// the code this binary was built from. `None` is silence — record missing,
+/// checkout moved, git absent, budget breached, or simply *matching* — and
+/// silence is the correct rendering of every one of those.
+///
+/// This outranks the release advisory when both would fire: it is the more
+/// specific fact (a release compares version *numbers*, which stand still
+/// between releases; this compares the actual code), and the fix is the same
+/// `codeconnect update` either way.
+pub fn checkout_advisory() -> Option<protocol::build_identity::CheckoutRelation> {
+    use protocol::build_identity::CheckoutRelation;
+    // Filesystem checks only on this path — `recorded_checkout_at`'s git
+    // validation is unbounded (fine for `codeconnect update`, which the
+    // user asked for and can interrupt), and a wedged git before the budget
+    // started would hang every launch. The budgeted relation's own git
+    // calls ARE the work-tree validation here: a non-repo answers None,
+    // which renders as the silence it should.
+    let record = std::fs::read_to_string(checkout_record_path()).ok()?;
+    let root = PathBuf::from(record.trim());
+    if !root.join("mac/install.sh").is_file() {
+        return None;
+    }
+    match protocol::build_identity::checkout_relation(&root)? {
+        CheckoutRelation::Matches => None,
+        other => Some(other),
+    }
+}
+
+/// One slot, two candidates: the checkout comparison outranks the release
+/// advisory because it is the more specific fact — a release compares
+/// version numbers, which stand still between releases; the checkout
+/// comparison reads the actual code. Both resolve with the same command.
+pub fn select_update_note(
+    checkout: Option<protocol::build_identity::CheckoutRelation>,
+    release: Option<UpdateAdvisory>,
+    style: Style,
+) -> Option<String> {
+    checkout
+        .map(|relation| render_checkout(&relation, style))
+        .or_else(|| release.map(|advisory| render_update(&advisory, style)))
+}
+
+/// The exact advisory text for each non-matching relation. Grammar shared
+/// with the release advisory: bold heading and bold action line in Styled,
+/// identical visible text across styles, `·` becoming `:` in Ascii.
+pub fn render_checkout(
+    relation: &protocol::build_identity::CheckoutRelation,
+    style: Style,
+) -> String {
+    use protocol::build_identity::CheckoutRelation;
+    match relation {
+        // Unreachable by construction — `checkout_advisory` filters it — but
+        // a caller handing it in deserves silence, not a lie.
+        CheckoutRelation::Matches => String::new(),
+        CheckoutRelation::Newer(count) => {
+            let commits = if *count == 1 {
+                "1 commit".to_string()
+            } else {
+                format!("{count} commits")
+            };
+            match style {
+                Style::Styled => format!(
+                    "{BOLD}CodeConnect checkout is newer{RESET} \u{b7} {commits} not \
+                     installed\n\n{BOLD}codeconnect update{RESET}"
+                ),
+                Style::PlainUnicode => format!(
+                    "CodeConnect checkout is newer \u{b7} {commits} not installed\n\n\
+                     codeconnect update"
+                ),
+                Style::Ascii => format!(
+                    "CodeConnect checkout is newer: {commits} not installed\n\ncodeconnect update"
+                ),
+            }
+        }
+        CheckoutRelation::DirtyCheckout => match style {
+            Style::Styled => concat!(
+                "\u{1b}[1mCodeConnect checkout has uninstalled changes\u{1b}[0m\n",
+                "Commit or stash the uncommitted changes, then run:\n\n",
+                "\u{1b}[1mcodeconnect update\u{1b}[0m"
+            )
+            .to_string(),
+            Style::PlainUnicode | Style::Ascii => concat!(
+                "CodeConnect checkout has uninstalled changes\n",
+                "Commit or stash the uncommitted changes, then run:\n\n",
+                "codeconnect update"
+            )
+            .to_string(),
+        },
+        CheckoutRelation::Differs => match style {
+            Style::Styled => concat!(
+                "\u{1b}[1mCodeConnect build differs from its checkout\u{1b}[0m\n\n",
+                "\u{1b}[1mcodeconnect update\u{1b}[0m"
+            )
+            .to_string(),
+            Style::PlainUnicode | Style::Ascii => {
+                "CodeConnect build differs from its checkout\n\ncodeconnect update".to_string()
+            }
+        },
+    }
+}
+
 /// How a terminal advisory may dress itself. Decided per destination
 /// stream, never globally: pre-attach writes stderr, `daemon status` writes
 /// stdout, and each answers for its own.
@@ -283,6 +386,122 @@ pub fn render_update(advisory: &UpdateAdvisory, style: Style) -> String {
         Style::Ascii => {
             format!("CodeConnect update available: {a}.{b}.{c} -> {latest}\n\ncodeconnect update")
         }
+    }
+}
+
+#[cfg(test)]
+mod checkout_advisory_tests {
+    use super::*;
+    use protocol::build_identity::CheckoutRelation;
+
+    #[test]
+    fn newer_renders_exactly_in_all_three_styles() {
+        let two = CheckoutRelation::Newer(2);
+        assert_eq!(
+            render_checkout(&two, Style::Styled),
+            "\u{1b}[1mCodeConnect checkout is newer\u{1b}[0m \u{b7} 2 commits not \
+             installed\n\n\u{1b}[1mcodeconnect update\u{1b}[0m"
+        );
+        assert_eq!(
+            render_checkout(&two, Style::PlainUnicode),
+            "CodeConnect checkout is newer \u{b7} 2 commits not installed\n\ncodeconnect update"
+        );
+        assert_eq!(
+            render_checkout(&two, Style::Ascii),
+            "CodeConnect checkout is newer: 2 commits not installed\n\ncodeconnect update"
+        );
+    }
+
+    #[test]
+    fn one_commit_is_singular() {
+        assert_eq!(
+            render_checkout(&CheckoutRelation::Newer(1), Style::Ascii),
+            "CodeConnect checkout is newer: 1 commit not installed\n\ncodeconnect update"
+        );
+    }
+
+    #[test]
+    fn dirty_and_differs_render_their_exact_sentences() {
+        assert_eq!(
+            render_checkout(&CheckoutRelation::DirtyCheckout, Style::PlainUnicode),
+            "CodeConnect checkout has uninstalled changes\n\
+             Commit or stash the uncommitted changes, then run:\n\ncodeconnect update"
+        );
+        assert_eq!(
+            render_checkout(&CheckoutRelation::DirtyCheckout, Style::Styled),
+            "\u{1b}[1mCodeConnect checkout has uninstalled changes\u{1b}[0m\n\
+             Commit or stash the uncommitted changes, then run:\n\n\
+             \u{1b}[1mcodeconnect update\u{1b}[0m"
+        );
+        assert_eq!(
+            render_checkout(&CheckoutRelation::Differs, Style::Ascii),
+            "CodeConnect build differs from its checkout\n\ncodeconnect update"
+        );
+    }
+
+    /// The Ascii renderer's whole contract: 7-bit bytes, no escapes, no
+    /// typography, nothing over 80 columns, no trailing whitespace.
+    #[test]
+    fn ascii_checkout_advisories_are_pure() {
+        for relation in [
+            CheckoutRelation::Newer(1),
+            CheckoutRelation::Newer(42),
+            CheckoutRelation::DirtyCheckout,
+            CheckoutRelation::Differs,
+        ] {
+            let rendered = render_checkout(&relation, Style::Ascii);
+            assert!(rendered.is_ascii(), "{relation:?}: {rendered:?}");
+            assert!(!rendered.contains('\u{1b}'), "{relation:?}");
+            for line in rendered.lines() {
+                assert!(line.len() <= 80, "{relation:?}: {line:?}");
+                assert_eq!(line.trim_end(), line, "{relation:?}: trailing space");
+            }
+        }
+    }
+
+    /// The dirty and differs sentences are style-invariant in visible text:
+    /// styling may bold, never reword.
+    #[test]
+    fn styling_never_rewords() {
+        for relation in [CheckoutRelation::DirtyCheckout, CheckoutRelation::Differs] {
+            let styled = render_checkout(&relation, Style::Styled)
+                .replace("\u{1b}[1m", "")
+                .replace("\u{1b}[0m", "");
+            assert_eq!(styled, render_checkout(&relation, Style::PlainUnicode));
+        }
+    }
+
+    #[test]
+    fn matches_renders_as_nothing() {
+        assert_eq!(
+            render_checkout(&CheckoutRelation::Matches, Style::Styled),
+            ""
+        );
+    }
+
+    /// The one-slot rule: when both facts exist, the checkout speaks and the
+    /// release stays quiet — never two blocks.
+    #[test]
+    fn the_checkout_outranks_the_release_in_the_one_slot() {
+        let release = UpdateAdvisory {
+            installed: (0, 2, 0),
+            latest: "v0.3.0".into(),
+        };
+        let both = select_update_note(
+            Some(CheckoutRelation::Newer(2)),
+            Some(release.clone()),
+            Style::Ascii,
+        )
+        .unwrap();
+        assert!(both.contains("checkout is newer"), "{both}");
+        assert!(
+            !both.contains("update available"),
+            "one slot means one block"
+        );
+
+        let release_only = select_update_note(None, Some(release), Style::Ascii).unwrap();
+        assert!(release_only.contains("update available"), "{release_only}");
+        assert_eq!(select_update_note(None, None, Style::Ascii), None);
     }
 }
 

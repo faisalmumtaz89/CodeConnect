@@ -47,7 +47,10 @@ const APPROVAL_MAX_AGE_MS: i64 = 15 * 60 * 1000;
 async fn main() -> Result<()> {
     log::init_from_env();
     if std::env::args().any(|arg| arg == "--version") {
-        println!("ccd {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{}",
+            protocol::build_identity::version_line("ccd", env!("CARGO_PKG_VERSION"))
+        );
         return Ok(());
     }
 

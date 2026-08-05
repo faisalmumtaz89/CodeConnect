@@ -24,6 +24,16 @@ update; a protocol-*major* mismatch is refused outright, on both sides.
   older commit after a newer one would misreport "latest" to every checker.
 * A published release is never deleted or retagged. Machines have already
   compared against it; rewriting it rewrites their history.
+* **Version numbers move with capability, not only with releases.** Any
+  commit that bumps `PROTOCOL_MINOR` bumps the workspace version in the same
+  commit, and every release's version is strictly above the last published
+  one. Between releases the binaries stay tellable-apart anyway: every build
+  embeds its git commit — `codeconnect --version` prints
+  `codeconnect X.Y.Z (<12-hex commit>)`, `-dirty` when built from an edited
+  tree, `(build unknown)` outside a checkout — and `codeconnect claude`
+  compares the installed build against the recorded checkout on every
+  launch, so an uninstalled local change is announced without any release
+  existing.
 * Plain `X.Y.Z` only — no suffixes. The checker's validator rejects
   anything else outright, so a `v0.3.0-rc1` tag would simply never reach a
   user, and publishing it as "latest" would mask the release before it.
