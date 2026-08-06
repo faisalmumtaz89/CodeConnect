@@ -224,6 +224,8 @@ struct SessionDetailView: View {
     /// starts on the same edge. See `CCToolColumn`.
     @State private var toolColumn: CGFloat = 0
     @State private var composeText = ""
+    /// Bumped to rebuild the compose field from scratch — see `clearComposer`.
+    @State private var composerGeneration = 0
     @State private var openApproval: ApprovalItem?
     @State private var composeResult: ComposeAttempt?
     @State private var showModelSheet = false
@@ -346,6 +348,7 @@ struct SessionDetailView: View {
                         sending: sending,
                         displayName: displayName,
                         summary: summary,
+                        generation: composerGeneration,
                         onWhy: { showLinkDetail = true },
                         onSend: send,
                         focused: $composerFocused)
@@ -677,6 +680,22 @@ struct SessionDetailView: View {
                             // their eyes rather than leaving them in the blank
                             // the collapse just made.
                             onCollapse: { id in
+                                // **Two anchors, in this order.** `.top` is
+                                // what the reader wants — the message they
+                                // were inside, back at eye level. It is not
+                                // always satisfiable: collapse from the very
+                                // bottom leaves the offset past the end of a
+                                // timeline that just lost a screen or more of
+                                // height, and asking for a position that
+                                // cannot exist can leave the viewport there,
+                                // in blank, with nothing under it to load.
+                                // Anchoring the row's own foot first always
+                                // can be satisfied — the collapsed row is a
+                                // few lines tall — so the screen is holding
+                                // content before the second pass refines
+                                // where. Reported from a device after
+                                // scrolling to the bottom and collapsing.
+                                proxy.scrollTo(id, anchor: .bottom)
                                 withAnimation(CC.motion.small) {
                                     proxy.scrollTo(id, anchor: .top)
                                 }
@@ -899,7 +918,28 @@ struct SessionDetailView: View {
     /// A landed native operation consumes the draft that opened it — a
     /// stale `/model` left behind a successful sheet was a shipped defect.
     private func consumeDraft() {
+        clearComposer()
+    }
+
+    /// Empty the composer **and rebuild the field**.
+    ///
+    /// Setting the bound string is not always enough. Reported from a device:
+    /// after a send landed, the field went on displaying the message it had
+    /// just sent while the string underneath was already empty — the circle
+    /// had turned back into the mic, and that face is read off this very
+    /// string. A text view with an open autocorrection session can restore
+    /// its own pending text over a programmatic clear, and a composer still
+    /// holding a message that has already been sent invites sending it twice.
+    ///
+    /// Bumping the identity makes SwiftUI build a fresh field, which cannot
+    /// carry the old one's pending input. Focus is retaken in the same update
+    /// so the keyboard never leaves the screen. Not reproducible under
+    /// XCUITest — `typeText` injects past the keyboard's prediction pipeline,
+    /// so the state this survives cannot be arranged there.
+    private func clearComposer() {
         composeText = ""
+        composerGeneration += 1
+        composerFocused = true
     }
 
     /// `/clear`, past its confirmation. The receipt claims typing, nothing
@@ -950,7 +990,7 @@ struct SessionDetailView: View {
                 // Never optimistic: the field clears only on a landed
                 // mutation — and an earlier attempt's landing is a landing.
                 // Speaking is following: the reply lands at the tail.
-                composeText = ""
+                clearComposer()
                 tailWatch.arrive()
                 // Good news may retire itself.
                 composeResultClearTask = Task {
@@ -1136,6 +1176,9 @@ private struct SessionComposeBar: View {
     let sending: Bool
     let displayName: String
     let summary: SessionSummary?
+    /// Changes when the field must be *rebuilt* empty rather than merely told
+    /// that it is — see `SessionDetailView.clearComposer`.
+    let generation: Int
     let onWhy: () -> Void
     let onSend: () -> Void
 
@@ -1240,6 +1283,7 @@ private struct SessionComposeBar: View {
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
         .focused(focused)
+        .id(generation)
         .accessibilityLabel("Message for \(displayName)")
     }
 

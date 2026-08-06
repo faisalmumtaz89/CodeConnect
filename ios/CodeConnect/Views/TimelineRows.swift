@@ -162,8 +162,14 @@ struct AgentMessageRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: CC.space.xxs) {
-            if isLong && !expanded {
+        // Spacing 0 at this level so the expander owns the whole gap on both
+        // of its sides. Inherited from the stack, the gap above it was the
+        // segment spacing and the gap below it was whatever the row's own
+        // padding happened to be — two different numbers, and different again
+        // depending on whether prose, a code block or a table came last.
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: CC.space.xxs) {
+                if isLong && !expanded {
                 // The collapsed preview is ONE `Text`, whole-message. A
                 // `lineLimit` on the segmented form below would clamp each
                 // segment separately — four lines *per paragraph and per code
@@ -218,6 +224,7 @@ struct AgentMessageRow: View {
                     }
                 }
             }
+            }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
                     let collapsing = expanded
@@ -233,6 +240,10 @@ struct AgentMessageRow: View {
                     }
                 }
                 .padding(.leading, -CC.space.sm)
+                // The same on both sides, and the same in both states: the
+                // control reads as belonging to the message rather than
+                // crowding whatever it follows.
+                .padding(.vertical, CC.space.sm)
             }
         }
         // **No container is not the same as no column.** The agent's prose is

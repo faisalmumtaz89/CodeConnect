@@ -160,6 +160,88 @@ final class SessionFollowUITests: XCTestCase {
                 + "not leave it wherever the clamp dropped it")
     }
 
+    /// **Reported from a device, and the case the test above does not
+    /// cover.** That one stops as soon as "Show less" is on screen — part
+    /// way down the expanded message. A reader who scrolls to the *very
+    /// bottom* first collapses from a different place: the offset the
+    /// collapse strands is past the end of the shrunken content, and the
+    /// lazy stack has nothing loaded there to re-anchor to.
+    func testShowLessFromTheVeryBottomDoesNotStrandTheReaderInBlank() {
+        let app = launchSession()
+        let timeline = app.scrollViews["session-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
+        expandTheLongMessage(app, timeline)
+
+        // All the way down, the way the report describes it.
+        for _ in 0..<10 {
+            drag(timeline, fromY: 0.65, toY: 0.15)
+        }
+        let showLess = app.buttons["Show less"]
+        let window = app.windows.firstMatch.frame
+        var attempts = 0
+        while attempts < 10 {
+            if showLess.exists && showLess.isHittable && showLess.frame.minY >= window.minY
+                && showLess.frame.maxY <= window.maxY
+            {
+                break
+            }
+            drag(timeline, fromY: 0.25, toY: 0.7)
+            attempts += 1
+        }
+        XCTAssertTrue(showLess.isHittable, "the control must be reachable from the bottom")
+        showLess.tap()
+
+        // The contract is that *something* of the timeline is under the
+        // reader's eyes. A blank viewport is the failure being reproduced.
+        XCTAssertTrue(
+            waitUntil(timeout: 6) {
+                let more = app.buttons["Show more"]
+                return more.exists && more.isHittable
+                    && more.frame.maxY > timeline.frame.minY
+                    && more.frame.minY < timeline.frame.maxY
+            },
+            "collapsing from the bottom must leave the timeline on screen, "
+                + "not a viewport stranded past the end of the content")
+    }
+
+    /// **Reported from a device.** After a send lands, the composer must be
+    /// empty. The send button turns back into the mic — which is read off
+    /// the bound string — so the string *is* cleared; what stays behind is
+    /// the keyboard's own uncommitted text, and a field still showing the
+    /// message that was just sent invites sending it twice.
+    func testTheComposerIsEmptyAfterASendLands() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
+            "-cc.debug.sendText", "sent",
+            "-CC_DEEPLINK", "codeconnect://session/fx-5",
+        ]
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
+
+        let field = app.textViews.firstMatch.exists
+            ? app.textViews.firstMatch : app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 20))
+        field.tap()
+        // A misspelling on purpose: it is what leaves an autocorrection
+        // session open on the field, which is the state the report was
+        // taken in and the state a clear has to survive.
+        field.typeText("Tell me abput this project")
+
+        let send = app.buttons["Send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        try? XCTSkipUnless(send.isEnabled, "send is disabled — link or capability says so")
+        send.tap()
+
+        XCTAssertTrue(
+            waitUntil(timeout: 8) {
+                let shown = (field.value as? String) ?? ""
+                return shown.isEmpty || shown == "Say something to this agent"
+            },
+            "the composer still shows the message it just sent: "
+                + "\((field.value as? String) ?? "nil")")
+    }
+
     private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
