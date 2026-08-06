@@ -478,6 +478,32 @@ final class AgentProseTests: XCTestCase {
         XCTAssertEqual(source, "How it's useful\nThe core value is x.")
     }
 
+    /// The preview drops blank lines from **prose only**. Its four lines are
+    /// worth more spent on words, and a preview that ends on a blank one
+    /// draws a line of empty space above the expander that the expanded state
+    /// does not have. Code is untouched: its blank lines separate statements
+    /// and its leading whitespace is the structure.
+    func testThePreviewDropsBlankProseLinesAndLeavesCodeAlone() {
+        let source = AgentProse.previewSource(
+            "First line.\n\n\nSecond line.\n\n```swift\nif x {\n\n    work()\n}\n```")
+        XCTAssertTrue(
+            source.contains("First line.\nSecond line."),
+            "blank prose lines spend the preview's four lines on nothing: \(source)")
+        XCTAssertTrue(
+            source.contains("if x {\n\n    work()\n}"),
+            "code keeps its own blank lines and its indentation: \(source)")
+    }
+
+    /// Runs of blank lines between paragraphs — including whitespace-only
+    /// ones — leave nothing behind in the preview. Asserted end to end
+    /// rather than at the layer that happens to achieve it: `segments`
+    /// discards a whitespace-only run and the preview drops the rest, and
+    /// the contract is the same whichever of them does the work.
+    func testBlankRunsBetweenParagraphsLeaveNothingInThePreview() {
+        let source = AgentProse.previewSource("Alpha.\n\n   \n\nBeta.")
+        XCTAssertEqual(source, "Alpha.\nBeta.", source)
+    }
+
     func testTickedFenceMarkerInProseIsNotADelimiter() {
         // A line *mentioning* backticks inline is prose; only a delimiter line
         // opens a fence.

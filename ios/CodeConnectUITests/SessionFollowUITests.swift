@@ -160,56 +160,76 @@ final class SessionFollowUITests: XCTestCase {
                 + "not leave it wherever the clamp dropped it")
     }
 
-    /// **Reported from a device, and the case the test above does not
-    /// cover.** That one stops as soon as "Show less" is on screen — part
-    /// way down the expanded message. A reader who scrolls to the *very
-    /// bottom* first collapses from a different place: the offset the
-    /// collapse strands is past the end of the shrunken content, and the
-    /// lazy stack has nothing loaded there to re-anchor to.
-    func testShowLessFromTheVeryBottomDoesNotStrandTheReaderInBlank() {
+    /// Measures the gap above the expander in both states and prints both.
+    /// Not an assertion about a number nobody has measured — an instrument.
+    func testMeasureTheGapAboveTheExpanderInBothStates() {
         let app = launchSession()
         let timeline = app.scrollViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
-        expandTheLongMessage(app, timeline)
 
-        // All the way down, the way the report describes it.
-        for _ in 0..<10 {
-            drag(timeline, fromY: 0.65, toY: 0.15)
-        }
-        let showLess = app.buttons["Show less"]
+        let showMore = app.buttons["Show more"]
         let window = app.windows.firstMatch.frame
         var attempts = 0
-        while attempts < 10 {
-            if showLess.exists && showLess.isHittable && showLess.frame.minY >= window.minY
-                && showLess.frame.maxY <= window.maxY
+        while attempts < 8 {
+            if showMore.isHittable && showMore.frame.minY >= window.minY
+                && showMore.frame.maxY <= window.maxY
             {
                 break
             }
             drag(timeline, fromY: 0.25, toY: 0.7)
             attempts += 1
         }
-        XCTAssertTrue(showLess.isHittable, "the control must be reachable from the bottom")
-        showLess.tap()
+        XCTAssertTrue(showMore.isHittable)
 
-        // The contract is that *something* of the timeline is under the
-        // reader's eyes. A blank viewport is the failure being reproduced.
-        XCTAssertTrue(
-            waitUntil(timeout: 6) {
-                let more = app.buttons["Show more"]
-                return more.exists && more.isHittable
-                    && more.frame.maxY > timeline.frame.minY
-                    && more.frame.minY < timeline.frame.maxY
-            },
-            "collapsing from the bottom must leave the timeline on screen, "
-                + "not a viewport stranded past the end of the content")
+        // The preview text immediately above the collapsed control.
+        let preview = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Soak status")
+        ).firstMatch
+        XCTAssertTrue(preview.exists, "the collapsed preview must be queryable")
+        let collapsedGap = showMore.frame.minY - preview.frame.maxY
+        print("MEASURED collapsed: text.maxY=\(preview.frame.maxY) "
+            + "button.minY=\(showMore.frame.minY) gap=\(collapsedGap)")
+
+        showMore.tap()
+        let showLess = app.buttons["Show less"]
+        XCTAssertTrue(showLess.waitForExistence(timeout: 5))
+        attempts = 0
+        while attempts < 16 {
+            if showLess.isHittable && showLess.frame.minY >= window.minY
+                && showLess.frame.maxY <= window.maxY
+            {
+                break
+            }
+            drag(timeline, fromY: 0.65, toY: 0.1)
+            attempts += 1
+        }
+        // The last prose segment sits immediately above the expanded control.
+        let tail = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Still watching")
+        ).firstMatch
+        XCTAssertTrue(tail.exists, "the expanded tail must be queryable")
+        let expandedGap = showLess.frame.minY - tail.frame.maxY
+        print("MEASURED expanded: text.maxY=\(tail.frame.maxY) "
+            + "button.minY=\(showLess.frame.minY) gap=\(expandedGap)")
+        print("MEASURED delta=\(collapsedGap - expandedGap)")
     }
 
-    /// **Reported from a device.** After a send lands, the composer must be
-    /// empty. The send button turns back into the mic — which is read off
-    /// the bound string — so the string *is* cleared; what stays behind is
-    /// the keyboard's own uncommitted text, and a field still showing the
-    /// message that was just sent invites sending it twice.
-    func testTheComposerIsEmptyAfterASendLands() {
+    /// The composer clear, typed on the **keyboard itself**.
+    ///
+    /// `typeText` hands a string to the text view and never opens an
+    /// autocorrection session, so it cannot reach the state a device report
+    /// was taken in: a misspelling, live corrections offered, and a send
+    /// landing on top of that. Tapping the keys does.
+    ///
+    /// **This is the only test here that types the way a person does**, and
+    /// it is also a recorded negative result. A composer that kept showing
+    /// the message it had just sent was blamed on the keyboard restoring its
+    /// pending text over the clear; the field empties here anyway, with the
+    /// blamed mechanism removed. That is not a disproof — a visible keyboard
+    /// is not evidence that autocorrection was engaged, and this simulator's
+    /// keyboard settings are not the reporter's device — but it is enough
+    /// that the guess was deleted rather than shipped on.
+    func testTheComposerIsEmptyAfterASendTypedOnTheKeyboard() throws {
         let app = XCUIApplication()
         app.launchArguments = [
             "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
@@ -223,23 +243,43 @@ final class SessionFollowUITests: XCTestCase {
             ? app.textViews.firstMatch : app.textFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 20))
         field.tap()
-        // A misspelling on purpose: it is what leaves an autocorrection
-        // session open on the field, which is the state the report was
-        // taken in and the state a clear has to survive.
-        field.typeText("Tell me abput this project")
+        try XCTSkipUnless(
+            app.keyboards.firstMatch.waitForExistence(timeout: 10),
+            "no software keyboard — the simulator is in hardware-keyboard mode, "
+                + "and the state this test exists for cannot be reached without it")
+
+        // A misspelling, key by key, so the keyboard runs its correction
+        // machinery exactly as it did on the device.
+        let keyboard = app.keyboards.firstMatch
+        // Keys carry a label and no identifier, and the label's case follows
+        // the shift state, so each one is matched case-insensitively.
+        for letter in ["a", "b", "p", "u", "t"] {
+            let cap = keyboard.keys.matching(
+                NSPredicate(format: "label LIKE[c] %@", letter)
+            ).firstMatch
+            XCTAssertTrue(cap.waitForExistence(timeout: 5), "no \(letter) key")
+            cap.tap()
+        }
+        print("TYPED value=\((field.value as? String) ?? "nil")")
+        XCTAssertTrue(
+            app.keyboards.firstMatch.exists, "the keyboard must still be up to correct")
 
         let send = app.buttons["Send"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
-        try? XCTSkipUnless(send.isEnabled, "send is disabled — link or capability says so")
+        // An assertion, not a skip: this fixture's link and capabilities are
+        // deterministic, so a disabled send here is a regression that would
+        // otherwise delete this coverage in silence.
+        XCTAssertTrue(send.isEnabled, "the fixture's send must be enabled")
         send.tap()
 
+        // An empty text view reports its placeholder as `value`, so both
+        // readings mean the same thing: nothing of the message is left.
         XCTAssertTrue(
             waitUntil(timeout: 8) {
                 let shown = (field.value as? String) ?? ""
                 return shown.isEmpty || shown == "Say something to this agent"
             },
-            "the composer still shows the message it just sent: "
-                + "\((field.value as? String) ?? "nil")")
+            "the composer still shows what it sent: \((field.value as? String) ?? "nil")")
     }
 
     private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {

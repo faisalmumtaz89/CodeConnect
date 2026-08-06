@@ -376,6 +376,9 @@
                 // geometry in which "Show less" can strand the viewport in
                 // blank space and scrolling can leave the tail at all — the
                 // two behaviours `SessionFollowUITests` exists to prove.
+                //
+                // Not longer: a several-screen version starved XCUITest's own
+                // accessibility snapshot over this selectable text.
                 """
                 {"type":"event","event":{"seq":13,"session_id":"fx-5","ts":"\(stamp)",\
                 "kind":"agent_message","source":"transcript",\

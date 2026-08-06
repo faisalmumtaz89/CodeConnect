@@ -296,12 +296,36 @@ enum AgentProse {
         segments(text)
             .map { segment in
                 switch segment {
-                case .prose(let prose): return prose
+                // **Blank lines are dropped from prose, and only prose.** The
+                // preview has four lines to spend and a blank one spends a
+                // quarter of them on nothing — and, because the clamp reserves
+                // all four either way, a preview ending on a blank line draws
+                // an empty line of space above the expander that the expanded
+                // state does not have. The gap either side of that control
+                // measures the same in both states (12pt); this is what made
+                // one of them look larger. Paragraph breaks are the
+                // expansion's job, where there is room for them to mean
+                // something.
+                //
+                // Code is left exactly as it is: its blank lines separate
+                // statements and its leading whitespace *is* the structure.
+                // Never empties: `segments` only emits a prose run that has
+                // non-whitespace in it, so at least one line always survives.
+                case .prose(let prose): return droppingBlankLines(prose)
                 case .heading(let heading): return heading
                 case .code(let code): return code
                 case .table(let table): return tablePreviewLine(table)
                 }
             }
+            .joined(separator: "\n")
+    }
+
+    /// Lines that are not whitespace-only, unchanged. Trimming is the *test*,
+    /// never applied to what is returned — a preview that re-indented what it
+    /// quoted would be showing something the message does not say.
+    private static func droppingBlankLines(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             .joined(separator: "\n")
     }
 

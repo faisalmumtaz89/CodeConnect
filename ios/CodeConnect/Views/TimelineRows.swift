@@ -144,10 +144,11 @@ struct UserMessageRow: View {
 /// grows downward from the button, never yanking the reader upward.
 struct AgentMessageRow: View {
     let text: String
-    /// Fired after "Show less". Collapsing removes a screen or more of height
-    /// in place, and the scroll view keeps its offset — which lands the reader
-    /// in the blank space where the text used to be, with nothing visible
-    /// until they scroll back by hand. The screen re-anchors to this row.
+    /// Fired **before** the collapse, on a "Show less" tap. Collapsing removes
+    /// a screen or more of height in place and the scroll view keeps its
+    /// offset, which lands the reader in the blank where the text used to be.
+    /// The screen anchors to this row while it is still expanded, so the
+    /// height that vanishes goes from below the reader's eyes.
     var onCollapse: (() -> Void)? = nil
     /// Fired synchronously from the expand tap, before any layout moves.
     var onExpand: (() -> Void)? = nil
@@ -229,14 +230,25 @@ struct AgentMessageRow: View {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
                     let collapsing = expanded
                     if !collapsing { onExpand?() }
-                    // The re-anchor waits for the collapse to *land*: fired
-                    // early, its scroll target resolves against mid-animation
-                    // layout and the viewport still ends up in the blank the
-                    // collapse made — measured at full fixture size.
-                    withAnimation(CC.motion.small, completionCriteria: .logicallyComplete) {
+                    // **Anchored before the collapse, and only before it.**
+                    //
+                    // Re-anchoring afterwards asks the scroll view to put this
+                    // row at the top of a timeline that has just lost several
+                    // screens of height — a position that may no longer exist.
+                    // A reader who had scrolled to the foot of a long message
+                    // was left in blank and nothing recovered it. Reported
+                    // twice from a device.
+                    //
+                    // Anchoring first is satisfiable by construction: the row
+                    // is still in its expanded geometry, so its top is a real
+                    // target, and that top does not move when height is later
+                    // removed from below it. The collapse then shrinks the row
+                    // beneath the reader's eyes, which can strand nothing.
+                    // Unanimated on purpose — a second animation overlapping
+                    // the collapse is what made "before" ambiguous.
+                    if collapsing { onCollapse?() }
+                    withAnimation(CC.motion.small) {
                         expanded.toggle()
-                    } completion: {
-                        if collapsing { onCollapse?() }
                     }
                 }
                 .padding(.leading, -CC.space.sm)
