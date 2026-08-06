@@ -331,6 +331,12 @@ pub struct Capabilities {
     /// must not retry one it did not see answered.
     #[serde(default)]
     pub send_text_idempotent: bool,
+    /// `send_text` runs the composer-recovery postcondition for slash
+    /// commands, and can answer `composer_recovered` / `composer_lost`. A
+    /// client that sees this false must not offer the snapshot commands:
+    /// their whole safety story is that the daemon closes the view again.
+    #[serde(default)]
+    pub slash_composer_recovery: bool,
     /// Approval cards carry a `generation` and an `identity_bound` flag, and
     /// the daemon refuses to answer a card whose prompt it cannot prove is
     /// still on screen. A client that sees this false must treat every remote
@@ -549,6 +555,29 @@ pub enum SendTextResult {
     Indeterminate {
         reason: String,
     },
+    /// The keys landed, Claude's composer disappeared, and the daemon's own
+    /// `Escape` brought it back. Terminal like `Sent`: the mutation
+    /// happened.
+    ///
+    /// Minor 9, and **sent to every client** — `hello` carries no client
+    /// minor for the daemon to branch on. That is safe because a status a
+    /// client does not know decodes as `indeterminate` ("typed, outcome
+    /// unknown, a retry is recognised") rather than as a decode failure;
+    /// this app's own decoder does exactly that, and any other client should.
+    ComposerRecovered {
+        matched: String,
+        /// The Mac's visible pane while the view was up — present only for
+        /// the snapshot commands (`/status`, `/usage`, `/cost`), and never
+        /// stored: it is a picture for a human to read once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_snapshot: Option<String>,
+        captured_at: String,
+    },
+    /// The keys landed, the composer disappeared, and one `Escape` did not
+    /// bring it back. Somebody has to look at the Mac.
+    ComposerLost {
+        matched: String,
+    },
 }
 
 /// Payload of an `approval_request` event: everything the phone needs to render
@@ -710,10 +739,16 @@ mod tests {
              installed Claude Code actually has, and the `command_catalog` \
              capability that gates it — is minor 8"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 9,
+            "composer recovery — the daemon closing a Mac view its own \
+             injection opened, and the `slash_composer_recovery` capability \
+             that gates it — is minor 9"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 8);
+        assert_eq!(crate::PROTOCOL_MINOR, 9);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1012,6 +1047,7 @@ mod tests {
             send_text_idempotent: true,
             prompt_identity: true,
             command_catalog: true,
+            slash_composer_recovery: true,
         }
     }
 

@@ -252,6 +252,22 @@ pub fn capture_visible_pane(name: &str) -> Result<String> {
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
 }
 
+/// Whether the pane's cursor is visible — tmux's own record of the terminal's
+/// DECTCEM state, which is the structural answer to "who has the keyboard".
+///
+/// **Measured, and better than any string.** Claude's composer keeps a visible
+/// cursor while idle, while a turn streams, and after it ends (327 consecutive
+/// samples through a live turn, not one of them hidden). Every view it opens
+/// hides it — including the one that leaves the composer *drawn* underneath and
+/// takes no keys, where the composer-presence needle matches and lies. Reading
+/// the pane's text for a view's dismissal hint would work too, until an agent
+/// wrote that hint into its own output; the cursor cannot be spelled.
+pub fn cursor_is_visible(name: &str) -> Result<bool> {
+    let out = run(&["display", "-p", "-t", &target_pane(name), "#{cursor_flag}"])?
+        .ok_or_else(|| anyhow::anyhow!("tmux display cursor_flag failed for {name}"))?;
+    Ok(out.trim() == "1")
+}
+
 /// Type text literally. `-l` stops tmux from interpreting the text as key names,
 /// which matters the moment a user sends anything containing "C-c" or "Enter".
 pub fn send_literal(name: &str, text: &str) -> Result<()> {

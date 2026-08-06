@@ -48,6 +48,20 @@ final class LocalCommandTests: XCTestCase {
         XCTAssertNil(LocalCommandLine.parse("ordinary message"))
     }
 
+    /// Non-model output gets the generic title; the sentence stays verbatim
+    /// in the detail.
+    func testNonModelOutputTitlesAsCommandOutput() throws {
+        let items = TimelineBuilder.build([
+            try userEvent(
+                seq: 1, content: "<local-command-stdout>Goodbye!</local-command-stdout>")
+        ])
+        guard case .notice(let notice)? = items.first?.content else {
+            return XCTFail("\(items)")
+        }
+        XCTAssertEqual(notice.title, "Command output")
+        XCTAssertEqual(notice.detail, "Goodbye!")
+    }
+
     func testAnUnclosedTagYieldsTheRestRatherThanNothing() {
         XCTAssertEqual(
             LocalCommandLine.parse("<local-command-stdout>Goodbye!"),
@@ -104,20 +118,24 @@ final class LocalCommandTests: XCTestCase {
         let items = TimelineBuilder.build(events)
         XCTAssertEqual(items.count, 3, "the caveat is boilerplate, not a row: \(items)")
 
-        guard case .userMessage(let command) = items[0].content else {
+        guard case .userMessage(let command, let isCommand) = items[0].content else {
             return XCTFail("\(items[0])")
         }
         XCTAssertEqual(command, "/model sonnet", "the command, never the markup")
+        XCTAssertTrue(isCommand, "a command renders in command typography")
 
         guard case .notice(let notice) = items[1].content else { return XCTFail("\(items[1])") }
+        XCTAssertEqual(notice.title, "Model changed", "the title names the kind of fact")
         XCTAssertEqual(
-            notice.title,
-            "Set model to Sonnet 5 and saved as your default for new sessions")
-        XCTAssertFalse(notice.title.contains("\u{1B}"), "no escape byte reaches a row")
+            notice.detail,
+            "Set model to Sonnet 5 and saved as your default for new sessions",
+            "the verbatim output is the detail")
+        XCTAssertFalse(notice.detail?.contains("\u{1B}") == true, "no escape byte reaches a row")
 
-        guard case .userMessage(let prose) = items[2].content else {
+        guard case .userMessage(let prose, let proseIsCommand) = items[2].content else {
             return XCTFail("\(items[2])")
         }
         XCTAssertEqual(prose, "and a real message")
+        XCTAssertFalse(proseIsCommand, "ordinary prose stays prose")
     }
 }

@@ -93,6 +93,19 @@ final class SessionState {
     private(set) var lastConfirmedModel: ConfirmedModel?
     private var lastConfirmedModelSeq: UInt64 = 0
 
+    /// The last effort level Claude Code *confirmed* — its own "Set effort
+    /// level to X…" stdout, nothing else. Same honesty rule as the model
+    /// fact: the sheet reports what the transcript said, never what a send
+    /// hoped for.
+    private(set) var lastConfirmedEffort: ConfirmedEffort?
+    private var lastConfirmedEffortSeq: UInt64 = 0
+
+    /// The last compaction outcome Claude Code reported — "Compacted (…)"
+    /// or the measured refusal on a near-empty context.
+    private(set) var lastCompactSignal: CompactSignal?
+    private var lastCompactSignalSeq: UInt64 = 0
+
+
     /// What to tell the reader when this run will never ask them anything.
     ///
     /// `nil` for every mode that can still raise a card, including an unknown one:
@@ -123,6 +136,20 @@ final class SessionState {
             return ConfirmedModel(name: name, source: "Command confirmation", at: event.date)
         }
         return nil
+    }
+
+    private static func effortFact(of event: Event) -> ConfirmedEffort? {
+        guard case .output(let line)? = event.localCommand,
+            let value = EffortConfirmation.parse(line)
+        else { return nil }
+        return ConfirmedEffort(value: value, at: event.date)
+    }
+
+    private static func compactFact(of event: Event) -> CompactSignal? {
+        guard case .output(let line)? = event.localCommand,
+            let outcome = CompactConfirmation.parse(line)
+        else { return nil }
+        return CompactSignal(outcome: outcome, at: event.date)
     }
 
     /// Events that arrived at or below the tail — a replay — held back until the
@@ -194,6 +221,20 @@ final class SessionState {
             lastConfirmedModel = confirmed.1
             lastConfirmedModelSeq = confirmed.0
         }
+        if let effort = cached.events.reversed()
+            .compactMap({ event in Self.effortFact(of: event).map { (event.seq, $0) } })
+            .first
+        {
+            lastConfirmedEffort = effort.1
+            lastConfirmedEffortSeq = effort.0
+        }
+        if let compact = cached.events.reversed()
+            .compactMap({ event in Self.compactFact(of: event).map { (event.seq, $0) } })
+            .first
+        {
+            lastCompactSignal = compact.1
+            lastCompactSignalSeq = compact.0
+        }
         rebuildTimeline()
     }
 
@@ -236,6 +277,14 @@ final class SessionState {
             if let fact = Self.modelFact(of: event) {
                 lastConfirmedModel = fact
                 lastConfirmedModelSeq = event.seq
+            }
+            if let fact = Self.effortFact(of: event) {
+                lastConfirmedEffort = fact
+                lastConfirmedEffortSeq = event.seq
+            }
+            if let fact = Self.compactFact(of: event) {
+                lastCompactSignal = fact
+                lastCompactSignalSeq = event.seq
             }
         }
 
@@ -293,6 +342,10 @@ final class SessionState {
         permissionModeSeq = 0
         lastConfirmedModel = nil
         lastConfirmedModelSeq = 0
+        lastConfirmedEffort = nil
+        lastConfirmedEffortSeq = 0
+        lastCompactSignal = nil
+        lastCompactSignalSeq = 0
         gap = notice
     }
 
@@ -407,6 +460,18 @@ final class SessionState {
             if let fact = Self.modelFact(of: event) {
                 lastConfirmedModel = fact
                 lastConfirmedModelSeq = event.seq
+            }
+        }
+        for event in incoming where event.seq > lastConfirmedEffortSeq {
+            if let fact = Self.effortFact(of: event) {
+                lastConfirmedEffort = fact
+                lastConfirmedEffortSeq = event.seq
+            }
+        }
+        for event in incoming where event.seq > lastCompactSignalSeq {
+            if let fact = Self.compactFact(of: event) {
+                lastCompactSignal = fact
+                lastCompactSignalSeq = event.seq
             }
         }
         if events.first?.seq == 1 { headTruncated = false }

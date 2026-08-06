@@ -35,8 +35,8 @@ struct TimelineRow: View {
 
     var body: some View {
         switch item.content {
-        case .userMessage(let text):
-            UserMessageRow(text: text, date: item.date)
+        case .userMessage(let text, let isCommand):
+            UserMessageRow(text: text, date: item.date, isCommand: isCommand)
         case .agentMessage(let text):
             AgentMessageRow(
                 text: text, onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
@@ -86,6 +86,10 @@ enum TimelineSpine {
 struct UserMessageRow: View {
     let text: String
     let date: Date
+    /// A slash command the user issued — `/model sonnet` — rendered in the
+    /// kit's command typography rather than prose, because every character
+    /// position in a command is load-bearing.
+    var isCommand: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -116,7 +120,7 @@ struct UserMessageRow: View {
                     .frame(width: TimelineSpine.gutter, alignment: .trailing)
                     .accessibilityHidden(true)
                 Text(text)
-                    .ccType(CC.type.callout)
+                    .ccType(isCommand ? CC.type.monoSmall : CC.type.callout)
                     .foregroundStyle(CC.text.primary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -239,6 +243,11 @@ struct AgentMessageRow: View {
         // perfectly. It has no glyph to hang in the gutter, so it pays the same
         // step the gutter would have cost it.
         .padding(.leading, TimelineSpine.content)
+        // And having stepped out, it says so: the declared column is what
+        // lets a mono block or a table inside this message hang its border
+        // into the gutter by the kit's one rule instead of by private
+        // arithmetic — one border edge, one text edge, for every surface.
+        .ccColumnInset(TimelineSpine.content)
         // **Combined only while collapsed.** The collapsed preview is one
         // clamped Text, and "Agent said: …" makes it one clean VoiceOver
         // stop. Expanded, the message can be arbitrarily long — folding the

@@ -20,6 +20,7 @@ struct AgentTableView: View {
     let table: MarkdownTable
 
     @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.ccColumnInset) private var columnInset
 
     /// One paragraph-of-text width. Wider, and a lone prose cell makes every
     /// other column unreachable without a scroll expedition; narrower, and
@@ -33,9 +34,10 @@ struct AgentTableView: View {
         }
         .scrollBounceBehavior(.basedOnSize, axes: [.horizontal])
         .ccSurface(.raised, radius: CC.radius.md)
-        // CCMonoBlock's own hang: the border steps CC.space.sm into the
-        // gutter so the first cell's text stands on the prose column.
-        .padding(.leading, -CC.space.sm)
+        // The kit's one hang rule, not private arithmetic: the container
+        // declared its column, and the border steps back from it so the
+        // first cell's text stands where the prose does.
+        .padding(.leading, CCColumn.hang(from: columnInset))
         // VoiceOver reads structure, not the grid's cells in visual order
         // stripped of context: the container states the shape, then one stop
         // for the columns and one per row, every cell paired with its header.

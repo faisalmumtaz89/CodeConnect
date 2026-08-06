@@ -115,7 +115,7 @@ struct NoticeItem: Sendable, Hashable {
 
 struct TimelineItem: Sendable, Hashable, Identifiable {
     enum Content: Sendable, Hashable {
-        case userMessage(String)
+        case userMessage(String, isCommand: Bool = false)
         case agentMessage(String)
         case tool(ToolItem)
         case approval(ApprovalItem)
@@ -200,18 +200,41 @@ enum TimelineBuilder {
                         break
                     case .invocation:
                         if let text = local.invocationText {
-                            items.append(event.item(.userMessage(text)))
+                            // `/clear` rotates the transcript: Claude Code
+                            // opens a NEW file whose first user entry is this
+                            // very invocation (measured), so its arrival IS
+                            // the observable completion — the daemon is
+                            // following the fresh conversation. Rendered as
+                            // the fact it proves rather than as typed input.
+                            if text == "/clear" {
+                                items.append(
+                                    event.item(
+                                        .notice(
+                                            NoticeItem(
+                                                kind: .other,
+                                                symbol: "eraser",
+                                                title: "Conversation cleared.",
+                                                detail: nil,
+                                                severity: .info))))
+                            } else {
+                                items.append(event.item(.userMessage(text, isCommand: true)))
+                            }
                         }
                     case .output(let text):
+                        // A full sentence is not a title. The title names the
+                        // kind of fact; the verbatim output is the detail.
                         if !text.isEmpty {
+                            let title =
+                                ModelConfirmation.parse(text) != nil
+                                ? "Model changed" : "Command output"
                             items.append(
                                 event.item(
                                     .notice(
                                         NoticeItem(
                                             kind: .other,
                                             symbol: "terminal",
-                                            title: text,
-                                            detail: nil,
+                                            title: title,
+                                            detail: text,
                                             severity: .info))))
                         }
                     }
@@ -323,7 +346,20 @@ enum TimelineBuilder {
                                 kind: .sessionStart,
                                 symbol: "play.circle",
                                 title: "Session started",
-                                detail: event.modelName,
+                                // Through the same mapper the Model sheet
+                                // uses. The hook hands over an API id —
+                                // `claude-opus-5[1m]` — and one screen
+                                // resolving that to "Opus 5 · 1M context"
+                                // while another prints the id is the app
+                                // disagreeing with itself about the same
+                                // fact. An id this build does not recognise
+                                // still passes through verbatim.
+                                detail: event.modelName.map {
+                                    let display = ModelDisplay.from($0)
+                                    return [display.name, display.meta]
+                                        .compactMap { $0 }
+                                        .joined(separator: " · ")
+                                },
                                 severity: .info))))
 
             case .sessionEnd, .turnComplete:

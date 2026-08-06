@@ -1412,13 +1412,17 @@ private struct DiffCommentSheet: View {
             sending = false
             result = attempt
             switch attempt {
-            case .sent, .alreadyApplied:
+            case .sent, .alreadyApplied, .composerRecovered:
                 // Either way the comment is in the session — an earlier
                 // attempt's landing is a landing.
                 CCHaptic.success.fire()
                 try? await Task.sleep(for: .seconds(0.6))
                 dismiss()
-            case .refused, .failed, .indeterminate:
+            case .refused, .indeterminate, .composerLost:
+                // Recoverable states get the warning signature; failure's
+                // buzz is reserved for actual failure.
+                CCHaptic.warning.fire()
+            case .failed:
                 CCHaptic.failure.fire()
             }
         }
@@ -1430,25 +1434,35 @@ private struct DiffCommentSheet: View {
         case .refused: return "Refused"
         case .failed: return "Failed"
         case .alreadyApplied: return "Already sent"
-        case .indeterminate: return "Unconfirmed"
+        case .indeterminate: return "Not confirmed"
+        case .composerRecovered: return "Sent"
+        case .composerLost: return "Composer not restored"
         }
     }
 
     private func resultMessage(_ attempt: ComposeAttempt) -> String {
         switch attempt {
         case .sent(let matched): return "The daemon typed it into \(matched)."
-        case .refused(let reason), .failed(let reason), .indeterminate(let reason):
+        case .refused(let reason), .failed(let reason):
             return reason
+        case .indeterminate(let reason):
+            return "Couldn’t confirm whether the comment was typed: \(reason) "
+                + "Retry is safe; it won’t be typed twice."
         case .alreadyApplied:
-            return "An earlier attempt already typed this; it was not repeated."
+            return "This comment was typed earlier and wasn’t repeated."
+        case .composerRecovered:
+            return "The comment was typed into the session."
+        case .composerLost:
+            return "The comment was typed, but the Mac's composer did not come back. "
+                + "Open Terminal to recover."
         }
     }
 
     private func resultTone(_ attempt: ComposeAttempt) -> CCTone {
         switch attempt {
-        case .sent, .alreadyApplied: return .success
+        case .sent, .alreadyApplied, .composerRecovered: return .success
         case .refused, .indeterminate: return .warning
-        case .failed: return .danger
+        case .failed, .composerLost: return .danger
         }
     }
 }

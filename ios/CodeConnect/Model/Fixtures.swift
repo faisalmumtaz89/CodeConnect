@@ -159,6 +159,9 @@
                 }
             }
             if let turn = decode(turnCompleteJSON(now: now)) { messages.append(turn) }
+            for json in confirmedFactsJSON(now: now) {
+                if let event = decode(json) { messages.append(event) }
+            }
             if variant.hasRunningTool {
                 // In order, so `fx-5` reads as Running: the turn's last item has
                 // to be the tool call.
@@ -167,6 +170,48 @@
                 }
             }
             return messages
+        }
+
+        /// **The facts the command sheets report, in their worst shapes.**
+        ///
+        /// Numbered to *follow* the frames above rather than sitting at some
+        /// high round number: the client reads a jump in `seq` as events it
+        /// never received and says so, correctly — so a fixture that skips
+        /// ahead prints a gap banner over every screen it appears on.
+        ///
+        /// On `fx-4`, the one session holding no approval card: a
+        /// `session_start` on a session that *is* blocked reads as that run
+        /// having restarted, and its card correctly stops being current —
+        /// which is right behaviour and the wrong fixture.
+        ///
+        /// Without these the Model sheet's populated state — a raw hook id in
+        /// monospace, a variant line, and a provenance line under it — is
+        /// unreachable by any render, and that exact state is the one that
+        /// shipped looking broken. `claude-opus-5[1m]` is verbatim what the
+        /// SessionStart hook hands the app; the effort line is verbatim what
+        /// Claude Code's `/effort` writes to its transcript, description and
+        /// all, so the Effort sheet's confirmed state has a real string to
+        /// wrap rather than a tidy one.
+        private static func confirmedFactsJSON(now: Date) -> [String] {
+            let ts = rfc3339(now)
+            let effort =
+                "Set effort level to xhigh (saved as your default for new sessions): "
+                + "Deeper reasoning than high, just below maximum "
+                + "(Fable 5, Opus 4.7+, Sonnet 5)"
+            return [
+                """
+                {"type":"event","event":{"seq":12,"session_id":"fx-4",\
+                "ts":"\(ts)","kind":"session_start","source":"hook",\
+                "payload":{"hook_event_name":"SessionStart",\
+                "model":"claude-opus-5[1m]"}}}
+                """,
+                """
+                {"type":"event","event":{"seq":13,"session_id":"fx-4",\
+                "ts":"\(ts)","kind":"user_message","source":"transcript",\
+                "payload":{"type":"user","message":{"role":"user",\
+                "content":"<local-command-stdout>\(effort)</local-command-stdout>"}}}}
+                """,
+            ]
         }
 
         /// A diff that exercises every branch of the parser: a modified file
@@ -194,14 +239,64 @@
         // MARK: JSON builders
 
         private static let helloAckJSON = """
-            {"type":"hello_ack","protocol_version":1,"protocol_minor":1,\
+            {"type":"hello_ack","protocol_version":1,"protocol_minor":9,\
             "server_time":"2026-07-31T09:14:00.000Z",\
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
             "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
             "push":false,"tls":false,"tls_active":false,"diff":true,"risk_class":true,\
-            "delete_session":true},\
+            "delete_session":true,"command_catalog":true,"slash_composer_recovery":true},\
             "device_name":"iPhone","ssh_key_installed":true}
             """
+
+        /// The `/status` view exactly as a narrow (80-column) tmux pane
+        /// rendered it in the measurement rig — wrapped cwd, the works —
+        /// with same-shape stand-ins for the account strings. Worst-case
+        /// real data for the snapshot sheet: the render must survive this,
+        /// not a tidied version of it.
+        static let statusPane = """
+            ❯ /usage
+              ⎿  Settings dialog dismissed
+            ❯ /status
+            ────────────────────────────────────────────────────────────────────────────────
+              Settings  Status   Config   Usage   Stats
+
+              Version:          2.1.222
+              Session name:     Reply with exactly alpha
+              Session ID:       022f6af6-328e-4245-8f10-d2d20ae4886f
+              Session kind:     interactive
+              cwd:              /private/tmp/claude-501/-Users-example-Documents-GitHub
+                                -CodeConnect/6e395e66-643a-4147-a28b-c8f7b18222c2/scratchpad
+              Login method:     Claude Max account
+              Organization:     fixture-owner@example.com's Organization
+              Email:            fixture-owner@example.com
+
+              Model:            fable (claude-fable-5)
+              Memory:           project + user
+              Setting sources:  Login managed settings, Command line arguments,
+
+              Esc to close
+            """
+
+        /// `-cc.debug.sendText <mode>` — what the stubbed daemon says to any
+        /// send. `recovered` carries the measured pane above, as the real
+        /// daemon does for the three snapshot commands.
+        static func sendTextResult(mode: String) -> SendTextResult {
+            switch mode {
+            case "recovered":
+                return .composerRecovered(
+                    matched: "foragents",
+                    paneSnapshot: statusPane,
+                    capturedAt: "2026-08-05T14:32:08.000Z")
+            case "recovered-empty":
+                return .composerRecovered(
+                    matched: "foragents", paneSnapshot: "  \n  ",
+                    capturedAt: "2026-08-05T14:32:08.000Z")
+            case "lost":
+                return .composerLost(matched: "foragents")
+            default:
+                return .sent(matched: "foragents")
+            }
+        }
 
         /// `blocked_on` is derived from the cards rather than stubbed with one
         /// placeholder id, so `SessionSummary.blockedOn.count` is the number of

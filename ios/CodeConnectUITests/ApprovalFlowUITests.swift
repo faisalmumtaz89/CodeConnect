@@ -207,7 +207,7 @@ final class ApprovalFlowUITests: XCTestCase {
         XCTAssertTrue(
             denied.waitForExistence(timeout: 30), "the denial must be daemon-confirmed")
 
-        let typed = app.staticTexts["Your reason was typed into the session."]
+        let typed = app.staticTexts["Reason typed into the session."]
         XCTAssertTrue(
             typed.waitForExistence(timeout: 30),
             "the reason has to reach the session, or the card must say it did not")

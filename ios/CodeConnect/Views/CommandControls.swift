@@ -3,69 +3,150 @@ import SwiftUI
 // =============================================================================
 //  Slash commands, from a phone.
 //
-//  Typing `/` in the composer summons a palette of what the Mac's Claude Code
-//  actually has — read from the binary itself over `get_command_catalog`,
-//  never from a hand-kept list. Exactly one command gets native UX in this
-//  release: `/model`, whose picker form measured as a lockout (the dialog
-//  replaces the Mac's composer and every phone send is refused until someone
-//  presses Esc there). Everything else is labeled honestly and handed to the
-//  Terminal tab rather than injected — a discovered-but-unclassified built-in
-//  might be a dialog under a new name, and "send and warn" is not a
-//  safeguard when the failure is a measured lockout.
+//  Typing `/` in the composer summons a palette of what this app can do with
+//  a command natively — sheets for `/model`, `/effort` and `/compact`, a
+//  confirmation for `/clear`, the app's own diff for `/diff`, and — when the
+//  daemon can recover the Mac's composer — a captured snapshot of the views
+//  `/status`, `/usage` and `/cost` open. The palette never lists a row whose
+//  only behavior would be refusing the tap: rows the daemon cannot honour are
+//  omitted, not disabled. The send-time policy underneath is unchanged:
+//  typed native commands open their controls, typed dialog built-ins get the
+//  composer's refusal note, and anything unknown passes through as the
+//  custom skill or plain text it is — with the supervisor's recovery check
+//  standing behind every word-shaped send.
 // =============================================================================
 
-/// The palette above the keyboard while the composer starts with `/`.
+/// One palette row: the command, what tapping it opens, and the action the
+/// detail view routes — the same `CommandAction` a typed send resolves to,
+/// so a tap and a typed command can never drift apart.
+struct PaletteRow: Equatable, Identifiable {
+    let command: String
+    let subtitle: String
+    let icon: String
+    let action: CommandAction
+
+    var id: String { command }
+    var title: String { "/\(command)" }
+}
+
+/// The palette above the keyboard while the composer holds a bare `/` or a
+/// prefix of a native command. Anything else — arguments, unknown fragments —
+/// shows no palette at all; typing simply continues.
 struct CommandPalette: View {
-    let typed: String
-    let catalog: [String]?
-    let failure: String?
-    let onModel: () -> Void
-    let onBlocked: (String) -> Void
-
-    /// The prefix being completed: `/mo` → `mo`.
-    private var fragment: String {
-        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("/") else { return "" }
-        return String(trimmed.dropFirst().prefix { !$0.isWhitespace }).lowercased()
+    /// What the palette shows for one composer text: which rows, and whether
+    /// the discovery caption underneath. `nil` means no palette.
+    struct Content: Equatable {
+        var rows: [PaletteRow]
+        var showsCaption: Bool
     }
 
-    private var matches: [String] {
-        guard let catalog else { return [] }
-        let names = catalog.filter { fragment.isEmpty || $0.hasPrefix(fragment) }
-        // `/model` first — it is the one row that opens app UX — then the
-        // binary's own order, which is Claude Code's to choose.
-        return names.sorted { a, b in
-            if a == "model" { return true }
-            if b == "model" { return false }
-            return false
+    let content: Content
+    let onAction: (CommandAction) -> Void
+
+    /// The eight native commands, in the order they are worth a thumb's
+    /// attention: the two levers, the two context acts, the diff, then the
+    /// three Mac captures.
+    static let allRows: [PaletteRow] = [
+        PaletteRow(
+            command: "model", subtitle: "Choose model", icon: "cpu",
+            action: .nativeModel(prefillArgs: "")),
+        PaletteRow(
+            command: "effort", subtitle: "Choose reasoning effort", icon: "dial.medium",
+            action: .nativeEffort),
+        PaletteRow(
+            command: "compact", subtitle: "Compact context",
+            icon: "arrow.down.right.and.arrow.up.left",
+            action: .nativeCompact(prefillInstructions: "")),
+        PaletteRow(
+            command: "clear", subtitle: "Clear Claude’s context", icon: "eraser",
+            action: .nativeClear),
+        PaletteRow(
+            command: "diff", subtitle: "Review working-tree changes",
+            icon: "plus.forwardslash.minus",
+            action: .nativeDiff),
+        PaletteRow(
+            command: "status", subtitle: "Capture the Mac status view", icon: "info.circle",
+            action: .nativeSnapshot(.status)),
+        PaletteRow(
+            command: "usage", subtitle: "Capture the Mac usage view", icon: "chart.bar",
+            action: .nativeSnapshot(.usage)),
+        PaletteRow(
+            command: "cost", subtitle: "Capture the Mac cost view", icon: "creditcard",
+            action: .nativeSnapshot(.cost)),
+    ]
+
+    /// The palette for one composer text, or `nil` for none. Bare `/` is the
+    /// discovery moment: every available row plus the caption. A fragment
+    /// filters case-insensitively. Whitespace after the fragment means
+    /// arguments are coming, and arguments are typing, not browsing. The
+    /// snapshot rows exist only when the daemon can close the Mac view they
+    /// open — omitted, never disabled.
+    static func content(for typed: String, recoversComposer: Bool) -> Content? {
+        let afterLeading = typed.drop(while: \.isWhitespace)
+        guard afterLeading.hasPrefix("/") else { return nil }
+        let fragment = afterLeading.dropFirst()
+        let available = allRows.filter { row in
+            if case .nativeSnapshot = row.action { return recoversComposer }
+            return true
         }
+        if fragment.isEmpty {
+            return Content(rows: available, showsCaption: true)
+        }
+        guard !fragment.contains(where: \.isWhitespace) else { return nil }
+        let needle = fragment.lowercased()
+        let matches = available.filter { $0.command.hasPrefix(needle) }
+        return matches.isEmpty ? nil : Content(rows: matches, showsCaption: false)
     }
+
+    /// One standard row's height, in the reader's type size — the unit the
+    /// scroll cap is measured in.
+    @ScaledMetric(relativeTo: .body) private var rowUnit: CGFloat = 52
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if catalog == nil, failure == nil {
-                statusLine("Reading the Mac's command list…")
-            } else if let failure, catalog == nil {
-                // Static knowledge still stands when discovery does not: the
-                // model row works, and the guard on dialog commands holds.
-                row(command: "model")
-                CCHairline()
-                statusLine(failure)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(matches, id: \.self) { command in
-                            row(command: command)
-                            if command != matches.last { CCHairline() }
-                        }
-                        if matches.isEmpty {
-                            statusLine("No built-in matches — sent as typed.")
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(content.rows) { row in
+                        CCRow(
+                            row.title,
+                            titleIsMono: true,
+                            subtitle: row.subtitle,
+                            separator: row != content.rows.last || content.showsCaption,
+                            action: { onAction(row.action) }
+                        ) {
+                            CCIcon(row.icon, size: 16, weight: .regular, relativeTo: .body)
+                                .foregroundStyle(CC.text.tertiary)
+                        } trailing: {
+                            EmptyView()
                         }
                     }
+                    // **Inside the scroll, deliberately.** Pinned below it, the
+                    // caption competed with the rows for a fixed height: at AX5
+                    // it took the space of two of them and still truncated
+                    // itself mid-word, and at reading size it sat flush against
+                    // a half-clipped row so the two read as one broken element.
+                    // Here it costs no row its place, it wraps instead of
+                    // truncating, and it arrives exactly when a reader who has
+                    // scanned the whole list starts wondering where the rest of
+                    // the commands went.
+                    if content.showsCaption {
+                        Text("Run other commands on the Mac from the Terminal tab.")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, CC.space.sm)
+                            .padding(.vertical, CC.space.sm)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-                .frame(maxHeight: 224)
-                .scrollBounceBehavior(.basedOnSize)
             }
+            .scrollBounceBehavior(.basedOnSize)
+            // Roughly four standard rows, then the list scrolls — the
+            // fractional cap keeps part of a row in view, which is the only
+            // thing telling a reader there is more. Bounded so the largest
+            // accessibility sizes still leave the composer on screen and
+            // scroll the list instead of eating the keyboard.
+            .frame(maxHeight: min(rowUnit * 4.4, 340))
         }
         .background(CC.color.surfaceOverlay)
         .clipShape(RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
@@ -76,284 +157,282 @@ struct CommandPalette: View {
         .padding(.horizontal, CC.space.md)
         .padding(.top, CC.space.xs)
     }
-
-    private func row(command: String) -> some View {
-        let native = command == "model"
-        return Button {
-            if native {
-                onModel()
-            } else {
-                switch ClaudeCommandPolicy.action(for: "/\(command)", catalog: catalog) {
-                case .blocked(_, let reason): onBlocked(reason)
-                case .nativeModel, .passThrough: break
-                }
-            }
-        } label: {
-            HStack(spacing: CC.space.xs) {
-                Text("/\(command)")
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.primary)
-                Spacer(minLength: CC.space.sm)
-                Text(native ? "App control" : "Mac only")
-                    .ccType(CC.type.micro)
-                    .foregroundStyle(native ? CCTone.success.color : CC.text.tertiary)
-            }
-            .padding(.horizontal, CC.space.sm)
-            .padding(.vertical, CC.space.xs)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(
-            "/\(command), \(native ? "opens app control" : "runs on the Mac only")")
-    }
-
-    private func statusLine(_ text: String) -> some View {
-        Text(text)
-            .ccType(CC.type.micro)
-            .foregroundStyle(CC.text.secondary)
-            .padding(.horizontal, CC.space.sm)
-            .padding(.vertical, CC.space.xs)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
 }
 
-/// The native `/model` control.
-///
-/// Injects the *argument form* (`/model sonnet`), which executes inline and
-/// keeps the Mac's composer on screen — and, measured, also saves the choice
-/// as the default for new sessions. There is no session-only argument form,
-/// so the sheet says exactly that instead of pretending; session-only remains
-/// a Terminal handoff.
+/// The native `/model` control: tap a row, it applies. The Mac's own picker
+/// works the same way, the operation is trivially reversible from this same
+/// sheet, and stating the consequence *above* the rows means consent precedes
+/// the tap — which is what let the confirm-button dance, and its
+/// disabled-at-rest scold, be deleted.
 struct ModelSheet: View {
     let sessionKey: String
     var prefill: String = ""
-    let onOpenTerminal: () -> Void
+    /// The keystrokes landed on the Mac — the composer draft that opened
+    /// this sheet has been consumed and may be cleared.
+    var onLanded: () -> Void = {}
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    /// Claude Code's shipping aliases. Free text below covers everything
-    /// else, so a new alias is typeable the day it exists.
+    /// The selectable ships, by alias — the argument `/model` accepts.
     private static let aliases = ["fable", "opus", "sonnet", "haiku"]
 
     private enum Phase: Equatable {
-        case choosing
+        case idle
+        /// The alias being typed on the Mac right now.
         case sending(String)
-        /// Keystrokes landed; Claude Code has not yet said so in the
-        /// transcript. `since` drives the honesty timeout.
-        case waiting(String, since: Date)
+        /// Keystrokes landed; Claude Code has not yet confirmed in the
+        /// transcript.
+        case waiting(String)
         case confirmed(String)
         case failed(String)
     }
 
-    @State private var phase: Phase = .choosing
+    @State private var phase: Phase = .idle
     @State private var custom: String = ""
-    @State private var chosen: String?
     @State private var timeoutTask: Task<Void, Never>?
-    /// The model fact as it stood when send was tapped. The confirmation
-    /// rule is "a NEW command-confirmation fact", and new is relative to
-    /// this — never to whatever happens to be current when the transcript
-    /// event lands.
+    /// The model fact as it stood when a row was tapped; "confirmed" means a
+    /// NEW command-confirmation fact relative to this.
     @State private var baseline: ConfirmedModel?
 
     private var state: SessionState? { model.states[sessionKey] }
 
-    private var selection: String? {
-        if let chosen { return chosen }
-        let typed = custom.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? nil : typed
+    private var busy: Bool {
+        switch phase {
+        case .sending, .waiting: return true
+        case .idle, .confirmed, .failed: return false
+        }
+    }
+
+    private var current: ModelDisplay? {
+        state?.lastConfirmedModel.map { ModelDisplay.from($0.name) }
     }
 
     var body: some View {
         CCSheetChrome("Model", onClose: { dismiss() }) {
             ScrollView {
-                sheetBody
+                VStack(alignment: .leading, spacing: CC.space.md) {
+                    CCSectionHeader("Current model")
+                    currentCard
+                    CCSectionHeader("Choose model")
+                    Text("Also becomes your default for new sessions.")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                    chooserCard
+                    customEntry
+                    Text("For this session only, use the model picker in the Terminal tab.")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    statusSlot
+                }
+                .padding(CC.space.md)
             }
             .scrollBounceBehavior(.basedOnSize)
         }
         .onAppear {
-            // "/model sonnet" typed into the composer arrives here with its
-            // argument; the sheet is the confirmation step, not a detour.
-            if custom.isEmpty, chosen == nil, !prefill.isEmpty { custom = prefill }
+            if custom.isEmpty, !prefill.isEmpty { custom = prefill }
         }
-        .onChange(of: custom) { _, typed in
-            if !typed.isEmpty { chosen = nil }
-        }
-        .onChange(of: state?.lastConfirmedModel) { _, current in
+        .onChange(of: state?.lastConfirmedModel) { _, currentFact in
             guard case .waiting = phase,
-                let name = ModelChangeWatch.confirmed(baseline: baseline, current: current)
+                let name = ModelChangeWatch.confirmed(baseline: baseline, current: currentFact)
             else { return }
             timeoutTask?.cancel()
-            withAnimation(CC.motion.small) { phase = .confirmed("Model set to \(name).") }
+            let display = ModelDisplay.from(name).name
+            withAnimation(CC.motion.small) { phase = .confirmed("Model set to \(display).") }
         }
         .onDisappear { timeoutTask?.cancel() }
     }
 
-    private var sheetBody: some View {
-        VStack(alignment: .leading, spacing: CC.space.md) {
-                if let confirmed = state?.lastConfirmedModel {
-                    CCFactRow(
-                        "Last confirmed", age: RelativeAge.text(since: confirmed.at),
-                        separator: false
-                    ) {
-                        Text(confirmed.name).ccType(CC.type.body)
-                            .foregroundStyle(CC.text.primary)
-                    } detail: {
-                        Text(confirmed.source).ccType(CC.type.micro)
-                            .foregroundStyle(CC.text.tertiary)
-                    }
-                } else {
-                    CCFactRow("Last confirmed", separator: false) {
-                        Text("Unknown").ccType(CC.type.body)
-                            .foregroundStyle(CC.text.secondary)
-                    } detail: {
-                        Text("This session has not said which model it runs.")
-                            .ccType(CC.type.micro)
-                            .foregroundStyle(CC.text.tertiary)
-                    }
-                }
+    // MARK: Current
 
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Self.aliases, id: \.self) { alias in
-                        aliasRow(alias)
-                        if alias != Self.aliases.last { CCHairline() }
-                    }
-                }
-                .ccSurface(.raised, radius: CC.radius.md)
-
-                CCField(
-                    label: "Other model or alias", text: $custom,
-                    placeholder: "e.g. claude-sonnet-5",
-                    autocapitalization: .never,
-                    disableAutocorrection: true)
-
-                CCBanner(
-                    "Also becomes your default",
-                    message:
-                        "Claude Code's argument form changes this session and saves the "
-                        + "choice as the default for new sessions. A session-only change "
-                        + "exists only in the Mac's own picker — use Terminal for that.",
-                    tone: .warning, icon: "exclamationmark.triangle")
-
-                statusLines
-
-                CCButton(
-                    primaryTitle,
-                    variant: .primary,
-                    disabledReason: disabledReason
+    private var currentCard: some View {
+        CCCard(padding: 0) {
+            if let fact = state?.lastConfirmedModel, let current {
+                CCRow(
+                    current.name,
+                    titleIsMono: current.isRawFallback,
+                    subtitle: current.meta,
+                    meta: Self.provenanceLine(fact, now: Date()),
+                    showsChevron: false,
+                    separator: false
                 ) {
-                    if let selection { send(selection) }
+                    CCIcon(
+                        "checkmark.circle.fill", size: 16, weight: .semibold,
+                        relativeTo: .body
+                    )
+                    .foregroundStyle(CCTone.success.color)
+                } trailing: {
+                    EmptyView()
                 }
-                CCButton("Use Terminal for session only", variant: .ghost) {
-                    dismiss()
-                    onOpenTerminal()
+            } else {
+                CCRow(
+                    "Not confirmed",
+                    meta: "This session has not reported a model.",
+                    showsChevron: false,
+                    separator: false
+                ) {
+                    CCIcon("circle.dashed", size: 16, weight: .regular, relativeTo: .body)
+                        .foregroundStyle(CC.text.tertiary)
+                } trailing: {
+                    EmptyView()
                 }
             }
-        .padding(CC.space.md)
-    }
-
-    private var disabledReason: CCDisabledReason? {
-        if selection == nil { return CCDisabledReason("Pick a model or type one") }
-        if !phaseAllowsSending { return CCDisabledReason("Waiting on the Mac") }
-        return nil
-    }
-
-    private var phaseAllowsSending: Bool {
-        switch phase {
-        case .choosing, .confirmed, .failed: return true
-        case .sending, .waiting: return false
         }
     }
 
-    private var primaryTitle: String {
-        if let selection { return "Set \(selection) & make default" }
-        return "Set model & make default"
+    /// `Confirmed at session start · 1m ago` — one line, one place.
+    static func provenanceLine(_ fact: ConfirmedModel, now: Date) -> String {
+        let origin =
+            fact.source == "Command confirmation"
+            ? "Confirmed by /model" : "Confirmed at session start"
+        return "\(origin) · \(RelativeAge.text(since: fact.at, now: now))"
+    }
+
+    // MARK: Chooser
+
+    private var chooserCard: some View {
+        CCCard(padding: 0) {
+            VStack(spacing: 0) {
+                ForEach(Self.aliases, id: \.self) { alias in
+                    aliasRow(alias)
+                }
+            }
+        }
+        .accessibilityValue(busy ? "Busy" : "")
     }
 
     private func aliasRow(_ alias: String) -> some View {
-        Button {
-            chosen = alias
-            custom = ""
-        } label: {
-            HStack(spacing: CC.space.xs) {
-                Text(alias.capitalized).ccType(CC.type.body)
-                    .foregroundStyle(CC.text.primary)
-                Spacer(minLength: 0)
-                if chosen == alias {
-                    CCIcon("checkmark", size: 13, weight: .semibold, relativeTo: .body)
-                        .foregroundStyle(CCTone.success.color)
-                } else if let confirmed = state?.lastConfirmedModel,
-                    confirmed.name.lowercased().contains(alias)
-                {
-                    Text("last confirmed").ccType(CC.type.micro)
-                        .foregroundStyle(CC.text.tertiary)
-                }
+        let display = ModelDisplay.from(alias)
+        let isCurrent = current.map { $0.name == display.name } ?? false
+        let isApplying: Bool = {
+            if case .sending(let active) = phase { return active == alias }
+            if case .waiting(let active) = phase { return active == alias }
+            return false
+        }()
+        return CCRow(
+            display.name,
+            showsChevron: false,
+            separator: alias != Self.aliases.last,
+            action: (busy || isCurrent) ? nil : { apply(alias) }
+        ) {
+            if isApplying {
+                CCProgressRing(.sm)
+            } else {
+                CCIcon(
+                    isCurrent ? "checkmark.circle.fill" : "circle",
+                    size: 16, weight: isCurrent ? .semibold : .regular, relativeTo: .body
+                )
+                .foregroundStyle(isCurrent ? CCTone.success.color : CC.text.tertiary)
             }
-            .padding(.horizontal, CC.space.sm)
-            .padding(.vertical, CC.space.sm)
-            .contentShape(Rectangle())
+        } trailing: {
+            EmptyView()
+        } meta: {
+            EmptyView()
         }
-        .buttonStyle(.plain)
     }
 
+    // MARK: Custom entry
+
+    private var customEntry: some View {
+        // Carded for the same reason as the Compact sheet's field: outside
+        // one, the label lands on the content column and its own box on the
+        // container's edge, 36pt apart.
+        CCCard {
+            HStack(alignment: .bottom, spacing: CC.space.xs) {
+                CCField(
+                    label: "Model id or alias", text: $custom,
+                    placeholder: "e.g. claude-sonnet-5",
+                    submitLabel: .done,
+                    autocapitalization: .never,
+                    disableAutocorrection: true,
+                    isMono: true,
+                    onSubmit: { applyCustom() })
+                if !custom.trimmingCharacters(in: .whitespaces).isEmpty {
+                    CCButton("Set", variant: .secondary, size: .sm) { applyCustom() }
+                }
+            }
+        }
+    }
+
+    private func applyCustom() {
+        let trimmed = custom.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !busy else { return }
+        apply(trimmed)
+    }
+
+    // MARK: Status
+
     @ViewBuilder
-    private var statusLines: some View {
+    private var statusSlot: some View {
         switch phase {
-        case .choosing:
+        case .idle:
             EmptyView()
         case .sending(let alias):
             statusLine("Typing /model \(alias) on the Mac…", tone: .neutral)
         case .waiting:
-            statusLine(
-                "Typed on the Mac. Waiting for Claude Code to confirm.", tone: .neutral)
-        case .confirmed(let message):
-            statusLine(message, tone: .success)
-        case .failed(let reason):
-            statusLine(reason, tone: .warning)
+            statusLine("Waiting for Claude Code to confirm…", tone: .neutral)
+        case .confirmed(let line):
+            statusLine(line, tone: .success)
+        case .failed(let line):
+            statusLine(line, tone: .warning)
         }
     }
 
     private func statusLine(_ text: String, tone: CCTone) -> some View {
-        Text(text)
-            .ccType(CC.type.footnote)
-            .foregroundStyle(tone == .neutral ? CC.text.secondary : tone.color)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        CCProse(
+            text, style: CC.type.footnote,
+            color: tone == .neutral ? CC.text.secondary : tone.color
+        )
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func send(_ alias: String) {
+    // MARK: Apply
+
+    private func apply(_ alias: String) {
         baseline = state?.lastConfirmedModel
-        phase = .sending(alias)
+        withAnimation(CC.motion.micro) { phase = .sending(alias) }
         Task {
             let attempt = await model.sendModelCommand(alias, to: sessionKey)
             switch attempt {
             case .sent:
-                // Keystrokes landed — which proves typing, not execution. The
-                // transcript's own confirmation is what flips this to done —
-                // and it may already have landed while we were `.sending`,
-                // so the current fact is checked before waiting on a change.
+                // Keystrokes landed — which proves typing, not execution.
+                // Claude Code's own transcript confirmation flips this to
+                // done, and it may already have landed while `.sending`.
+                onLanded()
                 if let name = ModelChangeWatch.confirmed(
                     baseline: baseline, current: state?.lastConfirmedModel)
                 {
-                    phase = .confirmed("Model set to \(name).")
+                    phase = .confirmed("Model set to \(ModelDisplay.from(name).name).")
                 } else {
-                    phase = .waiting(alias, since: Date())
+                    phase = .waiting(alias)
                     armTimeout()
                 }
             case .alreadyApplied:
-                // The daemon replayed an earlier attempt's outcome without
-                // typing again — no new transcript line is coming, and
-                // waiting for one would be a guaranteed timeout.
-                phase = .confirmed("Already applied by an earlier attempt.")
+                // The daemon replayed an earlier attempt without typing; no
+                // new transcript line is coming. It proves the keys were
+                // typed once — never that Claude acted on them — so this says
+                // "sent", exactly as the Effort and Compact sheets do.
+                onLanded()
+                phase = .confirmed("This model request was already sent earlier.")
             case .refused(let reason):
                 phase = .failed("Nothing was typed: \(reason)")
             case .failed(let reason):
-                phase = .failed(reason)
+                phase = .failed("Couldn’t type the command: \(reason)")
             case .indeterminate(let reason):
                 phase = .failed(
-                    "CodeConnect can't tell whether this landed: \(reason) "
-                        + "Sending the same choice again is safe — a retry is "
-                        + "recognised, not retyped.")
+                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
+            case .composerRecovered:
+                // `/model <alias>` is measured inline, so this is not the
+                // expected path — but the keys landed, and the transcript
+                // confirmation is still what proves the change.
+                onLanded()
+                phase = .waiting(alias)
+                armTimeout()
+            case .composerLost:
+                phase = .failed(
+                    "Couldn’t restore the composer. Open Terminal to recover.")
             }
         }
     }
@@ -366,9 +445,377 @@ struct ModelSheet: View {
             if case .waiting = phase {
                 withAnimation(CC.motion.small) {
                     phase = .failed(
-                        "Claude Code did not confirm the change. It may still have run — "
-                            + "check the session timeline or Terminal.")
+                        "Not confirmed yet. The change may still have run; "
+                            + "check the timeline or Terminal.")
                 }
+            }
+        }
+    }
+}
+
+/// The native `/effort` control: five direct-apply rows and no current-state
+/// marker — Claude Code does not report the standing level, and this app
+/// does not present what it cannot know. The measured machine values
+/// (`xhigh`, `max`) appear only in command receipts; the rows wear the
+/// human labels. `ultracode` and `auto` are deliberately typing-only: both
+/// pass through the composer unimpeded, but neither has earned a row —
+/// one is a token-expensive power mode, the other's semantics are unmeasured.
+struct EffortSheet: View {
+    let sessionKey: String
+    var onLanded: () -> Void = {}
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    /// The five ruled levels, machine value and human label.
+    private static let levels: [(value: String, label: String)] = [
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "Extra high"),
+        ("max", "Maximum"),
+    ]
+
+    private enum Phase: Equatable {
+        case idle
+        case sending(String)
+        /// Keystrokes landed; watching for Claude Code's own
+        /// "Set effort level to …" line.
+        case waiting(String)
+        case confirmed(String)
+        case failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+    @State private var timeoutTask: Task<Void, Never>?
+    /// The effort fact as it stood when a row was tapped; "confirmed" means
+    /// a NEW fact relative to this.
+    @State private var baseline: ConfirmedEffort?
+
+    private var state: SessionState? { model.states[sessionKey] }
+
+    private var busy: Bool {
+        switch phase {
+        case .sending, .waiting: return true
+        case .idle, .confirmed, .failed: return false
+        }
+    }
+
+    var body: some View {
+        CCSheetChrome("Effort", onClose: { dismiss() }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: CC.space.md) {
+                    CCSectionHeader("Choose effort")
+                    Text(
+                        "CodeConnect reports only what Claude Code confirms; "
+                            + "it does not assume how long the choice lasts."
+                    )
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    chooserCard
+                    statusSlot
+                }
+                .padding(CC.space.md)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .onChange(of: state?.lastConfirmedEffort) { _, fact in
+            guard case .waiting = phase, let fact, fact != baseline else { return }
+            timeoutTask?.cancel()
+            let label = EffortConfirmation.label(for: fact.value)
+            withAnimation(CC.motion.small) {
+                phase = .confirmed("Claude Code confirmed \(label) effort.")
+            }
+        }
+        .onDisappear { timeoutTask?.cancel() }
+    }
+
+    private var chooserCard: some View {
+        CCCard(padding: 0) {
+            VStack(spacing: 0) {
+                ForEach(Self.levels, id: \.value) { level in
+                    levelRow(level.value, label: level.label)
+                }
+            }
+        }
+        .accessibilityValue(busy ? "Busy" : "")
+    }
+
+    private func levelRow(_ value: String, label: String) -> some View {
+        let isApplying: Bool = {
+            if case .sending(let active) = phase { return active == value }
+            if case .waiting(let active) = phase { return active == value }
+            return false
+        }()
+        return CCRow(
+            label,
+            showsChevron: false,
+            separator: value != Self.levels.last?.value,
+            action: busy ? nil : { apply(value) }
+        ) {
+            if isApplying {
+                CCProgressRing(.sm)
+            } else {
+                CCIcon("circle", size: 16, weight: .regular, relativeTo: .body)
+                    .foregroundStyle(CC.text.tertiary)
+            }
+        } trailing: {
+            EmptyView()
+        } meta: {
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var statusSlot: some View {
+        switch phase {
+        case .idle:
+            EmptyView()
+        case .sending(let value):
+            effortStatusLine("Typing /effort \(value) on the Mac…", tone: .neutral)
+        case .waiting:
+            effortStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
+        case .confirmed(let line):
+            effortStatusLine(line, tone: .success)
+        case .failed(let line):
+            effortStatusLine(line, tone: .warning)
+        }
+    }
+
+    private func effortStatusLine(_ text: String, tone: CCTone) -> some View {
+        CCProse(
+            text, style: CC.type.footnote,
+            color: tone == .neutral ? CC.text.secondary : tone.color
+        )
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func apply(_ value: String) {
+        baseline = state?.lastConfirmedEffort
+        withAnimation(CC.motion.micro) { phase = .sending(value) }
+        Task {
+            let attempt = await model.sendEffortCommand(value, to: sessionKey)
+            switch attempt {
+            case .sent:
+                onLanded()
+                // The confirmation may already have landed while `.sending`.
+                if let fact = state?.lastConfirmedEffort, fact != baseline {
+                    let label = EffortConfirmation.label(for: fact.value)
+                    phase = .confirmed("Claude Code confirmed \(label) effort.")
+                } else {
+                    phase = .waiting(value)
+                    armTimeout(value)
+                }
+            case .alreadyApplied:
+                onLanded()
+                phase = .confirmed("This effort request was already sent earlier.")
+            case .refused(let reason):
+                phase = .failed("Nothing was typed: \(reason)")
+            case .failed(let reason):
+                phase = .failed("Couldn’t type the command: \(reason)")
+            case .indeterminate(let reason):
+                phase = .failed(
+                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
+            case .composerRecovered:
+                // Measured inline, so not the expected path — but the keys
+                // landed, and the transcript still proves the change.
+                onLanded()
+                phase = .waiting(value)
+                armTimeout(value)
+            case .composerLost:
+                phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
+            }
+        }
+    }
+
+    private func armTimeout(_ value: String) {
+        timeoutTask?.cancel()
+        timeoutTask = Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            if case .waiting = phase {
+                withAnimation(CC.motion.small) {
+                    phase = .failed(
+                        "Sent /effort \(value) to the Mac. "
+                            + "CodeConnect has not received confirmation.")
+                }
+            }
+        }
+    }
+}
+
+/// The native `/compact` control: an optional instruction, one always-active
+/// button. Completion is watched, not assumed — Claude Code's own
+/// "Compacted (…)" line confirms it, its measured refusal on a near-empty
+/// context fails it verbatim, and past the observation window the sheet
+/// says plainly that no signal has arrived while continuing to watch.
+struct CompactSheet: View {
+    let sessionKey: String
+    var prefill: String = ""
+    var onLanded: () -> Void = {}
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    private enum Phase: Equatable {
+        case idle
+        case sending
+        /// Keystrokes landed; watching for the completion line. `quietly`
+        /// flips after the observation window: same watch, honest caption.
+        case waiting(quietly: Bool)
+        case confirmed(String)
+        case failed(String)
+    }
+
+    @State private var phase: Phase = .idle
+    @State private var instructions: String = ""
+    @State private var timeoutTask: Task<Void, Never>?
+    @State private var baseline: CompactSignal?
+
+    private var state: SessionState? { model.states[sessionKey] }
+
+    private var busy: Bool {
+        switch phase {
+        case .sending, .waiting: return true
+        case .idle, .confirmed, .failed: return false
+        }
+    }
+
+    var body: some View {
+        CCSheetChrome("Compact context", onClose: { dismiss() }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: CC.space.md) {
+                    Text("Ask Claude Code to compact its current context. Instructions are optional.")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // In a card, like every other field in the app. A field
+                    // label sits on the *content* column while a bare `Text`
+                    // and a field's own border sit on the container's edge —
+                    // so a field standing free on a sheet puts its label 36pt
+                    // right of the box it names. The card is what gives all
+                    // three the same edge. Measured against the shipped
+                    // Terminal and SSH screen, where label, border and hint
+                    // share one column inside exactly this container.
+                    CCCard {
+                        CCField(
+                            label: "Instructions (optional)", text: $instructions,
+                            placeholder: "What should Claude preserve?",
+                            submitLabel: .done,
+                            onSubmit: { apply() })
+                    }
+                    CCButton(
+                        "Compact now",
+                        variant: .primary,
+                        isLoading: busy
+                    ) { apply() }
+                    statusSlot
+                }
+                .padding(CC.space.md)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .onAppear {
+            if instructions.isEmpty, !prefill.isEmpty { instructions = prefill }
+        }
+        .onChange(of: state?.lastCompactSignal) { _, signal in
+            guard case .waiting = phase, let signal, signal != baseline else { return }
+            timeoutTask?.cancel()
+            withAnimation(CC.motion.small) {
+                switch signal.outcome {
+                case .compacted:
+                    phase = .confirmed("Claude Code confirmed the compaction.")
+                case .notEnoughMessages:
+                    phase = .failed("Not enough messages to compact.")
+                }
+            }
+        }
+        .onDisappear { timeoutTask?.cancel() }
+    }
+
+    @ViewBuilder
+    private var statusSlot: some View {
+        switch phase {
+        case .idle:
+            EmptyView()
+        case .sending:
+            compactStatusLine("Typing /compact on the Mac…", tone: .neutral)
+        case .waiting(quietly: false):
+            compactStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
+        case .waiting(quietly: true):
+            compactStatusLine(
+                "Compaction requested on the Mac. "
+                    + "CodeConnect has not received a completion signal.",
+                tone: .neutral)
+        case .confirmed(let line):
+            compactStatusLine(line, tone: .success)
+        case .failed(let line):
+            compactStatusLine(line, tone: .warning)
+        }
+    }
+
+    private func compactStatusLine(_ text: String, tone: CCTone) -> some View {
+        CCProse(
+            text, style: CC.type.footnote,
+            color: tone == .neutral ? CC.text.secondary : tone.color
+        )
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func apply() {
+        guard !busy else { return }
+        baseline = state?.lastCompactSignal
+        withAnimation(CC.motion.micro) { phase = .sending }
+        Task {
+            let attempt = await model.sendCompactCommand(
+                instructions: instructions, to: sessionKey)
+            switch attempt {
+            case .sent:
+                onLanded()
+                if let signal = state?.lastCompactSignal, signal != baseline {
+                    switch signal.outcome {
+                    case .compacted:
+                        phase = .confirmed("Claude Code confirmed the compaction.")
+                    case .notEnoughMessages:
+                        phase = .failed("Not enough messages to compact.")
+                    }
+                } else {
+                    phase = .waiting(quietly: false)
+                    armQuietFlip()
+                }
+            case .alreadyApplied:
+                onLanded()
+                phase = .confirmed("This compaction request was already sent earlier.")
+            case .refused(let reason):
+                phase = .failed("Nothing was typed: \(reason)")
+            case .failed(let reason):
+                phase = .failed("Couldn’t type the command: \(reason)")
+            case .indeterminate(let reason):
+                phase = .failed(
+                    "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
+            case .composerRecovered:
+                onLanded()
+                phase = .waiting(quietly: false)
+                armQuietFlip()
+            case .composerLost:
+                phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
+            }
+        }
+    }
+
+    /// A real compaction measured ~6s on a small context and grows with the
+    /// context, so the window's end is not a failure — the watch continues;
+    /// only the caption stops promising.
+    private func armQuietFlip() {
+        timeoutTask?.cancel()
+        timeoutTask = Task {
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            if case .waiting(quietly: false) = phase {
+                withAnimation(CC.motion.small) { phase = .waiting(quietly: true) }
             }
         }
     }

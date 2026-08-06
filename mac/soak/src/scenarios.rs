@@ -954,3 +954,99 @@ pub fn choose_target(reference: Option<&str>) -> Result<SessionSummary> {
         ),
     }
 }
+
+// ------------------------------------------------ (h) slash-command recovery
+
+/// The slash-command release criterion, verbatim from the ruling: **every
+/// tested dialog is followed immediately by a successful ordinary phone
+/// send, without anyone touching the Mac.**
+///
+/// `/status`, `/usage` and `/cost` are the three dialog commands the phone
+/// offers natively. Each send must come back `composer_recovered` carrying
+/// the saved pane — the daemon typed the command, watched the composer
+/// disappear, saved the view, pressed Esc, and proved the composer's
+/// return — and the ordinary send right after must land as a plain `sent`.
+/// One refusal is a skip, not a failure: a busy composer means the
+/// measurement would be about contention, not recovery.
+pub async fn slash_commands(target: &Target) -> Outcome {
+    let uid = target.session.session_uid.clone();
+    let mut phone = match target.phone().await {
+        Ok(phone) => phone,
+        Err(err) => return Outcome::failed(format!("no phone connection: {err:#}")),
+    };
+    let mut notes = Vec::new();
+
+    for command in ["/status", "/usage", "/cost"] {
+        let name = &command[1..];
+        let id = format!("soak-snap-{name}-{}", protocol::time::now_unix_ms());
+        // The previous probe's turn is starting as this send arrives, and
+        // the moment a turn begins the pane can redraw mid-capture — the
+        // pre-send interlock then refuses, honestly. That is contention,
+        // not recovery, so a refusal here is retried briefly, exactly like
+        // the app's own after-Escape sends.
+        let mut attempt = phone.send_text(&uid, command, Some(&id)).await;
+        for _ in 0..6 {
+            match &attempt {
+                Ok(protocol::ws::SendTextResult::Refused { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    attempt = phone.send_text(&uid, command, Some(&id)).await;
+                }
+                _ => break,
+            }
+        }
+        match attempt {
+            Ok(protocol::ws::SendTextResult::ComposerRecovered { pane_snapshot, .. }) => {
+                let lines = pane_snapshot
+                    .as_deref()
+                    .map(|pane| pane.lines().filter(|l| !l.trim().is_empty()).count())
+                    .unwrap_or(0);
+                if lines == 0 {
+                    return Outcome::failed(format!(
+                        "{command}: recovered, but without a readable pane snapshot"
+                    ))
+                    .with_notes(notes);
+                }
+                notes.push(format!(
+                    "{command} → composer_recovered, pane {lines} lines"
+                ));
+            }
+            Ok(protocol::ws::SendTextResult::Refused { reason }) => {
+                return Outcome::skipped(format!(
+                    "{command} refused ({reason}); the session was not idle enough to measure"
+                ))
+                .with_notes(notes)
+            }
+            Ok(other) => {
+                return Outcome::failed(format!(
+                    "{command}: expected composer_recovered, got {other:?}"
+                ))
+                .with_notes(notes)
+            }
+            Err(err) => return Outcome::failed(format!("{command}: {err:#}")).with_notes(notes),
+        }
+
+        // The criterion itself: an ordinary send, immediately, untouched.
+        let probe = format!("soak-snapprobe-{name}-{}", protocol::time::now_unix_ms());
+        match phone
+            .send_text(&uid, "reply with exactly: ok", Some(&probe))
+            .await
+        {
+            Ok(protocol::ws::SendTextResult::Sent { .. }) => {
+                notes.push(format!("ordinary send right after {command} landed"));
+            }
+            Ok(other) => {
+                return Outcome::failed(format!(
+                    "ordinary send after {command} must land untouched, got {other:?}"
+                ))
+                .with_notes(notes)
+            }
+            Err(err) => {
+                return Outcome::failed(format!("ordinary send after {command}: {err:#}"))
+                    .with_notes(notes)
+            }
+        }
+    }
+
+    Outcome::passed("3 dialogs recovered with their panes; 3 immediate ordinary sends landed")
+        .with_notes(notes)
+}

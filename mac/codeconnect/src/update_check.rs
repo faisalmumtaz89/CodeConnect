@@ -284,14 +284,14 @@ pub fn render_checkout(
         }
         CheckoutRelation::DirtyCheckout => match style {
             Style::Styled => concat!(
-                "\u{1b}[1mCodeConnect checkout has uninstalled changes\u{1b}[0m\n",
-                "Commit or stash the uncommitted changes, then run:\n\n",
+                "\u{1b}[1mCodeConnect checkout has local changes\u{1b}[0m\n",
+                "Commit or stash them, then run:\n\n",
                 "\u{1b}[1mcodeconnect update\u{1b}[0m"
             )
             .to_string(),
             Style::PlainUnicode | Style::Ascii => concat!(
-                "CodeConnect checkout has uninstalled changes\n",
-                "Commit or stash the uncommitted changes, then run:\n\n",
+                "CodeConnect checkout has local changes\n",
+                "Commit or stash them, then run:\n\n",
                 "codeconnect update"
             )
             .to_string(),
@@ -424,13 +424,13 @@ mod checkout_advisory_tests {
     fn dirty_and_differs_render_their_exact_sentences() {
         assert_eq!(
             render_checkout(&CheckoutRelation::DirtyCheckout, Style::PlainUnicode),
-            "CodeConnect checkout has uninstalled changes\n\
-             Commit or stash the uncommitted changes, then run:\n\ncodeconnect update"
+            "CodeConnect checkout has local changes\n\
+             Commit or stash them, then run:\n\ncodeconnect update"
         );
         assert_eq!(
             render_checkout(&CheckoutRelation::DirtyCheckout, Style::Styled),
-            "\u{1b}[1mCodeConnect checkout has uninstalled changes\u{1b}[0m\n\
-             Commit or stash the uncommitted changes, then run:\n\n\
+            "\u{1b}[1mCodeConnect checkout has local changes\u{1b}[0m\n\
+             Commit or stash them, then run:\n\n\
              \u{1b}[1mcodeconnect update\u{1b}[0m"
         );
         assert_eq!(

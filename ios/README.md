@@ -164,6 +164,7 @@ release build:
 | `-cc.debug.diff truncated` | a capture the daemon cut at its 512KB cap, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Truncated at 512KB`. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
 | `-cc.debug.terminalState needsSetup\|hostKeyChanged\|ended` | the three terminal states that need an SSH server misbehaving to reach |
+| `-cc.debug.sendText sent\|recovered\|recovered-empty\|lost` | resolves typed sends locally, the way `-CC_FIXTURE` resolves decisions, so the snapshot sheet's four outcomes can be photographed. `recovered` carries a real 80-column `/status` capture measured off a live Mac. Against a daemon these states need a Mac view opened and its Escape failing on cue, which is not something a render pass can arrange |
 
 `-CC_FIXTURE` also resolves answers locally, because the Deck's advance
 behaviour cannot be exercised otherwise. The real answer path — daemon, ledger,

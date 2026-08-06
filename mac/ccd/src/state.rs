@@ -79,6 +79,17 @@ const LOCAL_RESOLVE_MISSES: u32 = 2;
 /// would be typed against a screen nobody checked.
 const SUPERVISOR_MINOR_PROMPT_IDENTITY: u32 = 3;
 
+/// The supervisor feature level that runs the composer-recovery postcondition.
+///
+/// **The same trap as the fingerprint, one field over.** A supervisor below
+/// this accepts `recover_composer` and drops it — serde ignores what it does
+/// not know — so the daemon would type `/status`, get back a plain `sent`, and
+/// leave a session whose composer is gone and whose every later send the
+/// interlock refuses. The daemon is replaced by `codeconnect update`; the
+/// supervisors keep running until their sessions restart, so this is the
+/// ordinary state of affairs after an upgrade, not an edge case.
+const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
+
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
 /// milliseconds; this is the ceiling for one that hangs connecting to a socket
@@ -455,6 +466,44 @@ fn holder(sighting: &crate::liveness::Sighting) -> Option<String> {
         Some(protocol::tmux::SessionOwner::Uid(ref uid)) => Some(uid.clone()),
         _ => None,
     }
+}
+
+/// Word-shaped slash command: `/status`, `/model sonnet`. Ordinary prose
+/// cannot open a Mac view, so it does not pay for the recovery check; a
+/// path like `/tmp/x` is not a command either.
+fn is_word_shaped_slash_command(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    // The leading run, not the first *word*: `/ status` is a slash followed
+    // by prose, and Claude Code reads a command name only when it sits
+    // immediately after the slash. Matches `ClaudeCommandPolicy.firstToken`
+    // on the phone, which is the other half of this same rule.
+    let word: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The only commands whose recovered pane may be kept. Deliberately three
+/// names and not a rule: a snapshot is a picture of somebody's screen, and
+/// the general version of this idea is the TUI-scraping bridge the design
+/// rejected.
+fn snapshot_command(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    let name: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // No arguments: these commands take none, and a snapshot request with
+    // extra text is not one of them.
+    rest[name.len()..].trim().is_empty() && matches!(name.as_str(), "status" | "usage" | "cost")
 }
 
 impl Daemon {
@@ -2114,8 +2163,18 @@ impl Daemon {
                 SupervisorRequest::SendText {
                     text,
                     require,
+                    // An answer goes to the prompt, not the composer — and a
+                    // prompt legitimately has no cursor of its own.
+                    targets_composer: false,
+                    // No recovery on this path, so nothing to guard.
+                    asking: None,
                     submit,
                     expect,
+                    // An answer to a permission prompt is never a slash
+                    // command, and the prompt it answers is not a view the
+                    // daemon may Escape away.
+                    recover_composer: false,
+                    capture_recovered: false,
                 },
             )
             .await
@@ -2162,6 +2221,19 @@ impl Daemon {
     /// supervisor stays dumb and the operator can fix a broken presence check
     /// (Claude's TUI copy is the most churn-prone thing we depend on) by
     /// editing one config file instead of shipping a release.
+    /// The operator's configured prompt needles, or `None` when they have
+    /// configured none. Deliberately not the *default* permission needles:
+    /// those include `esctocancel`, which Claude's views offer too, so
+    /// handing them to recovery's guard would stop it rescuing the measured
+    /// lockout. See `SupervisorRequest::SendText::asking`.
+    fn configured_prompt_presence(&self) -> Option<PromptPresence> {
+        self.config
+            .permission_prompt_needles()
+            .map(|needles| PromptPresence::AnyOf {
+                needles: needles.to_vec(),
+            })
+    }
+
     fn with_needle_overrides(&self, presence: PromptPresence) -> PromptPresence {
         let overrides = match presence {
             PromptPresence::InputBox => self.config.input_box_needles(),
@@ -2296,23 +2368,61 @@ impl Daemon {
         // Chosen here, never by the caller. Config overrides still apply — those
         // come from the operator's own file, not from the wire.
         let require = self.with_needle_overrides(PromptPresence::InputBox);
+        // Both decided here rather than trusted from the phone: recovery is
+        // safety behaviour, and the snapshot allowlist is what keeps this
+        // from becoming a general "screenshot any TUI view" facility.
+        let recover_composer = is_word_shaped_slash_command(&text);
+        let capture_recovered = snapshot_command(&text);
         let outcome = self
             .supervisor_request(
                 &session_uid,
                 SupervisorRequest::SendText {
                     text,
                     require,
+                    // This text goes to the composer, whatever needles the
+                    // operator configured for finding it — so the supervisor
+                    // may ask whether the composer has the keyboard.
+                    targets_composer: true,
+                    // And whatever they configured for recognising a prompt,
+                    // so recovery's "never Escape a screen that is asking"
+                    // guard sees the prompts they taught us to see. `None`
+                    // when nothing is configured; the supervisor then uses
+                    // the question itself.
+                    asking: self.configured_prompt_presence(),
                     submit,
                     // Free text is not an answer to a prompt; the composer being
                     // ready is the whole interlock, and a permission prompt on
                     // screen makes that check fail on its own.
                     expect: None,
+                    recover_composer,
+                    capture_recovered,
                 },
             )
             .await;
 
         let result = match outcome {
             Ok(SupervisorResult::Sent { matched }) => SendTextResult::Sent { matched },
+            Ok(SupervisorResult::ComposerRecovered {
+                matched,
+                pane_snapshot,
+                captured_at,
+            }) => SendTextResult::ComposerRecovered {
+                matched,
+                pane_snapshot,
+                captured_at,
+            },
+            // Typed, and the composer never came back. Not indeterminate:
+            // the typing is certain and so is the state it left behind.
+            Ok(SupervisorResult::ComposerLost { matched }) => {
+                SendTextResult::ComposerLost { matched }
+            }
+            // Typed, and then something could not be observed. `indeterminate`
+            // is exactly this state's existing name on the wire, and it is the
+            // one the phone already handles by keeping the identity so a retry
+            // is recognised rather than typed twice.
+            Ok(SupervisorResult::RecoveryUnconfirmed { reason, .. }) => {
+                SendTextResult::Indeterminate { reason }
+            }
             // A refusal is a positive statement that nothing was typed — the
             // supervisor checks before it injects, never after.
             Ok(SupervisorResult::Refused { reason }) => SendTextResult::Refused { reason },
@@ -2332,7 +2442,14 @@ impl Daemon {
 
         if let Some((request_id, _)) = &identity {
             match &result {
-                SendTextResult::Sent { matched } => {
+                // The three outcomes that prove the keys landed. Settling all
+                // three is what makes a lost response replay as `duplicate`
+                // instead of a permanent unknown: recovery and loss are as
+                // final as a plain send — the typing happened, and no retry
+                // may type it again.
+                SendTextResult::Sent { matched }
+                | SendTextResult::ComposerRecovered { matched, .. }
+                | SendTextResult::ComposerLost { matched } => {
                     // Injected text landed at the prompt: the human moved the
                     // run, and the ambient latch must not swallow what follows.
                     self.push_gate.note_progress(&session_uid);
@@ -2801,6 +2918,18 @@ impl Daemon {
         session_uid: &str,
         request: SupervisorRequest,
     ) -> std::result::Result<SupervisorResult, SupervisorFailure> {
+        // What the request needs the supervisor to be able to do, checked
+        // against the handle that will actually receive it. Asked separately
+        // beforehand it was a different question: a session can restart
+        // between the two lookups, and the answer would be about a
+        // supervisor that no longer exists.
+        let needs_recovery = matches!(
+            &request,
+            SupervisorRequest::SendText {
+                recover_composer: true,
+                ..
+            }
+        );
         let (slot, tx, rx) = {
             let inner = self.inner.lock().await;
             let Some(handle) = inner.supervisors.get(session_uid) else {
@@ -2808,6 +2937,13 @@ impl Daemon {
                     "no supervisor attached for {session_uid}"
                 )));
             };
+            if needs_recovery && handle.protocol_minor < SUPERVISOR_MINOR_COMPOSER_RECOVERY {
+                return Err(SupervisorFailure::NotSent(
+                    "this session cannot recover slash-command views safely yet. Restart it \
+                     after updating CodeConnect, or use Terminal."
+                        .into(),
+                ));
+            }
             let id = handle
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -4788,6 +4924,36 @@ mod tests {
         );
         let runs = std::fs::read_to_string(&count).unwrap_or_default();
         assert_eq!(runs.lines().count(), 1, "one binary, one probe: {runs:?}");
+    }
+
+    /// Recovery is paid for by slash commands only — prose cannot open a
+    /// Mac view, and a path is not a command.
+    #[test]
+    fn only_word_shaped_slash_commands_ask_for_recovery() {
+        for text in [
+            "/status",
+            "/model sonnet",
+            "  /clear",
+            "/deep-research x",
+            "/a-b_c",
+        ] {
+            assert!(is_word_shaped_slash_command(text), "{text}");
+        }
+        for text in ["hello", "", "/", "/tmp/build.log", "look at /status", "/ x"] {
+            assert!(!is_word_shaped_slash_command(text), "{text}");
+        }
+    }
+
+    /// Three names, no rule: a kept snapshot is a picture of somebody's
+    /// screen, and the general version of the idea was rejected by design.
+    #[test]
+    fn only_the_three_snapshot_commands_keep_a_pane() {
+        for text in ["/status", "/usage", "  /COST"] {
+            assert!(snapshot_command(text), "{text}");
+        }
+        for text in ["/model", "/clear", "/status extra", "/statuses", "hello"] {
+            assert!(!snapshot_command(text), "{text}");
+        }
     }
 
     #[tokio::test]

@@ -183,6 +183,9 @@ async fn main() -> Result<()> {
     if run_all || which == "wsflap" {
         results.push(timed("d wss flap", scenarios::ws_flap(&target, flaps(rounds))).await);
     }
+    if run_all || which == "commands" {
+        results.push(timed("h slash recovery", scenarios::slash_commands(&target)).await);
+    }
     if run_all || which == "tailtorture" {
         results.push(timed("e tailer torture", scenarios::tail_torture(&target)).await);
     }
@@ -314,6 +317,9 @@ ccsoak — chaos gauntlet against the running ccd
                     every line is still in the log exactly once
   commitorder   (g) N concurrent commits on one session; assert no socket ever
                     skips a seq
+  commands      (h) /status, /usage, /cost from the phone path; assert each is
+                    composer_recovered with its pane and an ordinary send lands
+                    immediately after — the slash-command release criterion
 
 The kill scenarios need the LaunchAgent installed (`codeconnect daemon install`), because
 something has to bring the daemon back."

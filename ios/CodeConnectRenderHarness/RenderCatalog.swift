@@ -127,6 +127,31 @@ struct RenderDriver {
         try require(terminal, "the Terminal tab")
         terminal.tap()
     }
+
+    /// Focuses the composer and types. A vertical-axis TextField is backed
+    /// by a text view, not a text field — the same fallback the product
+    /// suites use. Navigates only if the Fleet is still on screen, so a
+    /// scenario that arrived by deep link is not sent back to the root.
+    func typeIntoComposer(_ app: XCUIApplication, _ text: String) throws {
+        if app.navigationBars["Fleet"].exists { try openFirstSession(app) }
+        let field =
+            app.textViews.firstMatch.exists
+            ? app.textViews.firstMatch : app.textFields.firstMatch
+        try require(field, "the compose bar")
+        field.tap()
+        field.typeText(text)
+    }
+
+    /// Types a fragment and taps the palette row it filters to — the same
+    /// door a thumb uses, so the route itself proves the row responds.
+    func openPaletteRow(_ app: XCUIApplication, fragment: String, row: String) throws {
+        try typeIntoComposer(app, fragment)
+        let target = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH[c] %@", row)
+        ).firstMatch
+        try require(target, "the \(row) palette row")
+        target.tap()
+    }
 }
 
 /// The one failure this harness raises. It is never about a pixel.
@@ -276,6 +301,122 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.require(app.buttons["open-diff"], "the session detail")
+            }),
+
+        // **The slash palette and its eight native commands.** Every state
+        // here shipped broken once for want of a photograph: the first
+        // palette read as "Mac only" scolding, and the first /model sheet
+        // wore raw ids and a disabled-at-rest button. The fixture daemon
+        // advertises `slash_composer_recovery`, so the full eight-row
+        // discovery card is the state rendered; the snapshot rows' capability
+        // omission is covered by unit tests, not a photograph — a shorter
+        // list is not a distinct visual risk.
+        RenderScenario(
+            name: "session-palette",
+            purpose: "bare / — every native row, the caption, the ~4-row scroll cap",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.typeIntoComposer(app, "/")
+                try driver.require(
+                    driver.element(containing: "/model", in: app), "the /model row")
+                try driver.require(
+                    driver.text(containing: "Run other commands", in: app),
+                    "the discovery caption")
+            }),
+        RenderScenario(
+            name: "session-palette-filtered",
+            purpose: "a typed fragment filters the rows and drops the caption",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.typeIntoComposer(app, "/c")
+                try driver.require(
+                    driver.element(containing: "/compact", in: app), "the /compact row")
+                try driver.require(
+                    driver.element(containing: "/cost", in: app), "the /cost row")
+            }),
+        // **Opened on the session that carries the facts.** `fx-4`'s log
+        // holds a SessionStart with the raw hook id `claude-opus-5[1m]` and a
+        // real `/effort` confirmation, so these two sheets render their
+        // *populated* states — the raw id in monospace, its variant line, the
+        // provenance line beneath. That is the exact state that shipped
+        // looking broken, and until the fixture carried a model fact no
+        // render could reach it: every earlier photograph showed "Not
+        // confirmed" and proved nothing about the screen that was rejected.
+        RenderScenario(
+            name: "session-model-sheet",
+            purpose: "the /model sheet with a raw hook id confirmed — the state that shipped broken",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.require(
+                    driver.text(containing: "Choose model", in: app), "the chooser section")
+                try driver.require(
+                    driver.element(containing: "1M context", in: app),
+                    "the variant line the raw id resolves to")
+            }),
+        RenderScenario(
+            name: "session-effort-sheet",
+            purpose: "the /effort sheet — five rows, no current-state claim",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
+                try driver.require(
+                    driver.text(containing: "Choose effort", in: app), "the chooser section")
+                try driver.require(
+                    driver.element(containing: "Extra high", in: app), "the xhigh row's label")
+            }),
+        RenderScenario(
+            name: "session-compact-sheet",
+            purpose: "the /compact sheet — optional field, always-active button",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/com", row: "/compact")
+                try driver.require(app.buttons["Compact now"], "the always-active button")
+            }),
+        RenderScenario(
+            name: "session-clear-confirm",
+            purpose: "the /clear destructive confirmation, consequence stated",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/cl", row: "/clear")
+                try driver.require(app.buttons["Clear context"], "the destructive action")
+            }),
+        RenderScenario(
+            name: "session-snapshot-captured",
+            purpose: "a /status capture — the measured 80-column pane, verbatim",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/st", row: "/status")
+                try driver.require(
+                    driver.text(containing: "pressed Esc", in: app), "the recovery footer")
+            }),
+        RenderScenario(
+            name: "session-snapshot-lost",
+            purpose: "the capture whose Escape failed — no retry, Terminal only",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "lost",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/st", row: "/status")
+                try driver.require(
+                    driver.text(containing: "Couldn’t restore the composer", in: app),
+                    "the honest failure")
             }),
 
         RenderScenario(

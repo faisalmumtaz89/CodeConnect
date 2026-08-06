@@ -49,6 +49,11 @@ enum CCRowDensity {
 /// trailing edge, under the accessory rather than beside it.
 struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     let title: String
+    /// Monospace title — for a title that is an *identifier* rather than a
+    /// name: an unrecognized model id, a token, a path. The same rule
+    /// `CCField.isMono` encodes for input, applied to display: machine
+    /// strings wear machine type, byte-for-byte.
+    var titleIsMono: Bool = false
     var subtitle: String?
     /// **Which end of the title identifies it.** `.middle` is mandatory on the
     /// fleet: generated folder names like
@@ -95,6 +100,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// memberwise one, and the two collide over the private closure properties.
     init(
         _ title: String,
+        titleIsMono: Bool = false,
         subtitle: String? = nil,
         titleTruncation: Text.TruncationMode = .tail,
         subtitleLineLimit: Int? = 2,
@@ -110,6 +116,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         @ViewBuilder meta: @escaping () -> Meta
     ) {
         self.title = title
+        self.titleIsMono = titleIsMono
         self.subtitle = subtitle
         self.titleTruncation = titleTruncation
         self.subtitleLineLimit = subtitleLineLimit
@@ -276,7 +283,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text(title)
-                .ccType(CC.type.headline)
+                .ccType(titleIsMono ? CC.type.monoSmall : CC.type.headline)
                 .foregroundStyle(isDimmed ? CC.text.tertiary : CC.text.primary)
                 .lineLimit(titleLineLimit)
                 .truncationMode(titleTruncation)
@@ -375,6 +382,7 @@ struct CCRowMeta: View {
 extension CCRow where Meta == CCRowMeta {
     init(
         _ title: String,
+        titleIsMono: Bool = false,
         subtitle: String? = nil,
         meta: String? = nil,
         titleTruncation: Text.TruncationMode = .tail,
@@ -390,7 +398,8 @@ extension CCRow where Meta == CCRowMeta {
         @ViewBuilder trailing: @escaping () -> Trailing
     ) {
         self.init(
-            title, subtitle: subtitle, titleTruncation: titleTruncation,
+            title, titleIsMono: titleIsMono, subtitle: subtitle,
+            titleTruncation: titleTruncation,
             subtitleLineLimit: subtitleLineLimit, showsChevron: showsChevron,
             separator: separator, density: density,
             isDimmed: isDimmed, disabledReason: disabledReason,

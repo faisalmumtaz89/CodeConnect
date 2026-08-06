@@ -1087,6 +1087,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool) -> Capabilities {
         send_text_idempotent: true,
         prompt_identity: true,
         command_catalog: true,
+        slash_composer_recovery: true,
     }
 }
 

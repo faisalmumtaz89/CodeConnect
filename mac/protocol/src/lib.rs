@@ -126,7 +126,29 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     never hand-maintained, so a Claude Code upgrade changes the answer
 ///     instead of rotting a copy. `unavailable` is a complete answer: the
 ///     phone falls back to its conservative static policy, never to guessing.
-pub const PROTOCOL_MINOR: u32 = 8;
+///   * `9` — the daemon closes a Mac view its own injection opened.
+///     Measured problem: `/status`, `/usage`, `/help`, `/export`, `/diff`
+///     and bare `/model` replace Claude's composer, and while it is gone the
+///     presence interlock refuses every further send — a phone that typed
+///     one was locked out of its own session until somebody pressed Esc at
+///     the Mac. From minor 9 the supervisor checks the composer after any
+///     word-shaped slash injection, sends exactly one `Escape` if it is
+///     gone, and reports what it observed:
+///     [`ws::SendTextResult::ComposerRecovered`] (with the pane it captured,
+///     for `/status`, `/usage` and `/cost` only) or
+///     [`ws::SendTextResult::ComposerLost`] when one Escape was not enough —
+///     measured on `/config`, and on `/keybindings`, which opens an editor.
+///     Advertised as the `slash_composer_recovery` capability, and enforced
+///     per session: a supervisor below minor 9 accepts the request fields and
+///     drops them, so the daemon refuses word-shaped slash commands for that
+///     session rather than typing one it cannot rescue.
+///
+///     **The new statuses are sent to every client**, because a `hello`
+///     carries no client minor for the daemon to branch on. That is safe
+///     forwards — a client built against this or later knows them — and it is
+///     the reason `SendTextResult` decoding should treat an unknown status as
+///     indeterminate rather than as a decode failure.
+pub const PROTOCOL_MINOR: u32 = 9;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

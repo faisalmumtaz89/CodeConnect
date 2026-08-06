@@ -8,15 +8,26 @@ import XCTest
 @MainActor
 final class FixtureTests: XCTestCase {
 
+    /// Pinned rather than derived: the fixture's `hello_ack` is a literal, so
+    /// this is the one place that says out loud which daemon it is pretending
+    /// to be. A capability added to the app without adding it here would make
+    /// its UI unrenderable and unrendered.
+    private let protocolMinorTheAppWasBuiltAgainst: UInt32 = 9
+
     func testEveryFixtureFrameDecodes() {
         let frames = Fixtures.frames()
         XCTAssertEqual(
-            frames.count, 3 + Fixtures.deckCards.count,
-            "hello_ack + sessions + one card each + turn_complete")
+            frames.count, 5 + Fixtures.deckCards.count,
+            "hello_ack + sessions + one card each + turn_complete + the two confirmed facts")
 
         guard case .helloAck(let ack) = frames[0] else { return XCTFail("no hello_ack") }
-        XCTAssertEqual(ack.protocolMinor, 1)
+        XCTAssertEqual(
+            ack.protocolMinor, protocolMinorTheAppWasBuiltAgainst,
+            "the fixture daemon speaks this build's protocol, or capability-gated UI is unreachable")
         XCTAssertTrue(ack.capabilities.canApproveReliably)
+        XCTAssertTrue(
+            ack.capabilities.recoversComposer,
+            "without this the snapshot rows are correctly omitted and cannot be rendered")
 
         guard case .sessions(let sessions) = frames[1] else { return XCTFail("no sessions") }
         XCTAssertEqual(sessions.count, 4)

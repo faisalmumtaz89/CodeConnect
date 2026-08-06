@@ -228,6 +228,11 @@ struct SessionDetailView: View {
     @State private var composeResult: ComposeAttempt?
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
+    @State private var showEffortSheet = false
+    @State private var showCompactSheet = false
+    @State private var compactSheetPrefill = ""
+    @State private var showClearConfirm = false
+    @State private var snapshotCommand: SnapshotCommand?
     @State private var composeResultClearTask: Task<Void, Never>?
     @State private var sending = false
     /// The tail-following verdict — a box read only by `TailPill`, never by
@@ -332,18 +337,8 @@ struct SessionDetailView: View {
             // be two ways to say the same thing with different consequences.
             if surface == .timeline {
                 VStack(spacing: 0) {
-                    if composerShowsPalette {
-                        CommandPalette(
-                            typed: composeText,
-                            catalog: model.commandCatalogs[key],
-                            failure: model.commandCatalogFailures[key],
-                            onModel: {
-                                modelSheetPrefill = ""
-                                showModelSheet = true
-                            },
-                            onBlocked: { reason in
-                                noteComposeResult(.refused(reason))
-                            })
+                    if let palette = paletteContent {
+                        CommandPalette(content: palette, onAction: route)
                     }
                     SessionComposeBar(
                         text: $composeText,
@@ -355,22 +350,60 @@ struct SessionDetailView: View {
                         onSend: send,
                         focused: $composerFocused)
                 }
-                .task(id: paletteFetchKey) {
-                    // Re-fires when the palette appears AND when the
-                    // handshake lands mid-palette: a reconnect while "/" is
-                    // typed must not strand "Reading…" forever.
-                    guard composerShowsPalette else { return }
-                    await model.fetchCommandCatalog(for: key)
+                .onChange(of: composeText) { _, _ in
+                    // Editing is the user's next act; a standing failure
+                    // note has been read. Success notes retire themselves.
+                    if case .refused = composeResult {
+                        withAnimation(CC.motion.micro) { composeResult = nil }
+                    } else if case .failed = composeResult {
+                        withAnimation(CC.motion.micro) { composeResult = nil }
+                    } else if case .indeterminate = composeResult {
+                        withAnimation(CC.motion.micro) { composeResult = nil }
+                    }
                 }
             }
         }
         .sheet(isPresented: $showModelSheet) {
-            ModelSheet(
-                sessionKey: key,
-                prefill: modelSheetPrefill,
-                onOpenTerminal: { surface = .terminal }
+            ModelSheet(sessionKey: key, prefill: modelSheetPrefill, onLanded: consumeDraft)
+                .environment(model)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showEffortSheet) {
+            EffortSheet(sessionKey: key, onLanded: consumeDraft)
+                .environment(model)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showCompactSheet) {
+            CompactSheet(sessionKey: key, prefill: compactSheetPrefill, onLanded: consumeDraft)
+                .environment(model)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $snapshotCommand) { command in
+            SnapshotSheet(
+                sessionKey: key, command: command,
+                onLanded: consumeDraft,
+                onOpenTerminal: {
+                    snapshotCommand = nil
+                    surface = .terminal
+                }
             )
             .environment(model)
+            // **One detent, and it is the tall one.** This sheet carries a
+            // captured screen; every point of height is another row of the
+            // Mac's grid the reader does not have to scroll for. Offering
+            // `.medium` as well would not have opened it tall anyway —
+            // `presentationDetents` takes a `Set`, so the order written is
+            // not an order at all, and `[.large, .medium]` and
+            // `[.medium, .large]` are the same value.
+            .presentationDetents([.large])
+        }
+        .alert("Clear Claude’s context?", isPresented: $showClearConfirm) {
+            Button("Clear context", role: .destructive) { performClear() }
+            Button("Keep context", role: .cancel) {}
+        } message: {
+            Text(
+                "Claude Code will forget this conversation’s context. "
+                    + "CodeConnect’s timeline will stay here.")
         }
         .sheet(item: $openApproval) { approval in
             DecisionCardSheet(approval: approval)
@@ -801,57 +834,109 @@ struct SessionDetailView: View {
 
     // MARK: Compose
 
-    /// What makes the catalog fetch re-run: the palette's visibility and the
-    /// connection's readiness to answer. Tri-state on purpose — a handshake
-    /// still in flight ("waiting") and an older daemon that answered without
-    /// the capability ("unsupported") are different facts, and collapsing
-    /// them to one boolean left the palette stuck on "Reading…" whenever the
-    /// answer arrived as *no*.
-    private var paletteFetchKey: String {
-        let readiness: String
-        switch model.connection.capabilities?.servesCommandCatalog {
-        case .none: readiness = "waiting"
-        case .some(true): readiness = "supported"
-        case .some(false): readiness = "unsupported"
-        }
-        return "\(composerShowsPalette)|\(readiness)"
-    }
-
-    /// The composer starts with `/` and the keyboard is up: the palette's
-    /// moment, and the trigger for the one lazy catalog fetch.
-    private var composerShowsPalette: Bool {
-        composerFocused
-            && composeText.trimmingCharacters(in: .whitespaces).hasPrefix("/")
+    /// The palette's own visibility rule, gated on the keyboard being up.
+    /// Catalog fetching keys off any leading `/` (broader than visibility on
+    /// purpose — send-time classification needs the catalog even when the
+    /// palette shows nothing).
+    private var paletteContent: CommandPalette.Content? {
+        guard composerFocused else { return nil }
+        return CommandPalette.content(
+            for: composeText,
+            recoversComposer: model.connection.capabilities?.recoversComposer == true)
     }
 
     /// One place to show a compose outcome that did not go through `send()` —
-    /// the same note strip, the same 4-second clear.
+    /// the same note strip, the same persistence rule: good news retires
+    /// itself after four seconds, while a refusal stands until the text
+    /// changes or another attempt begins. A blocked command's explanation
+    /// vanishing mid-read was a shipped defect, not a style choice.
     private func noteComposeResult(_ result: ComposeAttempt) {
         withAnimation(CC.motion.micro) { composeResult = result }
         composeResultClearTask?.cancel()
-        composeResultClearTask = Task {
-            try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled else { return }
-            withAnimation(CC.motion.medium) { composeResult = nil }
+        switch result {
+        case .sent, .alreadyApplied, .composerRecovered:
+            composeResultClearTask = Task {
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                withAnimation(CC.motion.medium) { composeResult = nil }
+            }
+        case .refused, .failed, .indeterminate, .composerLost:
+            break
+        }
+    }
+
+    /// One router for both doors: a palette tap hands over the same
+    /// `CommandAction` a typed send resolves to, so the tap and the text can
+    /// never behave differently. The composer draft survives every route —
+    /// the sheets consume it via `onLanded` only once keystrokes actually
+    /// land on the Mac; a cancelled sheet leaves the draft exactly as typed.
+    private func route(_ action: CommandAction) {
+        switch action {
+        case .nativeModel(let prefillArgs):
+            modelSheetPrefill = prefillArgs
+            showModelSheet = true
+        case .nativeDiff:
+            // The app renders the working tree itself; typing the Mac's own
+            // `/diff` would open a view of something already on this screen.
+            composeText = ""
+            showDiff = true
+        case .nativeEffort:
+            showEffortSheet = true
+        case .nativeCompact(let prefillInstructions):
+            compactSheetPrefill = prefillInstructions
+            showCompactSheet = true
+        case .nativeClear:
+            showClearConfirm = true
+        case .nativeSnapshot(let command):
+            snapshotCommand = command
+        case .blocked(_, let reason):
+            noteComposeResult(.refused(reason))
+        case .passThrough:
+            break
+        }
+    }
+
+    /// A landed native operation consumes the draft that opened it — a
+    /// stale `/model` left behind a successful sheet was a shipped defect.
+    private func consumeDraft() {
+        composeText = ""
+    }
+
+    /// `/clear`, past its confirmation. The receipt claims typing, nothing
+    /// more; "Conversation cleared." appears in the timeline when the
+    /// rotated transcript's own `/clear` entry arrives — the observable
+    /// fact, in the place records live.
+    private func performClear() {
+        sending = true
+        composeResult = nil
+        composeResultClearTask?.cancel()
+        Task {
+            let result = await model.sendClearCommand(to: key)
+            sending = false
+            switch result {
+            case .sent, .alreadyApplied, .composerRecovered:
+                consumeDraft()
+                tailWatch.arrive()
+            case .refused, .failed, .indeterminate, .composerLost:
+                break
+            }
+            noteComposeResult(result)
         }
     }
 
     private func send() {
         let text = composeText
         // Slash commands answer to the policy before anything reaches the
-        // Mac: `/model` opens the native sheet (measured: its picker form
-        // locks the composer), other built-ins get the honest refusal, and
-        // everything else — prose, custom skills — passes through untouched.
-        switch ClaudeCommandPolicy.action(for: text, catalog: model.commandCatalogs[key]) {
-        case .nativeModel(let prefillArgs):
-            modelSheetPrefill = prefillArgs
-            showModelSheet = true
+        // Mac: native commands open their controls (measured: the Mac-side
+        // picker forms lock the composer), dialog built-ins get the honest
+        // refusal, and everything else — prose, custom skills — passes
+        // through untouched.
+        let action = ClaudeCommandPolicy.action(
+            for: text,
+            recoversComposer: model.connection.capabilities?.recoversComposer == true)
+        guard case .passThrough = action else {
+            route(action)
             return
-        case .blocked(_, let reason):
-            noteComposeResult(.refused(reason))
-            return
-        case .passThrough:
-            break
         }
         sending = true
         composeResult = nil
@@ -861,25 +946,25 @@ struct SessionDetailView: View {
             sending = false
             withAnimation(CC.motion.micro) { composeResult = result }
             switch result {
-            case .sent:
+            case .sent, .alreadyApplied, .composerRecovered:
                 // Never optimistic: the field clears only on a landed
-                // mutation. Speaking is following: the reply lands at the tail.
+                // mutation — and an earlier attempt's landing is a landing.
+                // Speaking is following: the reply lands at the tail.
                 composeText = ""
                 tailWatch.arrive()
-            case .alreadyApplied:
-                // As final as `.sent` — the original attempt landed.
-                composeText = ""
-                tailWatch.arrive()
-            case .refused, .failed, .indeterminate:
-                // The text stays. For `.indeterminate` specifically, the model
-                // kept the identity, so pressing send again is a recognisable
-                // retry the daemon can answer from its ledger.
+                // Good news may retire itself.
+                composeResultClearTask = Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(CC.motion.medium) { composeResult = nil }
+                }
+            case .refused, .failed, .indeterminate, .composerLost:
+                // The text stays — and so does the note. Four seconds is too
+                // short for actionable failure information; it clears when
+                // the text changes or another attempt begins. For
+                // `.indeterminate`, the model kept the identity, so pressing
+                // send again is a recognisable retry, not a second typing.
                 break
-            }
-            composeResultClearTask = Task {
-                try? await Task.sleep(for: .seconds(4))
-                guard !Task.isCancelled else { return }
-                withAnimation(CC.motion.medium) { composeResult = nil }
             }
         }
     }
@@ -1333,25 +1418,37 @@ private struct SessionComposeBar: View {
     @ViewBuilder
     private func feedbackLine(_ result: ComposeAttempt) -> some View {
         switch result {
-        case .sent(let matched):
+        case .sent:
             ComposeNote(
-                text: "Typed into the session (matched \"\(matched)\")",
+                text: "Typed into the session.",
                 tone: .success, glyph: "checkmark")
         case .refused(let reason):
             ComposeNote(
                 text: "Not typed: \(reason)", tone: .warning,
                 glyph: "exclamationmark.triangle.fill")
         case .failed(let reason):
-            ComposeNote(text: reason, tone: .danger, glyph: "xmark.octagon.fill")
+            ComposeNote(
+                text: "Couldn’t type the message: \(reason)", tone: .danger,
+                glyph: "xmark.octagon.fill")
         case .alreadyApplied:
             ComposeNote(
-                text: "Already typed by an earlier attempt — not repeated",
+                text: "Already typed earlier — not repeated.",
                 tone: .success, glyph: "checkmark")
         case .indeterminate(let reason):
             ComposeNote(
-                text: "CodeConnect can't tell whether this landed: \(reason) "
-                    + "Sending again is safe — a retry is recognised, not retyped.",
+                text: "Not confirmed: \(reason) "
+                    + "Retry is safe; the message won’t be typed twice.",
                 tone: .warning, glyph: "questionmark.circle.fill")
+        case .composerRecovered(let command, _, _):
+            ComposeNote(
+                text: "\(command) replaced the Mac composer. "
+                    + "CodeConnect pressed Esc; the composer is ready again.",
+                tone: .success, glyph: "checkmark")
+        case .composerLost(let command):
+            ComposeNote(
+                text: "\(command) was typed, but the Mac's composer did not come back. "
+                    + "Open Terminal to recover.",
+                tone: .danger, glyph: "exclamationmark.triangle.fill")
         }
     }
 

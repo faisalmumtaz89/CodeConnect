@@ -116,6 +116,34 @@ is refused with a reason rather than typed on a guess. A free-text takeover is
 exempt: it is not an answer to a prompt at all, and its interlock is the
 composer being ready — which a permission prompt on screen already fails.
 
+**A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
+check has a second half: the composer counts as ready only if the input-box
+needle matches *and* the pane's cursor is visible (`#{cursor_flag}`, tmux's
+record of the terminal's DECTCEM state). Measured: submitting `/status` while a
+turn is running leaves Claude's Settings view drawn **above** the composer box
+when the turn ends — the needle matches, typed text never appears, and Enter
+does nothing. Without the second half the interlock authorises keys into a pane
+that cannot receive them and reports them sent.
+
+The signal is the cursor rather than the view's `Esc to cancel` hint because a
+string is something an agent can write into its own output: a text rule would
+refuse every send in a session that merely *discussed* the hint, and would
+Escape a running turn to rescue it. Measured across states — idle, mid-turn
+(327 consecutive samples), and after a turn: cursor visible; every view Claude
+opens, including the one drawn above the composer: hidden. A cursor that cannot
+be read is a refusal, not a permissive default.
+
+**Word-shaped slash commands carry a postcondition.** After such a send the
+supervisor looks at the pane at 1.5s and again at 3.0s (a large inline render —
+measured on `/context` — can hide the footer for ~2.5s and restore it unaided),
+and if the composer is gone both times it saves that frame, sends exactly one
+`Escape`, and verifies for 250ms that the composer came back. It reports
+`composer_recovered` — with the saved pane, for the three snapshot commands and
+nothing else — or `composer_lost`, which asks for a human rather than guessing
+further keys. One Escape is the ceiling on purpose: `/keybindings` spawns an
+editor where Escape is a mode key, so no key sequence can rescue it, and typing
+into an unknown screen is how a rescue becomes damage.
+
 A supervisor from before `protocol_minor` 3 accepts the fingerprint field and
 silently drops it (serde ignores what it does not know), so it would look
 checked and be unchecked. Such a supervisor reports its level at registration
@@ -222,7 +250,7 @@ outranking the release check because it is the more specific fact:
 
 ```
 CodeConnect checkout is newer · 2 commits not installed   # committed, not installed
-CodeConnect checkout has uninstalled changes              # uncommitted edits
+CodeConnect checkout has local changes                    # uncommitted edits
 CodeConnect build differs from its checkout               # behind / diverged / foreign build
 CodeConnect update available · 0.2.0 → 0.3.0              # a newer release, checkout current
 ```
@@ -293,6 +321,7 @@ soak/run.sh --session cc-1 -- wsflap
 | `tailtorture` | Truncates, rewrites and tears a transcript under the tailer; asserts the cursor recovers with no duplicate ingest. |
 | `ingestkill` | `kill -9 ccd` timed *inside* the tail poll, five times; asserts every transcript line written is in the log exactly once. The loss it hunts is silent by construction — no gap in `seq`, no duplicate — so only "is every line I wrote there?" can see it. |
 | `commitorder` | 40 concurrent commits on one session while a socket watches; asserts the socket receives strictly successive seqs and gets no resync marker. The database is consistent either way, so the connection is the only vantage point the defect is visible from. |
+| `commands` | `/status`, `/usage` and `/cost` through the phone's own path; asserts each comes back `composer_recovered` carrying the pane the daemon saved while the Mac's view was up, and that an ordinary send lands **immediately** after each one with nobody touching the Mac. The last clause is the whole feature: these three commands take Claude's composer away, and while it is gone the interlock refuses every send, so a phone that opens one and cannot close it has locked itself out of its own session. |
 
 `run.sh` restarts the daemon after installing, and `ccsoak` refuses to run
 against a daemon whose `protocol_minor` is below the one the harness was built

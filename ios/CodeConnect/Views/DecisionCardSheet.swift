@@ -71,23 +71,31 @@ struct ResolutionBanner: View {
     private func composeLine(_ compose: ComposeAttempt) -> some View {
         switch compose {
         case .sent:
-            line("Your reason was typed into the session.", tone: .success, glyph: "checkmark")
+            line("Reason typed into the session.", tone: .success, glyph: "checkmark")
         case .refused(let reason):
             line(
-                "Denied, but the reason was not typed: \(reason)", tone: .warning,
+                "Reason not typed: \(reason)", tone: .warning,
                 glyph: "exclamationmark.triangle.fill")
         case .failed(let reason):
             line(
-                "Denied, but the reason failed to send: \(reason)", tone: .warning,
+                "Reason could not be sent: \(reason)", tone: .warning,
                 glyph: "xmark.octagon.fill")
         case .alreadyApplied:
             line(
-                "Your reason was already typed by an earlier attempt.", tone: .success,
+                "Reason was already typed — not repeated.", tone: .success,
                 glyph: "checkmark")
         case .indeterminate(let reason):
             line(
-                "Denied; whether the reason was typed is unknown: \(reason)", tone: .warning,
+                "Couldn’t confirm whether the reason was typed: \(reason)", tone: .warning,
                 glyph: "questionmark.circle.fill")
+        case .composerRecovered:
+            // Unreachable from a denial reason (never a slash command), but
+            // the compiler is right to ask and silence would be a lie.
+            line("Reason typed into the session.", tone: .success, glyph: "checkmark")
+        case .composerLost:
+            line(
+                "The Mac's composer did not come back. Open Terminal to recover.",
+                tone: .warning, glyph: "exclamationmark.triangle.fill")
         }
     }
 

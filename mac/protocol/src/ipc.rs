@@ -305,6 +305,31 @@ pub enum SupervisorRequest {
     SendText {
         text: String,
         require: PromptPresence,
+        /// How to recognise a prompt that is *asking* something, when the
+        /// operator has configured that themselves.
+        ///
+        /// Recovery never sends `Escape` at a screen matching this: a slash
+        /// command can be a skill, a skill can reach a tool, and cancelling a
+        /// decision nobody made is worse than leaving a view standing. `None`
+        /// means the operator has configured nothing, and the supervisor uses
+        /// the question itself — deliberately narrower than the default
+        /// permission needles, which include `esctocancel`, a hint Claude's
+        /// *views* also offer and which would therefore stop the rescue this
+        /// postcondition exists for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asking: Option<PromptPresence>,
+        /// Whether `require` names Claude's **composer**, as opposed to a
+        /// prompt awaiting an answer.
+        ///
+        /// Carried rather than inferred from `require`'s variant, because a
+        /// configured `input_box_needles` override arrives as `AnyOf` and the
+        /// variant then says nothing. The supervisor needs the distinction
+        /// twice: a composer must have the keyboard before anything is typed
+        /// into it, and a prompt legitimately does not. Absent from a
+        /// pre-minor-9 daemon, where it defaults false and the keyboard check
+        /// simply does not run — the behaviour that shipped.
+        #[serde(default)]
+        targets_composer: bool,
         /// Send Enter after the text. False lets the phone stage a draft.
         #[serde(default = "default_true")]
         submit: bool,
@@ -318,9 +343,24 @@ pub enum SupervisorRequest {
         /// answer to any prompt and whose interlock is composer presence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect: Option<PromptFingerprint>,
+        /// Run the post-injection composer check. Set for word-shaped slash
+        /// commands only: ordinary prose cannot open a view, and paying two
+        /// captures plus a settling wait on every message would tax the
+        /// common path for a case that cannot arise on it.
+        #[serde(default)]
+        recover_composer: bool,
+        /// Keep the pane captured while the view was up. Decided by the
+        /// daemon against its own allowlist rather than trusted from the
+        /// phone, and only ever set for the three snapshot commands —
+        /// otherwise this quietly becomes the generic TUI bridge that was
+        /// rejected by design.
+        #[serde(default)]
+        capture_recovered: bool,
     },
-    /// Text snapshot of the pane. Presence checks and mirroring only —
-    /// terminal bytes are never parsed for semantics.
+    /// Text snapshot of the pane. Presence checks and mirroring only — the
+    /// pane is matched against needles, never parsed into structure. The one
+    /// place a needle carries meaning rather than mere presence is recovery's
+    /// "is this screen asking something" guard; see `SendText::asking`.
     Capture {
         #[serde(default = "default_capture_lines")]
         lines: u32,
@@ -439,6 +479,48 @@ pub enum PromptPresence {
 pub enum SupervisorResult {
     /// Keys were injected; `matched` is the needle that authorised it.
     Sent {
+        matched: String,
+    },
+    /// Keys were injected, Claude's composer disappeared afterwards, and one
+    /// `Escape` brought it back.
+    ///
+    /// Named for the observable fact rather than for whatever appeared: the
+    /// supervisor never identifies what opened, so "a view opened" is not a
+    /// claim it can make. (It does read the pane for one thing — whether the
+    /// screen is asking a question — because that is the one state it must
+    /// not send a key into.) What it can prove is that the composer went
+    /// away and came back. Measured need: `/status` and its kind replace the
+    /// composer, and while it is gone the presence interlock refuses every
+    /// further send — the phone is locked out of its own session until
+    /// somebody presses Esc at the Mac.
+    ComposerRecovered {
+        matched: String,
+        /// The pane as it looked while the composer was gone — only when
+        /// the daemon asked for it, which it does for the three snapshot
+        /// commands and nothing else.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_snapshot: Option<String>,
+        captured_at: String,
+    },
+    /// Typing happened; what followed could not be observed. A capture that
+    /// failed, an `Escape` that could not be sent, or a permission prompt on
+    /// screen — which is deliberately never Escaped, because a slash command
+    /// can be a skill, a skill can reach a tool, and cancelling a decision
+    /// nobody made is worse than leaving it standing.
+    ///
+    /// Distinct from `ComposerLost` because that one is a *claim*: Escape went
+    /// out and the composer did not return. This one claims nothing, and the
+    /// daemon turns it into `indeterminate` — the status the phone already
+    /// reads as "typed, outcome unknown; retry is recognised".
+    RecoveryUnconfirmed {
+        matched: String,
+        reason: String,
+    },
+    /// The composer went away and one `Escape` did not bring it back.
+    /// Measured on `/config`, and on `/keybindings`, which spawns an editor
+    /// where Escape is a mode key. Typing happened; this needs a human at
+    /// the Mac, and no further keys are guessed at.
+    ComposerLost {
         matched: String,
     },
     /// Presence check failed. Nothing was typed.
@@ -721,8 +803,12 @@ mod tests {
         let request = SupervisorRequest::SendText {
             text: "1".into(),
             require: PromptPresence::PermissionPrompt,
+            asking: None,
+            targets_composer: false,
             submit: true,
             expect: prompt_fingerprint(PERMISSION_PANE, "doyouwanttoproceed"),
+            recover_composer: false,
+            capture_recovered: false,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(line.contains("\"expect\""), "{line}");
@@ -732,6 +818,49 @@ mod tests {
             }
             other => panic!("wrong request: {other:?}"),
         }
+    }
+
+    /// The recovery fields are additive: a supervisor below minor 9 sends a
+    /// frame without them, and a minor-9 daemon must still decode it — as
+    /// "no recovery", which is exactly what that supervisor does.
+    #[test]
+    fn a_pre_minor_nine_send_text_still_decodes() {
+        let legacy = r#"{"kind":"send_text","text":"hi","require":{"mode":"input_box"},
+                         "submit":true}"#;
+        match serde_json::from_str::<SupervisorRequest>(legacy).unwrap() {
+            SupervisorRequest::SendText {
+                recover_composer,
+                capture_recovered,
+                ..
+            } => {
+                assert!(!recover_composer);
+                assert!(!capture_recovered);
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
+
+    /// The two new results round-trip, and the snapshot stays optional.
+    #[test]
+    fn composer_results_round_trip() {
+        let recovered = SupervisorResult::ComposerRecovered {
+            matched: "foragents".into(),
+            pane_snapshot: Some("Model: …".into()),
+            captured_at: "2026-08-05T14:32:08Z".into(),
+        };
+        let line = serde_json::to_string(&recovered).unwrap();
+        assert!(line.contains("\"status\":\"composer_recovered\""), "{line}");
+        match serde_json::from_str::<SupervisorResult>(&line).unwrap() {
+            SupervisorResult::ComposerRecovered { pane_snapshot, .. } => {
+                assert_eq!(pane_snapshot.as_deref(), Some("Model: …"));
+            }
+            other => panic!("wrong result: {other:?}"),
+        }
+        let lost = serde_json::to_string(&SupervisorResult::ComposerLost {
+            matched: "foragents".into(),
+        })
+        .unwrap();
+        assert!(lost.contains("\"status\":\"composer_lost\""), "{lost}");
     }
 
     #[test]

@@ -378,6 +378,11 @@ struct Capabilities: Codable, Sendable, Hashable {
     var sendTextIdempotent: Bool { advertises(["send_text_idempotent"]) }
     /// `get_command_catalog` is answerable.
     var servesCommandCatalog: Bool { advertises(["command_catalog"]) }
+    /// The daemon closes a Mac view its own injection opened, and reports
+    /// `composer_recovered` / `composer_lost`. False means the snapshot
+    /// commands must not be offered: their entire safety story is that the
+    /// daemon closes the view again.
+    var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
@@ -594,12 +599,22 @@ enum SendTextResult: Sendable, Hashable {
     /// refusal: a refusal promises nothing was typed, and this promises
     /// nothing at all.
     case indeterminate(reason: String)
+    /// The keys landed, the Mac's composer disappeared, and the daemon's own
+    /// Escape brought it back. As final as `.sent`. `paneSnapshot` is the
+    /// Mac's screen while the view was up — present only for the snapshot
+    /// commands, and never stored.
+    case composerRecovered(matched: String, paneSnapshot: String?, capturedAt: String)
+    /// The keys landed, the composer disappeared, and one Escape was not
+    /// enough. Somebody has to look at the Mac.
+    case composerLost(matched: String)
 }
 
 extension SendTextResult: Codable {
     private enum CodingKeys: String, CodingKey {
         case status, matched, reason
         case appliedAt = "applied_at"
+        case paneSnapshot = "pane_snapshot"
+        case capturedAt = "captured_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -613,6 +628,13 @@ extension SendTextResult: Codable {
                 appliedAt: try c.decode(String.self, forKey: .appliedAt))
         case "indeterminate":
             self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
+        case "composer_recovered":
+            self = .composerRecovered(
+                matched: try c.decode(String.self, forKey: .matched),
+                paneSnapshot: try c.decodeIfPresent(String.self, forKey: .paneSnapshot),
+                capturedAt: try c.decode(String.self, forKey: .capturedAt))
+        case "composer_lost":
+            self = .composerLost(matched: try c.decode(String.self, forKey: .matched))
         case let other:
             // A status this build has never seen is a mutation result it
             // cannot vouch for. "Refused" would promise nothing was typed —
@@ -638,6 +660,14 @@ extension SendTextResult: Codable {
         case .indeterminate(let reason):
             try c.encode("indeterminate", forKey: .status)
             try c.encode(reason, forKey: .reason)
+        case .composerRecovered(let matched, let paneSnapshot, let capturedAt):
+            try c.encode("composer_recovered", forKey: .status)
+            try c.encode(matched, forKey: .matched)
+            try c.encodeIfPresent(paneSnapshot, forKey: .paneSnapshot)
+            try c.encode(capturedAt, forKey: .capturedAt)
+        case .composerLost(let matched):
+            try c.encode("composer_lost", forKey: .status)
+            try c.encode(matched, forKey: .matched)
         }
     }
 }

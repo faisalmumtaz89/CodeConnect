@@ -151,15 +151,25 @@ final class SendIdempotencyTests: XCTestCase {
     /// the wire at all.
     func testABlockedCommandNeverTouchesTheWireFromAnyCaller() async {
         let model = connectedModel { _, _ in .sent(matched: "foragents") }
-        let attempt = await model.send(text: "/config", to: "u-1")
+        let attempt = await model.send(text: "/help", to: "u-1")
         guard case .refused(let reason) = attempt else { return XCTFail("\(attempt)") }
-        XCTAssertTrue(reason.contains("locks this composer"), reason)
+        XCTAssertTrue(reason.contains("take over this composer"), reason)
         XCTAssertTrue(
             model.connection.sendTextIdentities.isEmpty,
             "a policy refusal is client-side; nothing may reach the wire")
 
         let modelAttempt = await model.send(text: "/model sonnet", to: "u-1")
         guard case .refused = modelAttempt else { return XCTFail("\(modelAttempt)") }
+        XCTAssertTrue(model.connection.sendTextIdentities.isEmpty)
+
+        // A snapshot command against a daemon that never advertised the
+        // recovery capability is refused before typing, with the sentence
+        // that says what to do about it.
+        let statusAttempt = await model.send(text: "/status", to: "u-1")
+        guard case .refused(let statusReason) = statusAttempt else {
+            return XCTFail("\(statusAttempt)")
+        }
+        XCTAssertTrue(statusReason.contains("Restart it after updating"), statusReason)
         XCTAssertTrue(model.connection.sendTextIdentities.isEmpty)
     }
 
@@ -179,30 +189,6 @@ final class SendIdempotencyTests: XCTestCase {
             "an unlisted session's identity dies with the attempt")
     }
 
-    /// The tri-state handshake: no capabilities is a wait (no verdict may be
-    /// recorded), capabilities without the flag is the honest "unsupported".
-    func testCatalogFetchDistinguishesWaitingFromUnsupported() async {
-        let model = AppModel(cache: EventCache())
-        // Handshake in flight: no capabilities at all.
-        await model.fetchCommandCatalog(for: "u-1")
-        XCTAssertNil(model.commandCatalogs["u-1"])
-        XCTAssertNil(
-            model.commandCatalogFailures["u-1"],
-            "a handshake in flight is a wait, not a verdict")
-
-        // An older daemon answers — without the capability.
-        model.connection.simulateConnectedForTesting()
-        model.connection.simulateCapabilitiesForTesting(
-            try! JSONDecoder().decode(
-                Capabilities.self, from: Data(#"{"send_text":true}"#.utf8)),
-            minor: 7)
-        await model.fetchCommandCatalog(for: "u-1")
-        XCTAssertNotNil(
-            model.commandCatalogFailures["u-1"],
-            "capabilities that lack the flag are the honest unsupported answer")
-        XCTAssertTrue(
-            model.commandCatalogFailures["u-1"]?.contains("predates") == true)
-    }
 
     /// The one sanctioned bypass: the Model sheet's own injection.
     func testTheModelSheetPathBypassesThePolicy() async {

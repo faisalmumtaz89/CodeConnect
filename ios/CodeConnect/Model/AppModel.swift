@@ -33,6 +33,11 @@ enum ComposeAttempt: Sendable, Equatable {
     /// same identity, so an explicit re-send is a recognisable retry instead
     /// of a second typing.
     case indeterminate(String)
+    /// It landed, it opened a view on the Mac, and CodeConnect closed the
+    /// view again. As final as `.sent`.
+    case composerRecovered(command: String, paneSnapshot: String?, capturedAt: String)
+    /// It landed, it opened a view, and one Escape did not close it.
+    case composerLost(command: String)
 }
 
 /// Why a diff request ended in nothing — and, decisively, **who said so**.
@@ -445,6 +450,13 @@ final class AppModel {
             else { return }
             fixturesActive = true
             connection.fixtureAnswers = true
+            // `-cc.debug.sendText recovered|recovered-empty|lost|sent` resolves
+            // typed sends locally, the way `fixtureAnswers` resolves decisions —
+            // the only way to photograph the snapshot sheet's states, which
+            // against a live Mac would need a real dialog opened and lost on cue.
+            if let sendMode = UserDefaults.standard.string(forKey: "cc.debug.sendText") {
+                connection.sendTextStub = { _, _ in Fixtures.sendTextResult(mode: sendMode) }
+            }
             connection.simulateConnectedForTesting()
             for message in Fixtures.frames(variant: variant) {
                 connection.injectForTesting(message)
@@ -863,7 +875,7 @@ final class AppModel {
     private func subtitle(for summary: SessionSummary, state: SessionState?) -> String {
         guard let last = state?.timeline.last else { return summary.displayName }
         switch last.content {
-        case .userMessage(let text): return "you: \(text.firstLine)"
+        case .userMessage(let text, _): return "you: \(text.firstLine)"
         case .agentMessage(let text): return text.firstLine
         case .tool(let tool):
             return "\(tool.name) \(tool.argument?.firstLine ?? "")".trimmingCharacters(
@@ -970,9 +982,6 @@ final class AppModel {
             // The daemon accepted this credential, which is the only proof a
             // hand-typed token ever gets.
             commitPendingPairing()
-            // A failure recorded against the old connection says nothing
-            // about this one — the daemon may have been upgraded under us.
-            commandCatalogFailures.removeAll()
             // A certificate the pairing's address can never validate is a fact
             // worth stating, not a silent downgrade.
             pairing.noteTLSUnusable(
@@ -1224,8 +1233,6 @@ final class AppModel {
         states.removeValue(forKey: key)
         diffs.removeValue(forKey: key)
         pendingCacheWrites.remove(key)
-        commandCatalogs.removeValue(forKey: key)
-        commandCatalogFailures.removeValue(forKey: key)
         // A departed run's unsettled mutations die with it. Left behind, a
         // reused session *name* would collide a brand-new send with a dead
         // mutation's identity and the daemon would refuse it as a conflict.
@@ -1349,9 +1356,22 @@ final class AppModel {
         // a denial reason, a diff comment. A deny reason that happens to
         // start with `/config` would otherwise recreate the measured Mac
         // dialog lockout through the side door.
-        switch ClaudeCommandPolicy.action(for: text, catalog: commandCatalogs[key]) {
+        switch ClaudeCommandPolicy.action(
+            for: text, recoversComposer: connection.capabilities?.recoversComposer == true)
+        {
         case .nativeModel:
             return .refused("/model has its own control in the app — use the Model sheet.")
+        case .nativeDiff:
+            return .refused("/diff has its own view in the app — open Changes.")
+        case .nativeEffort:
+            return .refused("/effort has its own control in the app — use the Effort sheet.")
+        case .nativeCompact:
+            return .refused("/compact has its own control in the app — use the Compact sheet.")
+        case .nativeClear:
+            return .refused("/clear has its own confirmation in the app.")
+        case .nativeSnapshot(let command):
+            return .refused(
+                "/\(command.rawValue) has its own view in the app — use the command palette.")
         case .blocked(_, let reason):
             return .refused(reason)
         case .passThrough:
@@ -1360,11 +1380,32 @@ final class AppModel {
         return await sendUnchecked(text: text, to: key, submit: submit)
     }
 
-    /// The native `/model` adapter's own injection — the ONE path that may
-    /// carry a slash command past the policy, because the sheet *is* the
-    /// policy's answer for it.
+    /// The native adapters' own injections — the ONLY paths that may carry
+    /// a slash command past the policy, because each sheet *is* the
+    /// policy's answer for its command.
     func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
         await sendUnchecked(text: "/model \(argument)", to: key, submit: true)
+    }
+
+    func sendEffortCommand(_ value: String, to key: String) async -> ComposeAttempt {
+        await sendUnchecked(text: "/effort \(value)", to: key, submit: true)
+    }
+
+    func sendCompactCommand(instructions: String, to key: String) async -> ComposeAttempt {
+        let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = trimmed.isEmpty ? "/compact" : "/compact \(trimmed)"
+        return await sendUnchecked(text: text, to: key, submit: true)
+    }
+
+    func sendClearCommand(to key: String) async -> ComposeAttempt {
+        await sendUnchecked(text: "/clear", to: key, submit: true)
+    }
+
+    /// `/status`, `/usage`, `/cost` — the send whose *result* is the point:
+    /// on `.composerRecovered` the daemon returns the pane it saved while
+    /// the Mac view was open, and the snapshot sheet renders exactly that.
+    func sendSnapshotCommand(_ command: SnapshotCommand, to key: String) async -> ComposeAttempt {
+        await sendUnchecked(text: "/\(command.rawValue)", to: key, submit: true)
     }
 
     private func sendUnchecked(
@@ -1401,6 +1442,20 @@ final class AppModel {
             case .duplicate(_, let appliedAt):
                 pendingSendIdentities[mutation] = nil
                 return .alreadyApplied(appliedAt: appliedAt)
+            case .composerRecovered(_, let paneSnapshot, let capturedAt):
+                pendingSendIdentities[mutation] = nil
+                return .composerRecovered(
+                    command: trimmed, paneSnapshot: paneSnapshot, capturedAt: capturedAt)
+            case .composerLost:
+                // **The identity is kept, and the draft with it.** The keys
+                // landed; the daemon has settled this mutation, so pressing
+                // send again after recovering the Mac by hand is recognised
+                // as the duplicate it is instead of typing the command a
+                // second time into whatever is on screen by then. Dropping
+                // the identity here while the composer deliberately keeps the
+                // text was a way to type it twice.
+                retainIdentityIfListed(mutation, requestID)
+                return .composerLost(command: trimmed)
             case .indeterminate(let reason):
                 retainIdentityIfListed(mutation, requestID)
                 return .indeterminate(reason)
@@ -1433,50 +1488,6 @@ final class AppModel {
         let submit: Bool
     }
     private var pendingSendIdentities: [SendMutationKey: String] = [:]
-
-    /// The installed Claude Code's slash-command inventory for one session,
-    /// fetched once and kept. `nil` while never asked; a failure records its
-    /// reason so the palette can say why instead of guessing.
-    private(set) var commandCatalogs: [String: [String]] = [:]
-    private(set) var commandCatalogFailures: [String: String] = [:]
-    private var catalogFetchesInFlight: Set<String> = []
-
-    func fetchCommandCatalog(for key: String) async {
-        if commandCatalogs[key] != nil { return }
-        // One fetch at a time per session: the palette can appear and
-        // disappear faster than a probe answers.
-        guard !catalogFetchesInFlight.contains(key) else { return }
-        catalogFetchesInFlight.insert(key)
-        defer { catalogFetchesInFlight.remove(key) }
-        guard let capabilities = connection.capabilities else {
-            // Handshake still in flight: no claim can be made either way.
-            // The palette's task re-fires when capabilities arrive, so this
-            // is a wait, not a failure — recording one here left the palette
-            // stuck on a lie after reconnects.
-            return
-        }
-        guard capabilities.servesCommandCatalog else {
-            commandCatalogFailures[key] =
-                "This Mac's daemon predates command discovery. Update it with codeconnect update."
-            return
-        }
-        do {
-            let result = try await connection.commandCatalog(session: key)
-            // The session may have departed while the probe ran; writing the
-            // answer back would resurrect state the sweep just removed.
-            guard summaries.contains(where: { $0.sessionKey == key }) else { return }
-            switch result {
-            case .available(let commands, _, _):
-                commandCatalogs[key] = commands
-                commandCatalogFailures[key] = nil
-            case .unavailable(let reason):
-                commandCatalogFailures[key] = reason
-            }
-        } catch {
-            guard summaries.contains(where: { $0.sessionKey == key }) else { return }
-            commandCatalogFailures[key] = error.localizedDescription
-        }
-    }
 
     func capturePane(key: String, lines: UInt32 = 80) async -> String? {
         guard connection.capabilities?.capture != false else { return nil }

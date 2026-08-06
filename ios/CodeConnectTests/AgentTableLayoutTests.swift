@@ -94,6 +94,18 @@ final class AgentTableLayoutTests: XCTestCase {
             AgentTableView.textAlignment(for: .center, rightToLeft: false), .center)
     }
 
+    /// The refactor's invariant: deriving the hang from the declared column
+    /// must land exactly where the old private constant did — the border
+    /// steps `CC.space.sm` into the gutter, no more, no less.
+    func testTheDerivedHangEqualsTheOldConstantUnderTheTimelineColumn() {
+        XCTAssertEqual(
+            CCColumn.hang(from: TimelineSpine.content), -CC.space.sm,
+            "a declared column hangs back exactly its own padding")
+        XCTAssertEqual(
+            CCColumn.hang(from: 0), CCColumn.content - CC.space.sm,
+            "free-standing surfaces still find the content column themselves")
+    }
+
     func testAStressTableLaysOut() {
         let header = "| " + (0..<10).map { "col\($0)" }.joined(separator: " | ") + " |"
         let delimiter = "|" + Array(repeating: "---", count: 10).joined(separator: "|") + "|"
