@@ -155,3 +155,17 @@ jobs:
             echo "::error::reference to a document that is not in this repository"
             exit 1
           fi
+
+      # **The sheet height policy is single-sourced.** iOS 26 draws a sheet at a
+      # partial detent as an inset floating card and `.large` edge-to-edge, and
+      # those are two different sizes — measured, every element 1.04145× larger
+      # at `.large`. A sheet offering both therefore rescales mid-drag.
+      # `CCSheetDetents` is where that is decided once; a raw
+      # `presentationDetents` anywhere else is a sheet quietly opting out.
+      - name: Sheets use the shared detent policy
+        run: |
+          if grep -rIn --include='*.swift' 'presentationDetents(' ios \
+              | grep -v 'CCSheetDetents\.swift:'; then
+            echo "::error::use .ccResizableSheet()/.ccTallSheet(), not raw presentationDetents"
+            exit 1
+          fi

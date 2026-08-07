@@ -1999,7 +1999,7 @@ import SwiftUI
                         }
                     }
                 }
-                .presentationDetents([.large])
+                .ccTallSheet()
             }
         }
     }

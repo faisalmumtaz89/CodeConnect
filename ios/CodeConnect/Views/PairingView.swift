@@ -640,7 +640,7 @@ struct PairingView: View {
                     .padding(CC.space.md)
             }
         }
-        .presentationDetents([.medium, .large])
+        .ccResizableSheet()
     }
 
     // MARK: - Actions

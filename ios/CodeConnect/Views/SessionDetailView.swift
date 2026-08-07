@@ -366,17 +366,17 @@ struct SessionDetailView: View {
         .sheet(isPresented: $showModelSheet) {
             ModelSheet(sessionKey: key, prefill: modelSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
-                .presentationDetents([.medium, .large])
+                .ccResizableSheet()
         }
         .sheet(isPresented: $showEffortSheet) {
             EffortSheet(sessionKey: key, onLanded: consumeDraft)
                 .environment(model)
-                .presentationDetents([.medium, .large])
+                .ccResizableSheet()
         }
         .sheet(isPresented: $showCompactSheet) {
             CompactSheet(sessionKey: key, prefill: compactSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
-                .presentationDetents([.medium, .large])
+                .ccResizableSheet()
         }
         .sheet(item: $snapshotCommand) { command in
             SnapshotSheet(
@@ -390,12 +390,11 @@ struct SessionDetailView: View {
             .environment(model)
             // **One detent, and it is the tall one.** This sheet carries a
             // captured screen; every point of height is another row of the
-            // Mac's grid the reader does not have to scroll for. Offering
-            // `.medium` as well would not have opened it tall anyway —
+            // Mac's grid the reader does not have to scroll for. Offering a
+            // second detent would not have opened it tall anyway —
             // `presentationDetents` takes a `Set`, so the order written is
-            // not an order at all, and `[.large, .medium]` and
-            // `[.medium, .large]` are the same value.
-            .presentationDetents([.large])
+            // not an order at all.
+            .ccTallSheet()
         }
         .alert("Clear Claude’s context?", isPresented: $showClearConfirm) {
             Button("Clear context", role: .destructive) { performClear() }

@@ -206,9 +206,33 @@ PY
     return 0
 }
 
+# The one assertion in this run, and it is here because a screenshot cannot
+# hold it: a sheet's frames at both ends of the same expand gesture. Run at `L`
+# only — the property is about presentation geometry, which no type size
+# changes. See `SheetPresentationTests`.
+behaviour_gate() {
+    say "── sheet presentation"
+    xcrun simctl ui "$SIM_ID" content_size large >/dev/null
+    if xcodebuild test-without-building \
+        -project CodeConnect.xcodeproj \
+        -scheme "CodeConnect Renders" \
+        -destination "platform=iOS Simulator,id=$SIM_ID" \
+        -derivedDataPath "$DD" \
+        -only-testing:"CodeConnectRenderHarness/SheetPresentationTests" \
+        >"$WORK/sheet-presentation.log" 2>&1; then
+        say "   expanding a sheet translates it without resizing it"
+        return 0
+    fi
+    say "   FAILED — see $WORK/sheet-presentation.log"
+    grep -E "XCTAssert|error:" "$WORK/sheet-presentation.log" \
+        | head -5 | sed 's/^/     /' | tee -a "$REPORT" || true
+    return 1
+}
+
 FAILED=0
 if [[ -z "$ONLY_SIZE" || "$ONLY_SIZE" == "L" ]]; then
     render_size L large testRendersEveryScenarioAtLarge || FAILED=1
+    behaviour_gate || FAILED=1
 fi
 if [[ -z "$ONLY_SIZE" || "$ONLY_SIZE" == "ax5" ]]; then
     render_size ax5 accessibility-extra-extra-extra-large testRendersEveryScenarioAtAX5 \

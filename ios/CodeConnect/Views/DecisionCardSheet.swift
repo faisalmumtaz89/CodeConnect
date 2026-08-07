@@ -27,7 +27,7 @@ struct DecisionCardSheet: View {
         ) {
             DecisionCardView(approval: approval)
         }
-        .presentationDetents([.large])
+        .ccTallSheet()
     }
 }
 

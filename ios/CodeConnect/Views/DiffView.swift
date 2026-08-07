@@ -1318,14 +1318,14 @@ private struct DiffCommentSheet: View {
     @State private var text = ""
     @State private var sending = false
     @State private var result: ComposeAttempt?
-    /// Opens at `.large` and can be pulled back to `.medium`.
+    /// Opens expanded and can be pulled back to `.medium`.
     ///
     /// Found by rendering: at `.medium` the primary sat on the screen's bottom
     /// edge and the reason `ccDisabled` draws underneath it — "Nothing typed
     /// yet." — was below the fold, so the sheet opened showing a dead button
     /// with no explanation. A disabled control's reason has to be *visible*,
     /// not merely present, and the detent is what decides that here.
-    @State private var detent: PresentationDetent = .large
+    @State private var detent: PresentationDetent = CCSheetDetents.expanded
 
     var body: some View {
         CCSheetChrome("Comment to agent", subtitle: target.anchor, onClose: { dismiss() }) {
@@ -1371,7 +1371,7 @@ private struct DiffCommentSheet: View {
                 .padding(CC.space.md)
             }
         }
-        .presentationDetents([.medium, .large], selection: $detent)
+        .ccResizableSheet(selection: $detent)
     }
 
     private var excerptLineCount: Int { min(8, target.hunk.lines.count) }
