@@ -1,7 +1,7 @@
 import Foundation
 
-/// The three Mac views the phone may capture: one Settings dialog on the
-/// Mac, three tabs, three commands. Each opens the reusable snapshot sheet.
+/// The Mac views the phone may capture: one Settings dialog on the Mac, three
+/// commands that open it. Each opens the reusable snapshot sheet.
 enum SnapshotCommand: String, CaseIterable, Identifiable {
     case status, usage, cost
 
@@ -9,11 +9,18 @@ enum SnapshotCommand: String, CaseIterable, Identifiable {
 
     /// The sheet's title — naming the phone's promise (a Mac capture), not
     /// Claude's internal tab names.
+    ///
+    /// **`/cost` is titled "Usage", because that is the view it opens.**
+    /// Measured on 2.1.223: injecting `/cost` makes Claude Code record
+    /// `<command-name>/usage</command-name>` in the transcript and render a
+    /// pane identical to `/usage`'s. Titling it "Cost" promised a third view
+    /// that does not exist. The sheet prints the command actually typed
+    /// beneath this title, so it reads "Usage · /cost" — the view you got, and
+    /// how you got there.
     var title: String {
         switch self {
         case .status: return "Mac status"
-        case .usage: return "Usage"
-        case .cost: return "Cost"
+        case .usage, .cost: return "Usage"
         }
     }
 }
@@ -27,13 +34,18 @@ enum CommandAction: Equatable {
     /// `/diff` — the app renders this itself, better than the Mac's own
     /// view; open that instead of typing anything.
     case nativeDiff
-    /// Bare `/effort` — the sheet chooses. `/effort <arg>` deliberately
-    /// does NOT come here: every measured argument (valid and invalid) is
-    /// inline, Claude Code prints its own confirmation or error into the
-    /// transcript, and the valid set has already drifted once (`ultracode`,
-    /// `auto` appeared without notice) — so an app-side validity list
-    /// would refuse things the Mac accepts, the false-positive class this
-    /// feature exists to end.
+    /// Bare `/effort` — the sheet chooses. `/effort <arg>` deliberately does
+    /// NOT come here, and must not grow an app-side validity list: the valid
+    /// set has already drifted once (`ultracode`, `auto` appeared without
+    /// notice), so a list here would refuse things the Mac accepts — the
+    /// false-positive class this feature exists to end.
+    ///
+    /// **It is not because every argument runs inline.** Measured on 2.1.223:
+    /// `/effort` with a value *different from the current one* opens a
+    /// `Change effort level?` confirmation whenever the conversation is already
+    /// cached for the current level, exactly as `/model` does. Only a same-value
+    /// `/effort` is reliably inline. Pass-through stands because the honest fix
+    /// is a typed native operation, not a validity list.
     case nativeEffort
     /// `/compact [instructions]` — the sheet, with any typed instructions
     /// already in its field.
@@ -135,8 +147,9 @@ enum ClaudeCommandPolicy {
         }
         if command == "diff" { return .nativeDiff }
         if command == "effort" {
-            // With an argument this is measured-inline and Claude Code
-            // prints its own confirmation or error — pass it through.
+            // With an argument, pass it through without a local validity list;
+            // Claude Code remains the authority on accepted values. A different
+            // value may open a confirmation on a cache-warm conversation.
             return args.isEmpty ? .nativeEffort : .passThrough
         }
         if command == "compact" {
@@ -284,78 +297,254 @@ struct ModelDisplay: Equatable {
     }
 }
 
+/// Where a model fact came from. Typed rather than the display string it is
+/// rendered as, so nothing decides anything by comparing prose.
+enum ModelProvenance: Sendable, Hashable {
+    /// The SessionStart hook's `model` field.
+    case sessionStart
+    /// Claude Code's own `/model` output, whichever verb it used. Which verb
+    /// is a property of the *receipt*, and lives on `ModelConfirmation`; here
+    /// it would only be a second copy to keep in step.
+    case command
+}
+
 /// A model fact and its provenance — see `SessionState.lastConfirmedModel`.
 struct ConfirmedModel: Sendable, Hashable {
     var name: String
-    /// "Session start" or "Command confirmation" — rendered next to the age,
-    /// because a fact without its origin reads as more certain than it is.
-    var source: String
+    /// Rendered next to the age, because a fact without its origin reads as
+    /// more certain than it is.
+    var provenance: ModelProvenance
     var at: Date
 }
 
-/// An effort fact — see `SessionState.lastConfirmedEffort`. No provenance
-/// field: unlike the model, effort has exactly one measured source, Claude
-/// Code's own command stdout.
-struct ConfirmedEffort: Sendable, Hashable {
-    /// The machine value as confirmed — `xhigh`, not "Extra high".
-    var value: String
-    var at: Date
-}
+/// Everything Claude Code's `/model` command is measured to say back.
+///
+/// The error is here beside the receipts because the Model sheet's free-text
+/// field is the only thing that can produce it, and it is that field's
+/// guaranteed outcome for a value Claude Code does not know. Left unread it
+/// would leave the sheet waiting for a confirmation already on screen in the
+/// timeline behind it.
+enum ModelCommandOutcome: Sendable, Hashable {
+    case receipt(ModelConfirmation)
+    /// `Model 'bananas' not found`, verbatim. Terminal, and never a fact about
+    /// the session's model.
+    case notFound(String)
 
-/// A compaction outcome — see `SessionState.lastCompactSignal`.
-struct CompactSignal: Sendable, Hashable {
-    var outcome: CompactConfirmation
-    var at: Date
-}
-
-/// The Model sheet's correlation rule: a confirmation counts only when it is
-/// a *new* fact (different from the baseline captured at send time) whose
-/// provenance is Claude Code's own command output — never the session-start
-/// seed, and never the unchanged baseline replayed. The sheet reports what
-/// Claude confirmed, which stays honest even if another device raced a
-/// change into the same window: the name shown is the Mac's truth either way.
-enum ModelChangeWatch {
-    static func confirmed(baseline: ConfirmedModel?, current: ConfirmedModel?) -> String? {
-        guard let current, current.source == "Command confirmation", current != baseline
-        else { return nil }
-        return current.name
+    static func parse(_ line: String) -> ModelCommandOutcome? {
+        if let receipt = ModelConfirmation.parse(line) { return .receipt(receipt) }
+        // Matched by its measured shape and nothing looser: a line merely
+        // containing "not found" is somebody else's error.
+        if line.hasPrefix("Model '") && line.hasSuffix("' not found") { return .notFound(line) }
+        return nil
     }
 }
 
-/// Claude Code's own confirmation line for a model change, as recorded in
-/// the transcript and rendered as a timeline notice. Both spellings are
-/// measured: the argument form says "Set model to X and saved as your
-/// default…", a cancelled or same-model picker says "Kept model as X".
-enum ModelConfirmation {
-    static func parse(_ line: String) -> String? {
+/// A `/model` outcome and **the event that carried it** — see
+/// `SessionState.lastModelCommandSignal`. The sequence is the point: see
+/// `ModelChangeWatch`.
+struct ModelCommandSignal: Sendable, Hashable {
+    var outcome: ModelCommandOutcome
+    var seq: UInt64
+}
+
+/// The Model sheet's correlation rule: **a fence in the event stream, and a
+/// match on the value that was asked for.**
+///
+/// The fence alone proves recency, not identity. `SessionState` fills an empty
+/// model slot with the first receipt a backfill finds at any sequence, so
+/// without it a "load earlier" replay landing inside the wait reports an
+/// hour-old change as the answer to this tap. But recency is not enough on its
+/// own either: a receipt from somebody at the Mac, or from a second phone, also
+/// lands above the fence, and reporting `Model set to Opus 5` over a tap that
+/// asked for Sonnet is the same phantom state wearing a fresher timestamp.
+///
+/// So both. Names are compared through `ModelDisplay`, because the request
+/// carries an alias (`sonnet`) and the receipt carries a display name
+/// (`Sonnet 5`); the error carries the argument Claude Code quoted back, which
+/// is compared to the argument that was sent.
+///
+/// What survives is still only ever *Claude Code's own report* — the sheet
+/// never claims to know which actor caused it, only that what it is showing
+/// answers the value this sheet asked for.
+enum ModelChangeWatch {
+    static func outcome(
+        after baselineSeq: UInt64, requested: String, signal: ModelCommandSignal?
+    ) -> ModelCommandOutcome? {
+        guard let signal, signal.seq > baselineSeq else { return nil }
+        let asked = ModelDisplay.from(requested).name
+        switch signal.outcome {
+        // `Set model to X` names the model that was *applied*, so it answers
+        // this request only when X is what this request asked for. Somebody
+        // else's switch lands above the fence too, and reporting it here would
+        // be the same phantom state wearing a fresher timestamp.
+        case .receipt(.set(let name)):
+            return ModelDisplay.from(name).name == asked ? signal.outcome : nil
+        // **`Kept model as X` names the model still in force, not the one
+        // asked for** — measured: `/model sonnet`, cancelled, prints
+        // `Kept model as Opus 5`. Matching it against the request would mean a
+        // cancelled confirmation never reports at all, which is the silence
+        // this whole change exists to end. The fence is what it has, and the
+        // sentence it produces is true whoever caused it: Claude Code kept X,
+        // and nothing here claims the request succeeded.
+        case .receipt(.kept):
+            return signal.outcome
+        // `Model 'bananas' not found` quotes the value Claude Code could not
+        // find, so only this sheet's own value makes it this sheet's failure.
+        case .notFound(let line):
+            return Self.quotedValue(in: line).map { ModelDisplay.from($0).name } == asked
+                ? signal.outcome : nil
+        }
+    }
+
+    /// The value between the first pair of single quotes, if any.
+    static func quotedValue(in line: String) -> String? {
+        guard let open = line.firstIndex(of: "'") else { return nil }
+        let after = line.index(after: open)
+        guard let close = line[after...].firstIndex(of: "'") else { return nil }
+        let inner = String(line[after..<close])
+        return inner.isEmpty ? nil : inner
+    }
+}
+
+/// What Claude Code's own model receipt says happened, as recorded in the
+/// transcript and rendered as a timeline notice.
+///
+/// **Both spellings are measured, and they mean opposite things.** The applied
+/// form is `Set model to X and saved as your default for new sessions`.
+/// `Kept model as X` is what Claude Code prints when its `Switch model?`
+/// confirmation was cancelled, or the same model was re-chosen — the model did
+/// **not** change.
+///
+/// Both are parsed, on purpose: `Kept model as X` is a true statement of the
+/// model in force, and it is the only signal by which this app learns the model
+/// after somebody cancels a confirmation at the Mac. Collapsing the two into one
+/// bare name is what lets a cancellation report success, so the verb lives in
+/// the type, where it cannot be dropped.
+enum ModelConfirmation: Sendable, Hashable {
+    case set(String)
+    case kept(String)
+
+    /// The model named by the receipt, whichever verb it used.
+    var name: String {
+        switch self {
+        case .set(let name), .kept(let name): return name
+        }
+    }
+
+    /// True only for `Set model to …`.
+    var isChange: Bool {
+        if case .set = self { return true }
+        return false
+    }
+
+    /// The sentence the Model sheet shows for this receipt.
+    ///
+    /// Here rather than in the view for two reasons: the live path and the
+    /// already-landed path must not word it differently, and an honesty
+    /// contract that cannot be asserted in a test is a comment. The
+    /// `kept` wording states what Claude Code reported and offers no theory
+    /// about who caused it — the same line is printed when a confirmation is
+    /// declined at the Mac and when the model asked for is already in force.
+    var sheetStatus: String {
+        let display = ModelDisplay.from(name).name
+        switch self {
+        case .set: return "Model set to \(display)."
+        case .kept: return "Claude Code kept \(display). The model was not changed."
+        }
+    }
+
+    static func parse(_ line: String) -> ModelConfirmation? {
         if line.hasPrefix("Set model to ") {
             let rest = line.dropFirst("Set model to ".count)
-            guard let end = rest.range(of: " and saved") else {
-                let name = rest.trimmingCharacters(in: .whitespaces)
-                return name.isEmpty ? nil : name
+            let name: String
+            if let end = rest.range(of: " and saved") {
+                name = String(rest[..<end.lowerBound]).trimmingCharacters(in: .whitespaces)
+            } else {
+                name = rest.trimmingCharacters(in: .whitespaces)
             }
-            let name = String(rest[..<end.lowerBound]).trimmingCharacters(in: .whitespaces)
-            return name.isEmpty ? nil : name
+            return name.isEmpty ? nil : .set(name)
         }
         if line.hasPrefix("Kept model as ") {
             let name = line.dropFirst("Kept model as ".count)
                 .trimmingCharacters(in: .whitespaces)
-            return name.isEmpty ? nil : name
+            return name.isEmpty ? nil : .kept(name)
         }
         return nil
     }
 }
 
-/// Claude Code's confirmation line for an effort change. Measured for all
-/// five values: `Set effort level to xhigh (this session only): Deeper
-/// reasoning…` — the value token, then a scope note, then a description.
-/// Only the value is parsed; everything after it is display prose.
-enum EffortConfirmation {
-    static func parse(_ line: String) -> String? {
-        guard line.hasPrefix("Set effort level to ") else { return nil }
-        let value = line.dropFirst("Set effort level to ".count)
-            .prefix { $0.isLetter }
-        return value.isEmpty ? nil : String(value)
+/// Claude Code's receipt for an effort request. Two spellings, measured on
+/// 2.1.223 and meaning opposite things — exactly as for the model:
+///
+/// * `Set effort level to xhigh (saved as your default for new sessions):
+///   Deeper reasoning…` — the value token, a scope note in brackets, then a
+///   description.
+/// * `Kept effort level as high` — printed when the `Change effort level?`
+///   confirmation was cancelled, or the same level was re-chosen. The level
+///   did **not** change.
+///
+/// The `kept` form must be parsed for the same reason: unread, it leaves the
+/// sheet waiting and then saying no confirmation arrived — while the receipt is
+/// on screen in the timeline behind it.
+///
+/// **The scope is read, never assumed.** It is measured to differ per value:
+/// `low`, `medium`, `high` and `xhigh` all say "saved as your default for new
+/// sessions"; `max` says "this session only". A build that hardcoded either
+/// would be wrong for the other, so the bracketed text is carried verbatim and
+/// a shape this build has not seen yields no scope at all rather than a guess.
+enum EffortConfirmation: Sendable, Hashable {
+    case set(value: String, scope: String?)
+    case kept(value: String)
+
+    var value: String {
+        switch self {
+        case .set(let value, _), .kept(let value): return value
+        }
+    }
+
+    var isChange: Bool {
+        if case .set = self { return true }
+        return false
+    }
+
+    /// The sentence the Effort sheet shows. Here rather than in the view for
+    /// the same reasons as `ModelConfirmation.sheetStatus`.
+    var sheetStatus: String {
+        let label = EffortConfirmation.label(for: value)
+        guard case .set(_, let scope) = self else {
+            return "Claude Code kept \(label) effort. The level was not changed."
+        }
+        guard let scope else { return "Claude Code confirmed \(label) effort." }
+        return "Claude Code confirmed \(label) effort (\(scope))."
+    }
+
+    static func parse(_ line: String) -> EffortConfirmation? {
+        if line.hasPrefix("Set effort level to ") {
+            let rest = line.dropFirst("Set effort level to ".count)
+            let value = rest.prefix { $0.isLetter }
+            guard !value.isEmpty else { return nil }
+            return .set(value: String(value), scope: scope(in: rest))
+        }
+        if line.hasPrefix("Kept effort level as ") {
+            let value = line.dropFirst("Kept effort level as ".count)
+                .prefix { $0.isLetter }
+            return value.isEmpty ? nil : .kept(value: String(value))
+        }
+        return nil
+    }
+
+    /// The scope note, which is the parenthetical **immediately** after the
+    /// value — not the first one in the line. `xhigh`'s description ends
+    /// `(Fable 5, Opus 4.7+, Sonnet 5)`, so a search anywhere would read a
+    /// description as a scope the moment either is reworded. Position is what
+    /// makes this safe, so the text is shown as Claude Code wrote it.
+    private static func scope(in rest: Substring) -> String? {
+        let afterValue = rest.drop { $0.isLetter }.drop { $0 == " " }
+        guard afterValue.first == "(", let close = afterValue.firstIndex(of: ")") else {
+            return nil
+        }
+        let inner = String(afterValue[afterValue.index(after: afterValue.startIndex)..<close])
+        return inner.isEmpty ? nil : inner
     }
 
     /// `xhigh` → `Extra high` — the human labels the sheet uses. A value

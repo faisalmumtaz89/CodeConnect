@@ -166,6 +166,8 @@ impl Phone {
                 .map(|_| protocol::hash::send_text_hash(session_ref, text, true)),
             require: None,
             submit: true,
+            // The soak drives raw sends, not a sheet that disclosed anything.
+            complete_native_confirmation: false,
         })
         .await?;
         loop {

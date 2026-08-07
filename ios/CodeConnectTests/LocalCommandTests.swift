@@ -108,6 +108,22 @@ final class LocalCommandTests: XCTestCase {
         return try JSONDecoder().decode(Event.self, from: Data(json.utf8))
     }
 
+    /// **The verb decides the title.** `Kept model as X` is Claude Code's
+    /// no-change receipt — what it prints when its confirmation was cancelled
+    /// or the same model re-chosen. Filed under "Model changed" it put a
+    /// permanent contradiction in the record: the title saying one thing and
+    /// the verbatim detail directly below it the other.
+    func testAKeptModelReceiptIsTitledUnchanged() throws {
+        let items = TimelineBuilder.build([
+            try userEvent(
+                seq: 1,
+                content: "<local-command-stdout>Kept model as Fable 5</local-command-stdout>")
+        ])
+        guard case .notice(let notice) = items[0].content else { return XCTFail("\(items)") }
+        XCTAssertEqual(notice.title, "Model unchanged")
+        XCTAssertEqual(notice.detail, "Kept model as Fable 5")
+    }
+
     func testTheTimelineRendersCommandsAsCommandsAndOutputAsNotice() throws {
         let events = [
             try userEvent(seq: 1, content: measuredCaveat),

@@ -277,9 +277,50 @@
               Esc to close
             """
 
+        /// Claude Code's own receipt for a command, delivered the way the real
+        /// daemon delivers it: the send returns, and the transcript line
+        /// arrives afterwards as an event.
+        ///
+        /// Without it the `kept` states are unreachable by any render, and a
+        /// state nobody can reach is a state nobody has looked at.
+        ///
+        /// Every line is verbatim from the 2.1.223 measurement rig, escape
+        /// codes and all: `Kept model as \u{1b}[1mFable 5\u{1b}[22m` is what
+        /// the transcript actually holds, so the render exercises the same
+        /// stripping the live path does.
+        static func receiptFrame(mode: String, session: String, now: Date = Date()) -> String? {
+            let line: String
+            switch mode {
+            case "kept-model":
+                line = "Kept model as \u{1b}[1mFable 5\u{1b}[22m"
+            case "kept-effort":
+                line = "Kept effort level as high"
+            case "set-effort-session":
+                line =
+                    "Set effort level to max (this session only): Maximum capability with "
+                    + "deepest reasoning. May use excessive tokens resulting in long response "
+                    + "times or overthinking. Use sparingly for the hardest tasks."
+            default:
+                return nil
+            }
+            let escaped = line.replacingOccurrences(of: "\u{1b}", with: "\\u001b")
+            // Seq 14, immediately after `confirmedFactsJSON`'s 12 and 13: a
+            // higher number leaves a hole, and the session then carries a gap
+            // and its banner through a scenario that is about a sheet. A
+            // fixture adds the one fact it is for, not a fault as well.
+            return """
+                {"type":"event","event":{"seq":14,"session_id":"\(session)",\
+                "ts":"\(rfc3339(now))","kind":"user_message","source":"transcript",\
+                "payload":{"type":"user","message":{"role":"user",\
+                "content":"<local-command-stdout>\(escaped)</local-command-stdout>"}}}}
+                """
+        }
+
         /// `-cc.debug.sendText <mode>` — what the stubbed daemon says to any
         /// send. `recovered` carries the measured pane above, as the real
-        /// daemon does for the three snapshot commands.
+        /// daemon does for the three snapshot commands. The `kept-*` and
+        /// `set-effort-session` modes answer `sent` and let `receiptFrame`
+        /// supply the transcript line, which is the shape of the real thing.
         static func sendTextResult(mode: String) -> SendTextResult {
             switch mode {
             case "recovered":
@@ -293,6 +334,11 @@
                     capturedAt: "2026-08-05T14:32:08.000Z")
             case "lost":
                 return .composerLost(matched: "foragents")
+            case "duplicate":
+                // The daemon replaying a settled mutation. Its `matched` and
+                // timestamp are all the wire carries — deliberately not the
+                // original outcome, which is why the sheets may not claim one.
+                return .duplicate(matched: "foragents", appliedAt: "2026-08-05T14:31:55.000Z")
             default:
                 return .sent(matched: "foragents")
             }
@@ -477,7 +523,7 @@
 
         // MARK: Helpers
 
-        private static func decode(_ json: String) -> ServerMessage? {
+        static func decode(_ json: String) -> ServerMessage? {
             try? JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
         }
 

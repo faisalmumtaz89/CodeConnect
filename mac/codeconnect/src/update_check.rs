@@ -142,8 +142,30 @@ fn write_cache_to(path: &std::path::Path, cache: &UpdateCache) -> Result<()> {
 /// Holds the kernel lock for as long as it lives; dropping — or dying, in
 /// any way — is what releases it. `flock` locks belong to the open file
 /// description, and the kernel cleans up when that closes.
+///
+/// Never cloned, and neither is the `File`. An unlock names the description
+/// rather than the descriptor, so two claims over one description would mean
+/// whichever dropped first released the lock for both.
 struct ThrottleClaim {
-    _file: std::fs::File,
+    file: std::fs::File,
+}
+
+/// **Not redundant with the `close` that follows it.** Closing frees the lock
+/// only when the last reference to the description goes, and spawning a
+/// process duplicates that reference into the child until the new image is
+/// activated — so without this, the lock outlives the drop, held by a child
+/// that has no idea it holds it. `flock(2)` is explicit that duplicated
+/// descriptors are references to one lock, released by an unlock through any
+/// of them; that is what makes dropping the release rather than a request for
+/// one. Dying by a route that runs no destructor still releases at last
+/// close, unchanged.
+impl Drop for ThrottleClaim {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Nowhere for a failure to go, and nothing to do about one: the
+        // close immediately after is the same release this pre-empts.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 fn claim_throttle_at(path: &std::path::Path) -> Option<ThrottleClaim> {
@@ -164,7 +186,7 @@ fn claim_throttle_at(path: &std::path::Path) -> Option<ThrottleClaim> {
     if rc != 0 {
         return None;
     }
-    Some(ThrottleClaim { _file: file })
+    Some(ThrottleClaim { file })
 }
 
 /// Whether the 24-hour throttle permits an attempt now. A future
@@ -1075,6 +1097,51 @@ mod tests {
         assert!(
             claim_throttle_at(&lock_file).is_some(),
             "release frees the next claimant; nothing to time out, nothing to break"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The claim outliving its drop is what the explicit unlock exists to
+    /// prevent, and only a duplicate held past that drop can demonstrate it.
+    /// The test above cannot: it meets one only if a sibling test happens to
+    /// spawn at that moment, which nothing in it arranges. So this one holds
+    /// the duplicate on purpose. The child is released through a pipe rather
+    /// than a sleep, because a regression guard that waits a fixed time is
+    /// the flake it guards against.
+    #[test]
+    fn a_claim_that_a_child_inherited_is_still_released_by_the_drop() {
+        let dir = temp_dir("inherit");
+        let lock_file = dir.join(".update-check.lock");
+        let claim = claim_throttle_at(&lock_file).expect("first claim wins");
+
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork");
+        if child == 0 {
+            // Holds the inherited descriptor until the parent has re-claimed,
+            // then leaves without running a destructor. Only async-signal-safe
+            // calls: this is the child of a threaded process.
+            unsafe {
+                libc::close(write_fd);
+                let mut byte = 0u8;
+                while libc::read(read_fd, std::ptr::addr_of_mut!(byte).cast(), 1) > 0 {}
+                libc::_exit(0);
+            }
+        }
+
+        unsafe { libc::close(read_fd) };
+        drop(claim);
+        let reclaimed = claim_throttle_at(&lock_file);
+        unsafe {
+            libc::close(write_fd);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        assert!(
+            reclaimed.is_some(),
+            "a descriptor a child still holds must not keep the lock past the drop"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

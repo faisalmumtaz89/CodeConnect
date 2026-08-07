@@ -281,6 +281,7 @@ fn handle_request(
             asking,
             recover_composer,
             capture_recovered,
+            confirm_view,
         } => send_text(
             args,
             config,
@@ -294,6 +295,7 @@ fn handle_request(
             Recovery {
                 enabled: recover_composer,
                 capture: capture_recovered,
+                confirm: confirm_view,
                 asking,
             },
         ),
@@ -327,6 +329,11 @@ fn handle_request(
 struct Recovery {
     enabled: bool,
     capture: bool,
+    /// Complete the view instead of dismissing it, and the needle that must be
+    /// on screen before that key is allowed — see
+    /// `SupervisorRequest::SendText::confirm_view`. `None` is the ordinary
+    /// rescue.
+    confirm: Option<String>,
     /// The operator's own definition of a prompt that is asking something,
     /// if they have given one. See `SupervisorRequest::SendText::asking`.
     asking: Option<PromptPresence>,
@@ -347,6 +354,12 @@ struct Recovery {
 const RECOVERY_FIRST_CHECK: Duration = Duration::from_millis(1_500);
 const RECOVERY_SECOND_CHECK: Duration = Duration::from_millis(3_000);
 const RECOVERY_VERIFY_WINDOW: Duration = Duration::from_millis(250);
+/// The confirming path's own window. `Enter` commits a model change and Claude
+/// Code redraws the transcript around it, which the 250ms figure above — taken
+/// from dismissing an already-drawn view — was never measured against. Measured
+/// on 2.1.223: the composer returned within 250ms in the observed runs, so this
+/// is headroom for a slower redraw rather than a figure the fast path needs.
+const CONFIRM_VERIFY_WINDOW: Duration = Duration::from_millis(1_500);
 
 /// What these keys are being typed into: how to recognise it on screen, and
 /// whether it is Claude's composer.
@@ -455,16 +468,21 @@ fn recover_composer(
         // can describe two different moments, and the whole question is
         // whether this drawn composer has the keyboard.
         &|| look_at_pane(&session),
-        &|| tmux::send_key(&session, "Escape"),
+        &|key| tmux::send_key(&session, key),
         composer,
         recovery.asking.clone(),
         matched,
         recovery.capture,
+        recovery.confirm.clone(),
     );
     match &outcome {
         SupervisorResult::ComposerRecovered { .. } => log_line(
             args,
             &format!("recovery: {text:?} took the composer; Escape restored it"),
+        ),
+        SupervisorResult::ViewConfirmed { .. } => log_line(
+            args,
+            &format!("recovery: {text:?} opened a view; Enter completed it"),
         ),
         SupervisorResult::ComposerLost { .. } => log_line(
             args,
@@ -488,7 +506,10 @@ fn recover_composer(
 /// which is the one state no key may be sent into.
 fn recover_composer_with(
     look: &dyn Fn() -> Result<(String, bool)>,
-    send_escape: &dyn Fn() -> Result<()>,
+    // Takes the key because the choice is made *here*, after the guards: a
+    // confirmation that cannot be established downgrades to the ordinary
+    // rescue rather than stranding the view.
+    send_key: &dyn Fn(&str) -> Result<()>,
     // The **effective** composer presence, overrides included — never
     // `InputBox` assumed. An operator configures `input_box_needles`
     // precisely when the defaults have stopped matching Claude's TUI, and a
@@ -499,6 +520,12 @@ fn recover_composer_with(
     asking: Option<PromptPresence>,
     matched: String,
     capture: bool,
+    // Complete the view rather than dismiss it, and what must be on screen for
+    // that to be allowed. `Enter` commits, so it is held to a standard the
+    // dismissing path is not: the screen must show the selected affirmative row
+    // for the value that was asked for, and must not have moved since it
+    // appeared. When it cannot, the ordinary rescue runs instead.
+    confirm: Option<String>,
 ) -> SupervisorResult {
     // "Ready" means able to take keys, not merely drawn: a view rendered above
     // a live-looking composer is the measured lockout this postcondition
@@ -516,12 +543,18 @@ fn recover_composer_with(
 
     // First look. A composer still here settles it — the overwhelmingly
     // common case, and it costs one look.
+    //
+    // The pane is **kept** rather than discarded: a confirming key is only
+    // allowed on a screen that has been the same screen since it appeared, and
+    // this is when it appeared. Taking a second look for that would buy the
+    // same frame at the price of another failure point on a path that never
+    // confirms anything.
     std::thread::sleep(RECOVERY_FIRST_CHECK);
-    match look() {
+    let first_absent = match look() {
         Ok((pane, cursor)) if ready(&pane, cursor) => return SupervisorResult::Sent { matched },
+        Ok((pane, _)) => pane,
         Err(_) => return unconfirmed("after the command was typed"),
-        Ok(_) => {}
-    }
+    };
 
     // Second look: a large inline render can hide the composer footer for a
     // while and then bring it back with nobody's help — measured on
@@ -556,14 +589,17 @@ fn recover_composer_with(
         needles: vec!["do you want to proceed".to_string()],
     });
     // Looked at again here, not judged from the frame saved a moment ago: a
-    // tool call reaches its prompt on its own schedule, and the pane this
-    // Escape is about to land on is the pane as it is *now*. Checking the
-    // older frame would leave exactly the window this guard exists to close.
-    let before_escape = match look() {
-        Ok((pane, _)) => pane,
-        Err(_) => return unconfirmed("just before Escape"),
+    // tool call reaches its prompt on its own schedule, and the pane this key
+    // is about to land on is the pane as it is *now*. Checking the older frame
+    // would leave exactly the window this guard exists to close.
+    //
+    // **One look, pane and cursor together.** Apart they describe two moments,
+    // and the whole question is what this key will land on.
+    let (before_key, cursor_before_key) = match look() {
+        Ok(look) => look,
+        Err(_) => return unconfirmed("just before the key was sent"),
     };
-    if asking.find_match(&before_escape, None).is_some()
+    if asking.find_match(&before_key, None).is_some()
         || asking.find_match(&absent_pane, None).is_some()
     {
         return SupervisorResult::RecoveryUnconfirmed {
@@ -572,10 +608,40 @@ fn recover_composer_with(
         };
     }
 
-    if send_escape().is_err() {
+    // **Confirming commits; dismissing does not.** `Escape` closes whatever is
+    // there; `Enter` *selects* whatever is highlighted. So the confirming path
+    // has to establish more — and when it cannot, it does not strand the Mac:
+    // it falls back to the ordinary rescue, which is what this postcondition
+    // would have done for this command anyway. Withholding both keys would
+    // leave the view open and the composer captured, which is the lockout the
+    // whole mechanism exists to clear.
+    let confirming = match &confirm {
+        None => false,
+        Some(needle) => {
+            // One needle, anchored to the *selected* affirmative row and
+            // carrying the requested value. Split into separate structural and
+            // value needles it proved nothing: the pane includes Claude Code's
+            // echo of the command just submitted, so a bare value needle
+            // matched itself, and a bare affirmative needle matched whichever
+            // row was highlighted. Joined, it can only match the row that is
+            // both selected and about the value that was asked for.
+            let shown = protocol::ipc::normalize_for_match(&before_key);
+            let same_screen = before_key == absent_pane && absent_pane == first_absent;
+            let authorised = shown.contains(needle.as_str())
+                // Raw, not normalised: normalising folds whitespace and case,
+                // and a difference there is still a different screen.
+                && same_screen
+                // A composer with the keyboard means the view is already gone.
+                && !cursor_before_key;
+            authorised
+        }
+    };
+
+    let key = if confirming { "Enter" } else { "Escape" };
+    if send_key(key).is_err() {
         return SupervisorResult::RecoveryUnconfirmed {
             matched,
-            reason: "Escape could not be sent".into(),
+            reason: format!("{key} could not be sent"),
         };
     }
 
@@ -583,12 +649,24 @@ fn recover_composer_with(
     // that ignores Escape (measured: `/keybindings` spawns an editor, where
     // Escape is a mode key) needs a human, and guessing further keys into
     // an unknown state is how a rescue becomes damage.
-    let deadline = std::time::Instant::now() + RECOVERY_VERIFY_WINDOW;
+    // `Escape` dismisses a view that is already drawn; `Enter` commits a
+    // choice and Claude Code then redraws the transcript around it. The 250ms
+    // window was measured for the first and says nothing about the second, so
+    // the confirming path gets its own.
+    let window = if confirming {
+        CONFIRM_VERIFY_WINDOW
+    } else {
+        RECOVERY_VERIFY_WINDOW
+    };
+    let deadline = std::time::Instant::now() + window;
     let mut saw_the_pane = false;
     loop {
         if let Ok((pane, cursor)) = look() {
             saw_the_pane = true;
             if ready(&pane, cursor) {
+                if confirming {
+                    return SupervisorResult::ViewConfirmed { matched };
+                }
                 return SupervisorResult::ComposerRecovered {
                     matched,
                     pane_snapshot: capture.then_some(absent_pane),
@@ -597,13 +675,22 @@ fn recover_composer_with(
             }
         }
         if std::time::Instant::now() >= deadline {
-            // `ComposerLost` is a claim — Escape went out and the composer
-            // did not come back — so it is only made when the looking that
-            // would have seen it actually worked.
-            return if saw_the_pane {
+            // `ComposerLost` is a claim — a key went out and the composer did
+            // not come back — so it is only made when the looking that would
+            // have seen it actually worked.
+            //
+            // **Never on the confirming path.** There the key was `Enter`, so
+            // the change has most likely already been made; calling that a lost
+            // composer would report a successful switch as a hard failure, and
+            // the sheet would go terminal on it. The window not being long
+            // enough to *see* the redraw is exactly the "typed, outcome
+            // unknown" state, and the transcript receipt still settles it.
+            return if confirming {
+                unconfirmed("while waiting for the composer after the confirmation")
+            } else if saw_the_pane {
                 SupervisorResult::ComposerLost { matched }
             } else {
-                unconfirmed("after Escape was sent")
+                unconfirmed("after the key was sent")
             };
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -987,7 +1074,11 @@ done
         tui.type_line(text);
         recover_composer_with(
             &|| Ok((tui.pane(), tui.cursor_is_visible())),
-            &|| {
+            &|key| {
+                assert_eq!(
+                    key, "Escape",
+                    "the ordinary rescue dismisses, never commits"
+                );
                 tui.send_escape();
                 Ok(())
             },
@@ -995,7 +1086,266 @@ done
             None,
             "forshortcuts".to_string(),
             capture,
+            None,
         )
+    }
+
+    /// The real `Switch model?` capture, verbatim from the 2.1.223 rig,
+    /// **including Claude Code's echo of the command that opened it**. The echo
+    /// is the point: a bare value needle matched itself against it, and a bare
+    /// affirmative needle matched whichever row was highlighted. Only a needle
+    /// anchored to the selection marker survives this frame.
+    const CONFIRM_PANE: &str = "\
+❯ /model sonnet
+
+────────────────────────────────────────
+  Switch model?
+  Your next response will be slower and use more tokens
+
+  This conversation is cached for the current model. Switching to Sonnet 5 \
+means the full history gets re-read on your next message.
+
+  ❯ 1. Yes, switch to Sonnet 5
+    2. No, go back";
+
+    /// The needle the daemon builds for `/model sonnet`.
+    const SONNET_NEEDLE: &str = "❯1.yes,switchtosonnet";
+
+    /// Drives the confirm path over a scripted sequence of looks and records
+    /// every key sent. `looks` supplies one `(pane, cursor_visible)` per call,
+    /// repeating its last entry once exhausted.
+    fn confirm_probe(looks: Vec<(String, bool)>) -> (SupervisorResult, Vec<String>) {
+        use std::sync::Mutex;
+        let index = Mutex::new(0usize);
+        let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let outcome = recover_composer_with(
+            &|| {
+                let mut i = index.lock().unwrap();
+                let at = (*i).min(looks.len() - 1);
+                *i += 1;
+                Ok(looks[at].clone())
+            },
+            &|key| {
+                sent.lock().unwrap().push(key.to_string());
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+            None,
+            "forshortcuts".to_string(),
+            false,
+            Some(SONNET_NEEDLE.to_string()),
+        );
+        let keys = sent.lock().unwrap().clone();
+        (outcome, keys)
+    }
+
+    /// The dialog is up and unmoved, but it is about a different model than the
+    /// one this send asked for. Only the needle check stands between that and a
+    /// committed change nobody requested.
+    #[test]
+    fn a_confirming_key_is_withheld_when_the_dialog_does_not_name_the_requested_model() {
+        let other = CONFIRM_PANE.replace("Sonnet 5", "Haiku 4.5");
+        let (outcome, keys) = confirm_probe(vec![(other, false)]);
+        assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
+        assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
+    }
+
+    /// The two later frames agree with each other; the frame at the first check
+    /// does not. Only keeping that first frame catches a dialog replaced inside
+    /// the ladder.
+    #[test]
+    fn a_confirming_key_is_withheld_when_the_first_absent_frame_changed() {
+        let moved = CONFIRM_PANE.replace("❯ 1.", "❯  1.");
+        let (outcome, keys) = confirm_probe(vec![
+            (moved, false),
+            (CONFIRM_PANE.to_string(), false),
+            (CONFIRM_PANE.to_string(), false),
+        ]);
+        assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
+        assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
+    }
+
+    /// Every earlier check passes, and then the composer takes the keyboard
+    /// back before the key goes out — so `Enter` would submit an empty prompt
+    /// rather than answer anything.
+    #[test]
+    fn a_confirming_key_is_withheld_when_the_composer_returns_before_the_key() {
+        let (outcome, keys) = confirm_probe(vec![
+            (CONFIRM_PANE.to_string(), false),
+            (CONFIRM_PANE.to_string(), false),
+            // Same frame, but the cursor is back.
+            (CONFIRM_PANE.to_string(), true),
+        ]);
+        assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
+        assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
+    }
+
+    /// **The production key mapping, pinned.** Transposing these two arms would
+    /// press `Enter` into every view the ordinary rescue dismisses — `/clear`,
+    /// `/compact`, `/config`, `/keybindings` — committing whatever Claude Code
+    /// has highlighted. Nothing else in the suite fails when they are swapped.
+    #[test]
+    fn recovery_uses_escape_without_confirmation_and_enter_with_confirmation() {
+        let (_, confirmed) = confirm_probe(vec![
+            (CONFIRM_PANE.to_string(), false),
+            (CONFIRM_PANE.to_string(), false),
+            (CONFIRM_PANE.to_string(), false),
+            ("? for shortcuts".to_string(), true),
+        ]);
+        assert_eq!(confirmed, ["Enter"], "a established confirmation commits");
+
+        use std::sync::Mutex;
+        let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let _ = recover_composer_with(
+            &|| Ok(("some view".to_string(), false)),
+            &|key| {
+                sent.lock().unwrap().push(key.to_string());
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+            None,
+            "forshortcuts".to_string(),
+            false,
+            None,
+        );
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            ["Escape"],
+            "the ordinary rescue dismisses"
+        );
+    }
+
+    /// **A committing key may only land on the frame that was already there —
+    /// and when it may not, the view is still dismissed.**
+    ///
+    /// `Enter` selects whatever the screen has highlighted, so the confirm path
+    /// re-reads the pane immediately before sending and will not commit if a
+    /// byte moved. Withholding *both* keys there would leave the view open and
+    /// the composer captured, which is the lockout this postcondition exists to
+    /// clear — so it falls back to the ordinary rescue.
+    #[test]
+    fn a_confirmation_that_cannot_be_established_falls_back_to_escape() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+        static LOOKS: AtomicU32 = AtomicU32::new(0);
+        LOOKS.store(0, Ordering::SeqCst);
+        let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        let outcome = recover_composer_with(
+            &|| {
+                // The dialog at every look until the one taken immediately
+                // before the key, where a different screen has replaced it.
+                match LOOKS.fetch_add(1, Ordering::SeqCst) {
+                    0..=1 => Ok((
+                        "❯ /model sonnet\n\
+             \n\
+             ────────────────────────────────────────\n\
+               Switch model?\n\
+               Your next response will be slower and use more tokens\n\
+             \n\
+               This conversation is cached for the current model. Switching to \
+             Sonnet 5 means the full history gets re-read on your next message.\n\
+             \n\
+               ❯ 1. Yes, switch to Sonnet 5\n\
+                 2. No, go back"
+                            .to_string(),
+                        false,
+                    )),
+                    // The same dialog with one character moved: the needle
+                    // still matches, so this exercises the sameness guard and
+                    // not the needle guard.
+                    _ => Ok((
+                        "❯ /model sonnet\n\
+             \n\
+             ────────────────────────────────────────\n\
+               Switch model?\n\
+               Your next response will be slower and use more tokens\n\
+             \n\
+               This conversation is cached for the current model. Switching to \
+             Sonnet 5 means the full history gets re-read on your next message.\n\
+             \n\
+               ❯ 1. Yes, switch to Sonnet 5\n\
+                 2. No, go back"
+                            .replace("❯ 1.", "❯  1."),
+                        false,
+                    )),
+                }
+            },
+            &|key| {
+                sent.lock().unwrap().push(key.to_string());
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+            None,
+            "forshortcuts".to_string(),
+            false,
+            Some("❯1.yes,switchtosonnet5".to_string()),
+        );
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            ["Escape"],
+            "an unestablished confirmation downgrades to the ordinary rescue: {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, SupervisorResult::ViewConfirmed { .. }),
+            "nothing was committed: {outcome:?}"
+        );
+    }
+
+    /// The confirm path's success shape: the frame held still, the key went
+    /// out, the composer came back — reported as `ViewConfirmed`, which claims
+    /// a key was delivered and nothing about what the command achieved.
+    #[test]
+    fn a_confirming_key_on_an_unchanged_frame_reports_view_confirmed() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+        static LOOKS: AtomicU32 = AtomicU32::new(0);
+        LOOKS.store(0, Ordering::SeqCst);
+        let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        let outcome = recover_composer_with(
+            &|| {
+                // The same dialog, unmoved, at every look; the composer is back
+                // once the key has been sent.
+                if !sent.lock().unwrap().is_empty() {
+                    return Ok(("? for shortcuts".to_string(), true));
+                }
+                LOOKS.fetch_add(1, Ordering::SeqCst);
+                Ok((
+                    "❯ /model sonnet\n\
+             \n\
+             ────────────────────────────────────────\n\
+               Switch model?\n\
+               Your next response will be slower and use more tokens\n\
+             \n\
+               This conversation is cached for the current model. Switching to \
+             Sonnet 5 means the full history gets re-read on your next message.\n\
+             \n\
+               ❯ 1. Yes, switch to Sonnet 5\n\
+                 2. No, go back"
+                        .to_string(),
+                    false,
+                ))
+            },
+            &|key| {
+                sent.lock().unwrap().push(key.to_string());
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+            None,
+            "forshortcuts".to_string(),
+            false,
+            Some("❯1.yes,switchtosonnet5".to_string()),
+        );
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            ["Enter"],
+            "exactly one Enter"
+        );
+        assert!(
+            matches!(outcome, SupervisorResult::ViewConfirmed { .. }),
+            "{outcome:?}"
+        );
     }
 
     /// The measured lockout, reproduced and rescued: a command takes the
@@ -1076,22 +1426,23 @@ done
                 // be observed.
                 use std::sync::atomic::{AtomicU32, Ordering};
                 static LOOKS: AtomicU32 = AtomicU32::new(0);
-                // Three successful looks — the two checks and the re-read
-                // taken immediately before Escape — then blind.
+                // Three successful looks — the two scheduled checks and the
+                // re-read taken immediately before the key — then blind.
                 match LOOKS.fetch_add(1, Ordering::SeqCst) {
                     0..=2 => Ok(("a view".to_string(), false)),
                     _ => Err(anyhow::anyhow!("the pane could not be read")),
                 }
             },
-            &|| Ok(()),
+            &|_| Ok(()),
             &PromptPresence::InputBox,
             None,
             "forshortcuts".to_string(),
             false,
+            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
-                assert!(reason.contains("after Escape was sent"), "{reason}");
+                assert!(reason.contains("after the key was sent"), "{reason}");
             }
             other => panic!("nothing was observed, so nothing may be claimed: {other:?}"),
         }
@@ -1152,7 +1503,7 @@ done
                 // …and by the re-look the tool has asked for permission.
                 _ => Ok(("Bash\nDo you want to proceed?\n 1. Yes".to_string(), false)),
             },
-            &|| {
+            &|_| {
                 ESCAPES.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1160,6 +1511,7 @@ done
             None,
             "forshortcuts".to_string(),
             false,
+            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
@@ -1185,7 +1537,7 @@ done
         static ESCAPES: AtomicU32 = AtomicU32::new(0);
         let outcome = recover_composer_with(
             &|| Ok(("Shall I go ahead with this?".to_string(), false)),
-            &|| {
+            &|_| {
                 ESCAPES.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1195,6 +1547,7 @@ done
             }),
             "forshortcuts".to_string(),
             false,
+            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {

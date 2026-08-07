@@ -148,7 +148,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     forwards — a client built against this or later knows them — and it is
 ///     the reason `SendTextResult` decoding should treat an unknown status as
 ///     indeterminate rather than as a decode failure.
-pub const PROTOCOL_MINOR: u32 = 9;
+pub const PROTOCOL_MINOR: u32 = 10;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

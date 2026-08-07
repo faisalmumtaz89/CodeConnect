@@ -70,8 +70,11 @@ struct CommandPalette: View {
         PaletteRow(
             command: "usage", subtitle: "Capture the Mac usage view", icon: "chart.bar",
             action: .nativeSnapshot(.usage)),
+        // Kept as a row because Claude Code accepts `/cost` and a reader who
+        // thinks in cost should find it — but the subtitle states the measured
+        // fact instead of inventing a "cost view". See `SnapshotCommand.title`.
         PaletteRow(
-            command: "cost", subtitle: "Capture the Mac cost view", icon: "creditcard",
+            command: "cost", subtitle: "Alias of /usage", icon: "creditcard",
             action: .nativeSnapshot(.cost)),
     ]
 
@@ -181,26 +184,45 @@ struct ModelSheet: View {
         case idle
         /// The alias being typed on the Mac right now.
         case sending(String)
-        /// Keystrokes landed; Claude Code has not yet confirmed in the
-        /// transcript.
-        case waiting(String)
+        /// Keystrokes landed; Claude Code has not yet answered in the
+        /// transcript. `quietly` flips once the usual window has passed: the
+        /// same watch, an honest caption. **It never becomes a failure** — a
+        /// receipt that arrives late still has to be able to settle this sheet.
+        /// A terminal "no confirmation" over a transcript that went on to say
+        /// `Set model to X` is a stale claim, and stale claims are the thing
+        /// this sheet may not make.
+        case waiting(request: String, quietly: Bool)
         case confirmed(String)
+        /// Terminal, and neither success nor failure: the request was
+        /// answered, and the answer was not a change. Claude Code kept the
+        /// model, or the daemon replayed a settled mutation that carries no
+        /// outcome. A green tick over either would be the exact lie this app
+        /// exists not to tell; a warning would invent a fault that is not
+        /// there. The sentence carries which it was.
+        case neutral(String)
         case failed(String)
     }
 
     @State private var phase: Phase = .idle
     @State private var custom: String = ""
     @State private var timeoutTask: Task<Void, Never>?
-    /// The model fact as it stood when a row was tapped; "confirmed" means a
-    /// NEW command-confirmation fact relative to this.
-    @State private var baseline: ConfirmedModel?
+    /// How far the event stream had got when a row was tapped. Only a `/model`
+    /// signal above this line can be an answer to this send — see
+    /// `ModelChangeWatch`.
+    @State private var baselineSeq: UInt64 = 0
 
     private var state: SessionState? { model.states[sessionKey] }
 
+    /// **Quiet waiting is not busy.** The watch stays armed for a receipt that
+    /// may still arrive, but once the usual window has passed the controls come
+    /// back: a sheet whose every row is inert, with a spinner running and no
+    /// statement that only dismissing it will help, is a dead end. A receipt
+    /// that never arrives — reworded copy, a gap reset, a dropped socket —
+    /// must not cost the reader the sheet.
     private var busy: Bool {
         switch phase {
-        case .sending, .waiting: return true
-        case .idle, .confirmed, .failed: return false
+        case .sending, .waiting(_, quietly: false): return true
+        case .waiting(_, quietly: true), .idle, .confirmed, .neutral, .failed: return false
         }
     }
 
@@ -210,38 +232,80 @@ struct ModelSheet: View {
 
     var body: some View {
         CCSheetChrome("Model", onClose: { dismiss() }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.md) {
-                    CCSectionHeader("Current model")
-                    currentCard
-                    CCSectionHeader("Choose model")
-                    Text("Also becomes your default for new sessions.")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                    chooserCard
-                    customEntry
-                    Text("For this session only, use the model picker in the Terminal tab.")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    statusSlot
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: CC.space.md) {
+                        CCSectionHeader("Current model")
+                        currentCard
+                        CCSectionHeader("Choose model")
+                        // Conditional on purpose. Unqualified, this promised a
+                        // consequence that does not occur on the common path:
+                        // when the conversation is already cached for the
+                        // current model the command opens a confirmation, the
+                        // daemon's rescue cancels it, and nothing is set or
+                        // saved. Consent copy may predict what an action does;
+                        // it may not assert an outcome the action often fails
+                        // to reach.
+                        // **The rule for *consent* prose on these sheets:** state
+                        // a consequence before the tap only where the app will
+                        // act on it for you. Here it will — Claude Code asks
+                        // about the re-read itself, and the daemon completes
+                        // that confirmation — so this is where the human
+                        // consents to it. Effort has none because nothing is
+                        // completed on its behalf; Compact's line describes its
+                        // optional field, which is a different job.
+                        //
+                        // "already run" was wrong: the measured trigger is a
+                        // conversation cached for the current model, and after
+                        // `/clear` a conversation has run and the command is
+                        // inline with no re-read.
+                        Text(
+                            "A confirmed change also becomes your default for new sessions. "
+                                + "Switching mid-conversation makes Claude Code re-read the "
+                                + "whole conversation on your next message."
+                        )
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                        chooserCard
+                        customEntry
+                        Text("For this session only, use the model picker in the Terminal tab.")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(CC.space.md)
                 }
-                .padding(CC.space.md)
+                .scrollBounceBehavior(.basedOnSize)
+                pinnedStatus
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
         .onAppear {
             if custom.isEmpty, !prefill.isEmpty { custom = prefill }
         }
-        .onChange(of: state?.lastConfirmedModel) { _, currentFact in
-            guard case .waiting = phase,
-                let name = ModelChangeWatch.confirmed(baseline: baseline, current: currentFact)
+        .onChange(of: state?.lastModelCommandSignal) { _, signal in
+            guard case .waiting(let request, _) = phase,
+                let outcome = ModelChangeWatch.outcome(
+                    after: baselineSeq, requested: request, signal: signal)
             else { return }
             timeoutTask?.cancel()
-            let display = ModelDisplay.from(name).name
-            withAnimation(CC.motion.small) { phase = .confirmed("Model set to \(display).") }
+            withAnimation(CC.motion.small) { phase = Self.phase(for: outcome) }
         }
         .onDisappear { timeoutTask?.cancel() }
+    }
+
+    /// Terminal phase for one `/model` outcome — the sentences live on
+    /// `ModelConfirmation` and on Claude Code's own error line, where a test
+    /// can assert them.
+    private static func phase(for outcome: ModelCommandOutcome) -> Phase {
+        switch outcome {
+        case .receipt(let receipt):
+            return receipt.isChange
+                ? .confirmed(receipt.sheetStatus) : .neutral(receipt.sheetStatus)
+        // Verbatim: Claude Code already said the useful thing, and the value it
+        // is quoting is the one the reader typed.
+        case .notFound(let line):
+            return .failed(line)
+        }
     }
 
     // MARK: Current
@@ -282,10 +346,16 @@ struct ModelSheet: View {
     }
 
     /// `Confirmed at session start · 1m ago` — one line, one place.
+    ///
+    /// A `kept` receipt keeps the same origin words: it is still `/model`
+    /// reporting the model in force, and inventing a third phrase for it would
+    /// say more about the request than about the fact.
     static func provenanceLine(_ fact: ConfirmedModel, now: Date) -> String {
-        let origin =
-            fact.source == "Command confirmation"
-            ? "Confirmed by /model" : "Confirmed at session start"
+        let origin: String
+        switch fact.provenance {
+        case .sessionStart: origin = "Confirmed at session start"
+        case .command: origin = "Confirmed by /model"
+        }
         return "\(origin) · \(RelativeAge.text(since: fact.at, now: now))"
     }
 
@@ -305,9 +375,12 @@ struct ModelSheet: View {
     private func aliasRow(_ alias: String) -> some View {
         let display = ModelDisplay.from(alias)
         let isCurrent = current.map { $0.name == display.name } ?? false
+        // The spinner tracks `busy`, not the request: once the wait goes quiet
+        // the row is tappable again, and a ring still turning on a live control
+        // would say it is not.
         let isApplying: Bool = {
             if case .sending(let active) = phase { return active == alias }
-            if case .waiting(let active) = phase { return active == alias }
+            if case .waiting(let active, quietly: false) = phase { return active == alias }
             return false
         }()
         return CCRow(
@@ -342,7 +415,13 @@ struct ModelSheet: View {
             HStack(alignment: .bottom, spacing: CC.space.xs) {
                 CCField(
                     label: "Model id or alias", text: $custom,
-                    placeholder: "e.g. claude-sonnet-5",
+                    // An **alias**, because a full API id will not switch: the
+                    // dialog renders `claude-sonnet-5` as "Sonnet 5", so the
+                    // daemon cannot establish that the confirmation on screen is
+                    // about the value asked for, and safely declines to complete
+                    // it. Suggesting one here would be suggesting a value that
+                    // reports back "no model change was confirmed".
+                    placeholder: "e.g. sonnet",
                     submitLabel: .done,
                     autocapitalization: .never,
                     disableAutocorrection: true,
@@ -363,6 +442,26 @@ struct ModelSheet: View {
 
     // MARK: Status
 
+    /// **Pinned, not scrolled.** Below the chooser, the custom field and two
+    /// footnotes, the outcome of a tap lands under the fold of a medium-detent
+    /// sheet — present, and unreadable. A report the reader cannot see is not a
+    /// report, and this is the one line on the sheet that has to be read.
+    ///
+    /// Nothing at rest: `CCActionBar` only exists once there is something to
+    /// say, so an untouched sheet is exactly as it was.
+    ///
+    /// **A sibling in a `VStack`, deliberately not `safeAreaInset`.** Measured:
+    /// the inset form hangs the main thread at the largest accessibility sizes,
+    /// where the bar is tallest. An inset whose height depends on the width it
+    /// is inset into, inside a scroll view that then re-lays out, is a layout
+    /// that can chase itself. A plain stack cannot.
+    @ViewBuilder
+    private var pinnedStatus: some View {
+        if phase != .idle {
+            CCActionBar { statusSlot }
+        }
+    }
+
     @ViewBuilder
     private var statusSlot: some View {
         switch phase {
@@ -370,14 +469,26 @@ struct ModelSheet: View {
             EmptyView()
         case .sending(let alias):
             statusLine("Typing /model \(alias) on the Mac…", tone: .neutral)
-        case .waiting:
+        case .waiting(_, quietly: false):
             statusLine("Waiting for Claude Code to confirm…", tone: .neutral)
+        case .waiting(let alias, quietly: true):
+            statusLine(
+                "Sent /model \(alias) to the Mac. Still waiting for Claude Code to confirm.",
+                tone: .neutral)
         case .confirmed(let line):
             statusLine(line, tone: .success)
+        case .neutral(let line):
+            statusLine(line, tone: .neutral)
         case .failed(let line):
             statusLine(line, tone: .warning)
         }
     }
+
+    /// One sentence, three sheets. A duplicate response proves the mutation was
+    /// typed once and settled; it does not carry what Claude Code then did, so
+    /// this claims neither a change nor the absence of one.
+    static let alreadySentLine =
+        "This request was sent earlier; this retry does not confirm its outcome."
 
     private func statusLine(_ text: String, tone: CCTone) -> some View {
         CCProse(
@@ -391,31 +502,33 @@ struct ModelSheet: View {
     // MARK: Apply
 
     private func apply(_ alias: String) {
-        baseline = state?.lastConfirmedModel
+        guard !busy else { return }
+        baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(alias) }
         Task {
             let attempt = await model.sendModelCommand(alias, to: sessionKey)
             switch attempt {
             case .sent:
                 // Keystrokes landed — which proves typing, not execution.
-                // Claude Code's own transcript confirmation flips this to
-                // done, and it may already have landed while `.sending`.
+                // Claude Code's own transcript receipt flips this to done, and
+                // it may already have landed while `.sending`.
                 onLanded()
-                if let name = ModelChangeWatch.confirmed(
-                    baseline: baseline, current: state?.lastConfirmedModel)
+                if let outcome = ModelChangeWatch.outcome(
+                    after: baselineSeq, requested: alias,
+                    signal: state?.lastModelCommandSignal)
                 {
-                    phase = .confirmed("Model set to \(ModelDisplay.from(name).name).")
+                    phase = Self.phase(for: outcome)
                 } else {
-                    phase = .waiting(alias)
-                    armTimeout()
+                    phase = .waiting(request: alias, quietly: false)
+                    armQuietFlip()
                 }
             case .alreadyApplied:
-                // The daemon replayed an earlier attempt without typing; no
-                // new transcript line is coming. It proves the keys were
-                // typed once — never that Claude acted on them — so this says
-                // "sent", exactly as the Effort and Compact sheets do.
+                // The daemon replayed a settled mutation without typing, so no
+                // new transcript line is coming. It proves the keys were typed
+                // once and nothing else — in particular, the settled outcome it
+                // is replaying may have been a cancelled confirmation.
                 onLanded()
-                phase = .confirmed("This model request was already sent earlier.")
+                phase = .neutral(Self.alreadySentLine)
             case .refused(let reason):
                 phase = .failed("Nothing was typed: \(reason)")
             case .failed(let reason):
@@ -424,12 +537,23 @@ struct ModelSheet: View {
                 phase = .failed(
                     "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
             case .composerRecovered:
-                // `/model <alias>` is measured inline, so this is not the
-                // expected path — but the keys landed, and the transcript
-                // confirmation is still what proves the change.
+                // The command took the composer and the daemon's generic
+                // slash-command rescue pressed Esc to give it back. Measured on
+                // 2.1.223: when the conversation is already cached for the
+                // current model, `/model <alias>` opens a confirmation, and that
+                // Esc answers it in the negative — Claude Code then prints
+                // `Kept model as …`. So this is never a change.
+                //
+                // Only what was observed is claimed: the composer went away and
+                // one Esc brought it back. The view is not named; the daemon
+                // does not identify views.
                 onLanded()
-                phase = .waiting(alias)
-                armTimeout()
+                phase = .neutral(
+                    "/model \(alias) took the composer on the Mac and CodeConnect "
+                        + "pressed Esc to give it back. No model change was confirmed.")
+                // On 2.1.223 that recovered path was followed by `Kept model as …`.
+                // The UI reports only the observed recovery and that no change
+                // was confirmed.
             case .composerLost:
                 phase = .failed(
                     "Couldn’t restore the composer. Open Terminal to recover.")
@@ -437,16 +561,17 @@ struct ModelSheet: View {
         }
     }
 
-    private func armTimeout() {
+    /// The observation window ends; the observation does not. Past it the
+    /// caption stops promising and nothing else changes — the watch stays
+    /// armed, so a receipt arriving late still settles this sheet correctly.
+    private func armQuietFlip() {
         timeoutTask?.cancel()
         timeoutTask = Task {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
-            if case .waiting = phase {
+            if case .waiting(let alias, quietly: false) = phase {
                 withAnimation(CC.motion.small) {
-                    phase = .failed(
-                        "Not confirmed yet. The change may still have run; "
-                            + "check the timeline or Terminal.")
+                    phase = .waiting(request: alias, quietly: true)
                 }
             }
         }
@@ -479,54 +604,77 @@ struct EffortSheet: View {
     private enum Phase: Equatable {
         case idle
         case sending(String)
-        /// Keystrokes landed; watching for Claude Code's own
-        /// "Set effort level to …" line.
-        case waiting(String)
+        /// Keystrokes landed; watching for Claude Code's own receipt. See the
+        /// note on `ModelSheet.Phase.waiting` — `quietly` changes the caption
+        /// and nothing else, and this never becomes a failure.
+        case waiting(request: String, quietly: Bool)
         case confirmed(String)
+        /// See `ModelSheet.Phase.neutral`.
+        case neutral(String)
         case failed(String)
     }
 
     @State private var phase: Phase = .idle
     @State private var timeoutTask: Task<Void, Never>?
-    /// The effort fact as it stood when a row was tapped; "confirmed" means
-    /// a NEW fact relative to this.
-    @State private var baseline: ConfirmedEffort?
+    /// How far the event stream had got when a row was tapped; only a receipt
+    /// above this line answers this send.
+    @State private var baselineSeq: UInt64 = 0
 
     private var state: SessionState? { model.states[sessionKey] }
 
+    /// See `ModelSheet.busy`.
     private var busy: Bool {
         switch phase {
-        case .sending, .waiting: return true
-        case .idle, .confirmed, .failed: return false
+        case .sending, .waiting(_, quietly: false): return true
+        case .waiting(_, quietly: true), .idle, .confirmed, .neutral, .failed: return false
         }
+    }
+
+    /// Terminal phase for one effort receipt — the sentence lives on
+    /// `EffortConfirmation`, where a test can assert it.
+    private static func phase(for receipt: EffortConfirmation) -> Phase {
+        receipt.isChange ? .confirmed(receipt.sheetStatus) : .neutral(receipt.sheetStatus)
     }
 
     var body: some View {
         CCSheetChrome("Effort", onClose: { dismiss() }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.md) {
-                    CCSectionHeader("Choose effort")
-                    Text(
-                        "CodeConnect reports only what Claude Code confirms; "
-                            + "it does not assume how long the choice lasts."
-                    )
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    chooserCard
-                    statusSlot
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: CC.space.md) {
+                        CCSectionHeader("Choose effort")
+                        // The same rule as the Model sheet: state a consequence
+                        // before the tap where the app will act on it for you.
+                        // Claude Code asks about the re-read itself when the
+                        // conversation is warm, and the daemon completes that
+                        // confirmation — so this is where the human consents.
+                        //
+                        // The *scope* is deliberately not claimed here: it is
+                        // measured to differ per value (`max` is this-session
+                        // only, the rest save as the default), so the receipt
+                        // states it afterwards in Claude Code's own words.
+                        Text(
+                            "Switching mid-conversation makes Claude Code re-read the whole "
+                                + "conversation on your next message."
+                        )
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        chooserCard
+                    }
+                    .padding(CC.space.md)
                 }
-                .padding(CC.space.md)
+                .scrollBounceBehavior(.basedOnSize)
+                pinnedStatus
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
-        .onChange(of: state?.lastConfirmedEffort) { _, fact in
-            guard case .waiting = phase, let fact, fact != baseline else { return }
+        // The *sequence*, not the fact: a fact can repeat verbatim, and a
+        // backfill can publish a historical one into an empty slot.
+        .onChange(of: state?.lastConfirmedEffortSeq) { _, seq in
+            guard case .waiting = phase, let seq, seq > baselineSeq,
+                let fact = state?.lastConfirmedEffort
+            else { return }
             timeoutTask?.cancel()
-            let label = EffortConfirmation.label(for: fact.value)
-            withAnimation(CC.motion.small) {
-                phase = .confirmed("Claude Code confirmed \(label) effort.")
-            }
+            withAnimation(CC.motion.small) { phase = Self.phase(for: fact) }
         }
         .onDisappear { timeoutTask?.cancel() }
     }
@@ -545,7 +693,7 @@ struct EffortSheet: View {
     private func levelRow(_ value: String, label: String) -> some View {
         let isApplying: Bool = {
             if case .sending(let active) = phase { return active == value }
-            if case .waiting(let active) = phase { return active == value }
+            if case .waiting(let active, quietly: false) = phase { return active == value }
             return false
         }()
         return CCRow(
@@ -567,6 +715,16 @@ struct EffortSheet: View {
         }
     }
 
+    /// Pinned for the same reason as the Model sheet's — see `pinnedStatus`
+    /// there. Five effort rows already fill a medium-detent sheet, so the
+    /// outcome was reliably off-screen.
+    @ViewBuilder
+    private var pinnedStatus: some View {
+        if phase != .idle {
+            CCActionBar { statusSlot }
+        }
+    }
+
     @ViewBuilder
     private var statusSlot: some View {
         switch phase {
@@ -574,10 +732,16 @@ struct EffortSheet: View {
             EmptyView()
         case .sending(let value):
             effortStatusLine("Typing /effort \(value) on the Mac…", tone: .neutral)
-        case .waiting:
+        case .waiting(_, quietly: false):
             effortStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
+        case .waiting(let value, quietly: true):
+            effortStatusLine(
+                "Sent /effort \(value) to the Mac. Still waiting for Claude Code to confirm.",
+                tone: .neutral)
         case .confirmed(let line):
             effortStatusLine(line, tone: .success)
+        case .neutral(let line):
+            effortStatusLine(line, tone: .neutral)
         case .failed(let line):
             effortStatusLine(line, tone: .warning)
         }
@@ -593,24 +757,26 @@ struct EffortSheet: View {
     }
 
     private func apply(_ value: String) {
-        baseline = state?.lastConfirmedEffort
+        guard !busy else { return }
+        baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending(value) }
         Task {
             let attempt = await model.sendEffortCommand(value, to: sessionKey)
             switch attempt {
             case .sent:
                 onLanded()
-                // The confirmation may already have landed while `.sending`.
-                if let fact = state?.lastConfirmedEffort, fact != baseline {
-                    let label = EffortConfirmation.label(for: fact.value)
-                    phase = .confirmed("Claude Code confirmed \(label) effort.")
+                // The receipt may already have landed while `.sending`.
+                if let fact = state?.lastConfirmedEffort,
+                    let seq = state?.lastConfirmedEffortSeq, seq > baselineSeq
+                {
+                    phase = Self.phase(for: fact)
                 } else {
-                    phase = .waiting(value)
-                    armTimeout(value)
+                    phase = .waiting(request: value, quietly: false)
+                    armQuietFlip(value)
                 }
             case .alreadyApplied:
                 onLanded()
-                phase = .confirmed("This effort request was already sent earlier.")
+                phase = .neutral(ModelSheet.alreadySentLine)
             case .refused(let reason):
                 phase = .failed("Nothing was typed: \(reason)")
             case .failed(let reason):
@@ -619,27 +785,30 @@ struct EffortSheet: View {
                 phase = .failed(
                     "Not confirmed: \(reason) Retry is safe; the command won’t be typed twice.")
             case .composerRecovered:
-                // Measured inline, so not the expected path — but the keys
-                // landed, and the transcript still proves the change.
+                // As on the Model sheet: on 2.1.223 `/effort <new value>` opens
+                // a confirmation whenever the conversation is already cached for
+                // the current level, and the generic rescue answers it with Esc.
+                // Claude Code then prints `Kept effort level as …`.
                 onLanded()
-                phase = .waiting(value)
-                armTimeout(value)
+                phase = .neutral(
+                    "/effort \(value) took the composer on the Mac and CodeConnect "
+                        + "pressed Esc to give it back. No effort change was confirmed.")
             case .composerLost:
                 phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
             }
         }
     }
 
-    private func armTimeout(_ value: String) {
+    /// See `ModelSheet.armQuietFlip`: the caption stops promising, the watch
+    /// continues.
+    private func armQuietFlip(_ value: String) {
         timeoutTask?.cancel()
         timeoutTask = Task {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
-            if case .waiting = phase {
+            if case .waiting(let request, quietly: false) = phase {
                 withAnimation(CC.motion.small) {
-                    phase = .failed(
-                        "Sent /effort \(value) to the Mac. "
-                            + "CodeConnect has not received confirmation.")
+                    phase = .waiting(request: request, quietly: true)
                 }
             }
         }
@@ -666,65 +835,75 @@ struct CompactSheet: View {
         /// flips after the observation window: same watch, honest caption.
         case waiting(quietly: Bool)
         case confirmed(String)
+        /// See `ModelSheet.Phase.neutral`.
+        case neutral(String)
         case failed(String)
     }
 
     @State private var phase: Phase = .idle
     @State private var instructions: String = ""
     @State private var timeoutTask: Task<Void, Never>?
-    @State private var baseline: CompactSignal?
+    /// How far the event stream had got when Compact was tapped; only a
+    /// completion signal above this line answers this request.
+    @State private var baselineSeq: UInt64 = 0
 
     private var state: SessionState? { model.states[sessionKey] }
 
+    /// See `ModelSheet.busy`.
     private var busy: Bool {
         switch phase {
-        case .sending, .waiting: return true
-        case .idle, .confirmed, .failed: return false
+        case .sending, .waiting(quietly: false): return true
+        case .waiting(quietly: true), .idle, .confirmed, .neutral, .failed: return false
         }
     }
 
     var body: some View {
         CCSheetChrome("Compact context", onClose: { dismiss() }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: CC.space.md) {
-                    Text("Ask Claude Code to compact its current context. Instructions are optional.")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    // In a card, like every other field in the app. A field
-                    // label sits on the *content* column while a bare `Text`
-                    // and a field's own border sit on the container's edge —
-                    // so a field standing free on a sheet puts its label 36pt
-                    // right of the box it names. The card is what gives all
-                    // three the same edge. Measured against the shipped
-                    // Terminal and SSH screen, where label, border and hint
-                    // share one column inside exactly this container.
-                    CCCard {
-                        CCField(
-                            label: "Instructions (optional)", text: $instructions,
-                            placeholder: "What should Claude preserve?",
-                            submitLabel: .done,
-                            onSubmit: { apply() })
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: CC.space.md) {
+                        Text("Ask Claude Code to compact its current context. Instructions are optional.")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // In a card, like every other field in the app. A field
+                        // label sits on the *content* column while a bare `Text`
+                        // and a field's own border sit on the container's edge —
+                        // so a field standing free on a sheet puts its label 36pt
+                        // right of the box it names. The card is what gives all
+                        // three the same edge. Measured against the shipped
+                        // Terminal and SSH screen, where label, border and hint
+                        // share one column inside exactly this container.
+                        CCCard {
+                            CCField(
+                                label: "Instructions (optional)", text: $instructions,
+                                placeholder: "What should Claude preserve?",
+                                submitLabel: .done,
+                                onSubmit: { apply() })
+                        }
+                        CCButton(
+                            "Compact now",
+                            variant: .primary,
+                            isLoading: busy
+                        ) { apply() }
                     }
-                    CCButton(
-                        "Compact now",
-                        variant: .primary,
-                        isLoading: busy
-                    ) { apply() }
-                    statusSlot
+                    .padding(CC.space.md)
                 }
-                .padding(CC.space.md)
+                .scrollBounceBehavior(.basedOnSize)
+                pinnedStatus
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
         .onAppear {
             if instructions.isEmpty, !prefill.isEmpty { instructions = prefill }
         }
-        .onChange(of: state?.lastCompactSignal) { _, signal in
-            guard case .waiting = phase, let signal, signal != baseline else { return }
+        // The sequence, not the fact — see the Effort sheet.
+        .onChange(of: state?.lastCompactSignalSeq) { _, seq in
+            guard case .waiting = phase, let seq, seq > baselineSeq,
+                let signal = state?.lastCompactSignal
+            else { return }
             timeoutTask?.cancel()
             withAnimation(CC.motion.small) {
-                switch signal.outcome {
+                switch signal {
                 case .compacted:
                     phase = .confirmed("Claude Code confirmed the compaction.")
                 case .notEnoughMessages:
@@ -733,6 +912,15 @@ struct CompactSheet: View {
             }
         }
         .onDisappear { timeoutTask?.cancel() }
+    }
+
+    /// Pinned, as on the Model and Effort sheets — one vocabulary for where a
+    /// sheet reports its outcome.
+    @ViewBuilder
+    private var pinnedStatus: some View {
+        if phase != .idle {
+            CCActionBar { statusSlot }
+        }
     }
 
     @ViewBuilder
@@ -751,6 +939,8 @@ struct CompactSheet: View {
                 tone: .neutral)
         case .confirmed(let line):
             compactStatusLine(line, tone: .success)
+        case .neutral(let line):
+            compactStatusLine(line, tone: .neutral)
         case .failed(let line):
             compactStatusLine(line, tone: .warning)
         }
@@ -767,7 +957,7 @@ struct CompactSheet: View {
 
     private func apply() {
         guard !busy else { return }
-        baseline = state?.lastCompactSignal
+        baselineSeq = model.eventHighWater(for: sessionKey)
         withAnimation(CC.motion.micro) { phase = .sending }
         Task {
             let attempt = await model.sendCompactCommand(
@@ -775,8 +965,10 @@ struct CompactSheet: View {
             switch attempt {
             case .sent:
                 onLanded()
-                if let signal = state?.lastCompactSignal, signal != baseline {
-                    switch signal.outcome {
+                if let signal = state?.lastCompactSignal,
+                    let seq = state?.lastCompactSignalSeq, seq > baselineSeq
+                {
+                    switch signal {
                     case .compacted:
                         phase = .confirmed("Claude Code confirmed the compaction.")
                     case .notEnoughMessages:
@@ -788,7 +980,7 @@ struct CompactSheet: View {
                 }
             case .alreadyApplied:
                 onLanded()
-                phase = .confirmed("This compaction request was already sent earlier.")
+                phase = .neutral(ModelSheet.alreadySentLine)
             case .refused(let reason):
                 phase = .failed("Nothing was typed: \(reason)")
             case .failed(let reason):

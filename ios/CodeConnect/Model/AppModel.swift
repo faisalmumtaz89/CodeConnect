@@ -450,12 +450,24 @@ final class AppModel {
             else { return }
             fixturesActive = true
             connection.fixtureAnswers = true
-            // `-cc.debug.sendText recovered|recovered-empty|lost|sent` resolves
-            // typed sends locally, the way `fixtureAnswers` resolves decisions —
-            // the only way to photograph the snapshot sheet's states, which
-            // against a live Mac would need a real dialog opened and lost on cue.
+            // `-cc.debug.sendText` resolves typed sends locally and can inject
+            // measured receipts, allowing command-sheet states to be rendered
+            // without arranging live Mac interactions on cue.
             if let sendMode = UserDefaults.standard.string(forKey: "cc.debug.sendText") {
-                connection.sendTextStub = { _, _ in Fixtures.sendTextResult(mode: sendMode) }
+                connection.sendTextStub = { [weak connection] session, _ in
+                    // A receipt-bearing mode injects Claude Code's own
+                    // transcript line *before* answering, so the sheet's
+                    // immediate post-send check finds it. The real daemon has
+                    // the same two parts in the other order and the sheet
+                    // handles both; injecting first is what makes the render
+                    // deterministic instead of a race with `onChange`.
+                    if let frame = Fixtures.receiptFrame(mode: sendMode, session: session),
+                        let message = Fixtures.decode(frame)
+                    {
+                        connection?.injectForTesting(message)
+                    }
+                    return Fixtures.sendTextResult(mode: sendMode)
+                }
             }
             connection.simulateConnectedForTesting()
             for message in Fixtures.frames(variant: variant) {
@@ -839,6 +851,19 @@ final class AppModel {
 
     func summary(for key: String) -> SessionSummary? {
         summaries.first { $0.sessionKey == key }
+    }
+
+    /// How far this run's event stream has got, as far as anything here knows.
+    ///
+    /// A command sheet captures this the moment a row is tapped and accepts
+    /// only receipts above it. Both terms are needed: `SessionState` holds what
+    /// has actually arrived, and during a first subscription or a catch-up the
+    /// fleet summary can already advertise events the state has not received —
+    /// a fence built on the lower of the two would admit exactly the historical
+    /// receipt it exists to exclude. The lookup lives here so a sheet never has
+    /// to reach into fleet presentation to correlate its own send.
+    func eventHighWater(for key: String) -> UInt64 {
+        max(states[key]?.lastSeq ?? 0, summary(for: key)?.lastSeq ?? 0)
     }
 
     /// What to call this run on screen. The tmux name, which is what `codeconnect attach`
@@ -1383,12 +1408,26 @@ final class AppModel {
     /// The native adapters' own injections — the ONLY paths that may carry
     /// a slash command past the policy, because each sheet *is* the
     /// policy's answer for its command.
+    /// The one caller that permits the daemon to *complete* Claude Code's
+    /// confirmation rather than dismiss it. The Model sheet states both
+    /// consequences — the new default, and the history re-read — above the rows
+    /// it is tapped from, so the tap is the consent that key needs. Nothing
+    /// else sets it, and the daemon still decides which commands it applies to.
     func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
-        await sendUnchecked(text: "/model \(argument)", to: key, submit: true)
+        await sendUnchecked(
+            text: "/model \(argument)", to: key, submit: true,
+            completeNativeConfirmation: true)
     }
 
+    /// The Effort sheet's own injection. Like `sendModelCommand`, it permits
+    /// the daemon to complete Claude Code's confirmation, because the sheet
+    /// states the cost above the rows it is tapped from. A *typed*
+    /// `/effort <value>` passes through instead and never sets this, so it gets
+    /// the ordinary rescue — there is no disclosure behind it to point at.
     func sendEffortCommand(_ value: String, to key: String) async -> ComposeAttempt {
-        await sendUnchecked(text: "/effort \(value)", to: key, submit: true)
+        await sendUnchecked(
+            text: "/effort \(value)", to: key, submit: true,
+            completeNativeConfirmation: true)
     }
 
     func sendCompactCommand(instructions: String, to key: String) async -> ComposeAttempt {
@@ -1409,7 +1448,8 @@ final class AppModel {
     }
 
     private func sendUnchecked(
-        text: String, to key: String, submit: Bool
+        text: String, to key: String, submit: Bool,
+        completeNativeConfirmation: Bool = false
     ) async -> ComposeAttempt {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
@@ -1429,7 +1469,8 @@ final class AppModel {
         do {
             let result = try await connection.sendText(
                 session: key, text: trimmed, require: .inputBox, submit: submit,
-                requestID: requestID, payloadHash: payloadHash)
+                requestID: requestID, payloadHash: payloadHash,
+                completeNativeConfirmation: completeNativeConfirmation)
             switch result {
             case .sent(let matched):
                 pendingSendIdentities[mutation] = nil

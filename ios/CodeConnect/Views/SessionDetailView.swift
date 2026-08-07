@@ -1438,10 +1438,17 @@ private struct SessionComposeBar: View {
                     + "Retry is safe; the message won’t be typed twice.",
                 tone: .warning, glyph: "questionmark.circle.fill")
         case .composerRecovered(let command, _, _):
+            // **Not a success.** The same daemon result on the Model and Effort
+            // sheets reports that no change was confirmed, and a typed command
+            // reaches this note by the identical path — `/effort high` routes
+            // through here, and on a cache-warm conversation it opens a
+            // confirmation that the daemon's one Esc then cancels. A green tick
+            // over that is the claim this app exists not to make.
             ComposeNote(
-                text: "\(command) replaced the Mac composer. "
-                    + "CodeConnect pressed Esc; the composer is ready again.",
-                tone: .success, glyph: "checkmark")
+                text: "After \(command) was typed, the Mac composer disappeared. "
+                    + "CodeConnect pressed Esc and confirmed it returned. "
+                    + "The command's outcome was not confirmed.",
+                tone: .warning, glyph: "questionmark.circle.fill")
         case .composerLost(let command):
             ComposeNote(
                 text: "\(command) was typed, but the Mac's composer did not come back. "

@@ -224,9 +224,19 @@ enum TimelineBuilder {
                         // A full sentence is not a title. The title names the
                         // kind of fact; the verbatim output is the detail.
                         if !text.isEmpty {
-                            let title =
-                                ModelConfirmation.parse(text) != nil
-                                ? "Model changed" : "Command output"
+                            // **The verb decides the title.** `Kept model as X`
+                            // is Claude Code's *no-change* receipt — what it
+                            // prints when its confirmation was cancelled or the
+                            // same model re-chosen. Filed under "Model changed"
+                            // it is a permanent contradiction: the title saying
+                            // one thing and the verbatim detail directly below
+                            // it the other.
+                            let title: String
+                            switch ModelConfirmation.parse(text) {
+                            case .set: title = "Model changed"
+                            case .kept: title = "Model unchanged"
+                            case nil: title = "Command output"
+                            }
                             items.append(
                                 event.item(
                                     .notice(

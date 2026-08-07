@@ -356,6 +356,21 @@ pub enum SupervisorRequest {
         /// rejected by design.
         #[serde(default)]
         capture_recovered: bool,
+        /// Complete the view this command opened instead of dismissing it,
+        /// and the single needle that must be on screen first.
+        ///
+        /// Built by the daemon from the command it is about to complete, never
+        /// taken from the phone. This is the one place a keystroke *commits*
+        /// something, so the screen has to show the **selected** affirmative
+        /// row, for the value that was asked for — a screen that merely holds
+        /// still is not authorisation, and neither is one that merely contains
+        /// the words somewhere.
+        ///
+        /// `None` is the ordinary rescue: `Escape`, and no such demand. A
+        /// needle that cannot be established is also the ordinary rescue —
+        /// never a key withheld with the view left open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirm_view: Option<String>,
     },
     /// Text snapshot of the pane. Presence checks and mirroring only — the
     /// pane is matched against needles, never parsed into structure. The one
@@ -501,6 +516,13 @@ pub enum SupervisorResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_snapshot: Option<String>,
         captured_at: String,
+    },
+    /// The keys landed, the view this command opened was still exactly the
+    /// frame that appeared, one `Enter` completed it, and the composer came
+    /// back. What the command then *did* is not claimed here — the transcript
+    /// receipt says that, and only that.
+    ViewConfirmed {
+        matched: String,
     },
     /// Typing happened; what followed could not be observed. A capture that
     /// failed, an `Escape` that could not be sent, or a permission prompt on
@@ -809,6 +831,7 @@ mod tests {
             expect: prompt_fingerprint(PERMISSION_PANE, "doyouwanttoproceed"),
             recover_composer: false,
             capture_recovered: false,
+            confirm_view: None,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(line.contains("\"expect\""), "{line}");

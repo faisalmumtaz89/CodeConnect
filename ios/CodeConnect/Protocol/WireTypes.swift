@@ -840,7 +840,7 @@ enum ClientMessage: Sendable {
         requestID: String, payloadHash: String, decision: AnswerDecision, session: String?)
     case sendText(
         session: String, text: String, require: PromptPresence?, submit: Bool,
-        requestID: String?, payloadHash: String?)
+        requestID: String?, payloadHash: String?, completeNativeConfirmation: Bool)
     case capture(session: String, lines: UInt32?)
     case getDiff(session: String)
     case getCommandCatalog(session: String)
@@ -871,6 +871,7 @@ extension ClientMessage: Encodable {
         case require
         case submit
         case lines
+        case completeNativeConfirmation = "complete_native_confirmation"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -925,7 +926,8 @@ extension ClientMessage: Encodable {
             // "no scope" anyway while making the frame wrong to read.
             try c.encodeIfPresent(session, forKey: .sessionID)
         case .sendText(
-            let session, let text, let require, let submit, let requestID, let payloadHash):
+            let session, let text, let require, let submit, let requestID, let payloadHash,
+            let completeNativeConfirmation):
             try c.encode("send_text", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encode(text, forKey: .text)
@@ -935,6 +937,11 @@ extension ClientMessage: Encodable {
             // null would say "present but empty".
             try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encodeIfPresent(payloadHash, forKey: .payloadHash)
+            // Only ever true from a control that stated this command's
+            // consequences before the tap. It is a permission, not an
+            // instruction: the daemon still decides which commands it applies
+            // to, so this can never nominate one.
+            try c.encode(completeNativeConfirmation, forKey: .completeNativeConfirmation)
         case .capture(let session, let lines):
             try c.encode("capture", forKey: .type)
             try c.encode(session, forKey: .sessionID)

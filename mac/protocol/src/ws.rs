@@ -141,6 +141,17 @@ pub enum ClientMessage {
         require: Option<PromptPresence>,
         #[serde(default = "default_true")]
         submit: bool,
+        /// The client saw this command's consequences stated and the human
+        /// tapped anyway, so the daemon may **complete** the confirmation
+        /// Claude Code opens rather than dismissing it. Minor 10.
+        ///
+        /// Default false, and it is a *permission*, not an instruction: the
+        /// daemon still intersects it with its own allowlist and its
+        /// supervisor gate, so a client cannot nominate a command. It exists
+        /// because a client that predates the disclosure must not trigger a
+        /// committing keystroke it never told anybody about.
+        #[serde(default)]
+        complete_native_confirmation: bool,
     },
     Capture {
         session_id: String,
@@ -745,10 +756,16 @@ mod tests {
              injection opened, and the `slash_composer_recovery` capability \
              that gates it — is minor 9"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 10,
+            "view confirmation — the daemon *completing* the confirmation its \
+             own injection opened, for `/model` and `/effort` with an argument, \
+             rather than dismissing it — is minor 10"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 9);
+        assert_eq!(crate::PROTOCOL_MINOR, 10);
     }
 
     /// **The tags, pinned on this side too.**
@@ -955,6 +972,7 @@ mod tests {
             payload_hash: Some(hash.clone()),
             require: None,
             submit: true,
+            complete_native_confirmation: false,
         };
         let encoded = serde_json::to_string(&msg).unwrap();
         assert!(!encoded.contains("require"), "{encoded}");

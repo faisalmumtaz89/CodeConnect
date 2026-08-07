@@ -125,6 +125,13 @@ final class RenderPass: XCTestCase {
     /// The screenshot, named. `render-screens.sh` exports these out of the
     /// result bundle and writes them as `<name>.png`.
     private func capture(_ app: XCUIApplication, named name: String) {
+        // **Let the frame settle first.** A scenario's last assertion returns
+        // the instant its text exists, which is the *start* of any transition
+        // that put it there — so a caption replacing another caption in the
+        // same slot photographs as both at once, and the render is evidence of
+        // nothing. One wait, just past `CC.duration.draw` (0.30s), the longest
+        // class the product animates outside a deliberate hold.
+        Thread.sleep(forTimeInterval: 0.35)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name
         shot.lifetime = .keepAlways

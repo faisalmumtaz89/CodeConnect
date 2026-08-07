@@ -781,6 +781,7 @@ where
             // the interlock is the server's to choose.
             require: _,
             submit,
+            complete_native_confirmation,
         } => {
             let result = daemon
                 .send_text(
@@ -789,6 +790,7 @@ where
                     request_id.as_deref(),
                     payload_hash.as_deref(),
                     submit,
+                    complete_native_confirmation,
                 )
                 .await;
             send(sink, &ServerMessage::SendTextResult { session_id, result }).await?;

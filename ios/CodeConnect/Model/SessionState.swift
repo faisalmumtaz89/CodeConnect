@@ -86,7 +86,10 @@ final class SessionState {
 
     /// The last model this session *confirmed*, and how we know. Seeded by
     /// the SessionStart hook's `model` field; replaced whenever Claude Code's
-    /// own local-command stdout says "Set model to X…" or "Kept model as X".
+    /// own local-command stdout says "Set model to X…" or "Kept model as X" —
+    /// both are true about the model in force. Which verb it was is a property
+    /// of the receipt, not of this fact: it lives on `ModelConfirmation`, and
+    /// the sheet reads it from `lastModelCommandSignal`.
     /// Deliberately named "confirmed", never "current": a picker change made
     /// at the Mac's keyboard with `s` (session-only) may be unobservable,
     /// and this app does not present what it cannot know.
@@ -94,16 +97,27 @@ final class SessionState {
     private var lastConfirmedModelSeq: UInt64 = 0
 
     /// The last effort level Claude Code *confirmed* — its own "Set effort
-    /// level to X…" stdout, nothing else. Same honesty rule as the model
-    /// fact: the sheet reports what the transcript said, never what a send
-    /// hoped for.
-    private(set) var lastConfirmedEffort: ConfirmedEffort?
-    private var lastConfirmedEffortSeq: UInt64 = 0
+    /// level to X…" or "Kept effort level as X" stdout, nothing else, with
+    /// `isChange` recording which. Same honesty rule as the model fact: the
+    /// sheet reports what the transcript said, never what a send hoped for.
+    private(set) var lastConfirmedEffort: EffortConfirmation?
+    /// Exposed so a sheet can fence a receipt against the stream position it
+    /// captured when the row was tapped. A fact alone cannot say whether it is
+    /// news: a backfill can publish a historical receipt into an empty slot.
+    private(set) var lastConfirmedEffortSeq: UInt64 = 0
+
+    /// The last thing `/model` said back — a receipt, or the measured
+    /// `Model 'x' not found` — with the sequence that carried it. Kept apart
+    /// from `lastConfirmedModel` because an error is not a fact about the
+    /// session's model, and because the sheet correlates on the sequence.
+    private(set) var lastModelCommandSignal: ModelCommandSignal?
 
     /// The last compaction outcome Claude Code reported — "Compacted (…)"
     /// or the measured refusal on a near-empty context.
-    private(set) var lastCompactSignal: CompactSignal?
-    private var lastCompactSignalSeq: UInt64 = 0
+    private(set) var lastCompactSignal: CompactConfirmation?
+    /// Exposed for the same reason as `lastConfirmedEffortSeq`: a fact cannot
+    /// say whether it is news, and a backfill can publish a historical one.
+    private(set) var lastCompactSignalSeq: UInt64 = 0
 
 
     /// What to tell the reader when this run will never ask them anything.
@@ -126,30 +140,44 @@ final class SessionState {
     }
 
     /// What one event says about the session's model, if anything.
+    ///
+    /// A `Kept model as X` receipt becomes a fact here just as `Set model to X`
+    /// does — both are true statements of the model in force, and the cancelled
+    /// one is the only way this app learns the model after somebody dismisses a
+    /// confirmation at the Mac. This fact is only ever "the model in force";
+    /// the verb, and therefore whether anything changed, is carried separately
+    /// by `lastModelCommandSignal`.
     private static func modelFact(of event: Event) -> ConfirmedModel? {
         if event.kind == .sessionStart, let name = event.modelName, !name.isEmpty {
-            return ConfirmedModel(name: name, source: "Session start", at: event.date)
+            return ConfirmedModel(name: name, provenance: .sessionStart, at: event.date)
         }
         if case .output(let line)? = event.localCommand,
-            let name = ModelConfirmation.parse(line)
+            let receipt = ModelConfirmation.parse(line)
         {
-            return ConfirmedModel(name: name, source: "Command confirmation", at: event.date)
+            return ConfirmedModel(
+                name: receipt.name,
+                provenance: .command,
+                at: event.date)
         }
         return nil
     }
 
-    private static func effortFact(of event: Event) -> ConfirmedEffort? {
+    /// What one event says `/model` answered, if anything.
+    private static func modelCommandSignal(of event: Event) -> ModelCommandSignal? {
         guard case .output(let line)? = event.localCommand,
-            let value = EffortConfirmation.parse(line)
+            let outcome = ModelCommandOutcome.parse(line)
         else { return nil }
-        return ConfirmedEffort(value: value, at: event.date)
+        return ModelCommandSignal(outcome: outcome, seq: event.seq)
     }
 
-    private static func compactFact(of event: Event) -> CompactSignal? {
-        guard case .output(let line)? = event.localCommand,
-            let outcome = CompactConfirmation.parse(line)
-        else { return nil }
-        return CompactSignal(outcome: outcome, at: event.date)
+    private static func effortFact(of event: Event) -> EffortConfirmation? {
+        guard case .output(let line)? = event.localCommand else { return nil }
+        return EffortConfirmation.parse(line)
+    }
+
+    private static func compactFact(of event: Event) -> CompactConfirmation? {
+        guard case .output(let line)? = event.localCommand else { return nil }
+        return CompactConfirmation.parse(line)
     }
 
     /// Events that arrived at or below the tail — a replay — held back until the
@@ -235,6 +263,8 @@ final class SessionState {
             lastCompactSignal = compact.1
             lastCompactSignalSeq = compact.0
         }
+        lastModelCommandSignal = cached.events.reversed()
+            .compactMap(Self.modelCommandSignal(of:)).first
         rebuildTimeline()
     }
 
@@ -285,6 +315,11 @@ final class SessionState {
             if let fact = Self.compactFact(of: event) {
                 lastCompactSignal = fact
                 lastCompactSignalSeq = event.seq
+            }
+            if let signal = Self.modelCommandSignal(of: event),
+                signal.seq > (lastModelCommandSignal?.seq ?? 0)
+            {
+                lastModelCommandSignal = signal
             }
         }
 
@@ -346,6 +381,7 @@ final class SessionState {
         lastConfirmedEffortSeq = 0
         lastCompactSignal = nil
         lastCompactSignalSeq = 0
+        lastModelCommandSignal = nil
         gap = notice
     }
 
@@ -472,6 +508,11 @@ final class SessionState {
             if let fact = Self.compactFact(of: event) {
                 lastCompactSignal = fact
                 lastCompactSignalSeq = event.seq
+            }
+        }
+        for event in incoming where event.seq > (lastModelCommandSignal?.seq ?? 0) {
+            if let signal = Self.modelCommandSignal(of: event) {
+                lastModelCommandSignal = signal
             }
         }
         if events.first?.seq == 1 { headTruncated = false }

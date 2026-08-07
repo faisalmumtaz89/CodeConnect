@@ -152,6 +152,15 @@ struct RenderDriver {
         try require(target, "the \(row) palette row")
         target.tap()
     }
+
+    /// Taps a labelled row inside an open sheet, having first established that
+    /// it is there. Never `app.buttons[label].tap()` directly: tapping an
+    /// element that does not exist fails as an opaque snapshot timeout, which
+    /// reads exactly like an app hang and sends the next reader hunting for
+    /// one. `require` turns the same case into "could not reach <row>".
+    func tapRow(_ app: XCUIApplication, _ label: String) throws {
+        try require(app.buttons[label].firstMatch, "the \(label) row").tap()
+    }
 }
 
 /// The one failure this harness raises. It is never about a pixel.
@@ -417,6 +426,124 @@ enum RenderCatalog {
                 try driver.require(
                     driver.text(containing: "Couldn’t restore the composer", in: app),
                     "the honest failure")
+            }),
+
+        // ---------------------------------------------------------------
+        //  The "no change" states.
+        //
+        //  Measured on Claude Code 2.1.223: `/model <alias>` and
+        //  `/effort <value>` open a confirmation whenever the conversation is
+        //  already cached for the current value — which is every session
+        //  somebody would actually use these sheets on. Cancel it and Claude
+        //  Code prints `Kept model as X` / `Kept effort level as X`.
+        //
+        //  These are the states that say so, at reading size and at AX5, where
+        //  a two-clause sentence is where a sheet breaks.
+        // ---------------------------------------------------------------
+        RenderScenario(
+            name: "session-model-kept",
+            purpose: "the model was NOT changed, said plainly",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "kept-model",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.tapRow(app, "Sonnet 5")
+                try driver.require(
+                    driver.text(containing: "was not changed", in: app),
+                    "the honest no-change line")
+            }),
+        RenderScenario(
+            name: "session-model-still-waiting",
+            purpose: "no receipt arrived: the caption stops promising and the rows come back",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "sent",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.tapRow(app, "Sonnet 5")
+                // The watch stays armed — this is the moment it stops claiming
+                // a receipt is coming, and gives the controls back rather than
+                // leaving the sheet inert with a spinner nobody can stop.
+                try driver.require(
+                    driver.text(containing: "Still waiting", in: app),
+                    "the quiet caption")
+            }),
+        RenderScenario(
+            name: "session-model-composer-taken",
+            purpose: "the command took the composer and CodeConnect gave it back — no change claimed",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/m", row: "/model")
+                try driver.tapRow(app, "Sonnet 5")
+                try driver.require(
+                    driver.text(containing: "pressed Esc", in: app),
+                    "the observed-facts-only line")
+            }),
+        RenderScenario(
+            name: "session-effort-kept",
+            purpose: "the level was NOT changed, said plainly",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "kept-effort",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
+                try driver.tapRow(app, "Maximum")
+                try driver.require(
+                    driver.text(containing: "was not changed", in: app),
+                    "the honest no-change line")
+            }),
+        RenderScenario(
+            name: "session-effort-scoped",
+            purpose: "a confirmed level carrying Claude Code's own scope words — the longest one",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "set-effort-session",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/e", row: "/effort")
+                try driver.tapRow(app, "Maximum")
+                try driver.require(
+                    driver.text(containing: "this session only", in: app),
+                    "the scope clause, verbatim from the receipt")
+            }),
+        RenderScenario(
+            name: "session-snapshot-cost-is-usage",
+            purpose: "/cost is titled Usage, because that is the view it opens",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "recovered",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/co", row: "/cost")
+                // **Exact label, not `contains`.** `text(containing:)` is
+                // `CONTAINS[c]` over the whole app, so "Usage" also matches the
+                // palette's own "/usage" row and its "Alias of /usage" subtitle
+                // sitting behind the sheet — the assertion would pass with the
+                // sheet still titled "Cost", which is the one thing this
+                // scenario exists to hold.
+                try driver.require(
+                    app.staticTexts["Usage"].firstMatch, "the sheet titled Usage")
+            }),
+        RenderScenario(
+            name: "session-compact-already-sent",
+            purpose: "a replayed mutation: typed once, outcome unknown, said neutrally",
+            arguments: [
+                "-CC_FIXTURE", "deck", "-cc.debug.sendText", "duplicate",
+                "-CC_DEEPLINK", "codeconnect://session/fx-4",
+            ],
+            reach: { app, driver in
+                try driver.openPaletteRow(app, fragment: "/com", row: "/compact")
+                try driver.require(app.buttons["Compact now"], "the always-active button").tap()
+                try driver.require(
+                    driver.text(containing: "does not confirm its outcome", in: app),
+                    "the neutral duplicate line")
             }),
 
         RenderScenario(

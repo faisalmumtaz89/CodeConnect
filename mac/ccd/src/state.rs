@@ -89,6 +89,8 @@ const SUPERVISOR_MINOR_PROMPT_IDENTITY: u32 = 3;
 /// supervisors keep running until their sessions restart, so this is the
 /// ordinary state of affairs after an upgrade, not an edge case.
 const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
+/// The supervisor build that can *complete* a view instead of dismissing it.
+const SUPERVISOR_MINOR_CONFIRM_VIEW: u32 = 10;
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -485,6 +487,82 @@ fn is_word_shaped_slash_command(text: &str) -> bool {
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// What the Mac must be showing before the daemon may press `Enter` to
+/// complete the view a native command opened — or `None` when this command may
+/// never be completed.
+///
+/// **`/model <value>` and `/effort <value>`.** Both open the same shape of
+/// confirmation, measured on 2.1.223, and both are reached from a sheet that
+/// states the cost before the tap. Bare `/model` and bare `/effort` are
+/// excluded: they open Claude Code's own chooser, where the highlighted row is
+/// whatever it happens to be, so `Enter` there picks something nobody named.
+///
+/// **One needle.** Separate structural and value needles proved nothing,
+/// because the check runs over the whole visible pane and the pane carries
+/// Claude Code's echo of the command just submitted: a bare value needle
+/// matched that echo, and a bare affirmative needle matched whichever row was
+/// highlighted. Joined and anchored to the selection marker, the needle can
+/// only match a row that is *selected*, *affirmative*, and *about the value
+/// asked for*. Measured, and normalised the way the supervisor normalises the
+/// pane — `normalize_for_match` drops whitespace and lowercases but keeps `❯`
+/// and digits:
+///
+/// ```text
+/// ❯ 1. Yes, switch to Sonnet 5      (/model sonnet)
+/// ❯ 1. Yes, switch to low           (/effort low)
+/// ```
+///
+/// `/effort` echoes its argument verbatim; `/model` echoes a display name, so a
+/// full API id such as `claude-sonnet-5` — which the dialog renders as
+/// `Sonnet 5` — yields a needle that cannot match. The supervisor then runs the
+/// **ordinary rescue**: one `Escape`, composer restored, and the phone told no
+/// change was confirmed. The Model sheet's field suggests an alias for exactly
+/// this reason.
+fn confirmation_needle(text: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if name != "model" && name != "effort" {
+        return None;
+    }
+    // One printable word. `is_ascii_graphic` is the whole rule: it excludes the
+    // empty argument, anything with whitespace or control bytes, and anything
+    // non-ASCII. A payload that did not make one command must never authorise
+    // one key.
+    let argument = rest[name.len()..].trim();
+    if argument.is_empty() || !argument.chars().all(|c| c.is_ascii_graphic()) {
+        return None;
+    }
+    Some(format!(
+        "❯1.yes,switchto{}",
+        protocol::ipc::normalize_for_match(argument)
+    ))
+}
+
+/// Consent plus the allowlist — two of the three things that must agree before
+/// the one keystroke that commits.
+///
+/// The client's flag says a human was shown what this command costs and tapped
+/// anyway; a client that predates that disclosure sends `false` and gets
+/// today's behaviour. The needle is the daemon's own, so the flag can never
+/// nominate a command. The third — whether this session's supervisor can
+/// *make* a confirmation — is asked in `supervisor_request`, under the same
+/// lock that fetches the handle, because a session can restart between two
+/// lookups and the answer would be about a supervisor that no longer exists.
+///
+/// A free function because it is the safety property: as a chain of `&&`
+/// inlined in `send_text` it could only be exercised through a full supervisor
+/// round trip, and it was not exercised at all.
+fn confirm_view_for(text: &str, complete_native_confirmation: bool) -> Option<String> {
+    if !complete_native_confirmation {
+        return None;
+    }
+    confirmation_needle(text)
 }
 
 /// The only commands whose recovered pane may be kept. Deliberately three
@@ -2175,6 +2253,7 @@ impl Daemon {
                     // daemon may Escape away.
                     recover_composer: false,
                     capture_recovered: false,
+                    confirm_view: None,
                 },
             )
             .await
@@ -2268,6 +2347,9 @@ impl Daemon {
         request_id: Option<&str>,
         payload_hash: Option<&str>,
         submit: bool,
+        // The client's statement that a human saw this command's consequences
+        // and tapped anyway. Never sufficient on its own — see `confirm_view`.
+        complete_native_confirmation: bool,
     ) -> SendTextResult {
         if text.len() > protocol::ws::MAX_SEND_TEXT_BYTES {
             return SendTextResult::Refused {
@@ -2373,6 +2455,22 @@ impl Daemon {
         // from becoming a general "screenshot any TUI view" facility.
         let recover_composer = is_word_shaped_slash_command(&text);
         let capture_recovered = snapshot_command(&text);
+        // **The one place a rescue becomes a completion.** Here the view is
+        // not an ambush: it is Claude Code asking the human to confirm the
+        // choice they already made on the phone, and dismissing it throws that
+        // choice away. Everything else keeps the generic rescue.
+        //
+        // Three things must agree, and the client is only one of them. The
+        // client's flag says a human was shown what this costs and tapped
+        // anyway — a client that predates that disclosure sends `false` and
+        // gets today's behaviour. The daemon's own allowlist says which
+        // commands may ever be completed, so the flag can never nominate one.
+        // The supervisor gate keeps a build that would silently drop the field
+        // — and therefore Escape — from being handed a confirmation to make.
+        // Consent and the allowlist decide here; the supervisor's capability
+        // is decided in `supervisor_request`, against the handle that actually
+        // receives the frame.
+        let confirm_view = confirm_view_for(&text, complete_native_confirmation);
         let outcome = self
             .supervisor_request(
                 &session_uid,
@@ -2396,6 +2494,7 @@ impl Daemon {
                     expect: None,
                     recover_composer,
                     capture_recovered,
+                    confirm_view,
                 },
             )
             .await;
@@ -2416,6 +2515,11 @@ impl Daemon {
             Ok(SupervisorResult::ComposerLost { matched }) => {
                 SendTextResult::ComposerLost { matched }
             }
+            // Deliberately `Sent`. A completed confirmation is the same news
+            // to the phone as a clean inline send — the keys landed and the
+            // transcript decides — so it needs no wire status of its own, and
+            // a client that predates this cannot misread one.
+            Ok(SupervisorResult::ViewConfirmed { matched }) => SendTextResult::Sent { matched },
             // Typed, and then something could not be observed. `indeterminate`
             // is exactly this state's existing name on the wire, and it is the
             // one the phone already handles by keeping the identity so a retry
@@ -2916,7 +3020,7 @@ impl Daemon {
     async fn supervisor_request(
         &self,
         session_uid: &str,
-        request: SupervisorRequest,
+        mut request: SupervisorRequest,
     ) -> std::result::Result<SupervisorResult, SupervisorFailure> {
         // What the request needs the supervisor to be able to do, checked
         // against the handle that will actually receive it. Asked separately
@@ -2943,6 +3047,17 @@ impl Daemon {
                      after updating CodeConnect, or use Terminal."
                         .into(),
                 ));
+            }
+            // Completing a view is decided against **this** handle for the same
+            // reason: a supervisor that predates the field drops it silently and
+            // presses `Escape`, so a capability read from an earlier lookup
+            // could hand a confirmation to a build that cannot make one. Asking
+            // here withdraws it instead, and the ordinary rescue runs — the same
+            // outcome as never having asked.
+            if handle.protocol_minor < SUPERVISOR_MINOR_CONFIRM_VIEW {
+                if let SupervisorRequest::SendText { confirm_view, .. } = &mut request {
+                    *confirm_view = None;
+                }
             }
             let id = handle
                 .next_id
@@ -4942,6 +5057,66 @@ mod tests {
         for text in ["hello", "", "/", "/tmp/build.log", "look at /status", "/ x"] {
             assert!(!is_word_shaped_slash_command(text), "{text}");
         }
+    }
+
+    /// The allowlist that stands between a client's flag and a **committing**
+    /// keystroke. `Enter` selects whatever is highlighted, so everything this
+    /// function refuses is a key that is never pressed.
+    #[test]
+    fn only_model_with_one_ascii_graphic_argument_gets_a_confirmation_needle() {
+        assert_eq!(
+            confirmation_needle("/model sonnet").as_deref(),
+            Some("❯1.yes,switchtosonnet"),
+            "the needle binds the selection marker, the affirmative row and the value"
+        );
+        assert_eq!(
+            confirmation_needle("  /MODEL Opus").as_deref(),
+            Some("❯1.yes,switchtoopus"),
+            "leading space and case are the command's, not the needle's"
+        );
+        // Measured: `/effort` opens the identical shape and echoes its argument
+        // verbatim, so it shares the needle rather than growing a second one.
+        assert_eq!(
+            confirmation_needle("/effort low").as_deref(),
+            Some("❯1.yes,switchtolow")
+        );
+        for text in [
+            // Not a command whose confirmation the phone discloses.
+            "/clear",
+            "/status",
+            "hello",
+            // Bare: Claude Code's own chooser, where the highlighted row is
+            // whatever it happens to be.
+            "/model",
+            "/model   ",
+            "/effort",
+            // Not one printable word: a payload that did not make one command
+            // must never authorise one key.
+            "/model two words",
+            "/model with\ttab",
+            "/model line\nbreak",
+            "/model café",
+        ] {
+            assert_eq!(confirmation_needle(text), None, "{text:?}");
+        }
+    }
+
+    /// Consent and the allowlist both have to agree. Dropping either hands a
+    /// committing keystroke to a case that never authorised it. The third
+    /// condition — the supervisor's capability — is checked at dispatch, under
+    /// the lock that fetches the handle.
+    #[test]
+    fn a_confirmation_is_forwarded_only_with_consent_an_allowlisted_command_and_a_minor_10_supervisor(
+    ) {
+        assert_eq!(
+            confirm_view_for("/model sonnet", true).as_deref(),
+            Some("❯1.yes,switchtosonnet")
+        );
+        // The client never showed anybody what this costs.
+        assert_eq!(confirm_view_for("/model sonnet", false), None);
+        // Consent, but not a command the daemon will complete.
+        assert_eq!(confirm_view_for("/clear", true), None);
+        assert_eq!(confirm_view_for("/model", true), None);
     }
 
     /// Three names, no rule: a kept snapshot is a picture of somebody's
@@ -7809,13 +7984,27 @@ mod tests {
         let hash = protocol::hash::send_text_hash(uid, text, true);
 
         let first = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
             .await;
         assert!(matches!(first, SendTextResult::Sent { .. }), "{first:?}");
 
         for _ in 0..4 {
             match daemon
-                .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+                .send_text(
+                    uid,
+                    text.to_string(),
+                    Some("st-1"),
+                    Some(&hash),
+                    true,
+                    false,
+                )
                 .await
             {
                 SendTextResult::Duplicate { .. } => {}
@@ -7845,6 +8034,7 @@ mod tests {
                 Some("st-1"),
                 Some(&honest),
                 true,
+                false,
             )
             .await;
         assert!(
@@ -7854,7 +8044,7 @@ mod tests {
 
         // An id with no hash cannot say what it is a retry *of*.
         let unbound = daemon
-            .send_text(uid, "hi".to_string(), Some("st-2"), None, true)
+            .send_text(uid, "hi".to_string(), Some("st-2"), None, true, false)
             .await;
         assert!(
             matches!(unbound, SendTextResult::Refused { .. }),
@@ -7866,13 +8056,13 @@ mod tests {
         let ok = protocol::hash::send_text_hash(uid, "one", true);
         assert!(matches!(
             daemon
-                .send_text(uid, "one".into(), Some("st-3"), Some(&ok), true)
+                .send_text(uid, "one".into(), Some("st-3"), Some(&ok), true, false)
                 .await,
             SendTextResult::Sent { .. }
         ));
         let other = protocol::hash::send_text_hash(uid, "two", true);
         let conflict = daemon
-            .send_text(uid, "two".into(), Some("st-3"), Some(&other), true)
+            .send_text(uid, "two".into(), Some("st-3"), Some(&other), true, false)
             .await;
         assert!(
             matches!(&conflict, SendTextResult::Refused { reason } if reason.contains("already used")),
@@ -7888,7 +8078,7 @@ mod tests {
         let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
 
         let huge = "x".repeat(protocol::ws::MAX_SEND_TEXT_BYTES + 1);
-        let refused = daemon.send_text(uid, huge, None, None, true).await;
+        let refused = daemon.send_text(uid, huge, None, None, true, false).await;
         assert!(
             matches!(&refused, SendTextResult::Refused { reason } if reason.contains("ceiling")),
             "{refused:?}"
@@ -7900,7 +8090,7 @@ mod tests {
         // the point: the client used to nominate the needle that authorised its
         // own keystrokes.
         assert!(matches!(
-            daemon.send_text(uid, "hello".into(), None, None, true).await,
+            daemon.send_text(uid, "hello".into(), None, None, true, false).await,
             SendTextResult::Sent { matched } if matched == "foragents" || matched == "forshortcuts"
         ));
 
@@ -7908,7 +8098,7 @@ mod tests {
         // text is refused rather than typed into the prompt.
         pane.show(&permission_pane("touch /tmp/a"));
         let blocked = daemon
-            .send_text(uid, "hello".into(), None, None, true)
+            .send_text(uid, "hello".into(), None, None, true, false)
             .await;
         assert!(
             matches!(blocked, SendTextResult::Refused { .. }),
@@ -7957,7 +8147,14 @@ mod tests {
         daemon.recover().await;
 
         let result = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
             .await;
         assert!(
             matches!(result, SendTextResult::Indeterminate { .. }),
@@ -8038,7 +8235,7 @@ mod tests {
         pane.go_silent();
         for _ in 0..5 {
             let _ = daemon
-                .send_text("cc-1", "hello".into(), None, None, false)
+                .send_text("cc-1", "hello".into(), None, None, false, false)
                 .await;
         }
         assert_eq!(
@@ -8106,7 +8303,14 @@ mod tests {
 
         pane.go_silent();
         let first = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
             .await;
         assert!(
             matches!(first, SendTextResult::Indeterminate { .. }),
@@ -8116,7 +8320,14 @@ mod tests {
         // Answering again — even with the supervisor healthy — must replay the
         // unknown, because the first attempt may already have typed it.
         let second = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
             .await;
         assert!(
             matches!(second, SendTextResult::Indeterminate { .. }),
@@ -8175,7 +8386,14 @@ mod tests {
         daemon.unregister_supervisor(&pane._registration).await;
 
         let refused = daemon
-            .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
             .await;
         assert!(
             matches!(&refused, SendTextResult::Refused { reason } if reason.contains("no supervisor")),
@@ -8187,7 +8405,14 @@ mod tests {
         let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
         assert!(matches!(
             daemon
-                .send_text(uid, text.to_string(), Some("st-1"), Some(&hash), true)
+                .send_text(
+                    uid,
+                    text.to_string(),
+                    Some("st-1"),
+                    Some(&hash),
+                    true,
+                    false
+                )
                 .await,
             SendTextResult::Sent { .. }
         ));

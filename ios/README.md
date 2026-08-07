@@ -165,6 +165,7 @@ release build:
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
 | `-cc.debug.terminalState needsSetup\|hostKeyChanged\|ended` | the three terminal states that need an SSH server misbehaving to reach |
 | `-cc.debug.sendText sent\|recovered\|recovered-empty\|lost` | resolves typed sends locally, the way `-CC_FIXTURE` resolves decisions, so the snapshot sheet's four outcomes can be photographed. `recovered` carries a real 80-column `/status` capture measured off a live Mac. Against a daemon these states need a Mac view opened and its Escape failing on cue, which is not something a render pass can arrange |
+| `-cc.debug.sendText kept-model\|kept-effort\|set-effort-session\|duplicate` | answers `sent` **and** injects Claude Code's own transcript receipt, the way the real daemon delivers it — the send returns, the line follows. These reach the Model and Effort sheets' `no change` states and a scope-bearing confirmation, none of which any render could reach before: a `kept` receipt needs Claude Code's `Switch model?` / `Change effort level?` confirmation opened and then declined. Every line is verbatim from the 2.1.223 rig, escape codes included, so the render exercises the same parsing the live path does |
 
 `-CC_FIXTURE` also resolves answers locally, because the Deck's advance
 behaviour cannot be exercised otherwise. The real answer path — daemon, ledger,

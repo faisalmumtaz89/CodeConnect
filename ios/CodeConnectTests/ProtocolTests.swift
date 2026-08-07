@@ -274,16 +274,35 @@ final class SendTextWireTests: XCTestCase {
         let with = encoded(
             .sendText(
                 session: "u-1", text: "hi", require: nil, submit: true,
-                requestID: "st-1", payloadHash: "abc123"))
+                requestID: "st-1", payloadHash: "abc123",
+                completeNativeConfirmation: false))
         XCTAssertTrue(with.contains(#""request_id":"st-1""#), with)
         XCTAssertTrue(with.contains(#""payload_hash":"abc123""#), with)
 
         let without = encoded(
             .sendText(
                 session: "u-1", text: "hi", require: nil, submit: true,
-                requestID: nil, payloadHash: nil))
+                requestID: nil, payloadHash: nil, completeNativeConfirmation: false))
         XCTAssertFalse(without.contains("request_id"), "omitted, never null: \(without)")
         XCTAssertFalse(without.contains("payload_hash"), without)
+    }
+
+    /// The permission that lets the daemon *complete* Claude Code's
+    /// confirmation instead of dismissing it. Always present and explicit — a
+    /// daemon that defaults it to false must be told `true` by a client that
+    /// showed the human what the command costs.
+    func testSendTextCarriesTheNativeConfirmationPermission() {
+        let allowed = encoded(
+            .sendText(
+                session: "u-1", text: "/model sonnet", require: nil, submit: true,
+                requestID: nil, payloadHash: nil, completeNativeConfirmation: true))
+        XCTAssertTrue(allowed.contains(#""complete_native_confirmation":true"#), allowed)
+
+        let ordinary = encoded(
+            .sendText(
+                session: "u-1", text: "hi", require: nil, submit: true,
+                requestID: nil, payloadHash: nil, completeNativeConfirmation: false))
+        XCTAssertTrue(ordinary.contains(#""complete_native_confirmation":false"#), ordinary)
     }
 
     func testGetCommandCatalogEncodesItsType() {
