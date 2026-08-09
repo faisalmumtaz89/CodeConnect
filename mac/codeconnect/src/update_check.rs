@@ -101,6 +101,39 @@ pub fn installed_version() -> (u64, u64, u64) {
     parse_version(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION is not a plain X.Y.Z semver")
 }
 
+/// Whether a release may be installed over the version that is running.
+///
+/// **Newer or the same, never older.** Every other check the updater makes
+/// passes on an older release: it is a genuine, correctly signed, correctly
+/// checksummed CodeConnect release. What `releases/latest` points at is
+/// server-side state this program does not control — a release published by
+/// hand, or by an account that was compromised, can make an older version
+/// "latest" — and every machine would then be offered a downgrade as an
+/// upgrade.
+///
+/// The same version is allowed through deliberately: that is the repair path
+/// for a set where one binary is missing or does not match the others.
+///
+/// Text that cannot be read as a version is refused rather than ordered as
+/// text, under which `0.10.0` precedes `0.9.0`.
+pub fn may_install(candidate: &str, running: &str) -> Result<(), String> {
+    let Some(offered) = parse_version(candidate) else {
+        return Err(format!("`{candidate}` is not a version this can order"));
+    };
+    let Some(installed) = parse_version(running) else {
+        return Err(format!(
+            "the running binary calls itself `{running}`, which is not a version this can order"
+        ));
+    };
+    if offered < installed {
+        return Err(format!(
+            "the latest release is {candidate}, which is older than the installed {running}. \
+             Nothing was changed."
+        ));
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ cache
 
 /// Read the cache, revalidating the stored version — a cache written by
@@ -228,111 +261,14 @@ pub fn cached_advisory() -> Option<UpdateAdvisory> {
     update_advisory(&read_cache(), installed_version())
 }
 
-// ------------------------------------------------------- checkout advisory
+// -------------------------------------------------------- update advisory
 
-/// The local half of "am I current?": how the recorded checkout relates to
-/// the code this binary was built from. `None` is silence — record missing,
-/// checkout moved, git absent, budget breached, or simply *matching* — and
-/// silence is the correct rendering of every one of those.
-///
-/// This outranks the release advisory when both would fire: it is the more
-/// specific fact (a release compares version *numbers*, which stand still
-/// between releases; this compares the actual code), and the fix is the same
-/// `codeconnect update` either way.
-pub fn checkout_advisory() -> Option<protocol::build_identity::CheckoutRelation> {
-    use protocol::build_identity::CheckoutRelation;
-    // Filesystem checks only on this path — `recorded_checkout_at`'s git
-    // validation is unbounded (fine for `codeconnect update`, which the
-    // user asked for and can interrupt), and a wedged git before the budget
-    // started would hang every launch. The budgeted relation's own git
-    // calls ARE the work-tree validation here: a non-repo answers None,
-    // which renders as the silence it should.
-    let record = std::fs::read_to_string(checkout_record_path()).ok()?;
-    let root = PathBuf::from(record.trim());
-    if !root.join("mac/install.sh").is_file() {
-        return None;
-    }
-    match protocol::build_identity::checkout_relation(&root)? {
-        CheckoutRelation::Matches => None,
-        other => Some(other),
-    }
+/// The one advisory a launch can carry: a newer release exists. Rendered here
+/// so the caller has a single thing to print or not print.
+pub fn select_update_note(release: Option<UpdateAdvisory>, style: Style) -> Option<String> {
+    release.map(|advisory| render_update(&advisory, style))
 }
 
-/// One slot, two candidates: the checkout comparison outranks the release
-/// advisory because it is the more specific fact — a release compares
-/// version numbers, which stand still between releases; the checkout
-/// comparison reads the actual code. Both resolve with the same command.
-pub fn select_update_note(
-    checkout: Option<protocol::build_identity::CheckoutRelation>,
-    release: Option<UpdateAdvisory>,
-    style: Style,
-) -> Option<String> {
-    checkout
-        .map(|relation| render_checkout(&relation, style))
-        .or_else(|| release.map(|advisory| render_update(&advisory, style)))
-}
-
-/// The exact advisory text for each non-matching relation. Grammar shared
-/// with the release advisory: bold heading and bold action line in Styled,
-/// identical visible text across styles, `·` becoming `:` in Ascii.
-pub fn render_checkout(
-    relation: &protocol::build_identity::CheckoutRelation,
-    style: Style,
-) -> String {
-    use protocol::build_identity::CheckoutRelation;
-    match relation {
-        // Unreachable by construction — `checkout_advisory` filters it — but
-        // a caller handing it in deserves silence, not a lie.
-        CheckoutRelation::Matches => String::new(),
-        CheckoutRelation::Newer(count) => {
-            let commits = if *count == 1 {
-                "1 commit".to_string()
-            } else {
-                format!("{count} commits")
-            };
-            match style {
-                Style::Styled => format!(
-                    "{BOLD}CodeConnect checkout is newer{RESET} \u{b7} {commits} not \
-                     installed\n\n{BOLD}codeconnect update{RESET}"
-                ),
-                Style::PlainUnicode => format!(
-                    "CodeConnect checkout is newer \u{b7} {commits} not installed\n\n\
-                     codeconnect update"
-                ),
-                Style::Ascii => format!(
-                    "CodeConnect checkout is newer: {commits} not installed\n\ncodeconnect update"
-                ),
-            }
-        }
-        CheckoutRelation::DirtyCheckout => match style {
-            Style::Styled => concat!(
-                "\u{1b}[1mCodeConnect checkout has local changes\u{1b}[0m\n",
-                "Commit or stash them, then run:\n\n",
-                "\u{1b}[1mcodeconnect update\u{1b}[0m"
-            )
-            .to_string(),
-            Style::PlainUnicode | Style::Ascii => concat!(
-                "CodeConnect checkout has local changes\n",
-                "Commit or stash them, then run:\n\n",
-                "codeconnect update"
-            )
-            .to_string(),
-        },
-        CheckoutRelation::Differs => match style {
-            Style::Styled => concat!(
-                "\u{1b}[1mCodeConnect build differs from its checkout\u{1b}[0m\n\n",
-                "\u{1b}[1mcodeconnect update\u{1b}[0m"
-            )
-            .to_string(),
-            Style::PlainUnicode | Style::Ascii => {
-                "CodeConnect build differs from its checkout\n\ncodeconnect update".to_string()
-            }
-        },
-    }
-}
-
-/// How a terminal advisory may dress itself. Decided per destination
-/// stream, never globally: pre-attach writes stderr, `daemon status` writes
 /// stdout, and each answers for its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
@@ -408,122 +344,6 @@ pub fn render_update(advisory: &UpdateAdvisory, style: Style) -> String {
         Style::Ascii => {
             format!("CodeConnect update available: {a}.{b}.{c} -> {latest}\n\ncodeconnect update")
         }
-    }
-}
-
-#[cfg(test)]
-mod checkout_advisory_tests {
-    use super::*;
-    use protocol::build_identity::CheckoutRelation;
-
-    #[test]
-    fn newer_renders_exactly_in_all_three_styles() {
-        let two = CheckoutRelation::Newer(2);
-        assert_eq!(
-            render_checkout(&two, Style::Styled),
-            "\u{1b}[1mCodeConnect checkout is newer\u{1b}[0m \u{b7} 2 commits not \
-             installed\n\n\u{1b}[1mcodeconnect update\u{1b}[0m"
-        );
-        assert_eq!(
-            render_checkout(&two, Style::PlainUnicode),
-            "CodeConnect checkout is newer \u{b7} 2 commits not installed\n\ncodeconnect update"
-        );
-        assert_eq!(
-            render_checkout(&two, Style::Ascii),
-            "CodeConnect checkout is newer: 2 commits not installed\n\ncodeconnect update"
-        );
-    }
-
-    #[test]
-    fn one_commit_is_singular() {
-        assert_eq!(
-            render_checkout(&CheckoutRelation::Newer(1), Style::Ascii),
-            "CodeConnect checkout is newer: 1 commit not installed\n\ncodeconnect update"
-        );
-    }
-
-    #[test]
-    fn dirty_and_differs_render_their_exact_sentences() {
-        assert_eq!(
-            render_checkout(&CheckoutRelation::DirtyCheckout, Style::PlainUnicode),
-            "CodeConnect checkout has local changes\n\
-             Commit or stash them, then run:\n\ncodeconnect update"
-        );
-        assert_eq!(
-            render_checkout(&CheckoutRelation::DirtyCheckout, Style::Styled),
-            "\u{1b}[1mCodeConnect checkout has local changes\u{1b}[0m\n\
-             Commit or stash them, then run:\n\n\
-             \u{1b}[1mcodeconnect update\u{1b}[0m"
-        );
-        assert_eq!(
-            render_checkout(&CheckoutRelation::Differs, Style::Ascii),
-            "CodeConnect build differs from its checkout\n\ncodeconnect update"
-        );
-    }
-
-    /// The Ascii renderer's whole contract: 7-bit bytes, no escapes, no
-    /// typography, nothing over 80 columns, no trailing whitespace.
-    #[test]
-    fn ascii_checkout_advisories_are_pure() {
-        for relation in [
-            CheckoutRelation::Newer(1),
-            CheckoutRelation::Newer(42),
-            CheckoutRelation::DirtyCheckout,
-            CheckoutRelation::Differs,
-        ] {
-            let rendered = render_checkout(&relation, Style::Ascii);
-            assert!(rendered.is_ascii(), "{relation:?}: {rendered:?}");
-            assert!(!rendered.contains('\u{1b}'), "{relation:?}");
-            for line in rendered.lines() {
-                assert!(line.len() <= 80, "{relation:?}: {line:?}");
-                assert_eq!(line.trim_end(), line, "{relation:?}: trailing space");
-            }
-        }
-    }
-
-    /// The dirty and differs sentences are style-invariant in visible text:
-    /// styling may bold, never reword.
-    #[test]
-    fn styling_never_rewords() {
-        for relation in [CheckoutRelation::DirtyCheckout, CheckoutRelation::Differs] {
-            let styled = render_checkout(&relation, Style::Styled)
-                .replace("\u{1b}[1m", "")
-                .replace("\u{1b}[0m", "");
-            assert_eq!(styled, render_checkout(&relation, Style::PlainUnicode));
-        }
-    }
-
-    #[test]
-    fn matches_renders_as_nothing() {
-        assert_eq!(
-            render_checkout(&CheckoutRelation::Matches, Style::Styled),
-            ""
-        );
-    }
-
-    /// The one-slot rule: when both facts exist, the checkout speaks and the
-    /// release stays quiet — never two blocks.
-    #[test]
-    fn the_checkout_outranks_the_release_in_the_one_slot() {
-        let release = UpdateAdvisory {
-            installed: (0, 2, 0),
-            latest: "v0.3.0".into(),
-        };
-        let both = select_update_note(
-            Some(CheckoutRelation::Newer(2)),
-            Some(release.clone()),
-            Style::Ascii,
-        )
-        .unwrap();
-        assert!(both.contains("checkout is newer"), "{both}");
-        assert!(
-            !both.contains("update available"),
-            "one slot means one block"
-        );
-
-        let release_only = select_update_note(None, Some(release), Style::Ascii).unwrap();
-        assert!(release_only.contains("update available"), "{release_only}");
-        assert_eq!(select_update_note(None, None, Style::Ascii), None);
     }
 }
 
@@ -621,9 +441,12 @@ fn fetch_latest_release_tag() -> Option<String> {
             "65536",
             "-H",
             "Accept: application/vnd.github+json",
-            // The one non-tailnet request CodeConnect ever makes, documented
-            // in the README's privacy note and disabled by `update_check:
-            // false`. GitHub's "latest" is the newest published non-draft,
+            // The only GitHub request CodeConnect makes on its own —
+            // documented in the README's privacy note and disabled by
+            // `update_check: false`. (`codeconnect update` also talks to
+            // GitHub, but only ever when the user types it; the daemon's
+            // APNs pushes are the other autonomous traffic, to Apple.)
+            // GitHub's "latest" is the newest published non-draft,
             // non-prerelease Release.
             "https://api.github.com/repos/faisalmumtaz89/CodeConnect/releases/latest",
         ])
@@ -727,125 +550,323 @@ pub fn spawn_line_listener(
 
 // ----------------------------------------------------------------- update
 
-/// Where `install.sh` records the checkout it ran from, so `codeconnect
-/// update` never has to ask the user where their clone lives.
-fn checkout_record_path() -> PathBuf {
-    protocol::root_dir().join("source-checkout")
-}
-
-/// The recorded checkout, if it still looks like one. Takes the record path
-/// explicitly so tests exercise it against temp directories — mutating the
-/// process environment in a parallel test suite races every other test that
-/// reads the home directory.
-fn recorded_checkout_at(record: &std::path::Path) -> std::result::Result<PathBuf, String> {
-    let Ok(raw) = std::fs::read_to_string(record) else {
-        return Err(format!(
-            "no checkout is recorded at {} — this codeconnect was not \
-             installed by ./install.sh from a clone on this machine",
-            record.display()
-        ));
-    };
-    let root = PathBuf::from(raw.trim());
-    if !root.join("mac/install.sh").is_file() {
-        return Err(format!(
-            "the recorded checkout {} no longer contains mac/install.sh",
-            root.display()
-        ));
-    }
-    // Captured, not just exit-checked: `rev-parse --is-inside-work-tree`
-    // exits 0 while printing `false` inside a bare repository. Only the
-    // literal answer counts.
-    let inside = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&root)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
-        .unwrap_or(false);
-    if !inside {
-        return Err(format!(
-            "the recorded checkout {} is not a git work tree any more",
-            root.display()
-        ));
-    }
-    Ok(root)
-}
-
-/// Whether the checkout has no local changes at all — tracked edits and
-/// untracked files both count. `git pull --ff-only` alone is not this
-/// check: a fast-forward can succeed over unrelated local edits, and the
-/// installer would then build a tree that is neither the release nor the
-/// user's own work.
-fn checkout_is_clean(root: &std::path::Path) -> std::result::Result<bool, String> {
-    let output = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(root)
-        .args(["status", "--porcelain"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|error| format!("running git status: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("git status failed in {}", root.display()));
-    }
-    Ok(output.stdout.is_empty())
-}
-
-/// `codeconnect update`: pull the recorded checkout fast-forward-only, then
-/// run its installer — which builds, installs, and restarts a managed
-/// daemon. One command, because "find your clone and run a git chain" is
-/// developer choreography no user should have to remember.
+/// The lock one `codeconnect update` holds against another.
 ///
-/// Failures stay loud and stop the chain: a dirty or diverged clone makes
-/// `git pull --ff-only` refuse, and that refusal — git's own words — is
-/// exactly what the user needs to see. Nothing here force-anythings.
+/// **A different lock from the advisory's**, deliberately. That one throttles a
+/// background check nobody asked for and is fine to lose; this one guards a
+/// directory exchange, and two of those interleaving could stage against each
+/// other's `bin.incoming` and exchange the wrong set into place.
+///
+/// The same `flock(2)` reasoning applies: the kernel releases it when the
+/// holder dies, however it dies, so there is no corpse to detect and no
+/// takeover race to lose.
+fn update_lock_path(root: &std::path::Path) -> PathBuf {
+    root.join(".update.lock")
+}
+
+/// The operations that reach outside the updater's own process: the network,
+/// the signature judgment, running a binary, launchd.
+///
+/// Everything else the updater does — checksum arithmetic, archive judgment,
+/// Mach-O reading, staging, the exchange — is its own code and runs for real
+/// everywhere, tests included. These five are the seams a test injects,
+/// because a test can neither reach GitHub nor produce a Developer ID
+/// signature; injecting a permissive judge there proves the *sequence* around
+/// the judgment, never the judgment itself, which has its own tests.
+pub struct UpdateDeps<'a> {
+    /// The `releases/latest` response body.
+    pub fetch_latest_release: &'a dyn Fn() -> Result<Vec<u8>>,
+    /// Fetch one asset URL into a file, within a byte ceiling.
+    pub download: &'a dyn Fn(&str, &std::path::Path, u64) -> Result<()>,
+    /// The Developer ID judgment on one file.
+    pub verify_signature: &'a dyn Fn(&std::path::Path) -> Result<()>,
+    /// Run a binary and return its `--version` line.
+    pub probe_version: &'a dyn Fn(&std::path::Path) -> Result<String>,
+    /// Restart the managed daemon; `false` means none is loaded.
+    pub restart_daemon: &'a dyn Fn() -> Result<bool>,
+}
+
+/// `codeconnect update`: install the latest published release.
+///
+/// **One way to update, whatever built the binary that is running.** It fetches
+/// the newest release, proves it is CodeConnect's, and replaces all three
+/// binaries together. It does not look for a checkout, does not build, and
+/// needs no toolchain on the machine.
+///
+/// Every step that could accept the wrong bytes refuses instead, and refuses
+/// before anything on disk moves:
+///
+///   * the two assets are read out of the release that named the version, not
+///     guessed from a `latest/download` URL that resolves later;
+///   * the checksum catches a truncated download;
+///   * the **signature** is the check that matters — pinned to CodeConnect's
+///     Apple team, so a correctly signed binary from anybody else is refused;
+///   * each binary is asked its own version, so a correctly signed *older*
+///     release cannot be served in place of the newest one.
+///
+/// The install itself is one directory exchange, so a machine that loses power
+/// mid-update comes back with the complete old set or the complete new one.
 pub fn run_update() -> Result<()> {
-    let root = match recorded_checkout_at(&checkout_record_path()) {
-        Ok(root) => root,
-        Err(why) => {
-            eprintln!("cannot update automatically: {why}.");
-            eprintln!();
-            eprintln!("update it the way it was installed — from your CodeConnect clone:");
-            eprintln!();
-            eprintln!("    git pull --ff-only && cd mac && ./install.sh");
-            anyhow::bail!("no usable checkout record");
-        }
+    let deps = UpdateDeps {
+        fetch_latest_release: &fetch_latest_release,
+        download: &crate::update_install::download,
+        verify_signature: &crate::update_install::verify_signature,
+        probe_version: &crate::update_install::version_of,
+        restart_daemon: &crate::launchd::restart_managed_daemon,
     };
-    // Refused outright, before any pull: a fast-forward would happily land
-    // on top of unrelated local edits, and the build that followed would be
-    // a mixture nobody asked for. The user's own changes are the user's —
-    // update never decides what happens to them.
-    if !checkout_is_clean(&root).map_err(|why| anyhow::anyhow!(why))? {
-        eprintln!(
-            "your checkout at {} has local changes (see `git status`).",
-            root.display()
-        );
-        eprintln!("update refuses to build a mixed tree — commit or stash them, then rerun.");
-        anyhow::bail!("checkout has local changes");
+    run_update_at(&protocol::root_dir(), &deps)
+}
+
+fn run_update_at(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
+    let live = root.join("bin");
+    let _only_one = claim_throttle_at(&update_lock_path(root)).ok_or_else(|| {
+        anyhow::anyhow!("another codeconnect update is already running; nothing was changed")
+    })?;
+    // Under the lock, before anything is read or staged: an interrupted run
+    // leaves a complete live set and a stale staging directory, and the next
+    // update must not build on top of it.
+    crate::update_install::clear_leftovers(root)?;
+    let installed = installed_version();
+    let installed_text = format!("{}.{}.{}", installed.0, installed.1, installed.2);
+
+    let body = (deps.fetch_latest_release)()?;
+    let tag = parse_release_tag(&body)
+        .ok_or_else(|| anyhow::anyhow!("the latest release does not name a version"))?;
+    let latest_text = tag.trim_start_matches('v').to_string();
+
+    // Before the currentness check, because a downgrade is *also* "not
+    // current": read the other way round, an older release served as the latest
+    // one looks exactly like an update that is due. See `may_install`.
+    may_install(&latest_text, &installed_text).map_err(|why| anyhow::anyhow!("{why}"))?;
+
+    // Asked of all three installed binaries, not of the one running: a skewed
+    // install — `ccd` a release behind the shim — is exactly what a check on
+    // the running binary blesses and then cannot repair. A binary that cannot
+    // be asked reads as absent, which reads as not current.
+    let set: Vec<(String, Option<String>)> = crate::update_release::SHIPPED_BINARIES
+        .iter()
+        .map(|binary| {
+            let said = (deps.probe_version)(&live.join(binary)).ok();
+            (binary.to_string(), said)
+        })
+        .collect();
+    if crate::update_install::set_is_current(&set, &latest_text) {
+        println!("codeconnect {latest_text} is the latest release. Nothing to do.");
+        return Ok(());
     }
-    println!("updating from {}", root.display());
-    let pulled = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&root)
-        .args(["pull", "--ff-only"])
-        .status()
-        .context("running git pull")?;
-    if !pulled.success() {
+    if latest_text == installed_text && !set.is_empty() {
+        for (binary, said) in &set {
+            match said {
+                Some(said) => println!("  {binary}: {said}"),
+                None => println!("  {binary}: not installed"),
+            }
+        }
+        println!("reinstalling {latest_text} so all three match.");
+    }
+
+    let assets = crate::update_release::select_assets(&body, &latest_text).map_err(|why| {
+        anyhow::anyhow!(
+            "codeconnect {installed_text} is installed and {latest_text} is the latest \
+             release, but it cannot be installed automatically: {why}. Nothing was changed."
+        )
+    })?;
+
+    println!("codeconnect {installed_text} installed; fetching {latest_text}\u{2026}");
+
+    // `clear_leftovers` already removed this, and did so fail-closed.
+    let work = root.join("update.work");
+    std::fs::create_dir_all(&work).context("creating the update work directory")?;
+
+    let outcome = install_release(&assets, &latest_text, &work, &live, root, deps);
+    // Said rather than swallowed. It holds only the download and the unpacked
+    // copy — nothing that can be installed from — so it does not turn a
+    // successful update into a failed one, but a directory that cannot be
+    // removed is something the next run will refuse on, and the reason belongs
+    // where it happened.
+    if let Err(why) = crate::update_install::remove_tree(&work) {
+        eprintln!("the update work directory could not be removed: {why:#}");
+    }
+    outcome?;
+
+    println!("codeconnect {latest_text} installed.");
+    Ok(())
+}
+
+/// The download-verify-exchange half, so `run_update` reads as the sequence
+/// it is. Every failure before the exchange leaves the installed set
+/// untouched; a failed smoke test after it swaps the previous set back; a
+/// failed restart keeps the new, proven set and says so.
+fn install_release(
+    assets: &crate::update_release::ReleaseAssets,
+    version: &str,
+    work: &std::path::Path,
+    live: &std::path::Path,
+    root: &std::path::Path,
+    deps: &UpdateDeps,
+) -> Result<()> {
+    use crate::update_install as install;
+
+    let archive = work.join(&assets.archive.name);
+    (deps.download)(
+        &assets.archive.url,
+        &archive,
+        crate::update_release::MAX_ARCHIVE_BYTES,
+    )?;
+    let checksum_file = work.join(&assets.checksum.name);
+    (deps.download)(&assets.checksum.url, &checksum_file, 4096)?;
+
+    let expected = crate::update_release::parse_checksum(
+        &std::fs::read_to_string(&checksum_file).context("reading the checksum file")?,
+        &assets.archive.name,
+    )
+    .map_err(|why| anyhow::anyhow!("the checksum file is unusable: {why}"))?;
+    if install::digest_of(&archive)? != expected {
         anyhow::bail!(
-            "git pull --ff-only refused (see above); resolve it in {} and rerun",
-            root.display()
+            "the download does not match its published checksum, so it was not installed"
         );
     }
-    let installed = std::process::Command::new("/bin/bash")
-        .arg(root.join("mac/install.sh"))
-        .status()
-        .context("running install.sh")?;
-    if !installed.success() {
-        anyhow::bail!("install.sh failed (see above)");
+
+    // Judged whole before a byte is unpacked — see `validate_members`.
+    let members = install::list_members(&archive)?;
+    crate::update_release::validate_members(&members, version)
+        .map_err(|why| anyhow::anyhow!("the archive is not one this can install: {why}"))?;
+
+    let unpacked = work.join("unpacked");
+    install::extract(&archive, &unpacked)?;
+    let from = unpacked.join(format!("codeconnect-{version}"));
+
+    let staged = install::staging_dir(root);
+    // Fail-closed. This directory is what gets exchanged into place, so
+    // anything surviving in it from an earlier run would be installed as
+    // though this run had verified it.
+    install::remove_tree(&staged)?;
+    std::fs::create_dir_all(&staged).context("creating the staging directory")?;
+
+    // **One build across all three, not three binaries that agree on a
+    // number.** A release is built from one commit; a set whose members name
+    // different commits is not a release, however each one is signed.
+    let mut common: Option<String> = None;
+    for binary in crate::update_release::SHIPPED_BINARIES {
+        let candidate = from.join(binary);
+        (deps.verify_signature)(&candidate)?;
+        install::is_universal(&candidate)?;
+        let reported = (deps.probe_version)(&candidate)?;
+        let Some(build) = install::reported_build(&reported, binary, version) else {
+            anyhow::bail!(
+                "{binary} in the {version} archive reports `{reported}`, so the release \
+                 does not contain what it says it does"
+            );
+        };
+        match &common {
+            None => common = Some(build.to_string()),
+            Some(seen) if seen == build => {}
+            Some(seen) => anyhow::bail!(
+                "the {version} archive mixes builds — {binary} was built from {build} and \
+                 an earlier binary from {seen} — so it is not one release"
+            ),
+        }
+        std::fs::copy(&candidate, staged.join(binary))
+            .with_context(|| format!("staging {binary}"))?;
+    }
+    std::fs::copy(from.join("LICENSE"), staged.join("LICENSE"))
+        .context("staging the licence that ships with the binaries")?;
+    install::carry_over_strangers(live, &staged, &crate::update_release::SHIPPED_BINARIES)?;
+    install::sync_tree(&staged)?;
+
+    // The commit point. Before this line nothing on disk has moved.
+    install::exchange(&staged, live).context("installing the new binaries")?;
+
+    // Proven where they will actually be run from, and rolled back as one if
+    // any of them cannot run there.
+    for binary in crate::update_release::SHIPPED_BINARIES {
+        if let Err(why) = (deps.probe_version)(&live.join(binary)) {
+            match install::exchange(&staged, live) {
+                Ok(()) => anyhow::bail!(
+                    "{binary} did not run after installation ({why:#}), so the previous \
+                     version was put back"
+                ),
+                // Both the install and its undo failed. Saying "put back" here
+                // would be the one thing worse than the failure itself: the
+                // user needs to know exactly what is where.
+                Err(undo) => anyhow::bail!(
+                    "{binary} did not run after installation ({why:#}) and the previous \
+                     version could not be put back ({undo}). The new files are in {}, \
+                     and the previous ones are in {}.",
+                    live.display(),
+                    staged.display()
+                ),
+            }
+        }
+    }
+    // The previous set, now that the new one has been proven where it runs.
+    // Not fatal — the install is done and correct — but not silent either: the
+    // next update refuses on a staging directory it cannot clear, so this is
+    // the run that knows why.
+    if let Err(why) = install::remove_tree(&staged) {
+        eprintln!(
+            "codeconnect {version} is installed. The previous set could not be removed: {why:#}"
+        );
+        eprintln!(
+            "it is in {}, and the next update will refuse until it can be cleared.",
+            staged.display()
+        );
+    }
+
+    // **After the smoke test, never before.** A daemon restarted onto binaries
+    // that turn out not to run would take the product down; by here the new set
+    // has been proven where it will actually be run from.
+    //
+    // A failed restart does not roll the binaries back. The new daemon may
+    // already have started and touched state, and undoing an install underneath
+    // it is a worse outcome than saying plainly what happened.
+    match (deps.restart_daemon)() {
+        Ok(true) => println!("the daemon was restarted; sessions survive it."),
+        Ok(false) => {
+            println!("no managed daemon to restart. If one is running, restart it to pick this up.")
+        }
+        Err(why) => {
+            eprintln!("the new binaries are installed, but the daemon did not restart: {why:#}");
+            eprintln!(
+                "run `codeconnect daemon restart` once, and check `codeconnect daemon status`."
+            );
+            anyhow::bail!("the daemon did not restart");
+        }
     }
     Ok(())
+}
+
+/// The release listing, with failures that say what happened.
+///
+/// The background advisory deliberately collapses every network error into
+/// silence, which is right for something nobody asked for. An update someone
+/// typed is the opposite: it has to say why it could not do what it was told.
+fn fetch_latest_release() -> Result<Vec<u8>> {
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-q",
+            "-fsS",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "20",
+            "--max-filesize",
+            "1048576",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "https://api.github.com/repos/faisalmumtaz89/CodeConnect/releases/latest",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("asking GitHub for the latest release")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "could not reach GitHub to find the latest release: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
 }
 
 fn unix_now() -> u64 {
@@ -995,46 +1016,25 @@ mod tests {
 
     // ------------------------------------------------------------- update
 
-    /// The two honest refusals: no record at all, and a record whose
-    /// checkout has stopped being one. Both name the path and both leave
-    /// The honest refusals, each against a real filesystem shape and none
-    /// touching process environment: no record; a record pointing at a
-    /// directory that is not a checkout; a checkout that is not a git work
-    /// tree — and then the acceptance, against a real `git init` work tree.
+    /// **Two updates cannot interleave.** Each stages into the same
+    /// `bin.incoming` and finishes with a directory exchange; two of those
+    /// overlapping could exchange the wrong set into place. The lock is a
+    /// separate one from the advisory throttle because losing that one is
+    /// harmless and losing this one is not.
     #[test]
-    fn the_checkout_record_is_validated_never_trusted() {
-        let dir = temp_dir("checkout");
-        let record = dir.join("source-checkout");
+    fn only_one_update_may_run_at_a_time() {
+        let dir = temp_dir("update-lock");
+        let lock = dir.join(".update.lock");
 
-        let why = recorded_checkout_at(&record).expect_err("no record file yet");
-        assert!(why.contains("no checkout is recorded"), "{why}");
-
-        // A record pointing somewhere without the installer.
-        let fake = dir.join("not-a-checkout");
-        std::fs::create_dir_all(&fake).unwrap();
-        std::fs::write(&record, fake.to_string_lossy().as_bytes()).unwrap();
-        let why = recorded_checkout_at(&record).expect_err("no installer, no checkout");
-        assert!(why.contains("install.sh"), "{why}");
-
-        // The installer exists but there is no git work tree around it.
-        std::fs::create_dir_all(fake.join("mac")).unwrap();
-        std::fs::write(fake.join("mac/install.sh"), b"#!/bin/bash\n").unwrap();
-        let why = recorded_checkout_at(&record).expect_err("not a work tree");
-        assert!(why.contains("work tree"), "{why}");
-
-        // A real work tree: accepted, and its cleanliness is readable.
-        assert!(std::process::Command::new("git")
-            .args(["-C"])
-            .arg(&fake)
-            .args(["init", "-q"])
-            .status()
-            .unwrap()
-            .success());
-        let root = recorded_checkout_at(&record).expect("a real checkout validates");
-        assert_eq!(root, fake);
+        let held = claim_throttle_at(&lock).expect("the first update claims it");
         assert!(
-            !checkout_is_clean(&root).unwrap(),
-            "the untracked installer counts as local state"
+            claim_throttle_at(&lock).is_none(),
+            "a second update must be refused while the first holds the lock"
+        );
+        drop(held);
+        assert!(
+            claim_throttle_at(&lock).is_some(),
+            "and the lock is free again once the first finishes"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1504,5 +1504,672 @@ mod tests {
             None,
             "no validated answer, no claim"
         );
+    }
+
+    /// The downgrade every other check in the updater would walk straight
+    /// through: an older release is genuine, correctly signed, and correctly
+    /// checksummed.
+    #[test]
+    fn an_older_release_is_refused_and_the_same_one_is_a_repair() {
+        assert!(may_install("0.5.0", "0.4.0").is_ok(), "newer installs");
+        assert!(
+            may_install("0.4.0", "0.4.0").is_ok(),
+            "the same version is the repair path for a mismatched set"
+        );
+
+        let refused = may_install("0.3.0", "0.4.0").expect_err("older must be refused");
+        assert!(
+            refused.contains("0.3.0") && refused.contains("0.4.0"),
+            "the refusal has to name both versions: {refused}"
+        );
+
+        assert!(
+            may_install("0.9.0", "0.10.0").is_err(),
+            "ordered by value — as text, `0.10.0` sorts before `0.9.0`"
+        );
+        assert!(
+            may_install("not-a-version", "0.4.0").is_err(),
+            "anything that cannot be ordered is refused, never compared as text"
+        );
+        assert!(may_install("0.5.0", "build unknown").is_err());
+    }
+
+    // ---------------------------------------------------- the whole update
+    //
+    // `run_update_at` against a real filesystem: real checksum arithmetic,
+    // real archives built with the system `tar`, real Mach-O headers, real
+    // staging and a real directory exchange. Only the five seams in
+    // `UpdateDeps` are injected — the network cannot be reached from a test
+    // and a Developer ID signature cannot be produced by one, so what these
+    // tests prove is that the judgments cannot be skipped, reordered, or
+    // applied to the wrong files. The judgments themselves have their own
+    // tests.
+
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// A minimal fat header carrying both release architectures: enough for
+    /// `is_universal` to read, with the version line riding behind it for the
+    /// injected probe. `arm64_only` produces the thin-slice refusal case.
+    fn fixture_binary(name: &str, version: &str, build: &str, arm64_only: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xcafe_babe_u32.to_be_bytes());
+        let cputypes: &[u32] = if arm64_only {
+            &[0x0100_000c]
+        } else {
+            &[0x0100_000c, 0x0100_0007]
+        };
+        bytes.extend_from_slice(&(cputypes.len() as u32).to_be_bytes());
+        for cputype in cputypes {
+            let mut entry = [0u8; 20];
+            entry[..4].copy_from_slice(&cputype.to_be_bytes());
+            bytes.extend_from_slice(&entry);
+        }
+        bytes.extend_from_slice(format!("\nSAYS:{name} {version} ({build})\n").as_bytes());
+        bytes
+    }
+
+    /// Write a fixture binary the way a binary exists on disk: executable.
+    /// The real pipeline — tar, extraction, `fs::copy`, the exchange — must
+    /// carry that bit through, and the probe below refuses a file without it.
+    fn place_binary(path: &std::path::Path, bytes: Vec<u8>) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The `SAYS:` line a fixture binary carries — the injected stand-in for
+    /// running `--version`. It reads the file instead of executing it, but
+    /// holds the file to what execution would require: a file without the
+    /// executable bit "does not run", exactly as `exec` would refuse it.
+    fn probe_says(path: &std::path::Path) -> Result<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(path).with_context(|| format!("{}", path.display()))?;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("{} is not executable", path.display());
+        }
+        let content = std::fs::read(path).with_context(|| format!("{}", path.display()))?;
+        let text = String::from_utf8_lossy(&content);
+        text.lines()
+            .find_map(|line| line.strip_prefix("SAYS:"))
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("{} does not run", path.display()))
+    }
+
+    /// Everything one scenario needs on disk: a root with a live set and a
+    /// packaged release with its checksum, addressable by asset URL.
+    struct Rig {
+        root: PathBuf,
+        live: PathBuf,
+        body: Vec<u8>,
+        by_url: BTreeMap<String, PathBuf>,
+        /// What each live binary said before the update — the reference the
+        /// smoke-failure fault uses to tell the new file from the old one.
+        old_lines: BTreeMap<String, String>,
+    }
+
+    /// The rig owns its temporary root; scenarios come and go with `cargo
+    /// test` and must not accumulate under the temp directory.
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// What one scenario may break, each `None`/`Ok` by default.
+    #[derive(Default)]
+    struct Faults {
+        /// Fail the Nth signature judgment (1-based).
+        refuse_signature_call: Option<usize>,
+        /// Fail the smoke probe of this binary at its installed path.
+        refuse_live_probe_of: Option<&'static str>,
+        /// What the daemon restart reports.
+        restart: Option<std::result::Result<bool, String>>,
+    }
+
+    struct Ran {
+        outcome: Result<()>,
+        /// Every seam crossing, in order: `fetch`,
+        /// `download <url> (max <bytes>)`, `verify <place>/<file>`,
+        /// `probe <place>/<file>`, `restart`.
+        events: Vec<String>,
+    }
+
+    fn rig(version: &str, live_builds: [&str; 3]) -> Rig {
+        // Distinct per rig, not per moment: parallel tests share the pid
+        // and can share the millisecond, and two rigs on one root would race
+        // each other's update lock and live set.
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "cc-update-{}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms(),
+            NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let live = root.join("bin");
+        std::fs::create_dir_all(&live).unwrap();
+        // The live set: one build id per binary so a scenario can skew them,
+        // plus a stranger the update must carry through untouched.
+        let mut old_lines = BTreeMap::new();
+        for (binary, build) in ["codeconnect", "ccd", "cc-hook"].iter().zip(live_builds) {
+            place_binary(
+                &live.join(binary),
+                fixture_binary(binary, env!("CARGO_PKG_VERSION"), build, false),
+            );
+            old_lines.insert(binary.to_string(), probe_says(&live.join(binary)).unwrap());
+        }
+        std::fs::write(live.join("stranger.txt"), b"not ours to judge").unwrap();
+
+        let fixtures = root.join("fixtures");
+        let dir = fixtures.join(format!("codeconnect-{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            place_binary(
+                &dir.join(binary),
+                fixture_binary(binary, version, "bbbbbbbbbbbb", false),
+            );
+        }
+        std::fs::write(dir.join("LICENSE"), b"the licence").unwrap();
+
+        let archive_name = crate::update_release::archive_name(version);
+        let archive = fixtures.join(&archive_name);
+        let listed = format!("codeconnect-{version}");
+        let status = std::process::Command::new("tar")
+            .current_dir(&fixtures)
+            .arg("-czf")
+            .arg(&archive_name)
+            .args([
+                format!("{listed}/codeconnect"),
+                format!("{listed}/ccd"),
+                format!("{listed}/cc-hook"),
+                format!("{listed}/LICENSE"),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "tar packages the fixture");
+
+        let digest = crate::update_install::digest_of(&archive).unwrap();
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        let checksum_name = crate::update_release::checksum_name(version);
+        std::fs::write(
+            fixtures.join(&checksum_name),
+            format!("{hex}  {archive_name}\n"),
+        )
+        .unwrap();
+
+        let mut by_url = BTreeMap::new();
+        let asset = |name: &str, by_url: &mut BTreeMap<String, PathBuf>| {
+            let url = format!("https://release.invalid/{name}");
+            by_url.insert(url.clone(), fixtures.join(name));
+            let size = std::fs::metadata(fixtures.join(name)).unwrap().len();
+            format!(r#"{{"name":"{name}","browser_download_url":"{url}","size":{size}}}"#)
+        };
+        let archive_json = asset(&archive_name, &mut by_url);
+        let checksum_json = asset(&checksum_name, &mut by_url);
+        let body =
+            format!(r#"{{"tag_name":"v{version}","assets":[{archive_json},{checksum_json}]}}"#)
+                .into_bytes();
+
+        Rig {
+            root,
+            live,
+            body,
+            by_url,
+            old_lines,
+        }
+    }
+
+    fn run(rig: &Rig, faults: Faults) -> Ran {
+        let events: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let signature_calls = RefCell::new(0usize);
+
+        let fetch = || {
+            events.borrow_mut().push("fetch".to_string());
+            Ok(rig.body.clone())
+        };
+        let download = |url: &str, into: &std::path::Path, max: u64| {
+            // The ceiling is part of the contract — a caller passing the
+            // wrong bound would download with the wrong protection, so it is
+            // recorded for the assertions, not discarded.
+            events
+                .borrow_mut()
+                .push(format!("download {url} (max {max})"));
+            let from = rig
+                .by_url
+                .get(url)
+                .ok_or_else(|| anyhow::anyhow!("no such asset: {url}"))?;
+            std::fs::copy(from, into).map(|_| ()).map_err(Into::into)
+        };
+        let verify = |path: &std::path::Path| {
+            let call = {
+                let mut count = signature_calls.borrow_mut();
+                *count += 1;
+                *count
+            };
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let place = if path.parent() == Some(rig.live.as_path()) {
+                "live"
+            } else {
+                "staged"
+            };
+            events.borrow_mut().push(format!("verify {place}/{name}"));
+            if faults.refuse_signature_call == Some(call) {
+                anyhow::bail!("{name} is not signed by CodeConnect");
+            }
+            Ok(())
+        };
+        let probe = |path: &std::path::Path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let place = if path.parent() == Some(rig.live.as_path()) {
+                "live"
+            } else {
+                "staged"
+            };
+            events.borrow_mut().push(format!("probe {place}/{name}"));
+            if place == "live" && faults.refuse_live_probe_of == Some(name.as_str()) {
+                // Refuses only the *new* file at the live path — the smoke
+                // test after the exchange — never the pre-update reading of
+                // the old set, which is told apart by the exact line the rig
+                // recorded before the update began.
+                let is_the_old_file =
+                    probe_says(path).is_ok_and(|says| Some(&says) == rig.old_lines.get(&name));
+                if !is_the_old_file {
+                    anyhow::bail!("{name} does not run here");
+                }
+            }
+            probe_says(path)
+        };
+        let restart = || {
+            events.borrow_mut().push("restart".to_string());
+            match &faults.restart {
+                None => Ok(true),
+                Some(Ok(loaded)) => Ok(*loaded),
+                Some(Err(why)) => Err(anyhow::anyhow!("{why}")),
+            }
+        };
+
+        let deps = UpdateDeps {
+            fetch_latest_release: &fetch,
+            download: &download,
+            verify_signature: &verify,
+            probe_version: &probe,
+            restart_daemon: &restart,
+        };
+        let outcome = run_update_at(&rig.root, &deps);
+        Ran {
+            outcome,
+            events: events.into_inner(),
+        }
+    }
+
+    fn snapshot(dir: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// The version this test binary was compiled as — the "running" version
+    /// every scenario is judged against.
+    fn running() -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    fn newer() -> String {
+        let (major, minor, patch) = installed_version();
+        format!("{major}.{minor}.{patch}", patch = patch + 1,)
+    }
+
+    #[test]
+    fn a_downgrade_is_refused_before_a_byte_is_downloaded() {
+        let fixture = rig("0.0.1", ["aaaaaaaaaaaa"; 3]);
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_err());
+        assert_eq!(
+            ran.events,
+            vec!["fetch".to_string()],
+            "asking what the latest release is came first and nothing followed it"
+        );
+        assert_eq!(snapshot(&fixture.live), before, "the live set is untouched");
+    }
+
+    #[test]
+    fn a_current_set_downloads_nothing() {
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+        assert!(
+            !ran.events.iter().any(|event| event.starts_with("download")),
+            "nothing to do means nothing fetched: {:?}",
+            ran.events
+        );
+        assert!(!ran.events.contains(&"restart".to_string()));
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    #[test]
+    fn an_equal_version_skew_is_repaired_not_blessed() {
+        // Same version, three binaries from two builds: the state a release
+        // never produced, repaired by reinstalling the release.
+        let fixture = rig(&running(), ["aaaaaaaaaaaa", "cccccccccccc", "aaaaaaaaaaaa"]);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            assert_eq!(
+                probe_says(&fixture.live.join(binary)).unwrap(),
+                format!("{binary} {} (bbbbbbbbbbbb)", running()),
+                "the skewed set was replaced by the release, each binary its own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_checksum_stops_the_install_with_the_live_set_untouched() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let checksum = fixture
+            .by_url
+            .values()
+            .find(|path| path.to_string_lossy().ends_with(".sha256"))
+            .unwrap();
+        let name = crate::update_release::archive_name(&newer());
+        std::fs::write(checksum, format!("{}  {name}\n", "ab".repeat(32))).unwrap();
+
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_err());
+        assert!(!ran.events.iter().any(|event| event == "restart"));
+        assert!(
+            !ran.events.iter().any(|event| event.starts_with("verify")),
+            "a mismatched archive is never handed to the signature judge"
+        );
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    #[test]
+    fn an_archive_with_a_directory_member_is_refused_whole() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        // Repackage the same tree the wrong way: naming the directory writes
+        // a directory member the validator refuses.
+        let fixtures = fixture.root.join("fixtures");
+        let archive_name = crate::update_release::archive_name(&newer());
+        let status = std::process::Command::new("tar")
+            .current_dir(&fixtures)
+            .arg("-czf")
+            .arg(&archive_name)
+            .arg(format!("codeconnect-{}", newer()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let digest = crate::update_install::digest_of(&fixtures.join(&archive_name)).unwrap();
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        std::fs::write(
+            fixtures.join(crate::update_release::checksum_name(&newer())),
+            format!("{hex}  {archive_name}\n"),
+        )
+        .unwrap();
+
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_err());
+        assert!(!ran.events.iter().any(|event| event.starts_with("verify")));
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    #[test]
+    fn a_refused_signature_on_any_of_the_three_stops_everything() {
+        for call in 1..=3 {
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let before = snapshot(&fixture.live);
+            let ran = run(
+                &fixture,
+                Faults {
+                    refuse_signature_call: Some(call),
+                    ..Faults::default()
+                },
+            );
+            assert!(ran.outcome.is_err(), "call {call} refused");
+            assert!(!ran.events.contains(&"restart".to_string()));
+            assert_eq!(
+                snapshot(&fixture.live),
+                before,
+                "refusal on signature {call} left the live set untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thin_binary_in_the_archive_is_refused() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        // Rebuild the archive with one thin slice — signed, versioned, and
+        // still not installable.
+        let fixtures = fixture.root.join("fixtures");
+        let dir = fixtures.join(format!("codeconnect-{}", newer()));
+        place_binary(
+            &dir.join("ccd"),
+            fixture_binary("ccd", &newer(), "bbbbbbbbbbbb", true),
+        );
+        repackage(&fixture, &newer());
+
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_err());
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    #[test]
+    fn an_archive_whose_binaries_mix_builds_is_refused() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixtures = fixture.root.join("fixtures");
+        let dir = fixtures.join(format!("codeconnect-{}", newer()));
+        place_binary(
+            &dir.join("cc-hook"),
+            fixture_binary("cc-hook", &newer(), "dddddddddddd", false),
+        );
+        repackage(&fixture, &newer());
+
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        let refused = ran.outcome.unwrap_err().to_string();
+        assert!(refused.contains("mixes builds"), "{refused}");
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    #[test]
+    fn a_binary_reporting_the_wrong_version_is_refused() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let fixtures = fixture.root.join("fixtures");
+        let dir = fixtures.join(format!("codeconnect-{}", newer()));
+        place_binary(
+            &dir.join("codeconnect"),
+            fixture_binary("codeconnect", "9.9.9", "bbbbbbbbbbbb", false),
+        );
+        repackage(&fixture, &newer());
+
+        let before = snapshot(&fixture.live);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_err());
+        assert_eq!(snapshot(&fixture.live), before);
+    }
+
+    /// Rebuild the fixture archive and checksum after a scenario edited the
+    /// tree — the same four-member packaging the rig itself uses.
+    fn repackage(fixture: &Rig, version: &str) {
+        let fixtures = fixture.root.join("fixtures");
+        let archive_name = crate::update_release::archive_name(version);
+        let listed = format!("codeconnect-{version}");
+        let status = std::process::Command::new("tar")
+            .current_dir(&fixtures)
+            .arg("-czf")
+            .arg(&archive_name)
+            .args([
+                format!("{listed}/codeconnect"),
+                format!("{listed}/ccd"),
+                format!("{listed}/cc-hook"),
+                format!("{listed}/LICENSE"),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let digest = crate::update_install::digest_of(&fixtures.join(&archive_name)).unwrap();
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        std::fs::write(
+            fixtures.join(crate::update_release::checksum_name(version)),
+            format!("{hex}  {archive_name}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_successful_update_downloads_verifies_exchanges_and_only_then_restarts() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+
+        // Exactly the two assets the release named, each under the ceiling
+        // that protects its kind of file — nothing else, nothing unbounded.
+        let downloads: Vec<&String> = ran
+            .events
+            .iter()
+            .filter(|event| event.starts_with("download"))
+            .collect();
+        let archive_name = crate::update_release::archive_name(&newer());
+        assert_eq!(
+            downloads,
+            vec![
+                &format!(
+                    "download https://release.invalid/{archive_name} (max {})",
+                    crate::update_release::MAX_ARCHIVE_BYTES
+                ),
+                &format!("download https://release.invalid/{archive_name}.sha256 (max 4096)"),
+            ]
+        );
+
+        // The signature judgment landed on the three unpacked candidates —
+        // each exactly once, never on a live path, never on the same file
+        // twice while another goes unjudged.
+        let verifies: Vec<&String> = ran
+            .events
+            .iter()
+            .filter(|event| event.starts_with("verify"))
+            .collect();
+        assert_eq!(
+            verifies,
+            vec![
+                "verify staged/codeconnect",
+                "verify staged/ccd",
+                "verify staged/cc-hook"
+            ]
+        );
+        // And per binary, judged before it is ever run: probing first would
+        // execute downloaded code whose signature nobody has looked at.
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            let judged = ran
+                .events
+                .iter()
+                .position(|event| event == &format!("verify staged/{binary}"))
+                .unwrap();
+            let executed = ran
+                .events
+                .iter()
+                .position(|event| event == &format!("probe staged/{binary}"))
+                .unwrap();
+            assert!(judged < executed, "{binary} was judged before it was run");
+        }
+
+        // Every judgment before the smoke test, the smoke test on all three
+        // installed paths, the restart dead last. The *last* probe of each
+        // live path is the smoke test — the first is the pre-update reading
+        // of the old set.
+        let last = |needle: &str| {
+            ran.events
+                .iter()
+                .rposition(|event| event == needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {:?}", ran.events))
+        };
+        let last_verify = ran
+            .events
+            .iter()
+            .rposition(|event| event.starts_with("verify"))
+            .unwrap();
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            let smoke = last(&format!("probe live/{binary}"));
+            assert!(
+                last_verify < smoke,
+                "every signature judged before {binary} was smoke-tested"
+            );
+            assert!(smoke < last("restart"), "restart waits for {binary}");
+        }
+        assert_eq!(ran.events.last().map(String::as_str), Some("restart"));
+
+        let after = snapshot(&fixture.live);
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            assert_eq!(
+                probe_says(&fixture.live.join(binary)).unwrap(),
+                format!("{binary} {} (bbbbbbbbbbbb)", newer()),
+                "the file installed under this name is this binary, not a copy \
+                 of another that happens to share the build"
+            );
+        }
+        assert_eq!(
+            after["stranger.txt"], b"not ours to judge",
+            "a file the release does not ship survives the exchange"
+        );
+        assert!(
+            !crate::update_install::staging_dir(&fixture.root).exists(),
+            "nothing left behind"
+        );
+        assert!(!fixture.root.join("update.work").exists());
+    }
+
+    #[test]
+    fn a_smoke_failure_of_any_binary_restores_the_previous_set_and_never_restarts() {
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let before = snapshot(&fixture.live);
+            let ran = run(
+                &fixture,
+                Faults {
+                    refuse_live_probe_of: Some(binary),
+                    ..Faults::default()
+                },
+            );
+            let said = ran.outcome.unwrap_err().to_string();
+            assert!(said.contains("put back"), "{binary}: {said}");
+            assert!(!ran.events.contains(&"restart".to_string()));
+            assert_eq!(
+                snapshot(&fixture.live),
+                before,
+                "{binary} failing its smoke test restored the previous set byte for byte"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_restart_keeps_the_installed_set_and_says_so() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let ran = run(
+            &fixture,
+            Faults {
+                restart: Some(Err("launchd said no".to_string())),
+                ..Faults::default()
+            },
+        );
+        let said = ran.outcome.unwrap_err().to_string();
+        assert!(said.contains("restart"), "{said}");
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            assert_eq!(
+                probe_says(&fixture.live.join(binary)).unwrap(),
+                format!("{binary} {} (bbbbbbbbbbbb)", newer()),
+                "the proven install stays installed; only the restart failed"
+            );
+        }
     }
 }

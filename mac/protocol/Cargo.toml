@@ -10,8 +10,3 @@ description = "Shared CodeConnect types: event log envelope, unix-socket IPC fra
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-
-# build.rs computes the same ship-source fingerprint the library compares
-# against at launch — one algorithm, two compile contexts.
-[build-dependencies]
-sha2 = { workspace = true }

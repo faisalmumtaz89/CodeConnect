@@ -8,8 +8,8 @@ comparison truthful. A test (`the_workspace_version_is_parseable` in
 `mac/codeconnect/src/update_check.rs`) fails CI if the workspace version
 ever stops being a plain `X.Y.Z`.
 
-The iOS app is a separate track: it ships through the App Store on its own
-version, and nothing here touches it. Within a protocol major, the app
+The iOS app is a separate track: it is built from source in Xcode and is
+not distributed, and nothing here touches it. Within a protocol major, the app
 tolerates an older daemon per surface — newer features hide or say what to
 update; a protocol-*major* mismatch is refused outright, on both sides.
 
@@ -18,10 +18,12 @@ update; a protocol-*major* mismatch is refused outright, on both sides.
 * The tag names the exact commit whose workspace version it matches:
   `vX.Y.Z` tags a commit where `mac/Cargo.toml` says `version = "X.Y.Z"`.
 * Publish releases from ever-newer commits, with strictly increasing
-  versions. GitHub's `releases/latest` is the non-draft, non-prerelease
-  release whose **tagged commit is most recent** — commit date, not
-  publication date, and not the greatest semver — so a release cut from an
-  older commit after a newer one would misreport "latest" to every checker.
+  versions. The workflow claims "latest" explicitly at publication
+  (`make_latest`), and GitHub defaults new releases to that claim anyway —
+  so whatever publishes last is what every checker sees, whoever published
+  it. That is exactly why the workflow refuses to publish a version that is
+  not strictly newer, twice: once before building and again at the moment
+  of publication — and why a release must never be published by hand.
 * A published release is never deleted or retagged. Machines have already
   compared against it; rewriting it rewrites their history.
 * **Version numbers move with capability, not only with releases.** Any
@@ -30,10 +32,8 @@ update; a protocol-*major* mismatch is refused outright, on both sides.
   one. Between releases the binaries stay tellable-apart anyway: every build
   embeds its git commit — `codeconnect --version` prints
   `codeconnect X.Y.Z (<12-hex commit>)`, `-dirty` when built from an edited
-  tree, `(build unknown)` outside a checkout — and `codeconnect claude`
-  compares the installed build against the recorded checkout on every
-  launch, so an uninstalled local change is announced without any release
-  existing.
+  tree, `(build unknown)` outside a checkout — so two builds that share a
+  version number are still tellable apart by the commit they name.
 * Plain `X.Y.Z` only — no suffixes. The checker's validator rejects
   anything else outright, so a `v0.3.0-rc1` tag would simply never reach a
   user, and publishing it as "latest" would mask the release before it.
@@ -79,21 +79,48 @@ Each block starts from the repository root.
    Wait for CI to go green on that commit before tagging it — a tag is a
    claim the commit builds, and CI is the proof.
 
-4. **Confirm the version is a step forward, then tag and publish.**
-   `--verify-tag` is load-bearing: without it, `gh release create` invents
-   a missing tag from the default branch, which may not be the commit you
-   verified.
+4. **Tag. The push builds and verifies a draft — it never publishes.**
+
+   Pushing the tag starts `.github/workflows/release.yml`, which pins the
+   tag to one commit, builds both architectures from that commit, signs and
+   notarizes them, attaches the archive to a **draft**, downloads those
+   exact assets back and re-verifies them — and stops there. A draft is
+   visible only to people who can see the repository's drafts, so nothing a
+   user can reach has changed yet. Do not create the release yourself: a
+   version that is not strictly newer than the current `releases/latest` is
+   refused before anything is built, and a tag that already carries a
+   published release is refused at the draft step — after signing, but
+   before any live release is touched. `codeconnect update` independently
+   refuses to install a release older than what is running — the producer
+   checks stop a bad release being made, the updater's stops one that
+   already exists from being installed.
 
    ```sh
-   gh api 'repos/{owner}/{repo}/releases/latest' --jq .tag_name   # must be older than X.Y.Z (HTTP 404 means first release)
    git tag vX.Y.Z && git push origin vX.Y.Z
-   gh release create vX.Y.Z --verify-tag --title "CodeConnect X.Y.Z" --notes "…"
+   gh run watch                                   # ends at "verified draft"
    ```
 
-   Not a draft, not a prerelease — the checker only sees published
-   releases.
+5. **Publish, as its own deliberate act.** Run the same workflow with
+   publishing enabled. It refuses outright if step 4's draft does not exist —
+   a publish run never quietly becomes a create-and-publish run. It rebuilds
+   and re-verifies everything from the same tag — publication publishes
+   exactly the bytes the publishing run itself proved — and then, only after
+   rechecking that the draft is still a draft with exactly the verified
+   assets, that the version is still newer than the published latest, and
+   that the tag still names the pinned commit, flips it live. This is the
+   moment `codeconnect update` on every machine can see it.
 
-5. **Verify the claim on the server, not just locally** — this is what the
+   ```sh
+   gh workflow run release.yml -f tag=vX.Y.Z -f publish=true
+   gh run watch
+   ```
+
+   The first time the signing secrets are exercised, do step 4 alone and
+   inspect the draft before running this — that is the whole rehearsal
+   procedure. A rehearsal draft that should be discarded:
+   `gh release delete vX.Y.Z --yes` (the tag itself stays).
+
+6. **Verify the claim on the server, not just locally** — this is what the
    checkers will actually read:
 
    ```sh
@@ -101,10 +128,10 @@ Each block starts from the repository root.
    gh api 'repos/{owner}/{repo}/releases/latest' --jq .tag_name   # must print vX.Y.Z
    ```
 
-6. **Update this machine**, so your own launches stay quiet:
+7. **Update this machine**, so your own launches stay quiet:
 
    ```sh
-   (cd mac && ./install.sh)      # builds, installs, restarts the daemon
+   codeconnect update             # installs the release, restarts the daemon
    codeconnect --version          # prints X.Y.Z
    codeconnect daemon status      # no STALE line, no upgrade note
    ```

@@ -1,0 +1,665 @@
+# Builds, signs, notarizes and verifies the Mac binaries for a release.
+#
+# **Every run proves a draft end to end; publication is a separate, explicit
+# act.** `codeconnect update` installs whatever `releases/latest` points at, so
+# the moment of publication is the moment every machine can be handed these
+# bytes. A tag push builds and verifies a draft and stops. Publishing requires
+# a person to run the workflow with publishing enabled *against a draft that
+# already exists* — that run re-proves everything and promotes exactly the
+# bytes it proved.
+#
+# **One commit, pinned once.** The `pin` job resolves the tag to a commit SHA
+# and every other job checks out that SHA — never the tag, which is mutable.
+# Publication re-verifies that the tag still resolves to the pinned commit, so
+# a tag moved mid-run is a refusal rather than a release whose halves came from
+# different code.
+#
+# **The draft is handled by its numeric id.** GitHub's get-release-by-tag
+# endpoint returns only *published* releases — a draft is invisible to it — so
+# every step after creation addresses the draft by the id captured at creation
+# (or recovered from the authenticated release listing on a rerun), and
+# publication is a PATCH on that id after rechecking what it holds.
+#
+# **Nothing in the tree is modified before building.** `protocol/build.rs`
+# bakes the commit and a dirty flag by reading git directly, so a version bump,
+# a `sed`, or a generated file here would ship binaries permanently claiming
+# they were built from an edited tree. Per RELEASING.md the version is
+# committed before the tag, so there is nothing to do.
+#
+# **Order is load-bearing:** build each arch natively → `lipo` → *then* sign →
+# *then* notarize. Signing before `lipo` produces a universal file whose
+# signature no longer matches what it contains.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.4.0"
+        required: true
+      publish:
+        description: "Publish. Leave off to stop at a verified draft."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  # The logical tag, never `github.ref`. A tag push arrives as
+  # `refs/tags/v0.4.0` and a manual dispatch for that same tag arrives as
+  # `refs/heads/main`, so keying on the ref would let two runs for one release
+  # proceed at once, each mutating the draft under the other.
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned, and the same for both slices: halves built against different
+  # minimums are an inconsistent universal binary. This is a published fact
+  # rather than whatever the runner image happened to default to.
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  pin:
+    name: Pin the release commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pin.outputs.sha }}
+      version: ${{ steps.pin.outputs.version }}
+      tag: ${{ steps.pin.outputs.tag }}
+      dir: ${{ steps.pin.outputs.dir }}
+    steps:
+      # Fully qualified for a dispatch: `actions/checkout` resolves a bare
+      # name as a remote *branch* before trying tags, so a branch that happens
+      # to be called `v0.5.0` would silently win over the tag of that name.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Resolve the tag to one commit, and validate everything about it
+        id: pin
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          tag="$RAW_TAG"
+          # Exactly `vX.Y.Z`, no leading zeroes, components inside u64 — the
+          # same rule the updater's own parser enforces, from the same file
+          # the ordering steps use. A glob would admit `v0.4.0-rc1` or
+          # `v0.04.0` and hand a tag downstream that the product refuses.
+          # shellcheck source=/dev/null
+          . "$GITHUB_WORKSPACE/.github/workflows/version-order.sh"
+          case "$tag" in v*) ;; *)
+            echo "::error::refusing a tag with no v prefix: $tag"; exit 1 ;;
+          esac
+          version="${tag#v}"
+          if ! valid_version "$version"; then
+            echo "::error::refusing a tag that is not plain vX.Y.Z: $tag"
+            exit 1
+          fi
+          in_source="$(awk -F'"' '/^version = /{print $2; exit}' mac/Cargo.toml)"
+          if [ "$version" != "$in_source" ]; then
+            echo "::error::tag $tag does not match the workspace version $in_source"
+            exit 1
+          fi
+          # `^{commit}` peels an annotated tag; a lightweight tag is already a
+          # commit. Everything downstream checks out this SHA, never the tag.
+          sha="$(git rev-parse "HEAD^{commit}")"
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "dir=codeconnect-$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "$tag is $sha"
+
+      # Before anything is built or signed, so a mistake costs seconds.
+      - name: Refuse a release that is not newer than the published one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          # `codeconnect update` installs whatever `releases/latest` points
+          # at, and the publish step below explicitly claims "latest"
+          # (`make_latest`) — so publishing a lower version today would hand
+          # every machine a downgrade as an upgrade. The updater refuses to
+          # move backwards; this refuses to create the situation, and the
+          # publish step asks again at the moment it matters.
+          #
+          # The status code decides, explicitly: 200 is an answer, 404 means
+          # no release exists yet, and anything else — rate limit, outage — is
+          # not permission to guess.
+          if ! code=$(curl -sS -o "$RUNNER_TEMP/latest.json" -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest"); then
+            echo "::error::could not reach the releases API"
+            exit 1
+          fi
+          case "$code" in
+            200) ;;
+            404) echo "no published release yet — $VERSION is the first"; exit 0 ;;
+            *) echo "::error::the releases API answered HTTP $code; refusing to guess"; exit 1 ;;
+          esac
+          previous="$(jq -r '.tag_name // empty' "$RUNNER_TEMP/latest.json")"
+          # shellcheck source=/dev/null
+          . "$GITHUB_WORKSPACE/.github/workflows/version-order.sh"
+          if ! version_strictly_newer "$VERSION" "${previous#v}"; then
+            echo "::error::$VERSION is not newer than the published latest '$previous'"
+            exit 1
+          fi
+          echo "$VERSION is newer than ${previous#v}"
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: pin
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # A native runner per architecture. `rusqlite` is built with the
+          # `bundled` feature, which compiles SQLite from C, and cross-compiling
+          # that is the single most likely thing to fail — so the risk class is
+          # deleted rather than planned around, at the cost of one extra job.
+          - arch: arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # The pinned SHA, not the tag: a real checkout with history for
+      # `build.rs`, and the same commit whichever job runs first.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pin.outputs.sha }}
+
+      - name: Refuse a tree that is not provably clean
+        run: |
+          # The status has to be *established*, not merely empty: a failed
+          # `git status` inside `$( )` yields an empty string, and an
+          # `[ -n ... ]` test would read that failure as a clean tree.
+          if ! status="$(git status --porcelain)"; then
+            echo "::error::git status failed; a clean tree cannot be proven"
+            exit 1
+          fi
+          if [ -n "$status" ]; then
+            echo "::error::the tree is dirty; binaries would claim they were built from an edited tree"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --manifest-path mac/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --bin codeconnect --bin ccd --bin cc-hook
+
+      - name: Check the deployment target landed
+        run: |
+          for binary in codeconnect ccd cc-hook; do
+            path="mac/target/${{ matrix.target }}/release/$binary"
+            got="$(vtool -show-build "$path" | awk '/minos/ {print $2; exit}')"
+            if [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+              echo "::error::$binary targets macOS $got, expected $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+          done
+
+      # Natively, per slice, while each slice can still be run on its own
+      # architecture. The combined universal binary can only ever be asked
+      # this on the publishing runner, which answers for one of the two
+      # halves — the other half would never be asked at all.
+      - name: Check the slice says exactly what it is
+        env:
+          SHA: ${{ needs.pin.outputs.sha }}
+          VERSION: ${{ needs.pin.outputs.version }}
+        run: |
+          # The whole line is knowable from the pinned commit, so it is
+          # compared as a literal. A regex built from the version would leave
+          # its dots as wildcards, and `0.4.0` would accept `0x4y0`.
+          for binary in codeconnect ccd cc-hook; do
+            expected="$binary $VERSION (${SHA:0:12})"
+            said="$("mac/target/${{ matrix.target }}/release/$binary" --version)"
+            if [ "$said" != "$expected" ]; then
+              echo "::error::$binary reports '$said', expected '$expected'"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slice-${{ matrix.arch }}
+          # Listed one per line: the artifact glob does not do shell brace
+          # expansion, and a pattern that matches nothing uploads nothing.
+          path: |
+            mac/target/${{ matrix.target }}/release/codeconnect
+            mac/target/${{ matrix.target }}/release/ccd
+            mac/target/${{ matrix.target }}/release/cc-hook
+          if-no-files-found: error
+
+  publish:
+    name: Sign, notarize, verify${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && ', publish' || '' }}
+    needs: [pin, build]
+    runs-on: macos-15
+    # Promotions run one at a time across ALL tags: the monotonic decision
+    # compares against `releases/latest`, and two promotions in parallel
+    # could each be newer than the latest they saw and publish out of order.
+    # Draft-only runs get a group of their own per run, so they never
+    # contend with a promotion. GitHub holds at most one *pending* run per
+    # group — a third promotion cancels the waiting second, visibly, and a
+    # cancelled promotion has published nothing. (`queue: max` would let
+    # them all wait, but no released actionlint accepts the key yet, and
+    # weakening the workflow lint costs more than a re-run.) The refusals
+    # inside the publish step — draft state, assets, monotonicity, tag→SHA —
+    # are what make ordering safe; this group only removes the interleaving.
+    concurrency:
+      group: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && 'release-publish-serial' || format('release-verify-{0}', github.run_id) }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pin.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: slices
+
+      # Both halves come from one pinned commit, so a mismatch means the
+      # workflow is wrong, not the code.
+      - name: Combine the slices
+        env:
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          mkdir -p "$DIR"
+          for binary in codeconnect ccd cc-hook; do
+            lipo -create -output "$DIR/$binary" \
+              "slices/slice-arm64/$binary" "slices/slice-x86_64/$binary"
+            # `upload-artifact` normalises uploaded files to 0644 and `lipo`
+            # carries the input mode into its output, so without this the
+            # binaries are not executable and every later step that runs one
+            # fails.
+            chmod 0755 "$DIR/$binary"
+            archs="$(lipo -archs "$DIR/$binary")"
+            case "$archs" in
+              *arm64*x86_64*|*x86_64*arm64*) ;;
+              *) echo "::error::$binary is not universal: $archs"; exit 1 ;;
+            esac
+          done
+          # The licence travels with the binaries because the licence says it
+          # must: a binaries-only archive is a distribution without its notice.
+          cp LICENSE "$DIR/LICENSE"
+
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          # A keychain that exists only for this run, so nothing is left behind
+          # on a shared runner image.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychain -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          pinned="$(awk -F'"' '/^pub const TEAM_ID/{print $2; exit}' \
+            mac/codeconnect/src/update_install.rs)"
+          if [ "$TEAM_ID" != "$pinned" ]; then
+            echo "::error::APPLE_TEAM_ID is $TEAM_ID but the updater pins $pinned;"
+            echo "::error::binaries signed by $TEAM_ID would be refused by every install"
+            exit 1
+          fi
+          identity="$(security find-identity -v -p codesigning \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::no Developer ID Application identity in the keychain"
+            exit 1
+          fi
+          for binary in codeconnect ccd cc-hook; do
+            codesign --force --options runtime --timestamp \
+              --sign "$identity" "$DIR/$binary"
+          done
+
+      - name: Notarize
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          # Apple accepts a zip, a flat package or a disk image — not a
+          # tarball. The zip exists only to carry the same signed bytes to the
+          # notary; the published archive is built from those bytes unchanged,
+          # and a notarization ticket is issued against each binary's own hash,
+          # so repackaging does not undo it. Nothing can be stapled to a bare
+          # executable, so Gatekeeper checks such a binary online.
+          ditto -c -k --keepParent "$DIR" notarize.zip
+          # `--wait` returns as soon as the submission reaches *a* terminal
+          # state, and `Invalid` and `Rejected` are terminal — so a completed
+          # `notarytool` is not an accepted one. The status is the only thing
+          # that says Apple took these binaries, and every later gate here
+          # checks signing, which would still pass on a rejected submission.
+          if ! xcrun notarytool submit notarize.zip \
+              --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
+              --wait --timeout 30m --output-format json \
+              > "$RUNNER_TEMP/notarize.json"; then
+            cat "$RUNNER_TEMP/notarize.json" || true
+            echo "::error::notarytool did not complete"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notarize.json"
+          status="$(jq -r '.status // empty' "$RUNNER_TEMP/notarize.json")"
+          if [ "$status" != "Accepted" ]; then
+            id="$(jq -r '.id // empty' "$RUNNER_TEMP/notarize.json")"
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --apple-id "$APPLE_ID" \
+                --team-id "$TEAM_ID" --password "$APP_PASSWORD" || true
+            fi
+            echo "::error::notarization is '${status:-unknown}', not Accepted"
+            exit 1
+          fi
+
+      # The same requirement `codeconnect update` enforces on a user's machine.
+      # Running it here means a release cannot be drafted that the product
+      # would then refuse to install.
+      - name: Verify the way the updater will
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          req="anchor apple generic \
+            and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+            and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+            and certificate leaf[subject.OU] = \"$TEAM_ID\""
+          for binary in codeconnect ccd cc-hook; do
+            path="$DIR/$binary"
+            codesign --verify --strict --all-architectures -R="$req" "$path"
+            # Captured, then searched — not piped into `grep -q`. `grep -q`
+            # exits at the first match, and the SIGPIPE that can leave on
+            # `codesign` would turn a present timestamp into a failed check.
+            info="$(codesign --display --verbose=4 "$path" 2>&1)"
+            if [[ $'\n'"$info" != *$'\n'Timestamp=* ]]; then
+              echo "::error::$binary has no secure timestamp"
+              exit 1
+            fi
+          done
+
+      - name: Check the combined binaries say exactly what they are
+        env:
+          SHA: ${{ needs.pin.outputs.sha }}
+          VERSION: ${{ needs.pin.outputs.version }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          # The same literal comparison the build jobs made per slice, repeated
+          # on the file that will actually ship: `lipo` is the one step between
+          # them, and a mis-combined binary would answer for the wrong code.
+          for binary in codeconnect ccd cc-hook; do
+            expected="$binary $VERSION (${SHA:0:12})"
+            said="$("$DIR/$binary" --version)"
+            if [ "$said" != "$expected" ]; then
+              echo "::error::$binary reports '$said', expected '$expected'"
+              exit 1
+            fi
+          done
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ needs.pin.outputs.version }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          archive="codeconnect-$VERSION-macos-universal.tar.gz"
+          # Named one by one, deliberately: `tar -czf "$archive" "$dir"` also
+          # writes a directory member, and the updater's archive validator
+          # allows only the four regular files. Packaging the directory would
+          # publish an archive the product refuses to install.
+          COPYFILE_DISABLE=1 tar -czf "$archive" \
+            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      # A draft is invisible to the get-release-by-tag endpoint, so the draft
+      # is found in the authenticated listing — which does include drafts —
+      # or created, and its numeric id is what every later step addresses.
+      - name: Find or create the draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.pin.outputs.tag }}
+          SHA: ${{ needs.pin.outputs.sha }}
+          VERSION: ${{ needs.pin.outputs.version }}
+          PROMOTING: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && 'true' || 'false' }}
+        run: |
+          # Before anything is created, adopted, or mutated: the tag must
+          # still name the pinned commit. Adoption deletes and replaces a
+          # draft's assets, and destroying a valid draft over a moved tag is
+          # damage even when the final publish check would have refused it.
+          git fetch --no-tags --depth=1 origin "refs/tags/$TAG"
+          at="$(git rev-parse "FETCH_HEAD^{commit}")"
+          if [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG now resolves to $at, not the pinned $SHA; refusing"
+            exit 1
+          fi
+
+          # `gh api` exits non-zero on any API failure, which fails this step:
+          # an unreadable listing is not permission to create anything. A
+          # fresh draft takes a few seconds to appear in the listing, so an
+          # empty answer is re-asked before it is believed — otherwise an
+          # immediate rerun would try to recreate a draft that exists and die
+          # on the collision.
+          find_matches() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq "[.[] | select(.tag_name == \"$TAG\")]" | jq -s 'add'
+          }
+          matches="$(find_matches)"
+          for _ in 1 2 3; do
+            [ "$(jq 'length' <<<"$matches")" != "0" ] && break
+            sleep 5
+            matches="$(find_matches)"
+          done
+          count="$(jq 'length' <<<"$matches")"
+          case "$count" in
+            0)
+              # Publication promotes a draft a previous run proved; a publish
+              # run that finds nothing to promote must not quietly become a
+              # create-and-publish run.
+              if [ "$PROMOTING" = "true" ]; then
+                echo "::error::no draft holds $TAG; run the workflow without publish first"
+                exit 1
+              fi
+              id="$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                -f tag_name="$TAG" -F draft=true -F generate_release_notes=true \
+                -f name="CodeConnect $VERSION" --jq .id)"
+              ;;
+            1)
+              if [ "$(jq -r '.[0].draft' <<<"$matches")" != "true" ]; then
+                echo "::error::$TAG is already published; this workflow will not modify a live release"
+                exit 1
+              fi
+              id="$(jq -r '.[0].id' <<<"$matches")"
+              ;;
+            *)
+              echo "::error::$count releases carry the tag $TAG; refusing to guess which"
+              exit 1
+              ;;
+          esac
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft id $id holds $TAG"
+
+      - name: Attach the assets
+        id: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          # By id, to this draft and no other. A rerun may find its own
+          # earlier upload under the same name; that asset is deleted first,
+          # because two assets cannot share a name and the bytes being
+          # attached are the ones this run verified.
+          for file in "$ARCHIVE" "$ARCHIVE.sha256"; do
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq ".assets[] | select(.name == \"$file\") | .id")"
+            for asset in $existing; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset"
+            done
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$file" \
+              > /dev/null
+          done
+          # Read back what the draft now holds; these exact asset ids are what
+          # the verification step downloads and what publication rechecks.
+          archive_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --jq ".assets[] | select(.name == \"$ARCHIVE\") | .id")"
+          checksum_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --jq ".assets[] | select(.name == \"$ARCHIVE.sha256\") | .id")"
+          if [ -z "$archive_id" ] || [ -z "$checksum_id" ]; then
+            echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
+            exit 1
+          fi
+          {
+            echo "archive_id=$archive_id"
+            echo "checksum_id=$checksum_id"
+          } >> "$GITHUB_OUTPUT"
+
+      # Downloaded back from the draft rather than checked in place: this is
+      # the first moment the bytes a user would actually receive have existed.
+      - name: Verify the assets a user would receive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
+          CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
+          DIR: ${{ needs.pin.outputs.dir }}
+        run: |
+          mkdir -p roundtrip && cd roundtrip
+          # By asset id, with the octet-stream accept header — the only form
+          # in which a draft's assets can be fetched at all.
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$ARCHIVE_ID" > "$ARCHIVE"
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$CHECKSUM_ID" > "$ARCHIVE.sha256"
+          shasum -a 256 -c "$ARCHIVE.sha256"
+          # The rule the updater applies, applied here: exactly these four
+          # members, nothing else, no directory entry. Extracting and hoping
+          # would not have caught a directory member the product refuses.
+          expected="$(printf '%s\n' \
+            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE" | sort)"
+          actual="$(tar -tzf "$ARCHIVE" | sort)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::the archive does not hold exactly the four expected members"
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+          tar -xzf "$ARCHIVE"
+          req="anchor apple generic \
+            and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+            and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+            and certificate leaf[subject.OU] = \"$TEAM_ID\""
+          for binary in codeconnect ccd cc-hook; do
+            codesign --verify --strict --all-architectures -R="$req" "$DIR/$binary"
+          done
+
+      - name: Publish
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
+          CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          TAG: ${{ needs.pin.outputs.tag }}
+          SHA: ${{ needs.pin.outputs.sha }}
+          VERSION: ${{ needs.pin.outputs.version }}
+        run: |
+          # Publication is a PATCH on the id this run adopted, made only after
+          # re-reading what that id holds *now*: still a draft, still this
+          # tag, and exactly the two assets the verification step downloaded —
+          # by id, name, and state, because an id survives a rename and the
+          # updater selects by name — not whatever a concurrent writer left.
+          state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          if [ "$(jq -r '.draft' <<<"$state")" != "true" ]; then
+            echo "::error::release $RELEASE_ID is no longer a draft; refusing"
+            exit 1
+          fi
+          if [ "$(jq -r '.tag_name' <<<"$state")" != "$TAG" ]; then
+            echo "::error::release $RELEASE_ID no longer names $TAG; refusing"
+            exit 1
+          fi
+          held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
+          expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
+            --arg archive "$ARCHIVE" \
+            '[{id: $aid, name: $archive, state: "uploaded"},
+              {id: $cid, name: ($archive + ".sha256"), state: "uploaded"}] | sort_by(.id) | tojson')"
+          if [ "$held" != "$(jq -r . <<<"$expected")" ]; then
+            echo "::error::draft $RELEASE_ID does not hold exactly the verified assets; refusing"
+            echo "held:     $held"
+            echo "verified: $(jq -r . <<<"$expected")"
+            exit 1
+          fi
+          # The monotonic decision again, at the moment it matters: the one
+          # taken in `pin` is minutes old by now, and another release may have
+          # been published while this one was building.
+          if ! code=$(curl -sS -o "$RUNNER_TEMP/latest.json" -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest"); then
+            echo "::error::could not reach the releases API"
+            exit 1
+          fi
+          if [ "$code" = "200" ]; then
+            previous="$(jq -r '.tag_name // empty' "$RUNNER_TEMP/latest.json")"
+            # shellcheck source=/dev/null
+            . "$GITHUB_WORKSPACE/.github/workflows/version-order.sh"
+            if ! version_strictly_newer "$VERSION" "${previous#v}"; then
+              echo "::error::$VERSION is no longer newer than the published latest '$previous'"
+              exit 1
+            fi
+          elif [ "$code" != "404" ]; then
+            echo "::error::the releases API answered HTTP $code; refusing to guess"
+            exit 1
+          fi
+          # And the tag still names the pinned commit: publishing makes the
+          # tag permanent, so this is the last moment a moved tag can be a
+          # refusal instead of a release.
+          git fetch --no-tags --depth=1 origin "refs/tags/$TAG"
+          at="$(git rev-parse "FETCH_HEAD^{commit}")"
+          if [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG now resolves to $at, not the pinned $SHA; refusing"
+            exit 1
+          fi
+          # Draft off, prerelease explicitly off, latest explicitly claimed:
+          # an adopted draft could carry a prerelease flag from however it was
+          # made, and either leftover would hide the release from
+          # `releases/latest` — the only thing the updater reads.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=false -f make_latest=true --jq .html_url
+
+      # Every run that is not an explicit publication ends here, on purpose.
+      - name: Leave it as a verified draft
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.publish }}
+        env:
+          TAG: ${{ needs.pin.outputs.tag }}
+        run: |
+          echo "$TAG is a verified draft. To publish it:"
+          echo "  gh workflow run release.yml -f tag=$TAG -f publish=true"

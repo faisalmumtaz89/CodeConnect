@@ -17,6 +17,8 @@ mod settings;
 mod supervisor;
 mod tmux;
 mod update_check;
+mod update_install;
+mod update_release;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -86,7 +88,7 @@ cc — CodeConnect shim
   codeconnect sessions            list what the event log knows, with lifecycle
   codeconnect sessions prune      remove ended sessions and their events (--dry-run first)
 
-  codeconnect update              pull the recorded checkout and reinstall (daemon restarts)
+  codeconnect update              install the latest release (daemon restarts)
 
   codeconnect daemon install      install and start the ccd LaunchAgent
   codeconnect daemon status       plist, launchd job and live daemon
@@ -167,18 +169,11 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
         use std::io::IsTerminal;
         let style = update_check::style_for_stream(std::io::stderr().is_terminal());
         let reachability = phone_unreachable_note(style);
-        // One update slot. The checkout comparison outranks the release
-        // advisory: it is the more specific fact, and `codeconnect update`
-        // resolves both. Both live behind the same `update_check` switch.
+        // One update slot: the release advisory, behind the `update_check`
+        // switch. `codeconnect update` is what resolves it.
         let update = config
             .update_check
-            .then(|| {
-                update_check::select_update_note(
-                    update_check::checkout_advisory(),
-                    update_check::cached_advisory(),
-                    style,
-                )
-            })
+            .then(|| update_check::select_update_note(update_check::cached_advisory(), style))
             .flatten();
         if let Some(group) = advisory_envelope(reachability, update) {
             eprint!("{group}");

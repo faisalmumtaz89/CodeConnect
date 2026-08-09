@@ -387,6 +387,34 @@ fn plist_field(text: &str, key: &str) -> Option<String> {
     Some(value.trim_matches('"').to_string())
 }
 
+/// Whether launchd is actually holding this job right now.
+///
+/// **Asked of launchd, not of the filesystem.** A plist on disk says somebody
+/// installed the daemon once; it does not say the job is loaded. An update that
+/// restarted on the strength of a stale plist would bootstrap a service the
+/// user had deliberately unloaded — enabling something nobody asked for, which
+/// is the one thing this product promises never to do.
+pub fn job_is_loaded() -> bool {
+    launchctl(&["list".into(), protocol::LAUNCHD_LABEL.into()])
+        .map(|result| result.ok)
+        .unwrap_or(false)
+}
+
+/// Restart the managed daemon so it picks up newly installed binaries, if — and
+/// only if — launchd is holding it.
+///
+/// Returns whether anything was restarted, so the caller can say what happened
+/// rather than implying a restart that did not occur. A daemon somebody started
+/// by hand is left alone: it is theirs, and killing it is not an update's
+/// business.
+pub fn restart_managed_daemon() -> Result<bool> {
+    if !job_is_loaded() {
+        return Ok(false);
+    }
+    restart()?;
+    Ok(true)
+}
+
 pub fn plist_path() -> PathBuf {
     protocol::home_dir()
         .join("Library/LaunchAgents")
