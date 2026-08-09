@@ -2,8 +2,8 @@ import SwiftUI
 
 @main
 struct CodeConnectApp: App {
-    /// Apple delivers the APNs token to a `UIApplicationDelegate` and SwiftUI's
-    /// `App` has none, so one is adopted for that single callback.
+    /// Apple delivers the APNs token — and a notification tap — to a
+    /// `UIApplicationDelegate`, and SwiftUI's `App` has none, so one is adopted.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
@@ -53,10 +53,48 @@ struct CodeConnectApp: App {
             // Dark-only, applied once at the root. See DesignKit.swift.
             .ccAppearance()
             .environment(model)
-            .task { model.bootstrap() }
+            // Drains a tap that launched the app, which can arrive before this
+            // view — and therefore the observer below — exists.
+            .task {
+                #if DEBUG
+                    // Test seam: `-CC_TAP approval|input|done|idle` seeds the
+                    // buffer a cold-started tap lands in, so a UI test drives
+                    // the same path a notification does — buffer, drain, route,
+                    // view — without SpringBoard, which XCUITest cannot reach.
+                    // A *warm* tap arrives by URL instead; see `onOpenURL`.
+                    if let kind = UserDefaults.standard.string(forKey: "CC_TAP") {
+                        PushWire.seedTapForTesting(kind: kind)
+                    }
+                #endif
+                model.consumePendingTap()
+                model.bootstrap()
+            }
             // Deep links land on the model, not on a view: the target has to
-            // survive the app being cold-started by the link, and once push
-            // notifications land the same entry point serves those too.
-            .onOpenURL { url in _ = model.open(url: url) }
+            // survive the app being cold-started by the link, and a tapped
+            // notification uses the same entry point for the same reason.
+            .onOpenURL { url in
+                #if DEBUG
+                    // Test seam for a *warm* tap: the test opens this URL only
+                    // after it can see the screen the tap has to replace, so
+                    // the ordering is something the test observed rather than
+                    // something it waited out. What follows is production —
+                    // `recordTap` broadcasts, and the observer below routes.
+                    if let kind = PushWire.testTapKind(from: url) {
+                        // Through the same entry point Apple's callback uses,
+                        // and with the payload the daemon writes — so what the
+                        // UI tests drive is the production path from the
+                        // payload onwards, not a shortcut past it.
+                        PushWire.deliverTap(userInfo: ["codeconnect": ["kind": kind]])
+                        return
+                    }
+                #endif
+                _ = model.open(url: url)
+            }
+            // A tapped notification lands the same way a link does, and for the
+            // same reason: it may have cold-started the app, so the destination
+            // has to survive there being no view yet.
+            .onReceive(NotificationCenter.default.publisher(for: PushWire.tapNotification)) { _ in
+                model.consumePendingTap()
+            }
     }
 }

@@ -1,84 +1,12 @@
 import SwiftUI
 
 // =============================================================================
-//  CCIdentity — the `cc-1 · K76F46` treatment.
+//  CCFingerprint — lighting only the characters that differ.
 // =============================================================================
-
-/// **The bright text is always the part that identifies.**
-///
-/// This is a correctness affordance, not decoration. On a fleet holding two
-/// `cc-1`s, the shared prefix tells you nothing and the tail tells you
-/// everything — so the prefix is dimmed to `textTertiary` and the tail is lit
-/// to full `text`. The eye lands on `K76F46` versus `WXNSK1`, which is the only
-/// difference that exists.
-///
-/// Inverting the emphasis is the point. A run of identical bright `cc-1`s with
-/// a dim suffix is the bug this component exists to prevent.
-///
-/// VoiceOver reads the tail character by character — `"cc-1, run K, 7, 6, F, 4,
-/// 6"` — because `K76F46` read as a word is not an identifier anyone can check
-/// against the Mac.
-struct CCIdentity: View {
-    let name: String
-    /// The shortest verified distinguishing suffix. `nil` when the name is
-    /// already unique, in which case nothing is dimmed and no separator is
-    /// drawn.
-    var tail: String?
-    var style: CCTextStyle = CC.type.monoSmall
-    /// What the tail is called out loud. "run" for a session uid.
-    var tailNoun: String = "run"
-
-    init(
-        name: String,
-        tail: String? = nil,
-        style: CCTextStyle = CC.type.monoSmall,
-        tailNoun: String = "run"
-    ) {
-        self.name = name
-        self.tail = tail
-        self.style = style
-        self.tailNoun = tailNoun
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if let tail, !tail.isEmpty {
-                // Dimmed: it does not identify.
-                Text(name)
-                    .ccType(style)
-                    .foregroundStyle(CC.text.tertiary)
-                Text("·")
-                    .ccType(style)
-                    .foregroundStyle(CC.text.disabled)
-                    .padding(.horizontal, 6)
-                // Full brightness, plus +0.04em so the characters can be read
-                // one at a time against the Mac's own output.
-                Text(tail)
-                    .ccType(style.tracking(style.size * 0.04))
-                    .foregroundStyle(CC.text.primary)
-            } else {
-                // Unique name: nothing to disambiguate, so nothing is dimmed.
-                Text(name)
-                    .ccType(style)
-                    .foregroundStyle(CC.text.secondary)
-            }
-        }
-        .lineLimit(1)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(spokenLabel)
-    }
-
-    private var spokenLabel: String {
-        guard let tail, !tail.isEmpty else { return name }
-        // Character by character. "K76F46" as a word is not checkable.
-        let spelled = tail.map(String.init).joined(separator: ", ")
-        return "\(name), \(tailNoun) \(spelled)"
-    }
-}
 
 // MARK: - Fingerprint comparison
 
-extension CCIdentity {
+extension CCFingerprint {
     /// Lights only the characters that *differ* from a reference string,
     /// dimming everything that matches.
     ///

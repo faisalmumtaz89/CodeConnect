@@ -226,6 +226,19 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     let createdAt: String
     let updatedAt: String
     let blockedOn: [String]
+    /// **What to call this run out loud**, resolved by the daemon (minor 11).
+    ///
+    /// The final component of the run's working directory — the project someone
+    /// is working in. Empty when the daemon could not name one, and empty from
+    /// any daemon below minor 11, which is the same thing as far as a reader is
+    /// concerned: nobody has said what this project is.
+    ///
+    /// **The only name the screens use** — see `RunLabel`, which is the one
+    /// place that turns this into what a reader sees. Nothing in this app
+    /// derives a second one from `cwd`: two rules produce two names for one
+    /// run, and a notification cannot derive anything at all, since the phone
+    /// may not be running when it is composed.
+    let projectLabel: String
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -240,6 +253,7 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case blockedOn = "blocked_on"
+        case projectLabel = "project_label"
     }
 
     init(from decoder: Decoder) throws {
@@ -256,6 +270,7 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         createdAt = try c.decode(String.self, forKey: .createdAt)
         updatedAt = try c.decode(String.self, forKey: .updatedAt)
         blockedOn = try c.decodeIfPresent([String].self, forKey: .blockedOn) ?? []
+        projectLabel = try c.decodeIfPresent(String.self, forKey: .projectLabel) ?? ""
     }
 
     /// What this app files the run's events, subscriptions and marks under, and
@@ -276,8 +291,6 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     var id: String { sessionKey }
     var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
     var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
-    var displayName: String { sessionID }
-    var folderName: String { (cwd as NSString).lastPathComponent }
 }
 
 // MARK: - Capabilities

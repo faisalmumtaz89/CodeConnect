@@ -56,10 +56,6 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
     /// it came from, or a daemon holding two cards with one `request_id` cannot
     /// tell which of them was tapped.
     var sessionKey: String
-    /// The tmux name that run had when the card was raised. Display only, and
-    /// taken from the event rather than looked up later, so a card whose session
-    /// has since left the fleet still says where it came from.
-    var sessionName: String
     /// `nil` while nobody has answered. Silence is never consent.
     var outcome: AnswerOutcome?
     /// `capture-pane` text taken when Claude said the prompt was up — the only
@@ -334,7 +330,6 @@ enum TimelineBuilder {
                                 card: card,
                                 requestedAt: event.date,
                                 sessionKey: event.sessionKey,
-                                sessionName: event.sessionID,
                                 outcome: outcomesByRequest[card.requestID],
                                 paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
                                 risk: card.risk ?? event.declaredRisk))))

@@ -51,9 +51,10 @@ final class SessionIdentityLiveUITests: XCTestCase {
             "a minor-2 daemon mints a uid per run and the app must key rows by it")
     }
 
-    /// Two runs that shared a name are two rows, and each says which one it is.
+    /// Two runs in one project are two rows, and each says which one it is —
+    /// without printing a tmux counter or a slice of a uid at anybody.
     ///
-    /// Skips rather than fails when the daemon has no reused name to show: the
+    /// Skips rather than fails when the daemon has no such pair to show: the
     /// state is real but it has to be arranged (see the header), and a suite
     /// that fails for want of a fixture stops being run.
     func testTwoRunsOfOneNameRenderAsTwoDistinctSessions() throws {
@@ -61,15 +62,20 @@ final class SessionIdentityLiveUITests: XCTestCase {
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
         try XCTSkipUnless(rows.firstMatch.waitForExistence(timeout: 30), "no sessions")
 
-        // The disambiguating tail is only printed where a name is shared, so its
-        // presence *is* the evidence that the fleet holds two runs of one name.
-        let shared = app.buttons.matching(NSPredicate(format: "label CONTAINS 'cc-1 · '"))
-        attach(app, "live-two-runs-one-name")
+        // The start qualifier is printed only where two runs share a project, so
+        // its presence *is* the evidence that the fleet holds such a pair.
+        let shared = app.buttons.matching(NSPredicate(format: "label CONTAINS 'started '"))
+        attach(app, "live-two-runs-one-project")
         try XCTSkipUnless(
-            shared.count > 0, "no tmux name is currently held by more than one run")
+            shared.count > 0, "no project is currently held by more than one run")
         XCTAssertGreaterThanOrEqual(
             shared.count, 2,
-            "a shared name must produce two rows; one row would be the splice")
+            "a shared project must produce two rows; one row would be the splice")
+        for index in 0..<shared.count {
+            let label = shared.element(boundBy: index).label
+            XCTAssertFalse(
+                label.contains("cc-1"), "no row names a run by a counter the next run inherits")
+        }
 
         let identifiers = Set(
             (0..<shared.count).map { shared.element(boundBy: $0).identifier })
@@ -82,10 +88,10 @@ final class SessionIdentityLiveUITests: XCTestCase {
     /// to the daemon about it — which it now does by uid.
     func testASharedNameOpensTheRunThatWasTapped() throws {
         let app = try launchApp()
-        let shared = app.buttons.matching(NSPredicate(format: "label CONTAINS 'cc-1 · '"))
+        let shared = app.buttons.matching(NSPredicate(format: "label CONTAINS 'started '"))
         try XCTSkipUnless(
             shared.firstMatch.waitForExistence(timeout: 30),
-            "no tmux name is currently held by more than one run")
+            "no project is currently held by more than one run")
 
         let first = shared.element(boundBy: 0)
         let identifier = first.identifier

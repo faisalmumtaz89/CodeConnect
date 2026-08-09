@@ -58,10 +58,11 @@ struct DiffSheet: View {
             // and the fleet row it was opened from already distinguishes two
             // runs that share a name.
             //
-            // Backticked, because `cc-1` is a run identifier and an identifier
-            // is always monospace. `CCSheetChrome` resolves the markup through
-            // `CCProse`, so the grave accents never reach the screen.
-            "Diff · `\(model.displayName(for: key))`",
+            // The project, not an identifier — so it is prose, and set as
+            // prose. It is also arbitrary text from a filesystem: a directory
+            // may legitimately contain backticks or asterisks, and a title
+            // rendered as markup would eat them.
+            "Diff · \(model.runLabel(for: key).project)",
             onClose: { dismiss() },
             closeLabel: "Done",
             trailing: { DiffRefreshButton(isLoading: state.isLoading) { start(force: true) } }
@@ -76,7 +77,7 @@ struct DiffSheet: View {
         // while the connection is still being made, `loadDiff` refuses, and the
         // screen dead-ends on a link state that stopped being true a second
         // later. Asking again the moment the link comes up is the difference
-        // between a push that lands on the diff and a push that lands on an
+        // between a link that lands on the diff and one that lands on an
         // apology. Only the app's own link failure is retried — a refusal the
         // daemon actually made is not re-asked behind the reader's back.
         .onChange(of: model.daemonProfile.isConnected) { _, isConnected in
@@ -1328,7 +1329,10 @@ private struct DiffCommentSheet: View {
     @State private var detent: PresentationDetent = CCSheetDetents.expanded
 
     var body: some View {
-        CCSheetChrome("Comment to agent", subtitle: target.anchor, onClose: { dismiss() }) {
+        CCSheetChrome(
+            "Comment to \(model.runLabel(for: key).project)", subtitle: target.anchor,
+            onClose: { dismiss() }
+        ) {
             ScrollView {
                 // The section headers go in flush: `CCSectionHeader` and
                 // `CCField`'s label own the content column and step out to 52
@@ -1357,11 +1361,12 @@ private struct DiffCommentSheet: View {
                             tone: resultTone(result))
                     }
 
-                    // The run name is an identifier, so it is monospace here as
-                    // it is everywhere else. `CCButton`'s label goes through
-                    // `CCProse`, which resolves the backticks and drops them.
+                    // **The button says what it does, not where it goes.** The
+                    // destination is on the sheet's own title, a few points
+                    // above, and a project name is long enough to push the verb
+                    // off the end of the button on a narrow phone.
                     CCButton(
-                        "Send to CodeConnect · `\(model.displayName(for: key))`",
+                        "Send comment",
                         variant: .primary, size: .lg, fullWidth: true, isLoading: sending,
                         disabledReason: blockedReason
                     ) {

@@ -130,15 +130,16 @@ struct FleetActivity: Sendable, Hashable {
 struct FleetRow: Sendable, Identifiable, Hashable {
     var summary: SessionSummary
     var status: FleetStatus
-    var title: String
     /// The daemon's own sentence, for a row whose last item is not a tool call —
-    /// and what a screen reader hears either way.
+    /// and what a screen reader hears either way. Empty when the run has said
+    /// nothing yet: a row that repeats its own title in place of a sentence
+    /// spends a line saying nothing.
     var subtitle: String
     /// The tool call this row is on, when it is on one.
     var activity: FleetActivity?
-    /// The tmux name, plus enough of the uid to tell it from a namesake when the
-    /// fleet holds more than one run under it.
-    var identity: String
+    /// What this run is called — see `RunLabel`. The same words the card, the
+    /// session header and the lock screen use.
+    var label: RunLabel
     var capability: CapabilityBadge
     var blockedCount: Int
     var lastEventAt: Date?

@@ -206,7 +206,7 @@ struct CCMonoBlock: View {
                                 // `textTertiary`, not `textDisabled`.
                                 // `textDisabled` is reserved for genuinely
                                 // inactive text — gutter line numbers, the cwd
-                                // breadcrumb, the `·` in `CCIdentity`,
+                                // breadcrumb, the `·` between a project and its start,
                                 // disabled-button labels — and this mark is none
                                 // of them: it is the only thing on screen saying
                                 // that a break fell **inside a token**, on the

@@ -762,10 +762,15 @@ mod tests {
              own injection opened, for `/model` and `/effort` with an argument, \
              rather than dismissing it — is minor 10"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 11,
+            "`project_label` — naming the project rather than the reused `cc-<n>` \
+             counter — is minor 11"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 10);
+        assert_eq!(crate::PROTOCOL_MINOR, 11);
     }
 
     /// **The tags, pinned on this side too.**

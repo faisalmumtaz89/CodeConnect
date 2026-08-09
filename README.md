@@ -42,7 +42,7 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 ```
 iPhone (SwiftUI)  ──WSS over Tailscale──▶  ccd (Rust daemon, launchd)
       ▲                                          │
-      └──────── APNs (a doorbell, not data) ──────┘
+      └── APNs (a doorbell: the project and why) ──┘
                                                   │ unix socket
                                     codeconnect claude ────┘  (tmux-hosted session)
 ```

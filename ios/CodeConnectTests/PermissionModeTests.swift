@@ -77,19 +77,25 @@ final class PermissionModeTests: XCTestCase {
         XCTAssertNil(state.silentBecauseOfPermissions)
     }
 
-    /// The same replay hazard `aiTitle` documents: "load all" re-delivers the
+    /// The replay hazard: "load all" re-delivers the
     /// whole log after the tail, so an older line must never displace a newer one.
     /// Without the guard, a session switched *out* of bypass would keep claiming
     /// it is silent the moment history was reloaded.
     func testAReplayedOlderLineCannotResurrectAStaleMode() throws {
+        // **Backfill, not a duplicate.** Seq 1 is a line this session has never
+        // held: the run's first turn is below the tail's window, and "load all"
+        // delivers it *after* seq 2. A test that re-sent a line already held
+        // would be refused as a duplicate before the guard was reached, and
+        // would pass with the guard deleted.
         let state = SessionState(sessionKey: "01KYZPH1RBF19BDYFBQ4AF3MPH")
-        state.ingest(try modeEvent("bypassPermissions", seq: 1))
         state.ingest(try modeEvent("default", seq: 2))
         XCTAssertNil(state.silentBecauseOfPermissions)
 
         state.ingest(try modeEvent("bypassPermissions", seq: 1))
+        state.settlePendingEvents()
+        XCTAssertEqual(state.events.map(\.seq), [1, 2], "the older line was merged in")
         XCTAssertNil(
             state.silentBecauseOfPermissions,
-            "a replayed seq 1 must not overwrite the mode established at seq 2")
+            "a backfilled seq 1 must not overwrite the mode established at seq 2")
     }
 }

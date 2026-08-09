@@ -714,7 +714,7 @@ enum RenderCatalog {
     /// instead of photographing an empty column.
     private static let galleryPages: [(page: String, marker: String)] = [
         ("foundations", "Foundations"),
-        ("identity", "CCIdentity"),
+        ("identity", "CCFingerprint"),
         ("buttons", "CCButton"),
         ("rows", "CCRow"),
         ("indicators", "CCBadge"),

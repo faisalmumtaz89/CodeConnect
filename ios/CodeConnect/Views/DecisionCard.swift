@@ -81,11 +81,6 @@ struct DecisionCardView: View {
     @State private var sentAt: Date?
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    /// The run this card came from. Its *name* is what the header shows and
-    /// its *key* is what the answer is scoped to — the two are different
-    /// strings on a daemon that mints uids, and only one of them identifies a
-    /// run.
-    private var sessionName: String { approval.sessionName }
     private var assessment: RiskAssessment { approval.assessment(profile: model.daemonProfile) }
     private var risk: RiskClass { assessment.effective }
 
@@ -212,15 +207,29 @@ struct DecisionCardView: View {
             // risk badge above it and the amber wait clock below. The dot went;
             // the column came back.
             HStack(spacing: CC.space.xs) {
-                Text(folderName)
+                Text(verbatim: label.project)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.secondary)
-                Text("·")
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.disabled)
-                CCIdentity(name: identity.name, tail: identity.tail)
+                    // **Bounded, because the decision comes first.** A project
+                    // may be forty characters, and at the largest accessibility
+                    // sizes that is four lines of provenance standing between
+                    // the reader and the command they came to answer. The full
+                    // path is on the line below, so nothing here is the only
+                    // copy of anything.
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                if let qualifier = label.qualifier {
+                    Text("·")
+                        .ccType(CC.type.monoSmall)
+                        .foregroundStyle(CC.text.disabled)
+                    Text(verbatim: qualifier)
+                        .ccType(CC.type.monoSmall)
+                        .foregroundStyle(CC.text.disabled)
+                }
                 Spacer(minLength: 0)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label.spoken)
             .padding(.top, 6)
 
             if let cwd = model.summary(for: approval.sessionKey)?.cwd {
@@ -253,16 +262,8 @@ struct DecisionCardView: View {
         }
     }
 
-    private var folderName: String {
-        model.summary(for: approval.sessionKey)?.folderName ?? sessionName
-    }
-
-    private var identity: (name: String, tail: String?) {
-        let label =
-            AppModel.identityLabels(for: model.summaries)[approval.sessionKey] ?? sessionName
-        let parts = label.components(separatedBy: " · ")
-        return (parts.first ?? label, parts.count > 1 ? parts[1] : nil)
-    }
+    /// What to call the run this decision belongs to — see `RunLabel`.
+    private var label: RunLabel { model.runLabel(for: approval.sessionKey) }
 
     // MARK: Command
 
@@ -382,10 +383,10 @@ struct DecisionCardView: View {
         guard next != gate else { return }
         let wasOpen = gate.isOpen(at: risk)
         withAnimation(CC.motion.medium) { gate = next }
-        // Never on entrance: a card deep-linked from a push notification whose
-        // command already fits on the first frame arms silently, because the
-        // notification has already buzzed and a second buzz 400ms behind it
-        // reads as a second event.
+        // Never on entrance: a card whose command already fits on the first
+        // frame arms silently. If a notification brought the reader here it has
+        // already buzzed, and a second buzz inside the entrance window below
+        // reads as a second event rather than as this one.
         guard !wasOpen, next.isOpen(at: risk), approval.isPending else { return }
         if Date().timeIntervalSince(appearedAt) > Self.entranceWindow { CCHaptic.light.fire() }
     }

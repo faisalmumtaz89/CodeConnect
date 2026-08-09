@@ -108,24 +108,36 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
         }
     }
 
-    /// **Both lines resolve backtick markup** (`CCProse`).
+    /// **The subtitle resolves backtick markup** (`CCProse`); the title does
+    /// not.
     ///
     /// The subtitle is a sheet's *anchor* — the comment sheet's is
-    /// ``In `ios/CodeConnect/Net/Sender.swift` lines 12–28`` — and it shipped
-    /// through this slot as `footnote`, which is SF Pro. So the one element on
-    /// the sheet whose entire job is to say *which file and which lines you are
-    /// commenting on* set a path in proportional type, wearing two literal grave
-    /// accents that the caller meant as markup. The rule is unconditional:
-    /// identifiers, commands, diffs and paths are monospace, always.
+    /// ``In `ios/CodeConnect/Net/Sender.swift` lines 12–28`` — and a slot that
+    /// rendered it as prose would set the one element whose entire job is to
+    /// say *which file and which lines* in proportional type, wearing two
+    /// literal grave accents the caller meant as markup. The rule is
+    /// unconditional: identifiers, commands, diffs and paths are monospace,
+    /// always.
     ///
-    /// The title takes the same treatment because it has the same problem —
-    /// `Diff · cc-tests` sets a session identifier in `title` — and because a
-    /// rule that holds on one line of a two-line block and not the other is not
-    /// a rule. Titles without markup are unaffected, so this costs nothing until
-    /// a caller has an identifier to mark.
+    /// **A title is a sentence, and it now contains a project name.** A project
+    /// is a directory the user named, and a directory may legitimately contain
+    /// a backtick, an asterisk or an underscore. Passing that through a markup
+    /// renderer would silently eat the characters, or worse, italicise part of
+    /// somebody's folder — so the title is set verbatim, and a caller with an
+    /// identifier to mark puts it in the subtitle where the monospace rule
+    /// already lives.
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            CCProse(title, style: CC.type.headline, color: CC.text.primary)
+            Text(verbatim: title)
+                .ccType(CC.type.headline)
+                .foregroundStyle(CC.text.primary)
+                // **Bounded, because a title can now carry a project.** A
+                // forty-character name is what the daemon allows, and at the
+                // largest accessibility sizes an unbounded header eats the
+                // sheet it is labelling. From the tail, as a project is drawn
+                // everywhere else.
+                .lineLimit(2)
+                .truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: true)
             if let subtitle {
                 CCProse(subtitle, style: CC.type.footnote, color: CC.text.secondary)

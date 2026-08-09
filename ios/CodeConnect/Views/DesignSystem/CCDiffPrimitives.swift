@@ -760,7 +760,7 @@ private struct CCDiffChipStyle: ButtonStyle {
 /// The sticky 40pt band that names the file you are reading.
 ///
 /// The path truncates from the **head**: the tail is what you need. A renamed
-/// file inverts its emphasis the same way `CCIdentity` does — the old path is
+/// file inverts its emphasis the same way `CCFingerprint` does — the old path is
 /// `textTertiary` because it is context, the new one is `text` because it is the
 /// answer.
 struct CCDiffFileHeader: View {
@@ -868,7 +868,7 @@ struct CCFoldRow: View {
                         // gutter number: it stands in for the lines that are not
                         // being shown, on a control the reader is meant to find
                         // and press. `textDisabled` is for line numbers, the cwd
-                        // breadcrumb, `CCIdentity`'s `·` and disabled-button
+                        // breadcrumb, the `·` between a project and its start, and disabled-button
                         // labels — inactive things, which this is not.
                         .foregroundStyle(CC.text.tertiary)
                         .frame(width: metrics.gutterWidth, alignment: .trailing)

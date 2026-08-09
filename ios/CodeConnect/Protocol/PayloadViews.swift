@@ -105,13 +105,6 @@ extension Event {
 
     // MARK: Transcript facts
 
-    /// Claude's own generated title for the run, from a `type: "ai-title"`
-    /// transcript line. A far better fleet-row label than a tmux name.
-    var aiTitle: String? {
-        guard case .other(let raw) = kind, raw == "transcript_ai-title" else { return nil }
-        return payload["aiTitle"]?.stringValue
-    }
-
     /// The session's permission mode, from a `type: "permission-mode"` transcript
     /// line — `bypassPermissions`, `acceptEdits`, `default`, `plan`.
     ///

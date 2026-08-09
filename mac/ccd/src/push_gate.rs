@@ -35,6 +35,15 @@ pub enum Ambient {
     Done,
 }
 
+/// What a `permission_prompt` turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice {
+    /// There is a card behind it: this is the decision, said once.
+    Decision,
+    /// There is not: a run is waiting on a human.
+    Waiting,
+}
+
 /// What a scheduled push captures at gating time and re-checks at dispatch,
 /// so the grace window cannot deliver a fact the world has moved past.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,18 +156,84 @@ impl PushGate {
         )
     }
 
-    /// Whether this approval is news; on yes, the ticket the dispatch must
-    /// carry. Records on first ask, so the `permission_prompt` notification
-    /// that follows the `PermissionRequest` hook — same prompt, second
-    /// delivery — finds it and stays silent.
-    pub fn admit_permission(&self, session_uid: &str, prompt_id: &str) -> Option<Ticket> {
-        let epochs = self.epochs.lock().unwrap();
+    /// **A decision arrived, and the run moved to meet it — one transition.**
+    ///
+    /// Recording progress and claiming the prompt are the same event and are
+    /// taken under the same guard. Apart, a notice landing between them reads a
+    /// prompt nobody has claimed *and* mints its ambient ticket at the new
+    /// progress epoch — so the progress that exists to cancel that notice
+    /// arrives just too early to, and the reader gets two notifications for one
+    /// prompt with no guarantee which one APNs keeps.
+    ///
+    /// `None` means this prompt already rang: the `permission_prompt` twin got
+    /// here first, and one decision deserves one ring.
+    pub fn admit_decision(&self, session_uid: &str, prompt_id: &str) -> Option<Ticket> {
+        let mut epochs = self.epochs.lock().unwrap();
+        let mut ambient = self.ambient.lock().unwrap();
         let mut permission = self.permission.lock().unwrap();
+        epochs.entry(session_uid.to_string()).or_default().1 += 1;
+        ambient.remove(session_uid);
         permission
             .entry(session_uid.to_string())
             .or_default()
             .insert(prompt_id.to_string())
             .then(|| ticket_under_lock(&epochs, session_uid))
+    }
+
+    /// What a `permission_prompt` notice is allowed to say, whole.
+    ///
+    /// Three states, and reading them apart is what lets a decision and a
+    /// notice about the same prompt both ring:
+    ///
+    ///   * **A card is filed for it.** The notice is the twin of a decision, so
+    ///     it takes the prompt's key and *is* that decision — whichever of the
+    ///     two hooks gets here first says the actionable thing once.
+    ///   * **No card, but the key is taken.** That decision already rang and
+    ///     its card is gone. Ringing again would announce something that no
+    ///     longer exists.
+    ///   * **Neither.** A run is waiting on a human, which is what it says.
+    ///
+    /// Taken under one guard with [`admit_decision`](Self::admit_decision), so
+    /// the two hooks for one prompt cannot interleave into two rings.
+    pub fn admit_notice(
+        &self,
+        session_uid: &str,
+        prompt_id: Option<&str>,
+        has_card: bool,
+    ) -> Option<(Ticket, Notice)> {
+        let mut epochs = self.epochs.lock().unwrap();
+        let mut ambient = self.ambient.lock().unwrap();
+        let mut permission = self.permission.lock().unwrap();
+        let waiting = |ambient: &mut HashMap<String, Ambient>| match ambient.get(session_uid) {
+            Some(Ambient::Waiting) => None,
+            _ => {
+                ambient.insert(session_uid.to_string(), Ambient::Waiting);
+                Some((ticket_under_lock(&epochs, session_uid), Notice::Waiting))
+            }
+        };
+        let Some(prompt_id) = prompt_id else {
+            return waiting(&mut ambient);
+        };
+        let claimed = permission.entry(session_uid.to_string()).or_default();
+        if has_card {
+            if !claimed.insert(prompt_id.to_string()) {
+                return None;
+            }
+            // **The same transition a decision makes anywhere else.** This
+            // notice *is* the decision — whichever hook reached the gate first
+            // — so the run has demonstrably moved, and any quiet-state push
+            // still waiting out its grace is describing a wait that is over.
+            // Without this, a `waiting` push admitted moments earlier survives
+            // alongside it, and the reader gets two notifications for one
+            // prompt.
+            epochs.entry(session_uid.to_string()).or_default().1 += 1;
+            ambient.remove(session_uid);
+            return Some((ticket_under_lock(&epochs, session_uid), Notice::Decision));
+        }
+        if claimed.contains(prompt_id) {
+            return None;
+        }
+        waiting(&mut ambient)
     }
 
     /// A deleted or pruned run has nothing left to ring about — including any
@@ -249,16 +324,94 @@ mod tests {
     fn each_approval_rings_once_including_its_notification_twin() {
         let gate = PushGate::new();
         assert!(
-            gate.admit_permission("run", "prompt-1").is_some(),
+            gate.admit_decision("run", "prompt-1").is_some(),
             "the request rings"
         );
         assert!(
-            gate.admit_permission("run", "prompt-1").is_none(),
+            gate.admit_notice("run", Some("prompt-1"), true).is_none(),
             "its permission_prompt notification is the same prompt"
         );
         assert!(
-            gate.admit_permission("run", "prompt-2").is_some(),
+            gate.admit_decision("run", "prompt-2").is_some(),
             "a second decision is second news"
+        );
+    }
+
+    /// **Whichever hook arrives first says it, and only one of them says it.**
+    ///
+    /// The two hooks for one prompt reach the gate in either order and, in
+    /// between, the notice may still believe there is no card. Every ordering
+    /// has to end with exactly one admission — the actionable one where there
+    /// is a card to answer.
+    #[test]
+    fn one_prompt_rings_once_however_its_two_hooks_interleave() {
+        // The request first: the notice behind it is silent whether or not it
+        // has caught up with the card.
+        let gate = PushGate::new();
+        assert!(gate.admit_decision("run", "p").is_some());
+        assert!(gate.admit_notice("run", Some("p"), true).is_none());
+        assert!(
+            gate.admit_notice("run", Some("p"), false).is_none(),
+            "a notice still reading the world as cardless must not ring a second time"
+        );
+
+        // The notice first, with the card already filed: it *is* the decision,
+        // and the request behind it adds nothing.
+        let gate = PushGate::new();
+        assert_eq!(
+            gate.admit_notice("run", Some("p"), true).map(|(_, n)| n),
+            Some(Notice::Decision)
+        );
+        assert!(gate.admit_decision("run", "p").is_none());
+
+        // The notice first, before the card exists: a run waiting on a human.
+        // The decision that follows is a different, louder fact, and the
+        // progress it records is what cancels the notice mid-grace.
+        let gate = PushGate::new();
+        let (waiting, notice) = gate.admit_notice("run", Some("p"), false).unwrap();
+        assert_eq!(notice, Notice::Waiting);
+        assert!(gate.admit_decision("run", "p").is_some());
+        assert_eq!(
+            gate.exclusions_if_valid("run", waiting, true, 1),
+            None,
+            "the weaker notice does not survive the decision"
+        );
+    }
+
+    /// **A decision admitted through the notice supersedes an earlier wait.**
+    ///
+    /// After a restart the card is in the database and the prompt key is
+    /// unclaimed, so the `permission_prompt` is the hook that admits the
+    /// decision. If it does not record the run moving, a `waiting` push
+    /// admitted moments before is still valid when its grace expires and the
+    /// reader gets two notifications for one prompt.
+    #[test]
+    fn a_decision_admitted_through_the_notice_cancels_the_wait_before_it() {
+        let gate = PushGate::new();
+        let waiting = gate.admit_ambient("run", Ambient::Waiting).unwrap();
+        assert_eq!(
+            gate.admit_notice("run", Some("p"), true).map(|(_, n)| n),
+            Some(Notice::Decision)
+        );
+        assert_eq!(
+            gate.exclusions_if_valid("run", waiting, true, 1),
+            None,
+            "the wait it replaced does not also ring"
+        );
+    }
+
+    /// A prompt whose decision already rang and whose card is gone is not news
+    /// again. It is the state between "never heard of it" and "here it is", and
+    /// collapsing it into either one produces a notification about something
+    /// that cannot be acted on.
+    #[test]
+    fn a_notice_for_a_decision_that_is_over_is_silent() {
+        let gate = PushGate::new();
+        assert!(gate.admit_decision("run", "p").is_some());
+        assert!(gate.admit_notice("run", Some("p"), false).is_none());
+        assert!(
+            gate.admit_notice("run", None, false).is_some(),
+            "a notice naming no prompt is still an ordinary wait"
         );
     }
 
@@ -301,13 +454,13 @@ mod tests {
         let gate = PushGate::new();
         gate.note_delivered("phone", "run", 9);
         assert!(gate.admit_ambient("run", Ambient::Waiting).is_some());
-        assert!(gate.admit_permission("run", "p1").is_some());
+        assert!(gate.admit_decision("run", "p1").is_some());
         gate.evict_session("run");
         assert!(
             gate.admit_ambient("run", Ambient::Waiting).is_some(),
             "a fresh run starts fresh"
         );
-        assert!(gate.admit_permission("run", "p1").is_some());
+        assert!(gate.admit_decision("run", "p1").is_some());
         // Last: the helper admits (or forces) a ticket of its own, which
         // would close the fresh latch the assertions above exist to observe.
         assert!(saw(&gate, "run", 1).is_empty());

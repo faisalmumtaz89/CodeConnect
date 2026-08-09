@@ -173,7 +173,7 @@ pub struct Daemon {
     /// reading it later would be reading whatever the environment has become.
     started_at: String,
     launchd_label: Option<String>,
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     /// One gate per run, held across *both* halves of an ingest.
     ///
     /// Separate from `inner` on purpose: it is held while SQLite commits, and
@@ -445,6 +445,15 @@ struct PendingApproval {
     /// happens if somebody approved it. Positive evidence, unlike an absent
     /// prompt, and it carries the decision with it.
     tool_ran: bool,
+    /// What the run this card came from is called.
+    ///
+    /// **Captured with the card, not looked up when a doorbell rings.** A
+    /// notification that speaks for the fleet names the one blocked run, and
+    /// reading that name from the database means releasing the lock the count
+    /// was taken under and awaiting SQLite — during which the card can be
+    /// answered or another run can block, so the name and the number stop
+    /// describing the same moment.
+    project_label: String,
     /// Which prompt this card belongs to. Compared against the run's current
     /// generation before anything is typed.
     generation: u64,
@@ -565,6 +574,50 @@ fn confirm_view_for(text: &str, complete_native_confirmation: bool) -> Option<St
     confirmation_needle(text)
 }
 
+/// How to find the card a decision push is about when its grace expires.
+///
+/// Two ways because the two hooks know different things: the request that filed
+/// the card knows its own id, and a `permission_prompt` knows only the prompt.
+#[derive(Debug, Clone)]
+enum CardKey {
+    Request(String),
+    Prompt(String),
+}
+
+/// Whether the card a decision push announces is still there to be answered.
+///
+/// **Asked when the push is about to ring, not when it was admitted.** A card
+/// can be answered at the keyboard, superseded, or resolved by the tool simply
+/// running, and any of those can happen inside the dispatch grace — or, after a
+/// restart, in the instant between reading the card and taking the gate. Ringing
+/// then would send someone to a decision list with nothing in it.
+fn card_is_open(inner: &Inner, session_uid: &str, key: &CardKey) -> bool {
+    inner.pending.iter().any(|((uid, request_id), entry)| {
+        uid == session_uid
+            && match key {
+                CardKey::Request(id) => request_id == id,
+                CardKey::Prompt(prompt) => entry.card.prompt_id.as_deref() == Some(prompt.as_str()),
+            }
+    })
+}
+
+/// Which runs are holding a decision, and what each is called.
+///
+/// **Runs, not cards.** One run can hold a second decision while its first is
+/// claimed and mid-injection — the superseding sweep deliberately leaves a
+/// claimed card in place — and the alert says "agents", so counting cards would
+/// make the sentence say something untrue about the fleet.
+fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
+    let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for pending in inner.pending.values() {
+        by_run.insert(&pending.session.uid, &pending.project_label);
+    }
+    by_run
+        .into_iter()
+        .map(|(uid, label)| (uid.to_string(), label.to_string()))
+        .collect()
+}
+
 /// The only commands whose recovered pane may be kept. Deliberately three
 /// names and not a rule: a snapshot is a picture of somebody's screen, and
 /// the general version of this idea is the TUI-scraping bridge the design
@@ -608,7 +661,7 @@ impl Daemon {
             exe_identity: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
             launchd_label: launchd_label(),
-            inner: Mutex::new(Inner::default()),
+            inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
@@ -689,6 +742,16 @@ impl Daemon {
                     }
                 }
 
+                // Resolved before the lock, because naming a run reads the
+                // database and the lock below admits no awaits.
+                let mut labels: HashMap<String, String> = HashMap::new();
+                for row in &rows {
+                    if !labels.contains_key(&row.session_uid) {
+                        let label = self.effective_project_label(&row.session_uid).await;
+                        labels.insert(row.session_uid.clone(), label);
+                    }
+                }
+
                 let mut inner = self.inner.lock().await;
                 let mut restored = 0usize;
                 for row in rows {
@@ -717,6 +780,10 @@ impl Daemon {
                         PendingApproval {
                             card,
                             session: SessionKey::new(&row.session_uid, &row.session_id),
+                            project_label: labels
+                                .get(&row.session_uid)
+                                .cloned()
+                                .unwrap_or_default(),
                             created_ms: row.created_ms,
                             responder: None,
                             claimed: false,
@@ -1120,6 +1187,7 @@ impl Daemon {
             .await;
 
         let created_ms = protocol::time::now_unix_ms();
+        let label = self.effective_project_label(&session.uid).await;
         {
             let mut inner = self.inner.lock().await;
             inner.pending.insert(
@@ -1127,6 +1195,7 @@ impl Daemon {
                 PendingApproval {
                     card: card.clone(),
                     session: session.clone(),
+                    project_label: label.clone(),
                     created_ms,
                     responder: responder_tx,
                     claimed: false,
@@ -1175,30 +1244,39 @@ impl Daemon {
             .prompt_id
             .clone()
             .unwrap_or_else(|| request_id.clone());
-        if let Some(ticket) = self.push_gate.admit_permission(&session.uid, &prompt_key) {
-            let name = &session.name;
+        // **A decision supersedes a notice about it.** A `permission_prompt`
+        // can arrive first and ring as "waiting for your input"; when the card
+        // itself lands moments later, that earlier ring is describing the same
+        // moment in weaker words. Recording the run's progress kills it inside
+        // its dispatch grace, so one notification goes out — the actionable
+        // one. Without that, both survive, and APNs stores exactly one per
+        // device without saying which, so the reader could be left holding the
+        // wrong one.
+        if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &prompt_key) {
             self.dispatch_push(
                 session.uid.clone(),
                 approval_event.seq,
                 PushHint {
-                    session_id: name.clone(),
-                    // The risk class is the one thing worth putting on a lock
-                    // screen: it is the difference between "look when you get a
-                    // moment" and "look now", and it leaks nothing about the
-                    // command itself.
-                    title: match risk.class {
-                        protocol::risk::RiskClass::High => {
-                            format!("{name} needs you — high risk")
-                        }
-                        _ => format!("{name} needs you"),
-                    },
-                    body: format!("{} approval", card.tool_name),
-                    blocked_sessions: self.blocked_session_count().await,
+                    // The project, not the run's tmux name: `cc-1` is the
+                    // lowest free counter and the next run inherits it, so it
+                    // named nothing a reader could recognise.
+                    project_label: label.clone(),
+                    // **No tool name and no risk class.** The tool says what
+                    // an agent is doing to anyone who can read the payload, and the class is a judgement the
+                    // card itself states — with the matched pattern beside it,
+                    // which a lock screen has no room for and Apple has no
+                    // business holding.
+                    kind: crate::apns::PushKind::Approval,
+                    // See `describing`: the count belongs to the moment of
+                    // ringing, not the moment of admission.
+                    blocked_sessions: 0,
+                    session_uid: session.uid.clone(),
                 },
                 ticket,
                 // A pending decision outlives other tools' progress; only the
-                // session's death cancels it.
+                // session's death, or the card being answered, cancels it.
                 false,
+                Some(CardKey::Request(request_id.clone())),
             );
         }
 
@@ -1470,7 +1548,7 @@ impl Daemon {
     /// instant; while it stays foregrounded the app declines to present the
     /// banner. Closing the sliver itself needs client delivery
     /// acknowledgements — a protocol change deliberately not taken for a
-    /// doorbell that carries no content.
+    /// doorbell whose whole content is four words and a count.
     fn dispatch_push(
         &self,
         session_uid: String,
@@ -1478,12 +1556,38 @@ impl Daemon {
         hint: PushHint,
         ticket: crate::push_gate::Ticket,
         heed_progress: bool,
+        needs_card: Option<CardKey>,
     ) {
         const GRACE: Duration = Duration::from_millis(400);
         let gate = Arc::clone(&self.push_gate);
         let sender = Arc::clone(&self.push);
+        let inner = Arc::clone(&self.inner);
+        let db = self.db.clone();
         tokio::spawn(async move {
             tokio::time::sleep(GRACE).await;
+            // **The run still has to exist.** The ticket catches a session
+            // evicted *after* this push was admitted, but not one evicted
+            // just before: a hook already past `ensure_session` goes on to
+            // admit, and mints its ticket against the epoch the eviction had
+            // already bumped. Asked here, the question has one answer for
+            // both — a doorbell for a run nobody can open is never rung.
+            //
+            // A database that will not answer is not an answer: the push goes
+            // out, because staying silent about a real decision is the worse
+            // of the two mistakes.
+            match db.get_session(session_uid.clone()).await {
+                Ok(None) => {
+                    crate::log_debug!(
+                        "push for {} dropped: the run was removed before the doorbell rang",
+                        session_uid
+                    );
+                    return;
+                }
+                Err(err) => crate::log_warn!(
+                    "push for {session_uid}: could not confirm the run still exists: {err:#}"
+                ),
+                Ok(Some(_)) => {}
+            }
             let Some(excluded) =
                 gate.exclusions_if_valid(&session_uid, ticket, heed_progress, trigger_seq)
             else {
@@ -1493,7 +1597,26 @@ impl Daemon {
                 );
                 return;
             };
-            sender.send(&hint, &excluded);
+            let blocked: Vec<(String, String)> = {
+                let held = inner.lock().await;
+                if let Some(key) = needs_card {
+                    if !card_is_open(&held, &session_uid, &key) {
+                        crate::log_debug!(
+                            "push for {} dropped: its card was answered before the doorbell rang",
+                            session_uid
+                        );
+                        return;
+                    }
+                }
+                blocked_runs(&held)
+            };
+            // The subject's name comes out of the same snapshot as the count —
+            // see `PushHint::describing` and `PendingApproval::project_label`.
+            let named = match blocked.as_slice() {
+                [(_, label)] => Some(label.clone()),
+                _ => None,
+            };
+            sender.send(&hint.describing(blocked.len(), named), &excluded);
         });
     }
 
@@ -1504,27 +1627,53 @@ impl Daemon {
         // ring per state change; `permission_prompt` is the notification twin
         // of a `PermissionRequest` that already rang, keyed by the prompt it
         // shares with it.
+        // **Admission and copy in one match.** An unadmitted kind never reaches
+        // a sentence, so a `_ =>` arm on the copy side would be a body no
+        // notification could ever carry — a fifth string that reads like a
+        // supported case and is not one.
         let admitted = match kind {
-            "agent_needs_input" | "idle_prompt" => self
+            "agent_needs_input" => self
                 .push_gate
-                .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting),
+                .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
+                .map(|t| (t, crate::apns::PushKind::NeedsInput)),
+            "idle_prompt" => self
+                .push_gate
+                .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
+                .map(|t| (t, crate::apns::PushKind::Idle)),
             "agent_completed" => self
                 .push_gate
-                .admit_ambient(&session.uid, crate::push_gate::Ambient::Done),
-            "permission_prompt" => match input.prompt_id.as_deref() {
-                Some(prompt) => self.push_gate.admit_permission(&session.uid, prompt),
-                // No prompt to correlate by: treat as ambient waiting rather
-                // than ring unconditionally.
-                None => self
-                    .push_gate
-                    .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting),
-            },
+                .admit_ambient(&session.uid, crate::push_gate::Ambient::Done)
+                .map(|t| (t, crate::apns::PushKind::Completed)),
+            "permission_prompt" => {
+                // **Which gate depends on whether there is a card**, and the
+                // question and the answer are one operation — see
+                // `PushGate::admit_notice`. Read apart, this notice and the
+                // `PermissionRequest` for the same prompt can each conclude the
+                // other has not happened yet and both ring.
+                //
+                // Whether a card exists is the daemon's own state, so it is
+                // resolved before the gate is entered; the gate is what decides
+                // and records, under one guard, in one step.
+                let has_card = match input.prompt_id.as_deref() {
+                    Some(prompt) => self.has_pending_card(&session.uid, prompt).await,
+                    None => false,
+                };
+                self.push_gate
+                    .admit_notice(&session.uid, input.prompt_id.as_deref(), has_card)
+                    .map(|(ticket, notice)| {
+                        let kind = match notice {
+                            crate::push_gate::Notice::Decision => crate::apns::PushKind::Approval,
+                            crate::push_gate::Notice::Waiting => crate::apns::PushKind::NeedsInput,
+                        };
+                        (ticket, kind)
+                    })
+            }
             _ => None,
         };
         // The ticket is minted inside the admission's own critical section:
         // progress landing anywhere after it — even before the dispatch task
         // spawns — reads as a moved epoch and kills the push.
-        let Some(ticket) = admitted else {
+        let Some((ticket, push_kind)) = admitted else {
             return;
         };
         // **The doorbell carries no agent text.** `input.message` is the
@@ -1532,35 +1681,91 @@ impl Daemon {
         // payload passes through Apple, and the documented design is that
         // nothing an agent wrote ever does. The body is derived from the hook's
         // *type* alone — the fact that a bell rang, never what it rang about.
-        let body = match kind {
-            "permission_prompt" => "Waiting on an approval",
-            "agent_needs_input" => "Waiting for your input",
-            "agent_completed" => "Finished a turn",
-            "idle_prompt" => "Waiting for you",
-            _ => "Needs your attention",
-        };
+
         self.dispatch_push(
             session.uid.clone(),
             trigger.seq,
             PushHint {
-                session_id: session.name.clone(),
-                title: session.name.clone(),
-                body: body.to_string(),
-                blocked_sessions: self.blocked_session_count().await,
+                // **The cwd the daemon has persisted.** A notification hook may
+                // omit `cwd` entirely, and `ensure_session` keeps the last one
+                // it was told; reading this hook's field directly would leave a
+                // push with no label whenever the hook happened not to carry
+                // one.
+                project_label: self.effective_project_label(&session.uid).await,
+                kind: push_kind,
+                // Overwritten at ring time by `describing`, which reads the
+                // fleet as it is when the doorbell actually goes.
+                blocked_sessions: 0,
+                session_uid: session.uid.clone(),
             },
             ticket,
-            true,
+            // **A decision outlives other tools' progress wherever it was
+            // admitted**, exactly as it does on the `PermissionRequest` path;
+            // only the session's death cancels it. A `permission_prompt` whose
+            // card is already filed is admitted here as that same decision, and
+            // the `note_progress` the request records moments later would
+            // otherwise cancel it — while the request's own admission found the
+            // prompt key taken and stayed silent. Two silences, and a reader
+            // never told there is a card waiting.
+            push_kind != crate::apns::PushKind::Approval,
+            // A notice that turned out to be a decision announces a specific
+            // card, and has to still mean it when it rings.
+            match push_kind {
+                crate::apns::PushKind::Approval => input.prompt_id.clone().map(CardKey::Prompt),
+                _ => None,
+            },
         );
     }
 
-    async fn blocked_session_count(&self) -> usize {
+    /// **A card is named by where its run is now.**
+    ///
+    /// The label is captured with the card so that composing a doorbell needs
+    /// no database read — but a run can move, and the fleet redraws from the
+    /// row. A card left holding the old name would put one name on a lock
+    /// screen and another on the list behind it.
+    ///
+    /// Called by every writer of a session's `cwd`: an ordinary hook, and a
+    /// supervisor registering or reconnecting. One of them relabelling and the
+    /// other not is how the two names come apart again.
+    async fn relabel_open_cards(&self, session_uid: &str, cwd: &str) {
+        let label = crate::project_label::project_label(cwd);
+        let mut inner = self.inner.lock().await;
+        for pending in inner.pending.values_mut() {
+            if pending.session.uid == session_uid && pending.project_label != label {
+                pending.project_label = label.clone();
+            }
+        }
+    }
+
+    /// Whether *this prompt* has a card the decision list could show.
+    ///
+    /// Per prompt, not per session: a run can hold an open card for one prompt
+    /// while a notice arrives for a newer one that has no card yet, and
+    /// answering "yes, there is a card" for that would send a reader to the
+    /// wrong decision.
+    async fn has_pending_card(&self, session_uid: &str, prompt_id: &str) -> bool {
         let inner = self.inner.lock().await;
-        inner
-            .pending
-            .values()
-            .map(|p| p.session.uid.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len()
+        inner.pending.iter().any(|((uid, _), entry)| {
+            uid == session_uid && entry.card.prompt_id.as_deref() == Some(prompt_id)
+        })
+    }
+
+    /// What the fleet would call this run, from the cwd the daemon has
+    /// persisted rather than from whatever the current hook happened to carry.
+    async fn effective_project_label(&self, session_uid: &str) -> String {
+        match self.db.get_session(session_uid.to_string()).await {
+            Ok(Some(row)) => crate::project_label::project_label(&row.cwd),
+            // No row: the run is gone. Say nothing rather than reach for the
+            // tmux name.
+            Ok(None) => String::new(),
+            // A database that will not answer is not the same thing as a run
+            // with no project, even though the notification says the same
+            // words for both — so it is said out loud here.
+            Err(err) => {
+                crate::log_warn!("push: no project label for {session_uid}: {err:#}");
+                String::new()
+            }
+        }
     }
 
     /// Work out which run this hook belongs to, adopting it if it is new, and
@@ -1677,6 +1882,8 @@ impl Daemon {
             );
             return Ok(None);
         }
+
+        self.relabel_open_cards(&uid, &row.cwd).await;
 
         if let Some(path) = &input.transcript_path {
             let already = existing
@@ -2809,6 +3016,10 @@ impl Daemon {
                 updated_at: now,
             })
             .await?;
+        // **The supervisor is a cwd writer too.** A run that reconnects from a
+        // different directory moves, and any card it is holding has to move
+        // with it — see `relabel_open_cards`.
+        self.relabel_open_cards(&uid, &info.cwd).await;
         if wrote == crate::store::SessionUpsert::Tombstoned {
             // The uid was deleted while this registration was in flight.
             // Installing the in-memory supervisor anyway would leave the daemon
@@ -3144,6 +3355,12 @@ impl Daemon {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
                 tmux_session: row.tmux_session,
+                // Resolved here rather than on the phone, because a push has
+                // to be named by something the phone cannot compute — it may
+                // not be running — and two rules for one name produce two
+                // names. Lexical, so it costs nothing on a read this hot. See
+                // `project_label`.
+                project_label: crate::project_label::project_label(&row.cwd),
                 cwd: row.cwd,
                 lifecycle: row.lifecycle,
                 link,
@@ -3850,19 +4067,31 @@ impl Daemon {
     }
 
     /// Store where a device wants its pushes sent.
+    ///
+    /// **A token belongs to one row.** A phone that re-pairs arrives under a new
+    /// device id carrying the same APNs token, and the store moves it — so the
+    /// rows it was taken from are told to the sender here. Their queues hold
+    /// work for a token they no longer own, and their workers would otherwise
+    /// wait on a phone that has already come back under another name.
     pub async fn register_push(
         &self,
         device_id: &str,
         token: &str,
         environment: &str,
     ) -> Result<()> {
-        self.db
+        let displaced = self
+            .db
             .set_push_token(
                 device_id.to_string(),
                 token.to_string(),
                 environment.to_string(),
             )
-            .await
+            .await?;
+        for previous in displaced {
+            crate::log_info!("push: {previous} lost its token to {device_id}; retiring its queue");
+            self.push.retire(&previous);
+        }
+        Ok(())
     }
 
     /// Authenticate a `hello`.
@@ -4169,6 +4398,10 @@ impl Daemon {
             // the ordinary case for a Mac with no phone connected.
             let _ = self.revocations_tx.send(device.device_id.clone());
             self.push_gate.evict_device(&device.device_id);
+            // And the sender's queue for it, which holds work authorised before
+            // this moment and a worker that would otherwise wait on a phone
+            // that is never coming back.
+            self.push.retire(&device.device_id);
             revoked
         };
 
@@ -4338,6 +4571,19 @@ mod tests {
     /// that must not depend on one.
     fn test_daemon() -> Arc<Daemon> {
         daemon_with(Config::default())
+    }
+
+    /// A daemon whose catalog probe will wait out a loaded machine.
+    ///
+    /// `catalog::probe_with` documents why the deadline is configurable: so
+    /// machine load cannot be mistaken for a binary that will not answer. A
+    /// full parallel suite is exactly that load, and the tests that use this
+    /// are about what the catalog reports, never how fast it reports it.
+    fn daemon_with_patient_catalog_probe() -> Arc<Daemon> {
+        daemon_with(Config {
+            catalog_probe_ms: 30_000,
+            ..Config::default()
+        })
     }
 
     fn daemon_with(config: Config) -> Arc<Daemon> {
@@ -4998,7 +5244,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_command_catalog_is_read_once_per_binary_and_cached() {
-        let daemon = test_daemon();
+        let daemon = daemon_with_patient_catalog_probe();
         // The fake counts its own invocations, so the cache claim is a
         // measured fact rather than an implementation hope.
         let bin = crate::catalog::test_bin::answering_binary();
@@ -5133,7 +5379,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_catalog_asks_share_one_probe() {
-        let daemon = test_daemon();
+        let daemon = daemon_with_patient_catalog_probe();
         let bin = crate::catalog::test_bin::answering_binary();
         let count = bin.parent().unwrap().join("count");
         let script = format!(
@@ -5164,7 +5410,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_failed_asks_share_one_probe_too() {
-        let daemon = test_daemon();
+        let daemon = daemon_with_patient_catalog_probe();
         let bin = crate::catalog::test_bin::answering_binary();
         let count = bin.parent().unwrap().join("count");
         // Counts its runs, then exits without ever saying init: a failure.
@@ -5419,10 +5665,21 @@ mod tests {
         prompt_id: &str,
         command: &str,
     ) -> String {
+        raise_prompt_in(daemon, "cc-1", uid, prompt_id, command).await
+    }
+
+    /// The same, for a named run — so a test can hold two runs at once.
+    async fn raise_prompt_in(
+        daemon: &Arc<Daemon>,
+        session_id: &str,
+        uid: &str,
+        prompt_id: &str,
+        command: &str,
+    ) -> String {
         let tool_input = json!({ "command": command });
         daemon
             .handle_hook(HookPost {
-                session_id: "cc-1".into(),
+                session_id: session_id.into(),
                 session_uid: Some(uid.to_string()),
                 event: "PermissionRequest".into(),
                 payload: json!({
@@ -6192,7 +6449,11 @@ mod tests {
 
     /// A daemon whose pushes land in a vec instead of APNs, each with the
     /// exclusion list it carried — the probe for the doorbell tests below.
-    struct CaptureSender(std::sync::Mutex<Vec<(crate::apns::PushHint, Vec<String>)>>);
+    struct CaptureSender(
+        std::sync::Mutex<Vec<(crate::apns::PushHint, Vec<String>)>>,
+        /// Devices the daemon told the sender to retire.
+        std::sync::Mutex<Vec<String>>,
+    );
     impl crate::apns::PushSender for CaptureSender {
         fn send(&self, hint: &crate::apns::PushHint, excluded: &[String]) {
             self.0
@@ -6200,15 +6461,27 @@ mod tests {
                 .unwrap()
                 .push((hint.clone(), excluded.to_vec()));
         }
+        fn retire(&self, device_id: &str) {
+            self.1.lock().unwrap().push(device_id.to_string());
+        }
     }
 
     fn capture_daemon() -> (Arc<Daemon>, Arc<CaptureSender>) {
-        let capture = Arc::new(CaptureSender(std::sync::Mutex::new(Vec::new())));
+        capture_daemon_on(shared_store())
+    }
+
+    /// The same, over a store that already exists — so a test can express "ccd
+    /// was killed and came back" and watch what the new one rings about.
+    fn capture_daemon_on(store: Arc<Store>) -> (Arc<Daemon>, Arc<CaptureSender>) {
+        let capture = Arc::new(CaptureSender(
+            std::sync::Mutex::new(Vec::new()),
+            std::sync::Mutex::new(Vec::new()),
+        ));
         let (tx, rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(rx));
         let daemon = Daemon::new(
             Config::default(),
-            shared_store(),
+            store,
             Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
             Endpoint {
                 host: "test.ts.net".into(),
@@ -6268,7 +6541,7 @@ mod tests {
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "one quiet state, one ring: {rings:?}");
         let (hint, excluded) = &rings[0];
-        assert_eq!(hint.body, "Waiting for your input");
+        assert_eq!(hint.kind.sentence(), "Waiting for your input");
         assert!(
             !format!("{hint:?}").contains("deploy_key"),
             "nothing the agent wrote may reach the APNs payload"
@@ -6310,7 +6583,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .map(|(hint, _)| hint.body.clone())
+            .map(|(hint, _)| hint.kind.sentence().to_string())
             .collect();
         bodies.sort();
         assert_eq!(
@@ -6321,6 +6594,526 @@ mod tests {
                 "Waiting for your input".to_string(),
             ],
             "a superseded wait stays silent; every surviving change rings once"
+        );
+    }
+
+    /// A pending card, hand-built: the state it represents — one run holding a
+    /// second decision while its first is claimed — is not reachable through
+    /// the hooks.
+    fn pending_card(uid: &str, label: &str) -> PendingApproval {
+        PendingApproval {
+            card: serde_json::from_value(json!({
+                "request_id": "r", "payload_hash": "h", "tool_name": "Bash",
+                "tool_input": {}, "display_text": "echo hi"
+            }))
+            .unwrap(),
+            session: SessionKey::new(uid, "cc-1"),
+            project_label: label.into(),
+            created_ms: 0,
+            responder: None,
+            claimed: false,
+            local_misses: 0,
+            tool_ran: false,
+            generation: 0,
+            prompt: None,
+        }
+    }
+
+    /// Two cards on one run are one agent, and the run is named once.
+    /// Unreachable through hooks alone — it takes a claimed card the
+    /// superseding sweep left standing — so the rule is pinned where it lives
+    /// rather than left to an arrangement no test can build.
+    #[test]
+    fn two_decisions_on_one_run_are_one_agent() {
+        let mut inner = Inner::default();
+        for request in ["r-1", "r-2"] {
+            inner.pending.insert(
+                (TEST_UID.to_string(), request.to_string()),
+                pending_card(TEST_UID, "Aion"),
+            );
+        }
+        inner.pending.insert(
+            ("other-run".to_string(), "r-3".to_string()),
+            pending_card("other-run", "Ledger"),
+        );
+
+        let mut blocked = blocked_runs(&inner);
+        blocked.sort();
+        assert_eq!(
+            blocked,
+            vec![
+                (TEST_UID.to_string(), "Aion".to_string()),
+                ("other-run".to_string(), "Ledger".to_string())
+            ],
+            "two cards on one run are one agent, named once"
+        );
+        assert!(blocked_runs(&Inner::default()).is_empty());
+    }
+
+    /// **A run that moves takes its open cards with it.**
+    ///
+    /// The label is captured with the card so that composing a doorbell needs
+    /// no database read. A later hook can carry a different `cwd`, and the
+    /// fleet redraws from the row — so a card still holding the old name would
+    /// put one name on a lock screen and a different one on the list behind it.
+    #[tokio::test]
+    async fn a_card_is_named_by_where_its_run_is_now() {
+        let (daemon, capture) = capture_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/srv/dev/before",
+                    "prompt_id": "p-1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "echo hi" },
+                }),
+                wait: false,
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().clear();
+
+        // The run moves: an ordinary hook carrying a different `cwd`.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "PreToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Read",
+                    "tool_input": { "file_path": "/srv/dev/after/x" },
+                    "cwd": "/srv/dev/after",
+                }),
+                wait: false,
+            })
+            .await;
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-2".into(),
+                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "agent_completed",
+                    "message": "done",
+                    "cwd": "/srv/dev/other",
+                }),
+                wait: false,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let (hint, _) = rings.last().expect("the completion rings");
+        assert_eq!(
+            hint.project_label, "after",
+            "the card wears the run's current project, not the one it was filed in: {rings:?}"
+        );
+    }
+
+    /// **The supervisor is a cwd writer too.** A run that reconnects from a
+    /// different directory moves, and a card it is holding has to move with it
+    /// — or the doorbell names one project while the fleet names another.
+    #[tokio::test]
+    async fn a_supervisor_reconnecting_elsewhere_relabels_the_cards_it_holds() {
+        let (daemon, capture) = capture_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/srv/dev/before",
+                    "prompt_id": "p-1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "echo hi" },
+                }),
+                wait: false,
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().clear();
+
+        // The run's supervisor registers from somewhere else.
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: "cc-1".to_string(),
+                    session_uid: Some(TEST_UID.to_string()),
+                    tmux_session: "cc-1".to_string(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/srv/dev/after".to_string(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("the supervisor registers");
+
+        // Another run finishes a turn, so the doorbell has to name the blocked
+        // one — and it names it by where that run is now.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-2".into(),
+                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "agent_completed",
+                    "message": "done",
+                    "cwd": "/srv/dev/other",
+                }),
+                wait: false,
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        let rings = capture.0.lock().unwrap();
+        let (hint, _) = rings.last().expect("the completion rings");
+        assert_eq!(
+            hint.project_label, "after",
+            "the card moved with the run its supervisor re-registered: {rings:?}"
+        );
+    }
+
+    /// **A phone that re-pairs takes its token with it.** The store moves an
+    /// APNs token to the row that just registered it, so the row it came from
+    /// holds work for a token it no longer owns — and a worker waiting on a
+    /// phone that has already come back under another name.
+    #[tokio::test]
+    async fn re_registering_a_token_retires_the_row_it_was_taken_from() {
+        let (daemon, capture) = capture_daemon();
+        async fn pair(daemon: &Arc<Daemon>) -> String {
+            let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+            match hello_with_code(daemon, &code).await {
+                AuthOutcome::Paired { device_id, .. } => device_id,
+                other => panic!("pairing must succeed: {other:?}"),
+            }
+        }
+        let first = pair(&daemon).await;
+        let second = pair(&daemon).await;
+
+        daemon
+            .register_push(&first, "tok-shared", "production")
+            .await
+            .unwrap();
+        assert!(
+            capture.1.lock().unwrap().is_empty(),
+            "nothing is displaced by the first registration"
+        );
+
+        daemon
+            .register_push(&second, "tok-shared", "production")
+            .await
+            .unwrap();
+        assert_eq!(
+            *capture.1.lock().unwrap(),
+            vec![first],
+            "the row the token was taken from is retired with it"
+        );
+    }
+
+    /// **Revoking a device retires its push queue with it.**
+    ///
+    /// The queue holds work authorised before the revocation, and behind it a
+    /// worker that would otherwise wait on a phone that is never coming back.
+    /// Retirement is *told*, not inferred from a later send: if nothing rings
+    /// again, an inference never happens.
+    #[tokio::test]
+    async fn revoking_a_device_retires_the_queue_holding_its_pushes() {
+        let (daemon, capture) = capture_daemon();
+        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let AuthOutcome::Paired { device_id, .. } = hello_with_code(&daemon, &code).await else {
+            panic!("pairing must succeed");
+        };
+        assert!(capture.1.lock().unwrap().is_empty(), "nothing retired yet");
+
+        daemon.revoke(&device_id, false).await.unwrap();
+        assert_eq!(
+            *capture.1.lock().unwrap(),
+            vec![device_id],
+            "the sender is told the device is gone, at the moment it goes"
+        );
+    }
+
+    /// **The doorbell names the run it is about, through the real path.**
+    ///
+    /// `aion` is holding a decision when `ledger` finishes a turn. One slot
+    /// means `ledger`'s doorbell has to speak for the fleet — and titling it
+    /// `ledger` would send the reader to the wrong project to look for a card
+    /// that is not there.
+    #[tokio::test]
+    async fn the_doorbell_that_speaks_for_the_fleet_names_the_blocked_run() {
+        let (daemon, capture) = capture_daemon();
+        let blocked_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(blocked_uid.into()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/srv/dev/aion",
+                    "prompt_id": "p-1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "echo hi" },
+                }),
+                wait: false,
+            })
+            .await;
+        // Past the decision's own grace, so what follows is counted alone.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().clear();
+
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-2".into(),
+                session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQS".into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "agent_completed",
+                    "message": "done",
+                    "cwd": "/srv/dev/ledger",
+                }),
+                wait: false,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let (hint, _) = rings.first().expect("the completion rings");
+        assert_eq!(
+            (hint.kind, hint.project_label.as_str()),
+            (crate::apns::PushKind::Approval, "aion"),
+            "the decision's project, not the run that happened to ring: {rings:?}"
+        );
+    }
+
+    /// **A decision the daemon inherited from its own restart still rings.**
+    ///
+    /// Cards are durable; the push gate is memory-only by design. So after a
+    /// restart the decision is in the database with its prompt key unclaimed,
+    /// and the `permission_prompt` Claude repeats is the first thing to admit
+    /// it — as a decision, because the card is right there.
+    ///
+    /// The run then does something ordinary: a tool starts. That records
+    /// progress, which is exactly what cancels a *quiet-state* push waiting out
+    /// its grace. A decision is not a quiet state. If progress cancels it, the
+    /// reader is never told about a card that is still on their screen and
+    /// still on the agent's.
+    #[tokio::test]
+    async fn a_decision_recovered_from_a_restart_survives_the_run_moving() {
+        let store = shared_store();
+        let before = daemon_on(Arc::clone(&store), Config::default());
+        raise_prompt(&before, TEST_UID, "p-open", "echo hi").await;
+
+        let (daemon, capture) = capture_daemon_on(store);
+        daemon.recover().await;
+        assert!(
+            daemon.has_pending_card(TEST_UID, "p-open").await,
+            "the run-up: the restarted daemon holds the card"
+        );
+
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "permission_prompt",
+                    "message": "Claude needs your permission to use Bash",
+                    "prompt_id": "p-open",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+        // A tool starts while the card waits — the run moved.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "PreToolUse".into(),
+                payload: json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Read",
+                    "tool_input": { "file_path": "/tmp/x" },
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let kinds: Vec<_> = rings.iter().map(|(h, _)| h.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![crate::apns::PushKind::Approval],
+            "a card that is still open still rings, whatever else the run does: {rings:?}"
+        );
+    }
+
+    /// **The badge is a count of runs, read at the moment of ringing.**
+    ///
+    /// The sentence says "agents", so the number has to be agents. Asserting it
+    /// on a hand-made hint would only re-check the composer's arithmetic; this
+    /// drives two runs to a decision each and reads the count off the hint the
+    /// daemon actually sent. Both say two: the second run blocked while the
+    /// first doorbell was still inside its dispatch grace, and a doorbell
+    /// describes the fleet it is about to interrupt someone for.
+    #[tokio::test]
+    async fn the_badge_counts_the_runs_that_are_blocked() {
+        let (daemon, capture) = capture_daemon();
+        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a", "echo a").await;
+        raise_prompt_in(
+            &daemon,
+            "cc-2",
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+            "p-b",
+            "echo b",
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let counts: Vec<usize> = rings.iter().map(|(h, _)| h.blocked_sessions).collect();
+        assert_eq!(
+            counts,
+            vec![2, 2],
+            "the count is of the fleet when the doorbell rings, and by then both \
+             runs were blocked: {rings:?}"
+        );
+    }
+
+    /// **The notice must not eat the decision's key, and must not outlive it.**
+    ///
+    /// A `permission_prompt` can arrive before — or without — the
+    /// `PermissionRequest` that makes a card. Taking the permission gate for
+    /// that notice would consume the prompt's key, and the real request landing
+    /// afterwards would be suppressed as a duplicate of a ring that never
+    /// described a card: the reader would never be told about the decision.
+    ///
+    /// And the notice must not simply *join* it. Two dispatches survive their
+    /// grace independently, and APNs stores one notification per device without
+    /// saying which — so the reader could be left holding "waiting for your
+    /// input" while an answerable card sat behind it. The decision supersedes
+    /// the notice, and one ring goes out.
+    #[tokio::test]
+    async fn a_notice_that_arrives_before_its_card_does_not_silence_the_decision() {
+        let (daemon, capture) = capture_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "permission_prompt",
+                    "message": "Claude needs your permission to use Bash",
+                    "prompt_id": "p-late",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+        // The structured request for that same prompt, arriving afterwards.
+        raise_prompt(&daemon, TEST_UID, "p-late", "echo hi").await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let kinds: Vec<_> = rings.iter().map(|(h, _)| h.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![crate::apns::PushKind::Approval],
+            "the decision supersedes the notice about it, and it is the one that rings: {rings:?}"
+        );
+    }
+
+    /// **A prompt whose card is gone is not news.** The decision rang, it was
+    /// answered, the card went with it — and a delayed or replayed notice about
+    /// that same prompt would be a notification about something that no longer
+    /// exists. Silence is the honest answer, and it is a different answer from
+    /// the one a prompt nobody has heard of gets.
+    #[tokio::test]
+    async fn a_notice_for_a_decision_that_already_rang_is_silent() {
+        let (daemon, capture) = capture_daemon();
+        raise_prompt(&daemon, TEST_UID, "p-done", "echo hi").await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(capture.0.lock().unwrap().len(), 1, "the decision rang");
+
+        // The card goes: answered at the Mac, superseded, whatever ended it.
+        daemon.inner.lock().await.pending.clear();
+
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "permission_prompt",
+                    "message": "Claude needs your permission to use Bash",
+                    "prompt_id": "p-done",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "no second ring for a decision that is over"
+        );
+    }
+
+    /// **`Approval` has to mean there is a card to answer.** A
+    /// `permission_prompt` whose `PermissionRequest` never arrived is a notice
+    /// that Claude Code is asking, with nothing in the decision list behind it —
+    /// the phone even has a word for that state. Tagging it `Approval` would
+    /// send a tap to an empty, unactionable list.
+    #[tokio::test]
+    async fn a_permission_notice_with_no_card_behind_it_does_not_ring_as_a_decision() {
+        let (daemon, capture) = capture_daemon();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.into()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "permission_prompt",
+                    "message": "Claude needs your permission to use Bash",
+                    "prompt_id": "orphan",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        assert_eq!(rings.len(), 1, "it still rings: {rings:?}");
+        assert_eq!(
+            rings[0].0.kind,
+            crate::apns::PushKind::NeedsInput,
+            "a human is waited on, but there is no card to open"
         );
     }
 
@@ -6367,6 +7160,70 @@ mod tests {
         );
     }
 
+    /// **A push admitted for a run that is already gone never rings.**
+    ///
+    /// The ticket catches an eviction that lands *after* admission. It cannot
+    /// catch one that lands just before: a hook already past `ensure_session`
+    /// goes on to admit, and mints its ticket against the epoch the eviction
+    /// had already bumped — so the ticket agrees with the world and the push
+    /// looks perfectly valid. What settles it is asking, at the moment of
+    /// ringing, whether the run is still there.
+    #[tokio::test]
+    async fn a_push_admitted_for_a_run_that_is_already_gone_never_rings() {
+        let (daemon, capture) = capture_daemon();
+        let hint = |uid: &str| PushHint {
+            project_label: "Aion".into(),
+            kind: crate::apns::PushKind::NeedsInput,
+            blocked_sessions: 1,
+            session_uid: uid.into(),
+        };
+
+        // Nothing has ever filed a row under this uid, which is the state a
+        // deleted run leaves behind.
+        let ticket = daemon
+            .push_gate
+            .admit_ambient(TEST_UID, crate::push_gate::Ambient::Waiting)
+            .expect("a fresh run admits");
+        daemon.dispatch_push(TEST_UID.into(), 1, hint(TEST_UID), ticket, true, None);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            capture.0.lock().unwrap().is_empty(),
+            "a run that is not there has nothing to ring about"
+        );
+
+        // The control: the same push for a run that does exist does ring, so
+        // the silence above is the check and not the harness.
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        let row = daemon
+            .store
+            .find_session("cc-1")
+            .unwrap()
+            .expect("the hook filed a row");
+        // Past that hook's own dispatch grace, so its ring is not counted here.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        capture.0.lock().unwrap().clear();
+        let ticket = daemon
+            .push_gate
+            .admit_ambient(&row.session_uid, crate::push_gate::Ambient::Waiting)
+            .expect("a new class is news");
+        daemon.dispatch_push(
+            row.session_uid.clone(),
+            1,
+            hint(&row.session_uid),
+            ticket,
+            true,
+            None,
+        );
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "a run that is still there rings"
+        );
+    }
+
     /// One ring per decision, through the real permission path: the
     /// `permission_prompt` notification that trails every `PermissionRequest`
     /// shares its prompt, so the twin finds the key and stays silent; a
@@ -6393,6 +7250,10 @@ mod tests {
             })
             .await; // the twin: silent
         raise_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // replay: silent
+                                                                  // Past the first ring's dispatch grace, so this is a second decision
+                                                                  // announced in its own right rather than one that supersedes a card
+                                                                  // nobody was told about — which is the test below.
+        tokio::time::sleep(Duration::from_millis(700)).await;
         raise_prompt(&daemon, TEST_UID, "p-2", "echo two").await; // new decision: rings
 
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -6401,8 +7262,35 @@ mod tests {
         assert!(
             rings
                 .iter()
-                .all(|(h, _)| h.body == "Bash approval" && h.title.contains("needs you")),
-            "an approval ring names the tool class, nothing else: {rings:?}"
+                .all(|(h, _)| h.kind == crate::apns::PushKind::Approval
+                    && h.project_label == "tmp"),
+            "an approval ring names the project and why it rang, nothing else: {rings:?}"
+        );
+    }
+
+    /// **A decision superseded before its doorbell rang is not announced.**
+    ///
+    /// Claude asks one thing at a time, so a second prompt retires the first —
+    /// and if that happens inside the dispatch grace, the first card is gone
+    /// before anyone was told it existed. Ringing about it would send a reader
+    /// to a decision list that does not hold it. The prompt that is actually
+    /// waiting rings, once.
+    #[tokio::test]
+    async fn a_card_retired_before_its_doorbell_rang_does_not_ring() {
+        let (daemon, capture) = capture_daemon();
+        raise_prompt(&daemon, TEST_UID, "p-first", "echo one").await;
+        raise_prompt(&daemon, TEST_UID, "p-second", "echo two").await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rung = format!("{:?}", capture.0.lock().unwrap());
+        let count = capture.0.lock().unwrap().len();
+        assert_eq!(
+            count, 1,
+            "only the decision that is still open rings: {rung}"
+        );
+        assert!(
+            daemon.has_pending_card(TEST_UID, "p-second").await,
+            "and it is the one that survived"
         );
     }
 

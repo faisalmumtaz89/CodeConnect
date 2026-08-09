@@ -1296,9 +1296,24 @@ impl Store {
     /// claiming row is missing or was revoked after the caller's own check,
     /// the transaction rolls back whole rather than leaving the token owned
     /// by no active row.
-    pub fn set_push_token(&self, device_id: &str, token: &str, environment: &str) -> Result<()> {
+    /// Returns the device rows this token was taken *from*, so their senders
+    /// can be retired: a phone that re-pairs arrives under a new device id, and
+    /// the old row's queue would otherwise wait on a token it no longer holds.
+    pub fn set_push_token(
+        &self,
+        device_id: &str,
+        token: &str,
+        environment: &str,
+    ) -> Result<Vec<String>> {
         let mut conn = self.write();
         let tx = conn.transaction()?;
+        let displaced: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT device_id FROM devices WHERE push_token = ?1 AND device_id <> ?2",
+            )?;
+            let rows = stmt.query_map(params![token, device_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         tx.execute(
             "UPDATE devices SET push_token = NULL, push_environment = NULL
               WHERE push_token = ?1 AND device_id <> ?2",
@@ -1313,15 +1328,23 @@ impl Store {
             anyhow::bail!("push registration for unknown or revoked device {device_id}");
         }
         tx.commit()?;
-        Ok(())
+        Ok(displaced)
     }
 
     /// Record the environment Apple actually accepted, leaving the token alone.
-    pub fn set_push_environment(&self, device_id: &str, environment: &str) -> Result<()> {
+    /// **Only for the token that was actually corrected.** A late answer about a
+    /// token the phone has already replaced must not move the new token to the
+    /// wrong host, which would make every push to it fail.
+    pub fn set_push_environment(
+        &self,
+        device_id: &str,
+        token: &str,
+        environment: &str,
+    ) -> Result<()> {
         let conn = self.write();
         conn.execute(
-            "UPDATE devices SET push_environment = ?2 WHERE device_id = ?1",
-            params![device_id, environment],
+            "UPDATE devices SET push_environment = ?3 WHERE device_id = ?1 AND push_token = ?2",
+            params![device_id, token, environment],
         )?;
         Ok(())
     }
@@ -1329,21 +1352,30 @@ impl Store {
     /// Apple has said this token is dead. Cleared rather than remembered: the
     /// device row itself stays, because the credential is still valid and the
     /// phone may register again on next launch.
-    pub fn clear_push_token(&self, device_id: &str) -> Result<()> {
+    /// **Only the token Apple refused.** A device id outlives the token behind
+    /// it: a phone that reinstalls registers a new one under the same row, and
+    /// a late `410` for the old token would otherwise erase the new one and
+    /// leave a paired phone silently unable to receive anything.
+    /// Returns whether the refused token was the one registered — `false` means
+    /// the phone has since registered another and nothing was cleared.
+    pub fn clear_push_token(&self, device_id: &str, refused: &str) -> Result<bool> {
         let conn = self.write();
-        conn.execute(
-            "UPDATE devices SET push_token = NULL, push_environment = NULL WHERE device_id = ?1",
-            params![device_id],
+        let cleared = conn.execute(
+            "UPDATE devices SET push_token = NULL, push_environment = NULL \
+             WHERE device_id = ?1 AND push_token = ?2",
+            params![device_id, refused],
         )?;
-        Ok(())
+        Ok(cleared > 0)
     }
 
     /// Every device that can currently receive a push.
     ///
-    /// Revoked devices are excluded here rather than at the call site: a
-    /// revoked phone must stop receiving notifications at the same instant it
-    /// stops being able to connect, or revocation leaks the fact that an agent
-    /// is waiting to a device that is no longer trusted.
+    /// **This read is the authorization point for a push.** Revoked devices are
+    /// excluded here rather than at the call site, so a revoked phone stops
+    /// being offered from the next read onward — otherwise revocation would
+    /// leak the fact that an agent is waiting to a device that is no longer
+    /// trusted. A doorbell already snapshotted from an earlier read may still
+    /// go out; nothing can recall a request handed to Apple.
     pub fn push_targets(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
@@ -4069,10 +4101,96 @@ mod tests {
         assert_eq!(store.push_targets().unwrap().len(), 2);
     }
 
+    /// **A late environment correction cannot move a token it is not about.**
+    ///
+    /// The correction says "this token belongs on the other host". Applied by
+    /// device id alone, an answer about a replaced token would move the *new*
+    /// one to the wrong host, and every push to it would fail.
+    #[test]
+    fn an_environment_correction_only_moves_the_token_it_is_about() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store.set_push_token("dev-1", "tok-a", "sandbox").unwrap();
+        store.set_push_token("dev-1", "tok-b", "sandbox").unwrap();
+
+        store
+            .set_push_environment("dev-1", "tok-a", "production")
+            .unwrap();
+        assert_eq!(
+            store.push_targets().unwrap(),
+            vec![(
+                "dev-1".to_string(),
+                "tok-b".to_string(),
+                "sandbox".to_string()
+            )],
+            "the live token keeps the host it registered on"
+        );
+
+        store
+            .set_push_environment("dev-1", "tok-b", "production")
+            .unwrap();
+        assert_eq!(
+            store.push_targets().unwrap()[0].2,
+            "production",
+            "a correction about the live token still applies"
+        );
+    }
+
+    /// **A late refusal cannot erase a token registered since.**
+    ///
+    /// A device id outlives the token behind it: a phone that reinstalls
+    /// registers a new one under the same row. Apple's `410` for the old token
+    /// can arrive after that, and clearing by device id alone would leave a
+    /// paired phone silently unable to receive anything.
+    #[test]
+    fn a_dead_token_is_cleared_only_if_it_is_still_the_one_registered() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-a", "production")
+            .unwrap();
+
+        // The phone reinstalls and registers again before Apple answers.
+        store
+            .set_push_token("dev-1", "tok-b", "production")
+            .unwrap();
+        assert!(
+            !store.clear_push_token("dev-1", "tok-a").unwrap(),
+            "and says it cleared nothing, so the caller can tell the device is still there"
+        );
+
+        let targets = store.push_targets().unwrap();
+        assert_eq!(
+            targets,
+            vec![(
+                "dev-1".to_string(),
+                "tok-b".to_string(),
+                "production".to_string()
+            )],
+            "the token the phone is actually using survives its predecessor's refusal"
+        );
+
+        // And the refusal still works when it names the current token — and
+        // says so, which is what `forget` reports and the delivery path types
+        // its refusal on.
+        assert!(
+            store.clear_push_token("dev-1", "tok-b").unwrap(),
+            "clearing the registered token reports that it did"
+        );
+        assert!(
+            store.push_targets().unwrap().is_empty(),
+            "a device Apple has disowned stops being a target"
+        );
+    }
+
     /// The strip must never commit without its claim: registering against a
-    /// device row that does not exist (or was revoked in the race window
-    /// after the caller's check) errors, and the current owner keeps the
-    /// token — the transaction rolled back whole.
+    /// device row that does not exist (or was revoked in the race window after
+    /// the caller's check) errors, and the current owner keeps the token — the
+    /// transaction rolled back whole.
     #[test]
     fn a_failed_claim_rolls_back_the_strip() {
         let (store, _path) = temp_store();

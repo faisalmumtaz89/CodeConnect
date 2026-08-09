@@ -408,7 +408,7 @@ import SwiftUI
                 specimen("MICRO 11/14 +0.06EM - SECTION LABELS ONLY", CC.type.micro, CC.text.tertiary)
                 specimen("BADGELABEL 11/14 SEMIBOLD +0.04EM", CC.type.badgeLabel, CC.text.primary)
                 specimen("FIELDLABEL 11/14 +0.02EM", CC.type.fieldLabel, CC.text.secondary)
-                specimen("mono 14  cc-1 · K76F46", CC.type.mono, CC.text.primary)
+                specimen("mono 14  git push --force", CC.type.mono, CC.text.primary)
                 specimen("monoSmall 12  1.4s", CC.type.monoSmall, CC.text.secondary)
             }
         }
@@ -424,23 +424,14 @@ import SwiftUI
         // MARK: Identity
 
         private var identitySection: some View {
-            section("CCIdentity") {
+            section("CCFingerprint") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     Text(
-                        "The bright text is always the part that identifies. Two runs sharing `cc-1` differ only in the tail, so the tail is lit and the shared prefix is dimmed."
+                        "The bright text is always the part that identifies. Reading two 47-character fingerprints at equal brightness is a task nobody performs correctly at 2am, so only the characters that moved are lit."
                     )
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-
-                    CCCard {
-                        VStack(alignment: .leading, spacing: CC.space.xs) {
-                            CCIdentity(name: "cc-1", tail: "K76F46")
-                            CCIdentity(name: "cc-1", tail: "WXNSK1")
-                            CCIdentity(name: "cc-2")
-                            CCIdentity(name: "cc-3", tail: "4410FE", style: CC.type.mono)
-                        }
-                    }
 
                     Text("FINGERPRINT DIFF - SSH HOST KEY CHANGED")
                         .ccType(CC.type.micro)
@@ -625,7 +616,7 @@ import SwiftUI
                             // that was cut. The subtitle is the daemon's
                             // activity sentence and nothing else.
                             subtitle: "Bash rm -rf node_modules",
-                            meta: "cc-1 · K76F46 · 12s",
+                            meta: "started 09:05 · 12s",
                             action: { lastAction = "row 1" }
                         ) {
                             CCStatusDot(status: .blocked)
@@ -636,7 +627,7 @@ import SwiftUI
                         CCRow(
                             "api-gateway",
                             subtitle: "Edit src/router.ts",
-                            meta: "cc-2 · 9A21BC · 3s",
+                            meta: "3s",
                             action: { lastAction = "row 2" }
                         ) {
                             CCStatusDot(status: .running)
@@ -649,7 +640,7 @@ import SwiftUI
                             // `Done`, not `Finished`: one word per state, and
                             // the word is the one `FleetStatus.label` prints.
                             subtitle: "Done - you have not looked at the diff",
-                            meta: "cc-3 · 4410FE · 4m",
+                            meta: "4m",
                             action: { lastAction = "row 3" }
                         ) {
                             CCStatusDot(status: .doneUnreviewed)
@@ -660,7 +651,7 @@ import SwiftUI
                         CCRow(
                             "Display row - no action",
                             subtitle: "No press state, no chevron, no button trait",
-                            meta: "cc-4 · 0000AA · 2h",
+                            meta: "2h",
                             showsChevron: false
                         ) {
                             CCStatusDot(tone: .neutral)
@@ -669,7 +660,7 @@ import SwiftUI
                         CCRow(
                             "Disabled row",
                             subtitle: "Observe only - no supervisor attached",
-                            meta: "cc-5 · BEEF01 · 9m",
+                            meta: "started 22:40 · 9m",
                             separator: false,
                             disabledReason: CCDisabledReason(
                                 "No supervisor is attached to this session."),
@@ -702,18 +693,17 @@ import SwiftUI
                     VStack(spacing: 0) {
                         CCRow(
                             "codeconnect",
-                            titleTruncation: .middle,
+                            titleTruncation: .tail,
                             subtitleLineLimit: 1,
                             showsChevron: false,
                             density: .comfortable,
                             // The shipped label, in the shipped order
                             // (`FleetView.accessibilityLabel`): place, status,
-                            // class, the class's *rationale*, the uid spelled
-                            // one character at a time, the activity, the wait,
+                            // class, the class's *rationale*, the activity, the wait,
                             // and the capability — which is announced on every
                             // row whether or not the badge is drawn.
                             accessibilityLabelText:
-                                "codeconnect, Blocked, risk HIGH, Destructive, credentialed, or publishes something., cc-1, run K, 7, 6, F, 4, 6, Bash, git push --force origin main, waiting 4 minutes ago, control",
+                                "codeconnect, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes ago, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot.** A blocked row draws none: the band
@@ -753,14 +743,19 @@ import SwiftUI
                                 CCAdaptiveStack(
                                     horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs
                                 ) {
-                                    CCIdentity(name: "cc-1", tail: "K76F46")
+                                    Text(verbatim: "started 09:05")
+                                        .ccType(CC.type.micro)
+                                        .foregroundStyle(CC.text.tertiary)
                                     Spacer(minLength: CC.space.xs)
                                 }
                             }
                         }
 
-                        // Middle truncation is the point of this row: the tail
-                        // is the only part that differs between soak sessions.
+                        // Middle truncation is the point of *this* row, and it
+                        // is the only place left that wants it: generated names
+                        // are identical for forty characters and differ only in
+                        // their tails. A Fleet row draws a project, which is
+                        // recognised by how it starts, and trims from the tail.
                         CCRow(
                             "ccsoak-tail-54568-1785466205",
                             subtitle: "Bash echo soak",
@@ -785,7 +780,7 @@ import SwiftUI
                         CCRow(
                             "infra-terraform",
                             subtitle: "Session ended",
-                            titleTruncation: .middle,
+                            titleTruncation: .tail,
                             subtitleLineLimit: 1,
                             showsChevron: false,
                             separator: false,
@@ -848,7 +843,7 @@ import SwiftUI
                                 "studio.tail1234.ts.net", labelStyle: .identifier,
                                 age: "pinned 3d ago",
                                 detail: {
-                                    CCIdentity.fingerprint(
+                                    CCFingerprint.fingerprint(
                                         "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
                                         comparedTo: nil,
                                         name: "Pinned key for studio.tail1234.ts.net")
@@ -1223,7 +1218,7 @@ import SwiftUI
                         CCMonoBlock(
                             "{\n  \"tool\": \"Bash\",\n  \"command\": \"rm -rf node_modules && npm install\",\n  \"cwd\": \"/Users/dev/app\"\n}",
                             lineLimit: 2)
-                        CCMonoBlock("cc-1 · K76F46", showsCopy: false, isSmall: true)
+                        CCMonoBlock("SHA256:9Xk2LmQpR7vN3wZ", showsCopy: false, isSmall: true)
                     }
                 }
 

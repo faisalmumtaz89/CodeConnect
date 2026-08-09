@@ -148,7 +148,55 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     forwards — a client built against this or later knows them — and it is
 ///     the reason `SendTextResult` decoding should treat an unknown status as
 ///     indeterminate rather than as a decode failure.
-pub const PROTOCOL_MINOR: u32 = 10;
+///   * `10` — the daemon *completes* a confirmation its own injection
+///     opened, rather than dismissing it. `/model <value>` and
+///     `/effort <value>` make Claude Code ask before switching, and the
+///     composer-recovery Escape from minor 9 answered "no" to a question the
+///     human had already answered on the phone. From minor 10 the supervisor
+///     may send `Enter` instead, but only when the client set
+///     `complete_native_confirmation`, the command is one of those two with an
+///     argument, and the pane it captured still shows that argument selected.
+///     Advertised per session, so a supervisor below minor 10 keeps escaping.
+///   * `11` — a run carries the **project** it is working in.
+///     `SessionSummary.project_label` is the final component of `cwd` — trimmed,
+///     stripped of anything that would break a line, and bounded — resolved by
+///     the daemon rather than by each client, so that every surface naming a
+///     run names it the same. A client must not compute its own from `cwd`:
+///     two rules produce two names for one run. Empty when `cwd` names nothing, and
+///     empty from any daemon below this minor — the two mean the same thing to a
+///     reader: nobody has said what this project is. A client says so rather
+///     than falling back to the tmux name, which is a reused counter.
+///     Additive; an older client ignores the field and an older daemon omits it.
+///     The notification now names that project and nothing else: the title is
+///     the label (or `CodeConnect` when there is none), and the body is one of
+///     four canned sentences chosen by the hook's kind — or `{n} agents need
+///     you` once more than one session is blocked. The tool name and the
+///     risk class it used to carry are gone.
+///     A tap opens the phone's decision list when an approval rang, and the
+///     fleet otherwise — the list, never a particular card. The payload carries
+///     no routing, session, request or device identifier, only which of four
+///     kinds rang — so there is nothing in it that could point at a decision
+///     somebody has since answered. The words themselves are a snapshot, like
+///     any notification's.
+///     Every surface that names a run — the fleet list, the decision card, the
+///     session header, the diff title and the notification — takes its name
+///     from this field and never derives one of its own, so a name on a lock
+///     screen and a name in the app are the same name rather than two rules'
+///     answers. A client may *add* to it where a screen has to tell two runs in
+///     one project apart; it may not replace it. A run that changes directory
+///     while a card is open takes that card with it: every writer of a run's
+///     `cwd` relabels the cards it is holding, so a doorbell names the project
+///     the run is in when it rings, which is the project the app is showing.
+///
+///     **One bound, stated rather than implied.** A card takes its run's name
+///     when it is filed, and filing is not atomic with the relabel: a card
+///     raised in the same instant a run moves can be inserted carrying the
+///     previous name. It is corrected by the next thing that writes that run's
+///     `cwd`, and it is gone when the card resolves. The daemon does not
+///     serialise every hook behind a database write to close that instant — a
+///     doorbell is best-effort by construction, the app reconciles from the
+///     event log, and the cost of the alternative is paid by every hook.
+pub const PROTOCOL_MINOR: u32 = 11;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

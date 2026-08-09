@@ -2,11 +2,12 @@ import Foundation
 
 /// Where a notification should land.
 ///
-/// A push is a doorbell that deep-links *past* the fleet to the decision: route
-/// through the glance, land directly in the Deck. Push itself has not shipped
-/// yet, but the target has to exist before the thing that aims at it, or the
-/// notification payload ends up designed around whatever the app happens to be
-/// able to open.
+/// A push is a doorbell. An approval lands *past* the fleet, in the Deck — the
+/// list of what is waiting; every other kind lands on the fleet itself. It aims
+/// at a list rather than at one decision because
+/// its payload names no session and no decision: one that pointed at a single card
+/// would have to keep being right about it after it was answered, superseded or
+/// already run, and would have to carry an identifier through Apple to do it.
 ///
 /// URL forms, all under the `codeconnect` scheme:
 ///
@@ -17,6 +18,13 @@ import Foundation
 ///     session's timeline with the decision card already open.
 ///   * `codeconnect://session/<session-id>/diff` — straight to the diff.
 enum DeepLink: Sendable, Hashable {
+    /// The fleet, with whatever was on top of it cleared.
+    ///
+    /// No URL form — nothing types this — and it exists because a tapped
+    /// notification about something undecidable has to land somewhere
+    /// *deterministic*. Doing nothing only resembles the fleet on a cold launch;
+    /// a warm app would stay on whatever screen it was left on.
+    case fleet
     case deck(requestID: String?)
     case session(sessionID: String, requestID: String?)
     case diff(sessionID: String)
@@ -52,6 +60,8 @@ enum DeepLink: Sendable, Hashable {
 
     var url: URL? {
         switch self {
+        case .fleet:
+            return nil
         case .deck(let requestID):
             guard let requestID else { return URL(string: "\(Self.scheme)://deck") }
             return URL(string: "\(Self.scheme)://deck?request=\(escaped(requestID))")

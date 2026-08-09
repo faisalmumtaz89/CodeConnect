@@ -21,9 +21,12 @@ the route because tmux has never heard of a uid.
 Two consequences worth stating:
 
 * **Two runs of one name are two sessions.** They get two rows, two timelines
-  and two rails. Where the fleet holds more than one run under a name, each row
-  prints the shortest tail of its uid that actually tells them apart — computed,
-  not a fixed slice, because a discriminator that ties is worse than none.
+  and two rails. The uid keys them; it never names them. A row is called by the
+  **project** the daemon resolved (`RunLabel`), and where two runs share one
+  project each row adds the time it started — but only when that is both true
+  and useful: never for an adopted run, whose timestamp is a first sighting
+  rather than a start, and never when two runs started in the same minute,
+  because a discriminator that ties is worse than none.
 * **An answer names its run** (`answer.session_id`). The daemon refuses an
   unscoped answer when one `request_id` is open in two runs rather than guessing;
   sending the uid means that path is never reached. In-flight answer state is
@@ -158,7 +161,7 @@ release build:
 | `-CC_FIXTURE_LINK stale` | withholds the fixture's keep-alive `pong`, so `LinkHealth` crosses its 45-second `staleAfter` on its own and every action disables itself **with its reason**. Pairs with either fixture; without it, `stale` is unreachable under a fixture and therefore never rendered or tested |
 | `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell an amber `5m40s` from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
 | `-CC_RENDER_PROBE YES` | adds a 1pt invisible element carrying the content-size category this process actually resolved to (`cc-render-probe`). The render harness reads it before it photographs anything — see *The render harness* below. Off by default so it cannot appear in a tree a product test is counting |
-| `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, exactly as a push would. `…/deck/<request-id>` opens a **named** card, which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
+| `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
 | `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut at its 512KB cap, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Truncated at 512KB`. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
@@ -330,10 +333,13 @@ MagicDNS name.
 
 ## Not built yet
 
-Push notifications (the daemon advertises `push: false`), Live Activities, and
-"comment to agent" from a diff hunk are not implemented. The deep-link routes
-(`codeconnect://deck`, `codeconnect://session/<id>`, `…/diff`) exist already, so
-that a push payload has somewhere to point when push does land.
+Live Activities are not implemented.
+Push notifications ring; an approval opens the Deck and every other kind opens
+the fleet. The deep-link routes
+(`codeconnect://deck`, `codeconnect://session/<id>`, `…/diff`) can name a
+particular target; a notification cannot — its payload carries no identifier at
+all, only which *kind* of doorbell rang — so a tapped approval opens the Deck and every other kind opens the fleet — the
+kind is the only thing a notification says about itself.
 
 ---
 
@@ -463,11 +469,11 @@ haptic is not motion, and removing it removes information.
 | `CCSectionHeader` | `CCSectionHeader("Blocked", count:, dotColor:, dotPulses:, note:, noteAction:, actionTitle:, action:)` — **place it flush**: it puts its own label on the 52pt column and takes no column parameter. The dot hangs itself into the 32pt gutter, takes no layout width, and stays centred on that axis as it scales |
 | `CCEmptyState` | `CCEmptyState(glyph:title:message:tone:actionTitle:action:actionDisabledReason:secondaryActionTitle:secondaryAction:)` — the primary action is `.primary`, because an empty state has exactly one action worth taking, and `actionDisabledReason:` *draws* why the only way out is shut |
 | `CCScreenMark` | `CCScreenMark(glyph:tone:)` — a 32pt glyph in a 64pt bordered circle. **A component, not a modifier, because the Dynamic Type ramp is welded to the token**: `ccGlyphContainer`'s free `relativeTo:` let two marks meaning "here is the thing this screen is about" ride `.title2` and `.largeTitle`, which measured 150.33 against 108.67 at AX5 and 0.00 apart at the default `L`. Use it for any such mark |
-| `CCSheetChrome` | `CCSheetChrome("Decision", subtitle:, onClose:) { content }` (+ `trailing:` slot); pairs with `CCActionBar`. Title and subtitle resolve backtick markup, so a sheet's anchor sets its path in mono |
+| `CCSheetChrome` | `CCSheetChrome("Decision", subtitle:, onClose:) { content }` (+ `trailing:` slot); pairs with `CCActionBar`. The **subtitle** resolves backtick markup, so a sheet's anchor sets its path in mono; the **title** is verbatim and bounded to two lines, because it carries a project name — arbitrary text from a filesystem, which a markup renderer would eat |
 | `CCActionPair` | `CCActionPair { deny } allow: { allow }` — **40 : 60, 12pt gap**, and no ratio parameter. A `Layout`, not a measurement: exact on the first frame, no `@State`, no `PreferenceKey`. Stacks at accessibility sizes |
 | `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with the diff grid's `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
 | `CCSegmented` | `CCSegmented(selection:options:accessibilityLabel:)` with `CCSegmentedOption(value, title:, icon:)` |
-| `CCIdentity` | `CCIdentity(name:tail:style:)` — shared prefix dimmed, distinguishing tail lit, character-by-character VoiceOver. `CCIdentity.fingerprint(_:comparedTo:name:referenceName:)` lights only the characters that differ; **`name:` prefixes the spoken label**, because an outer `.accessibilityLabel` would replace the spelling rather than introduce it, and **`referenceName:`** says what they differ *from* — a screen that diffs both keys against each other has one block whose reference is the other |
+| `CCFingerprint` | `CCFingerprint.fingerprint(_:comparedTo:name:referenceName:)` lights only the characters that differ from a reference; **`name:` prefixes the spoken label**, because an outer `.accessibilityLabel` would replace the spelling rather than introduce it, and **`referenceName:`** says what they differ *from* — a screen that diffs both keys against each other has one block whose reference is the other |
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
 | `CCHunkHeader` | `CCHunkHeader(header:fontSize:actions: CCHunkActions(comment:copyHunk:copyPath:))` — the kit draws the glyph, owns the menu and **is** the 44pt target. Pass actions as values, not a built control; the `menu:` closure form is legacy and cannot carry the gesture |
@@ -694,7 +700,7 @@ actually produce was checked.
   anywhere.
 - `textDisabled` is intentionally below AA and is exempt under WCAG 1.4.3
   ("inactive user interface component"). Permitted uses only: diff gutter line
-  numbers, the cwd breadcrumb, the `·` inside `CCIdentity`, disabled-button
+  numbers, the cwd breadcrumb, the `·` between a project and its start time, disabled-button
   labels — each of which sits beside a full-contrast explanation.
 
 **Semantic on surface** — all ✅: success 10.52 / info 5.71 / warning 10.36 /
@@ -791,9 +797,9 @@ as a tall portrait box with a word wedged into it.
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
 (`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold. `CCIdentity` spells uid tails character by
-character. `CCFreshnessPill` speaks ages as words ("14 seconds ago"), never
-"fourteen ess".
+VoiceOver cannot express a hold. `CCFingerprint` spells host-key fingerprints
+character by character. `CCFreshnessPill` speaks ages as words ("14 seconds
+ago"), never "fourteen ess".
 
 ## Reviewing the system
 

@@ -205,9 +205,9 @@ private struct TailObserver: UIViewRepresentable {
 /// answer a card, or say something.
 ///
 /// The identity block replaces the ambiguity of a bare nav title. The nav bar is
-/// left with nothing but a back chevron on purpose: the pushed screen's
-/// own header carries the identity, and a run is identified by `cc-1 · K76F46`,
-/// which no title bar can render honestly.
+/// left with nothing but a back chevron on purpose: the pushed screen's own
+/// header carries the project, and a project name is longer than a title bar
+/// can render honestly.
 struct SessionDetailView: View {
     let route: SessionRoute
 
@@ -256,9 +256,9 @@ struct SessionDetailView: View {
     private var key: String { route.key }
     private var state: SessionState? { model.states[key] }
     private var summary: SessionSummary? { model.summary(for: key) }
-    /// What to call it out loud: the tmux name, falling back to the key when the
-    /// daemon no longer lists this run.
-    private var displayName: String { model.displayName(for: key) }
+    /// What to call this run — see `RunLabel`. The same words the fleet row,
+    /// the card and the lock screen use.
+    private var label: RunLabel { model.runLabel(for: key) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -307,7 +307,7 @@ struct SessionDetailView: View {
                 TerminalTabView(
                     tmuxName: model.tmuxName(for: key),
                     unhosted: model.summary(for: key)?.tmuxSession.isEmpty == true,
-                    displayName: displayName)
+                    runLabel: label.spoken)
             }
         }
         .background(CC.color.bg)
@@ -317,8 +317,8 @@ struct SessionDetailView: View {
         // its own transition and fights any second one.
         .ccAnimation(CC.motion.small, value: composerFocused)
         .ccNavigationChrome()
-        // Empty on purpose. The identity block below carries the name, and it
-        // carries the uid tail the bar could never fit.
+        // Empty on purpose. The header below carries the project, at a width
+        // the bar could never give it.
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -344,7 +344,7 @@ struct SessionDetailView: View {
                         text: $composeText,
                         result: composeResult,
                         sending: sending,
-                        displayName: displayName,
+                        runLabel: label.spoken,
                         summary: summary,
                         onWhy: { showLinkDetail = true },
                         onSend: send,
@@ -440,11 +440,12 @@ struct SessionDetailView: View {
                 size: CCStatusDot.Size.cardHeader.rawValue,
                 isHollow: state?.loadedFromCacheAt != nil && state?.hasLiveData != true,
                 pulses: (state?.pendingApprovals.isEmpty == false))
-            Text(summary?.folderName ?? displayName)
+            Text(verbatim: label.project)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                // From the front, as everywhere else a project is drawn.
+                .truncationMode(.tail)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, CC.space.md)
@@ -472,17 +473,22 @@ struct SessionDetailView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-                        Text(summary?.folderName ?? displayName)
+                        Text(verbatim: label.project)
                             .ccType(CC.type.title)
                             .foregroundStyle(CC.text.primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
                         Spacer(minLength: CC.space.xs)
                         SessionFreshness(lastEventAt: state?.lastEventAt)
                     }
-                    CCIdentity(name: identityName, tail: identityTail)
+                    if let qualifier = label.qualifier {
+                        Text(verbatim: qualifier)
+                            .ccType(CC.type.micro)
+                            .foregroundStyle(CC.text.tertiary)
+                            .lineLimit(1)
+                    }
                     // `textDisabled` is permitted here — one of its few allowed
-                    // positions — because the folder name above it carries the
+                    // positions — because the project name above it carries the
                     // same fact at full contrast, so nothing is only readable in
                     // the dimmed run. Head truncation so the tail survives:
                     // `…/GitHub/CodeConnect` is the part that identifies.
@@ -555,21 +561,6 @@ struct SessionDetailView: View {
             reviewedSeq: ReviewMarks.reviewedSeq(for: key))
         return status.ccDotColor
     }
-
-    /// The shortest *verified* distinguishing suffix, computed by the model.
-    /// Read from `identityLabels` rather than from `model.fleet`, which re-sorts
-    /// the whole fleet on every access. Nothing ticks this body any more — see
-    /// the four small views at the foot of this file — so a body pass now means
-    /// the session itself changed, and that is the only time this is paid.
-    private var identity: (name: String, tail: String?) {
-        let label = AppModel.identityLabels(for: model.summaries)[key] ?? displayName
-        let parts = label.components(separatedBy: " · ")
-        return (parts.first ?? label, parts.count > 1 ? parts[1] : nil)
-    }
-
-    private var identityName: String { identity.name }
-
-    private var identityTail: String? { identity.tail }
 
     // MARK: Toolbar
 
@@ -1131,7 +1122,8 @@ private struct SessionComposeBar: View {
     @Binding var text: String
     let result: ComposeAttempt?
     let sending: Bool
-    let displayName: String
+    /// What to call the run out loud — see `RunLabel.spoken`.
+    let runLabel: String
     let summary: SessionSummary?
     let onWhy: () -> Void
     let onSend: () -> Void
@@ -1237,7 +1229,7 @@ private struct SessionComposeBar: View {
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
         .focused(focused)
-        .accessibilityLabel("Message for \(displayName)")
+        .accessibilityLabel("Message for \(runLabel)")
     }
 
     /// What the recognizer heard, streaming. Committed words at full strength;

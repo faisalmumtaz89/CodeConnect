@@ -766,11 +766,14 @@ struct DeckAccessoryBar: View {
             // aggregate and the door are what the bar is for; the preview is a
             // luxury, and VoiceOver still gets it as the button's value.
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
-                Text(topPlace)
+                Text(verbatim: topPlace)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    // From the front, as the rows are: this is a project, and a
+                    // project is recognised by how it starts. Trimming its
+                    // middle returns two elisions and neither name.
+                    .truncationMode(.tail)
                 if let waitingSince {
                     Text("·")
                         .ccType(CC.type.footnote)

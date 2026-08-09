@@ -1,9 +1,10 @@
 import SwiftUI
 import UserNotifications
 
-/// Where a push in the navigation stack points: one *run*, by its key, never by
-/// its tmux name. A route that held `cc-1` would follow the name to whichever
-/// run holds it next.
+/// Where a navigation route points: one *run*, by its key, never by its tmux
+/// name. A route that held `cc-1` would follow the name to whichever run holds
+/// it next. Reached from a `codeconnect://` URL or a row tap — a notification
+/// names no run, so it never builds one of these.
 struct SessionRoute: Hashable {
     let key: String
     /// Set when arriving from the Deck, so the card opens without a second tap.
@@ -634,7 +635,7 @@ struct FleetView: View {
     /// sat above it in the queue, and the one detail the product volunteered at
     /// 2am was its least important item.
     private func place(for approval: ApprovalItem) -> String {
-        model.summary(for: approval.sessionKey)?.folderName ?? approval.sessionName
+        model.runLabel(for: approval.sessionKey).inline
     }
 
     /// What that card wants to run. The command rather than the tool name, for
@@ -648,12 +649,39 @@ struct FleetView: View {
             ?? approval.card.toolName
     }
 
+    /// Dismisses everything Fleet itself can present.
+    ///
+    /// One place, so a new sheet added to this screen has exactly one list to
+    /// join — rather than being forgotten by whichever call site happened to
+    /// enumerate the others.
+    private func clearPresentations() {
+        showSettings = false
+        showLinkDetail = false
+        capabilityReason = nil
+        diffRoute = nil
+        // The Deck too. A `.fleet` route arriving while the Deck is up must
+        // dismiss it — that is the whole point of the route — and the `.deck`
+        // route re-opens it immediately afterwards, so clearing it here costs
+        // that path nothing.
+        showDeck = false
+        deckStartsAt = nil
+        path = []
+    }
+
     /// A deep link aimed at the Deck opens it here; anything session-shaped is
     /// pushed onto the stack and handled by the detail view.
     private func consumeDeepLink() {
         switch model.pendingDeepLink {
+        case .fleet:
+            _ = model.consumeDeepLink()
+            clearPresentations()
         case .deck(let requestID):
             _ = model.consumeDeepLink()
+            // **Everything on top goes first.** A warm app may be showing
+            // settings, link health, a capability sheet, a diff, or a session —
+            // and a Deck presented underneath one of those is a Deck the reader
+            // cannot see. A tap has to land where it says it lands.
+            clearPresentations()
             deckStartsAt = requestID
             showDeck = true
         case .session(let reference, _), .diff(let reference):
@@ -1041,11 +1069,14 @@ struct FleetRowView: View {
             // the daemon's own *sentence* — a user message, an agent reply, a
             // notice — which has no argument to set as code.
             subtitle: activity == nil ? row.subtitle : nil,
-            // Mandatory here: generated names like
-            // `ccsoak-tail-54568-1785466205` are identical for forty characters
-            // and differ only in their tails, so trimming either end alone
-            // renders two different runs as the same string.
-            titleTruncation: .middle,
+            // **From the front.** The title is a project — a directory
+            // somebody named — and a directory is recognised by how it starts.
+            // Trimming the middle of a long one returns
+            // `platform-s…nciliation…`, two elisions deep and readable as
+            // neither name; trimming the tail returns the beginning of the word
+            // the reader is looking for. Runs that share a project are told
+            // apart on the line below, not by the shape of this one.
+            titleTruncation: .tail,
             subtitleLineLimit: 1,
             showsChevron: false,
             separator: separator,
@@ -1071,9 +1102,6 @@ struct FleetRowView: View {
         // `UIContextMenuInteraction` on every one of two dozen rows is real
         // accessibility-snapshot payload on a tree that was collapsed to one
         // element per row precisely to keep it cheap.
-        .accessibilityAction(named: "Copy session name") {
-            CCPasteboard.copy(row.summary.displayName)
-        }
         .accessibilityAction(named: "Copy working directory") {
             CCPasteboard.copy(row.summary.cwd)
         }
@@ -1216,8 +1244,12 @@ struct FleetRowView: View {
     /// The third line, and only what the two above it do not already say.
     private var exceptionLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-            if showsIdentity {
-                CCIdentity(name: identityName, tail: identityTail)
+            if let qualifier = row.label.qualifier {
+                Text(verbatim: qualifier)
+                    .ccType(CC.type.micro)
+                    .foregroundStyle(CC.text.tertiary)
+                    .lineLimit(1)
+                    .accessibilityHidden(true)
             }
             if showsCapability {
                 CCBadge(capability: row.capability)
@@ -1235,27 +1267,16 @@ struct FleetRowView: View {
 
     // MARK: Content
 
-    /// The tail is worth a line only when it is the **only** thing telling this
-    /// run from a namesake. `fx-1` beside `app-1` is identity, not triage, and
-    /// the Deck card and the session header both carry it properly.
-    private var showsIdentity: Bool { identityTail != nil }
+    /// A qualifier earns the third line only when it is the **only** thing
+    /// telling this run from another in the same project — see `RunLabel`,
+    /// which withholds it unless it genuinely does.
+    private var showsIdentity: Bool { row.label.qualifier != nil }
 
-    private var identityName: String {
-        row.identity.components(separatedBy: " · ").first ?? row.identity
-    }
-
-    private var identityTail: String? {
-        let parts = row.identity.components(separatedBy: " · ")
-        return parts.count > 1 ? parts[1] : nil
-    }
-
-    /// Always the place — but a `cwd` whose last component is empty is a
-    /// real thing the daemon reports, and a row with no title at all is a row
-    /// nobody can identify. The tmux name is the honest fallback.
-    private var placeName: String {
-        let folder = row.summary.folderName.trimmingCharacters(in: .whitespaces)
-        return folder.isEmpty || folder == "/" ? row.summary.displayName : folder
-    }
+    /// Always the project, as the daemon resolved it — the same word the card,
+    /// the session header and the lock screen use. When the daemon could not
+    /// name one, the row says so rather than falling back to the tmux counter,
+    /// which is reused by the next run and names nothing.
+    private var placeName: String { row.label.project }
 
     /// Every fact carries its age. The word "cached" never appears here — the
     /// banner owns that fact and the hollow dot carries it per row.
@@ -1279,22 +1300,17 @@ struct FleetRowView: View {
     /// `git push --force` without opening it. On an app whose subject is risk
     /// triage that was the most consequential accessibility defect in the build.
     ///
-    /// Everything the row draws now survives: the class, the command, the uid
-    /// spelled the way `CCIdentity` spells it, the age in words. Capability is
+    /// Everything the row draws now survives: the class, the command, the
+    /// project, and the age in words. Capability is
     /// announced on **every** row regardless of visual suppression — screen
     /// readers read, they do not scan, and the economics are different.
     private var accessibilityLabel: String {
-        var parts = [placeName, row.status.label]
+        var parts = [row.label.spoken, row.status.label]
         if let blocked {
             parts.append("risk \(blocked.risk.label)")
             parts.append(blocked.risk.rationale)
         }
         if row.cachedAt != nil { parts.append("from cache") }
-        if let tail = identityTail {
-            // Character by character, the way `CCIdentity` says it: `K76F46`
-            // read as a word cannot be checked against the Mac.
-            parts.append("\(identityName), run \(tail.map(String.init).joined(separator: ", "))")
-        }
         if row.blockedCount > 1 { parts.append("\(row.blockedCount) pending decisions") }
         parts.append(spokenActivity)
         if isBlockedOrFailed {
@@ -1376,7 +1392,7 @@ struct CapabilitySheet: View {
 ///
 ///  * **A value the app cannot measure renders `—` in `textDisabled`, never
 ///    `0`.** `0` is a measurement. Round-trip time and the never-miss ledger
-///    arrive once push notifications land; printing zeroes for them now would
+///    are not measured yet; printing zeroes for them now would
 ///    be the exact lie this screen exists to disprove.
 ///  * **Capabilities are reported, not guessed** — including the advertised keys
 ///    this build has no word for, which are listed verbatim rather than dropped.
@@ -1462,7 +1478,7 @@ struct LinkHealthSheet: View {
     /// trust screen.
     ///
     /// `MISSED DECISIONS` is `—` and not `0` on purpose: this build has no
-    /// never-miss ledger — it arrives once push notifications land — and a zero
+    /// never-miss ledger — nothing measures it yet — and a zero
     /// here would be a claim about something nobody counted. Sequence gaps
     /// *are* counted, so that column carries a real number and turns `danger`
     /// when it is not zero.

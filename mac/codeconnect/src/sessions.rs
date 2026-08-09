@@ -231,6 +231,7 @@ mod tests {
             session_id: "cc-1".into(),
             tmux_session: "cc-1".into(),
             cwd: "/tmp".into(),
+            project_label: "tmp".into(),
             lifecycle,
             link: protocol::event::Link::Detached,
             claude_session_id: None,

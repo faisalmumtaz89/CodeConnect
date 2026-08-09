@@ -118,7 +118,7 @@ final class AppModel {
     private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
-    /// Where a deep link (today: a URL; once push notifications land: a push)
+    /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
     /// wants the UI to go. Cleared by whichever surface consumes it.
     var pendingDeepLink: DeepLink?
 
@@ -327,6 +327,29 @@ final class AppModel {
         deliverPushToken()
     }
 
+    /// Where a tapped notification lands.
+    ///
+    /// Routed through `pendingDeepLink` rather than by setting a view's state,
+    /// because a cold-started tap arrives before any view exists — the same
+    /// reason a `codeconnect://` URL takes this path.
+    ///
+    /// A tapped notification opens the decision list for an approval, and the
+    /// fleet for anything else.
+    ///
+    /// It opens the *list*, never a card: the payload names no decision, so
+    /// nothing here can point at something already answered. The other three
+    /// kinds have no card in that list and never will — `Finished a turn` has
+    /// nothing to decide — so sending them there would be a wrong answer rather
+    /// than a stale one.
+    func openFromNotification(kind: String?) {
+        pendingDeepLink = kind == "approval" ? .deck(requestID: nil) : .fleet
+    }
+
+    /// Drain a tap that arrived before anything was listening.
+    func consumePendingTap() {
+        if let tap = PushWire.consumeTap() { openFromNotification(kind: tap.kind) }
+    }
+
     func bootstrap() {
         var pairedByCode = false
         #if DEBUG
@@ -416,7 +439,8 @@ final class AppModel {
         }
 
         /// Test seam: `-CC_DEEPLINK codeconnect://deck/<request-id>` opens the
-        /// app exactly where a push would put it.
+        /// app on one named card — something a URL can do and a tapped
+        /// notification cannot, since its payload names no decision.
         ///
         /// It exists because the read gate has to be asserted **on a named
         /// card**, and the only other way to reach the second card in the queue
@@ -771,7 +795,7 @@ final class AppModel {
     }
 
     var fleet: [FleetRow] {
-        let identities = Self.identityLabels(for: summaries)
+        let labels = RunLabel.labels(for: summaries)
         return FleetOrdering.sort(
             summaries.map { summary in
                 let state = states[summary.sessionKey]
@@ -781,60 +805,15 @@ final class AppModel {
                     status: FleetStatusRule.status(
                         summary: summary, state: state,
                         reviewedSeq: ReviewMarks.reviewedSeq(for: summary.sessionKey)),
-                    title: title(for: summary, state: state),
                     subtitle: subtitle(for: summary, state: state),
                     activity: activity(for: state),
-                    identity: identities[summary.sessionKey] ?? summary.displayName,
+                    label: labels[summary.sessionKey] ?? .unknown,
                     capability: FleetStatusRule.capability(
                         summary: summary, capabilities: connection.capabilities),
                     blockedCount: max(summary.blockedOn.count, pending.count),
                     lastEventAt: state?.lastEventAt,
                     cachedAt: (state?.hasLiveData ?? false) ? nil : state?.loadedFromCacheAt)
             })
-    }
-
-    /// What to print on each row's id line, keyed by run.
-    ///
-    /// `cc-1` normally. Two runs really can be called `cc-1` at once — one
-    /// exited, one live — and a list with two identical-looking rows is its own
-    /// kind of lie, so those get `cc-1 · <tail>`: the shortest tail of the uid
-    /// that actually tells them apart. Shortest *and verified*, rather than a
-    /// fixed slice, because a fixed slice can tie — and a discriminator that
-    /// does not discriminate is worse than none, since it looks like it does.
-    static func identityLabels(for summaries: [SessionSummary]) -> [String: String] {
-        var labels: [String: String] = [:]
-        for (name, group) in Dictionary(grouping: summaries, by: \.sessionID) {
-            guard group.count > 1 else {
-                for summary in group { labels[summary.sessionKey] = name }
-                continue
-            }
-            let uids = group.map(\.sessionUID)
-            // A daemon that mints no uids has nothing to tell them apart with,
-            // and inventing something would be worse than admitting it.
-            guard uids.allSatisfy({ !$0.isEmpty }) else {
-                for summary in group { labels[summary.sessionKey] = name }
-                continue
-            }
-            let length = Self.shortestDistinguishingSuffix(uids)
-            for summary in group {
-                labels[summary.sessionKey] = "\(name) · \(summary.sessionUID.suffix(length))"
-            }
-        }
-        return labels
-    }
-
-    /// The shortest suffix length at which every one of `uids` differs. Six is
-    /// the floor because a shorter one reads as noise rather than as an
-    /// identifier; the full length is the ceiling, and it always works, because
-    /// the uids themselves are distinct.
-    static func shortestDistinguishingSuffix(_ uids: [String], floor: Int = 6) -> Int {
-        let longest = uids.map(\.count).max() ?? floor
-        var length = min(floor, longest)
-        while length < longest {
-            if Set(uids.map { $0.suffix(length) }).count == uids.count { return length }
-            length += 1
-        }
-        return longest
     }
 
     var blockedCount: Int { fleet.filter { $0.status == .blocked }.count }
@@ -866,11 +845,13 @@ final class AppModel {
         max(states[key]?.lastSeq ?? 0, summary(for: key)?.lastSeq ?? 0)
     }
 
-    /// What to call this run on screen. The tmux name, which is what `codeconnect attach`
-    /// takes and what the Mac's terminal is showing — never the uid, which is an
-    /// identifier and not a name anybody uses.
-    func displayName(for key: String) -> String {
-        summary(for: key)?.displayName ?? key
+    /// What to call this run on screen — see `RunLabel`.
+    ///
+    /// Computed across the whole fleet because the answer depends on it: a
+    /// second run in the same project is what earns a qualifier, and no run can
+    /// know that alone.
+    func runLabel(for key: String) -> RunLabel {
+        RunLabel.labels(for: summaries)[key] ?? .unknown
     }
 
     /// The tmux session name to attach to, or nil when the daemon no longer
@@ -891,14 +872,11 @@ final class AppModel {
         return summary.tmuxSession
     }
 
-    private func title(for summary: SessionSummary, state: SessionState?) -> String {
-        // Claude's own generated title beats a tmux name every time.
-        if let aiTitle = state?.aiTitle { return aiTitle }
-        return summary.folderName.isEmpty ? summary.displayName : summary.folderName
-    }
-
     private func subtitle(for summary: SessionSummary, state: SessionState?) -> String {
-        guard let last = state?.timeline.last else { return summary.displayName }
+        // **Nothing, rather than the run's own name back.** A run that has said
+        // nothing has no sentence, and repeating the title underneath itself
+        // reads as a fact and is not one.
+        guard let last = state?.timeline.last else { return "" }
         switch last.content {
         case .userMessage(let text, _): return "you: \(text.firstLine)"
         case .agentMessage(let text): return text.firstLine
@@ -1041,10 +1019,10 @@ final class AppModel {
 
     // MARK: - Deep links
 
-    /// Aim the UI at a decision. Today this comes from a `codeconnect://` URL;
-    /// once push notifications land the same entry point serves those too, which
-    /// is why the target is a value the model holds rather than navigation done
-    /// inline.
+    /// Aim the UI at a decision, from a `codeconnect://` URL. A tapped
+    /// notification takes a different route in — it names nothing, so it has no
+    /// URL — and the two meet at `pendingDeepLink`, which is why the target is a
+    /// value the model holds rather than navigation done inline.
     func open(url: URL) -> Bool {
         guard let link = DeepLink(url: url) else { return false }
         pendingDeepLink = link
@@ -1058,8 +1036,8 @@ final class AppModel {
 
     /// Turn a link's session reference into a key this app can look up.
     ///
-    /// A `codeconnect://session/…` URL may carry either: a uid (what a push
-    /// notification will send, and what survives a name being reused) or a tmux
+    /// A `codeconnect://session/…` URL may carry either: a uid (which survives
+    /// a name being reused — a notification never sends one) or a tmux
     /// name (what a person types, and what every link written before uids
     /// existed says). A name is resolved the way the daemon resolves one —
     /// prefer the run with a supervisor attached, else the newest — because that

@@ -62,9 +62,10 @@ final class DeckUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", size.rawValue,
         ]
         if let requestID {
-            // The same route a push takes, and the only way to assert the gate
-            // on a *named* card without three drags and a postpone standing
-            // between the test and the assertion.
+            // A URL can name one card; a tapped notification cannot — it
+            // carries no identifier — so this is a deep link, not a stand-in
+            // for a push. It is the only way to assert the gate on a *named*
+            // card without three drags and a postpone in the way.
             app.launchArguments += ["-CC_DEEPLINK", "codeconnect://deck/\(requestID)"]
         }
         app.launch()
@@ -258,9 +259,9 @@ final class DeckUITests: XCTestCase {
     /// which is exactly what a MEDIUM card at AX5 showed, with thirteen
     /// characters of that path on screen.
     ///
-    /// Deep-linked, exactly as a push about a blocked agent would land: the card opens with the
-    /// command below the fold, and `Allow` must not be the enabled white
-    /// primary it was in the render.
+    /// Deep-linked straight to the card: it opens with the command below the
+    /// fold, and `Allow` must not be the enabled white primary it was in the
+    /// render.
     func testMediumCardIsGatedWhenTheCommandIsBelowTheFoldAtAX5() {
         let app = launch(size: .ax5, openingCard: Self.mediumRequestID)
 
@@ -349,7 +350,7 @@ final class DeckUITests: XCTestCase {
         let app = launch(openingCard: Self.mediumRequestID)
         XCTAssertTrue(
             app.navigationBars["Needs you"].waitForExistence(timeout: 25),
-            "a push lands in the Deck, past the fleet")
+            "a deep link lands in the Deck, past the fleet")
         XCTAssertTrue(app.staticTexts["Write"].firstMatch.waitForExistence(timeout: 20))
         XCTAssertFalse(
             allowButton(app, tool: "Bash").exists,

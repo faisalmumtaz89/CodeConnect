@@ -63,7 +63,7 @@ final class SessionIdentityTests: XCTestCase {
             twoRunsSharingTheName(liveSeq: 4, deadSeq: 9))
         XCTAssertEqual(sessions.map(\.sessionID), ["cc-1", "cc-1"])
         XCTAssertEqual(Set(sessions.map(\.sessionKey)).count, 2)
-        XCTAssertEqual(sessions[0].displayName, "cc-1", "the name is what a human is shown")
+        XCTAssertEqual(sessions[0].sessionID, "cc-1", "the handle is still there for attach")
     }
 
     func testCapabilityAndProfileAgreeOnUIDScoping() throws {
@@ -146,13 +146,20 @@ final class SessionIdentityTests: XCTestCase {
             model.states[liveUID]?.events.count, 1,
             "each run holds only its own events — this is the splice")
         XCTAssertEqual(model.states[deadUID]?.events.count, 1)
-        XCTAssertEqual(model.summary(for: liveUID)?.displayName, "cc-1")
-        XCTAssertEqual(model.displayName(for: deadUID), "cc-1")
-
-        // Both rows say `cc-1`, and both say which `cc-1` they are.
-        let identities = Set(model.fleet.map(\.identity))
-        XCTAssertEqual(identities.count, 2, "two identical rows would be its own kind of lie")
-        XCTAssertTrue(identities.allSatisfy { $0.hasPrefix("cc-1") })
+        // Neither row says `cc-1`: the counter is reused by the next run and
+        // names nothing. This daemon named no project either, so both rows say
+        // so — and are still told apart, by the one honest thing left.
+        let labels = model.fleet.map(\.label)
+        XCTAssertEqual(Set(labels).count, 2, "two identical rows would be its own kind of lie")
+        // The single-key accessor every detail view calls agrees with the row.
+        XCTAssertEqual(
+            model.runLabel(for: liveUID), model.fleet.first { $0.id == liveUID }?.label)
+        XCTAssertEqual(
+            model.runLabel(for: "a run nobody has heard of"), .unknown,
+            "an unknown key is not a crash and not a made-up name")
+        XCTAssertTrue(labels.allSatisfy { $0.project == "Unknown project" })
+        XCTAssertTrue(labels.allSatisfy { $0.inline.contains("started") })
+        XCTAssertFalse(labels.contains { $0.inline.contains("cc-1") })
     }
 
     /// The same frames from a daemon that mints no uids: one session, keyed by
@@ -176,7 +183,9 @@ final class SessionIdentityTests: XCTestCase {
 
         XCTAssertEqual(model.states.count, 1)
         XCTAssertEqual(model.states["cc-1"]?.events.count, 2)
-        XCTAssertEqual(model.fleet.first?.identity, "cc-1", "no uid to disambiguate with")
+        XCTAssertEqual(
+            model.fleet.first?.label, .unknown,
+            "one run, no project named, and nothing to tell it from")
     }
 
     /// A run the daemon has stopped listing cannot contribute a decision to the
@@ -222,35 +231,31 @@ final class SessionIdentityTests: XCTestCase {
         XCTAssertNil(model.resolveSessionKey(reference: "cc-9"))
     }
 
-    /// These two uids share their last six characters. A fixed-length tail
-    /// would print the same discriminator on both rows — which looks like it
-    /// distinguishes them and does not.
-    func testTheRowDiscriminatorGrowsUntilItActuallyDistinguishes() throws {
+    /// **The uid keys the run; it never names it.** Two runs really can share a
+    /// tmux name, and the rows still have to be told apart — but by what a
+    /// reader recognises, not by a slice of an identifier. Every route,
+    /// subscription and answer below still travels on the uid.
+    func testTwoRunsSharingATmuxNameAreToldApartWithoutShowingTheUID() throws {
         let sessions = try decodeSessions(twoRunsSharingTheName(liveSeq: 1, deadSeq: 1))
         XCTAssertEqual(liveUID.suffix(6), deadUID.suffix(6), "the case this test exists for")
 
-        let labels = AppModel.identityLabels(for: sessions)
-        XCTAssertEqual(Set(labels.values).count, 2)
-        XCTAssertTrue(labels[liveUID]?.hasPrefix("cc-1 · ") == true)
+        let labels = RunLabel.labels(for: sessions)
+        XCTAssertEqual(Set(labels.values).count, 2, "two identical rows would be their own lie")
+        for label in labels.values {
+            XCTAssertFalse(label.inline.contains("cc-1"), "the tmux counter names nothing")
+            XCTAssertFalse(
+                label.inline.contains(liveUID.suffix(6)), "and a uid tail is not a name")
+        }
 
-        // A single run keeps the bare name; there is nothing to disambiguate.
+        // A single run has nothing to be told apart from, so it wears nothing.
         let alone = try decodeSessions(
             """
             {"type":"sessions","sessions":[{"session_uid":"\(liveUID)","session_id":"cc-1",
-             "tmux_session":"cc-1","cwd":"/tmp/live","lifecycle":"live","link":"attached",
-             "last_seq":1,"created_at":"t","updated_at":"t"}]}
+             "tmux_session":"cc-1","cwd":"/tmp/live","project_label":"live","lifecycle":"live",
+             "link":"attached","last_seq":1,"created_at":"t","updated_at":"t"}]}
             """)
-        XCTAssertEqual(AppModel.identityLabels(for: alone)[liveUID], "cc-1")
-    }
-
-    func testTheShortestDistinguishingSuffixIsUsed() {
-        XCTAssertEqual(AppModel.shortestDistinguishingSuffix(["ABCDEF123456", "ABCDEF654321"]), 6)
         XCTAssertEqual(
-            AppModel.shortestDistinguishingSuffix(["ABCDEFXXXXXX", "ABCDEYXXXXXX"]), 7,
-            "six ties, so it grows until it does not")
-        XCTAssertEqual(
-            AppModel.shortestDistinguishingSuffix(["AXXXXXXXXXXX", "BXXXXXXXXXXX"]), 12,
-            "distinct uids always differ at their full length")
+            RunLabel.labels(for: alone)[liveUID], RunLabel(project: "live", qualifier: nil))
     }
 
     // MARK: - Cache migration
@@ -483,7 +488,7 @@ final class SessionIdentityTests: XCTestCase {
                 displayText: "d", permissionSuggestions: nil, promptID: nil, permissionMode: nil,
                 risk: nil),
             requestedAt: Date(timeIntervalSince1970: 1_000_000), sessionKey: session,
-            sessionName: "cc-1", outcome: nil, paneSnapshot: nil, risk: nil)
+            outcome: nil, paneSnapshot: nil, risk: nil)
     }
 
     private func helloAckJSON(minor: UInt32, sessionUID: Bool) -> String {

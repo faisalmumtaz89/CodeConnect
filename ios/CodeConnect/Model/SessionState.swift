@@ -65,17 +65,9 @@ final class SessionState {
     /// not the start of the session.
     private(set) var headTruncated = false
     private(set) var lastEventAt: Date?
-    /// Claude's own generated title for the run. Tracked on ingest because the
-    /// fleet reads it once a second, and rescanning the log for it each time is
-    /// a linear cost for a value that changes about twice a session.
-    private(set) var aiTitle: String?
-    /// Which event `aiTitle` came from, so a *replayed older* event can never
-    /// overwrite a newer title. Replay makes that a real ordering, not a
-    /// hypothetical one: "load all" re-delivers the whole log after the tail.
-    private var aiTitleSeq: UInt64 = 0
-    /// The permission mode this run is operating under, tracked for the same
-    /// reason as `aiTitle`: the fleet reads it continuously and it changes about
-    /// once a session.
+    /// The permission mode this run is operating under, tracked on ingest
+    /// because the fleet reads it continuously and it changes about once a
+    /// session.
     ///
     /// It is a *log-derived* fact, not a wire field, so it costs no protocol
     /// change and works against a daemon that predates it — which also means it is
@@ -216,9 +208,8 @@ final class SessionState {
 
     /// Every card in this run still waiting on a human.
     ///
-    /// Tracked on rebuild rather than recomputed on read, for the same reason
-    /// `aiTitle` is: the fleet and the Deck read it once a second and it changes
-    /// about twice a session. As a computed property it walked the whole
+    /// Tracked on rebuild rather than recomputed on read: the fleet and the
+    /// Deck read it once a second and it changes about twice a session. As a computed property it walked the whole
     /// timeline per access, and `AppModel.deck` flat-maps it across every
     /// session the app holds — so one `body` pass on a 24-session fleet walked
     /// two dozen event logs, and `body` re-runs on the one-second tick. That is
@@ -234,10 +225,6 @@ final class SessionState {
         loadedFromCacheAt = cached.cachedAt
         cacheRestoredAt = Date()
         lastEventAt = cached.events.last?.date
-        if let titled = cached.events.reversed().first(where: { $0.aiTitle != nil }) {
-            aiTitle = titled.aiTitle
-            aiTitleSeq = titled.seq
-        }
         if let moded = cached.events.reversed().first(where: { $0.permissionModeChange != nil }) {
             permissionMode = moded.permissionModeChange
             permissionModeSeq = moded.seq
@@ -296,10 +283,6 @@ final class SessionState {
             }
             events.append(event)
             lastEventAt = event.date
-            if let title = event.aiTitle {
-                aiTitle = title
-                aiTitleSeq = event.seq
-            }
             if let mode = event.permissionModeChange {
                 permissionMode = mode
                 permissionModeSeq = event.seq
@@ -371,8 +354,6 @@ final class SessionState {
         cacheRestoredAt = nil
         lastEventAt = nil
         headTruncated = false
-        aiTitle = nil
-        aiTitleSeq = 0
         permissionMode = nil
         permissionModeSeq = 0
         lastConfirmedModel = nil
@@ -479,14 +460,10 @@ final class SessionState {
         pendingSeqs.removeAll(keepingCapacity: true)
         events = Self.merged(events, incoming)
 
-        // A replayed event can carry the only title in the log — the run's first
-        // turn is below the backfill window — but must never displace a newer
-        // one.
-        for event in incoming where event.seq > aiTitleSeq {
-            if let title = event.aiTitle {
-                aiTitle = title
-                aiTitleSeq = event.seq
-            }
+        // A replayed event can carry the only mode change in the log — the
+        // run's first turn is below the backfill window — but must never
+        // displace a newer one.
+        for event in incoming where event.seq > permissionModeSeq {
             if let mode = event.permissionModeChange {
                 permissionMode = mode
                 permissionModeSeq = event.seq

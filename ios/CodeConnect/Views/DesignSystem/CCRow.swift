@@ -32,9 +32,9 @@ enum CCRowDensity {
 /// "Nothing important is a small chevron": the chevron here is a hint about
 /// where the row goes, never the thing you have to hit.
 ///
-/// **Three text lines, not two.** A fleet row is `place` / `activity` /
-/// `identity · risk · capability`, and the third line is a *composition* — a
-/// `CCIdentity`, badges, a right-aligned note — not a string. Before the `meta`
+/// **Three text lines, not two.** A fleet row is `project` / `activity` /
+/// `qualifier · risk · capability`, and the third line is a *composition* —
+/// badges, a right-aligned note — not a string. Before the `meta`
 /// slot existed, the fleet row could not be a `CCRow` at all and was rebuilt
 /// from primitives, which is how one product ends up with two rows that lighten
 /// differently under a finger.
@@ -55,10 +55,12 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// strings wear machine type, byte-for-byte.
     var titleIsMono: Bool = false
     var subtitle: String?
-    /// **Which end of the title identifies it.** `.middle` is mandatory on the
-    /// fleet: generated folder names like
-    /// `ccsoak-tail-54568-1785466205` are identical for forty characters and
-    /// differ only in the tail.
+    /// **Which end of the title identifies it.** `.tail` on the fleet, whose
+    /// title is a project: a directory somebody named is recognised by how it
+    /// starts, and trimming its middle returns two elisions and neither name.
+    /// `.middle` is for a *generated* name — `ccsoak-tail-54568-1785466205`
+    /// and its siblings are identical for forty characters and differ only in
+    /// the tail.
     ///
     /// Head and middle truncation are statements that the string's *ends*
     /// identify it, which is only true on one line — so either mode drops the
@@ -68,8 +70,8 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// Two lines, not one: a truncated project name at AX3 is the difference
     /// between the right agent and the wrong one. `nil` never truncates.
     var subtitleLineLimit: Int? = 2
-    /// Monospace metadata — a uid tail, an age, a duration. Always monospace,
-    /// always present where a fact is shown. Use the `meta` **slot** when line
+    /// Monospace metadata — an age, a duration, a start time. Always
+    /// monospace, always present where a fact is shown. Use the `meta` **slot** when line
     /// three carries components rather than a string.
     var showsChevron: Bool = true
     var separator: Bool = true
@@ -354,7 +356,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
 
 // MARK: - The string form of line three
 
-/// `meta` as a plain string — a uid tail, an age, a duration.
+/// `meta` as a plain string — an age, a duration, a start time.
 ///
 /// A view rather than an `if let` inside `CCRow` so that the string form and
 /// the composed form are the *same slot*, and a row cannot end up with two
@@ -369,8 +371,8 @@ struct CCRowMeta: View {
             Text(text)
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
-                // Never truncate an identifier. At AX sizes `cc-1 · K76F46
-                // · 12s` needs two lines and gets them.
+                // Never truncate a fact. At AX sizes `started 09:05 · 12s`
+                // needs two lines and gets them.
                 .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                 .fixedSize(horizontal: false, vertical: true)
         }

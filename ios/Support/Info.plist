@@ -67,9 +67,9 @@
 	<key>NSCameraUsageDescription</key>
 	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run `codeconnect pair`. Nothing is recorded or sent anywhere.</string>
 	<!-- Deep-link target: `codeconnect://deck` and
-	     `codeconnect://session/<id>`. The same routes are what a push
-	     notification will open, which is why they exist before the thing that aims
-	     at them. -->
+	     `codeconnect://session/<id>`. A URL can name a particular run or card; a
+	     tapped notification cannot, and does not try — it carries no identifier
+	     and lands on a list. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

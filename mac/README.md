@@ -506,7 +506,12 @@ error codes, the truncated-event placeholder, and the transcript tailer's two
 rather than merely remembered, so `live` is proven rather than unrefuted, and a
 derived `session_end` carries a `reason`; `>= 6` adds `register_push`, the
 phone telling the daemon where to send a notification; `>= 7` adds
-`delete_session`.
+`delete_session`; `>= 8` through `>= 10` cover the diff, the composer and the
+native slash-command adapters; `>= 11` adds `SessionSummary.project_label` —
+the daemon resolving what a run is *called* (the last component of its working
+directory), so that every surface that names a run, including a notification
+the phone cannot compose for itself, uses one string. See
+`protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
@@ -767,7 +772,7 @@ for](#what-the-phone-can-ask-for).
 ## Testing
 
 ```sh
-cargo test                        # 417 tests, including fixture replay
+cargo test                        # the workspace suite, including fixture replay
 soak/run.sh                       # the live gauntlet, against a real session
 ```
 

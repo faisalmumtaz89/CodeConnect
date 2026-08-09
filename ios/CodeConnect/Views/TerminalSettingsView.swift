@@ -132,7 +132,7 @@ struct TerminalSettingsView: View {
                         // component that groups a fingerprint into readable runs
                         // and spells it out for VoiceOver, and this one did not.
                         // One object, one construction.
-                        CCIdentity.fingerprint(
+                        CCFingerprint.fingerprint(
                             identity.fingerprint, comparedTo: nil,
                             name: "This iPhone's key fingerprint")
 
@@ -409,7 +409,7 @@ private struct PinnedHostRow: View {
             // Named rather than trailing: `value` and `detail` are both single
             // closures, so a bare trailing closure cannot say which slot it is.
             detail: {
-                CCIdentity.fingerprint(
+                CCFingerprint.fingerprint(
                     pin.fingerprint, comparedTo: nil, name: "Pinned key for \(host)")
             }
         )

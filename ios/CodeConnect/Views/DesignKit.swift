@@ -87,9 +87,9 @@ private enum Hex {
     static let syntaxString: UInt32 = 0xC3E88D
     /// Comments were originally set in `textDisabled`. Corrected, for the same
     /// reason `textTertiary` was: `textDisabled` is reserved for genuinely
-    /// inactive text — gutter line numbers, the cwd breadcrumb, the `·` in
-    /// `CCIdentity`, disabled-button labels — and a code comment is none of
-    /// those. A comment is something you have to *read*, so it takes a colour
+    /// inactive text — gutter line numbers, the cwd breadcrumb, the `·` between
+    /// a project and its start time, disabled-button labels — and a code
+    /// comment is none of those. A comment is something you have to *read*, so it takes a colour
     /// that clears AA rather than sitting at 2.69:1.
     ///
     /// #909090 is the dimmest grey that clears AA on the *darkest* background a
@@ -679,7 +679,7 @@ extension CC {
             design: .monospaced, relativeTo: .footnote, documentedColor: CC.text.primary,
             monospacedDigits: true)
 
-        /// 12/16, `textTertiary`. Ages, durations, uid tails, line numbers.
+        /// 12/16, `textTertiary`. Ages, durations, fingerprints, line numbers.
         static let monoSmall = CCTextStyle(
             size: 12, lineHeight: 16, weight: .regular, tracking: 0,
             design: .monospaced, relativeTo: .caption, documentedColor: CC.text.tertiary,

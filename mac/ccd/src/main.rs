@@ -18,6 +18,7 @@ mod ipc_server;
 mod liveness;
 mod log;
 mod logrotate;
+mod project_label;
 mod push_gate;
 mod secret;
 mod ssh_keys;

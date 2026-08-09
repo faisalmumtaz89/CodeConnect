@@ -288,6 +288,23 @@ pub struct SessionSummary {
     /// Request ids currently awaiting a human. Non-empty == push-worthy.
     #[serde(default)]
     pub blocked_on: Vec<String>,
+    /// **What to call this run out loud.** The final component of `cwd` — the
+    /// project someone is working in — resolved by the daemon rather than by
+    /// each client, so that a surface using it agrees with every other one.
+    ///
+    /// Empty when `cwd` names no project (empty, `/`, or unusable). Empty is
+    /// also what an older daemon sends, since it does not know the field, and a
+    /// client should treat both the same way: say it does not know rather than
+    /// fall back to [`SessionKey::name`], which is a reused counter (`cc-1`)
+    /// and names nothing a human chose.
+    ///
+    /// A nonempty value is authoritative: a client that has one uses it rather
+    /// than re-deriving its own, because two rules produce two names for one
+    /// run — which is the state this replaced, where a reader saw one thing on
+    /// a list, another on a card, and a third on their lock screen.
+    ///
+    #[serde(default)]
+    pub project_label: String,
 }
 
 #[cfg(test)]
@@ -360,6 +377,27 @@ mod tests {
         assert_eq!(pending.session_id, "cc-1");
     }
 
+    /// An older daemon does not know the field. Absent decodes as empty, and
+    /// empty is what a client renders as "nobody has said" — never the tmux
+    /// counter, which is what this whole minor exists to stop showing.
+    #[test]
+    fn a_summary_from_a_daemon_that_does_not_know_projects_still_decodes() {
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "tmux_session": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "2026-08-07T10:00:00.000Z",
+            "updated_at": "2026-08-07T10:00:00.000Z"
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(decoded.project_label, "");
+        assert_eq!(decoded.session_id, "cc-1", "the handle survives for attach");
+    }
+
     #[test]
     fn two_runs_of_the_same_name_are_distinguishable_in_a_session_list() {
         // The bug this guards against, expressed as a wire property: a
@@ -370,6 +408,7 @@ mod tests {
             session_id: "cc-1".into(),
             tmux_session: "cc-1".into(),
             cwd: "/tmp".into(),
+            project_label: "tmp".into(),
             lifecycle,
             link: Link::Detached,
             claude_session_id: None,

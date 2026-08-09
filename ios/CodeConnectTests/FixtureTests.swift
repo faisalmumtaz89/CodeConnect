@@ -12,7 +12,7 @@ final class FixtureTests: XCTestCase {
     /// this is the one place that says out loud which daemon it is pretending
     /// to be. A capability added to the app without adding it here would make
     /// its UI unrenderable and unrendered.
-    private let protocolMinorTheAppWasBuiltAgainst: UInt32 = 9
+    private let protocolMinorTheAppWasBuiltAgainst: UInt32 = 11
 
     func testEveryFixtureFrameDecodes() {
         let frames = Fixtures.frames()
@@ -55,7 +55,7 @@ final class FixtureTests: XCTestCase {
             guard case .event(let event) = frame, let card = event.approvalCard else { continue }
             let item = ApprovalItem(
                 card: card, requestedAt: event.date, sessionKey: event.sessionKey,
-                sessionName: event.sessionID, outcome: nil, paneSnapshot: nil, risk: card.risk)
+                outcome: nil, paneSnapshot: nil, risk: card.risk)
             classes.insert(item.assessment(profile: profile).effective)
         }
         XCTAssertEqual(classes, [.low, .medium, .high])
@@ -89,9 +89,6 @@ final class FixtureTests: XCTestCase {
         XCTAssertEqual(
             model.deck.map(\.sessionKey), ["fx-1", "fx-2", "fx-3"],
             "HIGH before MEDIUM before LOW")
-        XCTAssertEqual(
-            model.deck.map(\.sessionName), ["fx-1", "fx-2", "fx-3"],
-            "a daemon that mints no uid is keyed by its tmux name, exactly as before")
     }
 }
 

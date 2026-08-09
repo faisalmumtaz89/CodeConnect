@@ -239,7 +239,7 @@
         // MARK: JSON builders
 
         private static let helloAckJSON = """
-            {"type":"hello_ack","protocol_version":1,"protocol_minor":9,\
+            {"type":"hello_ack","protocol_version":1,"protocol_minor":11,\
             "server_time":"2026-07-31T09:14:00.000Z",\
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
             "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
@@ -355,7 +355,8 @@
                 let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
                 return """
                     {"session_id":"\(id)","tmux_session":"\(id)",\
-                    "cwd":"/Users/dev/app-\(index)","lifecycle":"live","link":"attached",\
+                    "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
+                    "lifecycle":"live","link":"attached",\
                     "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
                     "blocked_on":[\(blocked.joined(separator: ","))]}
                     """
@@ -368,7 +369,8 @@
                 return """
                     {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
                     "session_id":"fx-\(index)","tmux_session":"fx-\(index)",\
-                    "cwd":"/Users/dev/app-\(index)","lifecycle":"exited","link":"detached",\
+                    "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
+                    "lifecycle":"exited","link":"detached",\
                     "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
                     "blocked_on":[]}
                     """

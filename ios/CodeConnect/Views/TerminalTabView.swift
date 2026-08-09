@@ -29,7 +29,10 @@ struct TerminalTabView: View {
     /// blocked reason has to tell that story rather than claim the run is gone.
     let unhosted: Bool
     /// What to call this run on screen.
-    let displayName: String
+    /// What to call the run out loud — see `RunLabel.spoken`. The tmux name is
+    /// still what this view *attaches* to; it is simply not what a reader is
+    /// told they are looking at.
+    let runLabel: String
 
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
@@ -579,7 +582,7 @@ struct TerminalTabView: View {
                 // carries the fact.
                 .padding(.leading, live ? CC.space.md : 0)
                 .modifier(SnapshotFrame(isLive: live, stamp: lastOutputText))
-                .accessibilityLabel("Terminal for \(displayName)")
+                .accessibilityLabel("Terminal for \(runLabel)")
                 // Pinch to scale, the same preference the diff surface has.
                 // `simultaneousGesture` so the emulator keeps its own selection
                 // and scroll gestures.
@@ -1400,7 +1403,7 @@ struct HostKeyChangedCard: View {
                 // 1 character differs from the pinned key" — a line naming
                 // itself as its own reference, on the screen where knowing which
                 // key is which is the entire task.
-                view: CCIdentity.fingerprint(
+                view: CCFingerprint.fingerprint(
                     change.pinned, comparedTo: change.offered, name: "The key you pinned",
                     referenceName: "the key offered now"))
             CCHairline(color: CC.color.danger.opacity(0.3))
@@ -1409,7 +1412,7 @@ struct HostKeyChangedCard: View {
                 tone: .danger,
                 // Diffed against the pinned key: the characters that moved
                 // are the bright ones.
-                view: CCIdentity.fingerprint(
+                view: CCFingerprint.fingerprint(
                     change.offered, comparedTo: change.pinned, name: "The key offered now"))
             CCHairline(color: CC.color.danger.opacity(0.3))
         }

@@ -97,7 +97,7 @@ final class RiskAndDeckTests: XCTestCase {
             card: card(
                 tool: "Bash", input: .object(["command": .string("echo hi")]),
                 risk: WireRisk(cls: "high", matchedPattern: "pipe to shell")),
-            requestedAt: Date(), sessionKey: "cc-1", sessionName: "cc-1", outcome: nil,
+            requestedAt: Date(), sessionKey: "cc-1", outcome: nil,
             paneSnapshot: nil, risk: WireRisk(cls: "high", matchedPattern: "pipe to shell"))
         let assessment = item.assessment(profile: newerDaemon)
         XCTAssertEqual(assessment.effective, .high)
@@ -107,7 +107,7 @@ final class RiskAndDeckTests: XCTestCase {
     // MARK: Deck ordering
 
     /// `session` is a *key* — a uid on a modern daemon, a tmux name on an old
-    /// one. The name is carried alongside it for display only.
+    /// one. What a run is *called* is resolved separately; see `RunLabel`.
     ///
     /// `input` decides the class: with no `risk` block on the wire and a
     /// classifying daemon, `RiskAssessment` takes the stricter of MEDIUM and
@@ -123,7 +123,7 @@ final class RiskAndDeckTests: XCTestCase {
                 toolInput: input, displayText: "d", permissionSuggestions: nil,
                 promptID: nil, permissionMode: nil, risk: nil),
             requestedAt: Date(timeIntervalSince1970: 1_000_000 - ageSeconds), sessionKey: session,
-            sessionName: name, outcome: nil, paneSnapshot: nil, risk: nil)
+            outcome: nil, paneSnapshot: nil, risk: nil)
     }
 
     private func low(_ request: String, ageSeconds: TimeInterval) -> ApprovalItem {
@@ -193,13 +193,13 @@ final class RiskAndDeckTests: XCTestCase {
                     requestID: "z", payloadHash: "h", toolName: "T", toolInput: .object([:]),
                     displayText: "d", permissionSuggestions: nil, promptID: nil,
                     permissionMode: nil, risk: nil), requestedAt: now, sessionKey: "cc-1",
-                sessionName: "cc-1", outcome: nil, paneSnapshot: nil, risk: nil),
+                outcome: nil, paneSnapshot: nil, risk: nil),
             ApprovalItem(
                 card: ApprovalCard(
                     requestID: "a", payloadHash: "h", toolName: "T", toolInput: .object([:]),
                     displayText: "d", permissionSuggestions: nil, promptID: nil,
                     permissionMode: nil, risk: nil), requestedAt: now, sessionKey: "cc-1",
-                sessionName: "cc-1", outcome: nil, paneSnapshot: nil, risk: nil),
+                outcome: nil, paneSnapshot: nil, risk: nil),
         ]
         XCTAssertEqual(
             DeckOrdering.sort(cards, profile: newerDaemon).map(\.card.requestID), ["a", "z"])
@@ -538,7 +538,8 @@ final class FleetCountTests: XCTestCase {
     private func row(_ id: String, _ status: FleetStatus, blockedCount: Int) -> FleetRow {
         FleetRow(
             summary: summary(id, blockedOn: (0..<blockedCount).map { "r\($0)" }),
-            status: status, title: id, subtitle: "", activity: nil, identity: id,
+            status: status, subtitle: "", activity: nil,
+            label: RunLabel(project: id, qualifier: nil),
             capability: .control, blockedCount: blockedCount, lastEventAt: nil, cachedAt: nil)
     }
 

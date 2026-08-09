@@ -315,12 +315,13 @@ impl Db {
             .await
     }
 
+    /// Returns the device rows the token was taken from — see the store.
     pub async fn set_push_token(
         &self,
         device_id: String,
         token: String,
         environment: String,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         self.run(move |store| store.set_push_token(&device_id, &token, &environment))
             .await
     }
