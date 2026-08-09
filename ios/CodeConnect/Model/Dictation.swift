@@ -93,15 +93,24 @@ final class DictationController {
         /// Whether this session holds one claim on the shared audio session
         /// — set by the builder that claimed, consumed by `dispose`.
         fileprivate var ownsAudioClaim = false
+        /// Whether a tap was installed and the engine started. `dispose`
+        /// tears down exactly what was built: even *reading* `inputNode` on
+        /// an engine that never ran instantiates its CoreAudio IO unit, so
+        /// a session whose engine never started must not touch it.
+        fileprivate let ownsEngineTap: Bool
         private var disposed = false
         #if DEBUG
             private(set) var disposeCount = 0
         #endif
 
-        fileprivate init(engine: AVAudioEngine, relay: AudioTapRelay, isAnalyzer: Bool) {
+        fileprivate init(
+            engine: AVAudioEngine, relay: AudioTapRelay, isAnalyzer: Bool,
+            ownsEngineTap: Bool = true
+        ) {
             self.engine = engine
             self.relay = relay
             self.isAnalyzer = isAnalyzer
+            self.ownsEngineTap = ownsEngineTap
         }
 
         /// Idempotent, and the only teardown there is: whoever holds the
@@ -124,8 +133,10 @@ final class DictationController {
             legacyTask?.cancel()
             legacyTask = nil
             legacyRecognizer = nil
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+            if ownsEngineTap {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
             if ownsAudioClaim {
                 ownsAudioClaim = false
                 DictationController.releaseAudioSession()
@@ -143,12 +154,18 @@ final class DictationController {
 
         /// A minimal session for the race tests: a never-started engine and
         /// a relay that goes nowhere. It claims the shared audio session the
-        /// way a real build does, so claim accounting is observable.
+        /// way a real build does, so claim accounting is observable — but
+        /// the claim's CoreAudio side is bypassed, because what the race
+        /// tests prove is the *counting*, and on a machine with no usable
+        /// audio route the HAL's RPC can deadlock and abort the whole test
+        /// process. That is a fact about the machine, not the accounting.
         static func makeStubSessionForTesting() -> Session {
+            audioHardwareBypassedForTesting = true
             let stub = Session(
                 engine: AVAudioEngine(),
                 relay: AudioTapRelay(onBuffer: { _ in }),
-                isAnalyzer: false)
+                isAnalyzer: false,
+                ownsEngineTap: false)
             stub.ownsAudioClaim = (try? claimAudioSession()) != nil
             return stub
         }
@@ -465,7 +482,22 @@ final class DictationController {
     /// successor had installed cut the successor's live microphone.
     private static var audioClaims = 0
 
+    #if DEBUG
+        /// Armed by the first stub session and never unset: from then on,
+        /// claims count without activating the process-wide audio session,
+        /// and the last release deactivates nothing. Unit tests build only
+        /// stub sessions, so no real claim shares the process with a
+        /// bypassed one.
+        fileprivate static var audioHardwareBypassedForTesting = false
+    #endif
+
     private static func claimAudioSession() throws {
+        #if DEBUG
+            if audioHardwareBypassedForTesting {
+                audioClaims += 1
+                return
+            }
+        #endif
         let shared = AVAudioSession.sharedInstance()
         try shared.setCategory(.record, mode: .measurement, options: [.duckOthers])
         try shared.setActive(true, options: [])
@@ -475,6 +507,9 @@ final class DictationController {
     private static func releaseAudioSession() {
         audioClaims = max(0, audioClaims - 1)
         guard audioClaims == 0 else { return }
+        #if DEBUG
+            if audioHardwareBypassedForTesting { return }
+        #endif
         try? AVAudioSession.sharedInstance().setActive(
             false, options: [.notifyOthersOnDeactivation])
     }
