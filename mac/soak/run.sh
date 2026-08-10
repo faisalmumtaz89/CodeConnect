@@ -61,6 +61,38 @@ fi
 
 session_ref="$existing"
 workdir=""
+# The trap exists BEFORE anything is spawned: a failure after a spawn but
+# before a later trap would leak the driver server, the session, and the
+# workdir. Everything it cleans is guarded on being set, so installing it
+# early costs nothing.
+cleanup() {
+    if [ "$keep" -eq 1 ]; then
+        echo
+        echo "left running: session $session_ref${workdir:+ in $workdir}"
+        echo "  attach with: $bin/codeconnect attach $session_ref"
+        return
+    fi
+    if [ -n "$workdir" ]; then
+        "$tmux_bin" -L "$driver_server" kill-server 2>/dev/null || true
+        if [ -z "$session_ref" ]; then
+            # The session may exist without ever having registered — created
+            # by `codeconnect claude` moments before a failure — and the
+            # daemon prints no cwd for a session it never met. tmux itself
+            # always knows: its panes carry their working directory, and this
+            # script's own temp dir is unambiguous.
+            # Tab-separated, because a working directory may contain spaces
+            # and whitespace-split fields would never match it.
+            session_ref="$("$tmux_bin" -L codeconnect list-panes -a \
+                -F "#{session_name}$(printf '\t')#{pane_current_path}" 2>/dev/null \
+                | awk -F '\t' -v d="$workdir" '$2 == d {print $1; exit}')" || true
+        fi
+        if [ -n "$session_ref" ]; then
+            "$tmux_bin" -L codeconnect kill-session -t "=$session_ref" 2>/dev/null || true
+        fi
+        rm -rf "$workdir"
+    fi
+}
+trap cleanup EXIT
 if [ -z "$session_ref" ]; then
     say "starting a session"
     # `pwd -P`: mktemp hands back /var/folders/…, which is a symlink to
@@ -93,7 +125,6 @@ if [ -z "$session_ref" ]; then
     printf '\n'
     if [ -z "$session_ref" ]; then
         echo "no session appeared in $workdir; is claude installed and logged in?" >&2
-        "$tmux_bin" -L "$driver_server" kill-server 2>/dev/null || true
         exit 1
     fi
     echo "session $session_ref in $workdir"
@@ -121,21 +152,6 @@ if [ -z "$session_ref" ]; then
         sleep 1
     done
 fi
-
-cleanup() {
-    if [ "$keep" -eq 1 ]; then
-        echo
-        echo "left running: session $session_ref${workdir:+ in $workdir}"
-        echo "  attach with: $bin/codeconnect attach $session_ref"
-        return
-    fi
-    if [ -n "$workdir" ]; then
-        "$tmux_bin" -L "$driver_server" kill-server 2>/dev/null || true
-        "$tmux_bin" -L codeconnect kill-session -t "=$session_ref" 2>/dev/null || true
-        rm -rf "$workdir"
-    fi
-}
-trap cleanup EXIT
 
 say "gauntlet"
 set +e

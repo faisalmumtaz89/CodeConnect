@@ -767,10 +767,15 @@ mod tests {
             "`project_label` — naming the project rather than the reused `cc-<n>` \
              counter — is minor 11"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 12,
+            "`SendText.respond_by_monotonic_ms` — the daemon's answer deadline riding \
+             in the request so the supervisor can budget against it — is minor 12"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 11);
+        assert_eq!(crate::PROTOCOL_MINOR, 12);
     }
 
     /// **The tags, pinned on this side too.**

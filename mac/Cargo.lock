@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hook"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "protocol",
  "serde_json",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "ccd"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -94,10 +94,11 @@ dependencies = [
 
 [[package]]
 name = "ccsoak"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "futures-util",
+ "libc",
  "protocol",
  "rusqlite",
  "serde",
@@ -114,7 +115,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "codeconnect"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -504,8 +505,9 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha2",

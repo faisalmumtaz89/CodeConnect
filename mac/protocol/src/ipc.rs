@@ -371,6 +371,17 @@ pub enum SupervisorRequest {
         /// never a key withheld with the view left open.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confirm_view: Option<String>,
+        /// When the daemon stops listening for this request's answer, as a
+        /// millisecond on the host's **monotonic** clock
+        /// ([`crate::time::now_monotonic_ms`]) — one clock for every process
+        /// on the machine, immune to wall-time steps that would otherwise
+        /// grant a queued request more time than its sender will wait. The
+        /// supervisor budgets every deliberate wait against it, so an
+        /// answer computed is an answer delivered. Absent from an older
+        /// daemon; the supervisor then derives a budget from its own
+        /// config. (Minor 12.)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        respond_by_monotonic_ms: Option<u64>,
     },
     /// Text snapshot of the pane. Presence checks and mirroring only — the
     /// pane is matched against needles, never parsed into structure. The one
@@ -832,6 +843,7 @@ mod tests {
             recover_composer: false,
             capture_recovered: false,
             confirm_view: None,
+            respond_by_monotonic_ms: None,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(line.contains("\"expect\""), "{line}");

@@ -12,6 +12,7 @@ description = "Chaos gauntlet for a live ccd: kill storms, duplicate hooks, answ
 # point of this one is to exercise the *production* protocol types rather than a
 # hand-written approximation of them.
 [dependencies]
+libc = { workspace = true }
 protocol = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

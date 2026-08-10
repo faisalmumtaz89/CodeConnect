@@ -6,12 +6,88 @@
 //! terminal bytes; that is the failure mode that killed agentapi and Omnara.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+use protocol::proc::{run_deadlined, RunOutcome};
 use protocol::tmux::target_session;
 pub use protocol::tmux::{search_path, SessionPresence};
+
+/// How long a non-interactive tmux client may take before it is killed.
+///
+/// tmux answers these in single-digit milliseconds; this is two orders of
+/// magnitude of headroom. It is a *per-call* bound: the daemon's patience
+/// for a whole request is `supervisor_timeout_ms`, whose default is derived
+/// from the worst-case sum of these calls plus recovery's observation
+/// windows — see its definition in `protocol::config`. What this bound
+/// buys: a tmux client the server never services becomes an answer the
+/// phone hears, not a supervisor blocked in `wait4` indefinitely.
+const OPERATION_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Server and session startup: the first client may have to fork the server
+/// and read its config before the command even begins.
+const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Why a tmux invocation produced no useful answer — three different facts,
+/// because callers that just *typed something* need to know which one is true.
+#[derive(Debug)]
+pub enum TmuxError {
+    /// The tmux process could not be started at all. Proof that nothing ran.
+    Spawn {
+        what: String,
+        source: std::io::Error,
+    },
+    /// tmux ran past its deadline and was killed and reaped. For a command
+    /// that mutates, this is indeterminate: the server may have acted before
+    /// stalling, and no later evidence can settle it.
+    TimedOut { what: String, waited: Duration },
+    /// tmux ran and answered no. The server processed and refused it.
+    Failed {
+        what: String,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for TmuxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TmuxError::Spawn { what, source } => {
+                write!(f, "tmux could not be started for {what}: {source}")
+            }
+            TmuxError::TimedOut { what, waited } => write!(
+                f,
+                "tmux did not answer {what} within {}ms and was killed",
+                waited.as_millis()
+            ),
+            TmuxError::Failed {
+                what,
+                status,
+                stderr,
+            } => {
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    write!(f, "tmux {what} failed with {status}")
+                } else {
+                    write!(f, "tmux {what} failed with {status}: {stderr}")
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for TmuxError {}
+
+impl TmuxError {
+    /// Whether this failure leaves open the possibility that the command
+    /// *acted* before failing. A spawn failure or a refusal proves it did
+    /// not; a kill at the deadline proves nothing either way.
+    pub fn outcome_is_indeterminate(&self) -> bool {
+        matches!(self, TmuxError::TimedOut { .. })
+    }
+}
 
 pub fn tmux_bin() -> Result<PathBuf> {
     protocol::tmux::tmux_bin()
@@ -22,6 +98,36 @@ fn base() -> Result<Command> {
     let mut command = Command::new(tmux_bin()?);
     command.arg("-L").arg(protocol::TMUX_SOCKET_NAME);
     Ok(command)
+}
+
+/// Every non-interactive tmux invocation goes through here: one place where
+/// the deadline, the kill, the reap, and the three failure facts live.
+fn run_tmux(command: &mut Command, deadline: Duration, what: &str) -> Result<Vec<u8>, TmuxError> {
+    match run_deadlined(command, deadline) {
+        Err(source) => Err(TmuxError::Spawn {
+            what: what.to_string(),
+            source,
+        }),
+        Ok(RunOutcome::TimedOut { waited }) => Err(TmuxError::TimedOut {
+            what: what.to_string(),
+            waited,
+        }),
+        Ok(RunOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+        }) => {
+            if status.success() {
+                Ok(stdout)
+            } else {
+                Err(TmuxError::Failed {
+                    what: what.to_string(),
+                    status,
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                })
+            }
+        }
+    }
 }
 
 /// The private server's config, written before every spawn and handed to tmux
@@ -94,17 +200,15 @@ fn ensure_server_options(history_limit: u32) {
 /// Correct only for subcommands where non-zero genuinely means "nothing to
 /// report" — listing sessions when no server is running. Anything that has to
 /// distinguish *absent* from *unknown* must use [`session_presence`] instead,
-/// which is why this collapses the two and that one does not.
+/// which is why this collapses the two and that one does not. A spawn failure
+/// or a deadline kill is neither: those stay errors.
 fn run(args: &[&str]) -> Result<Option<String>> {
-    let output = base()?
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .context("running tmux")?;
-    if !output.status.success() {
-        return Ok(None);
+    let what = args.first().copied().unwrap_or("tmux");
+    match run_tmux(base()?.args(args), OPERATION_DEADLINE, what) {
+        Ok(stdout) => Ok(Some(String::from_utf8_lossy(&stdout).into_owned())),
+        Err(TmuxError::Failed { .. }) => Ok(None),
+        Err(refusal) => Err(refusal.into()),
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
 pub fn list_sessions() -> Result<Vec<String>> {
@@ -194,13 +298,11 @@ pub fn new_session(
         command.arg(arg);
     }
 
-    let status = command
-        .stdin(Stdio::null())
-        .status()
+    // The startup deadline, not the operational one: this command may be the
+    // one that forks the server and reads its config.
+    run_tmux(&mut command, STARTUP_DEADLINE, "new-session")
+        .map_err(|err| anyhow::anyhow!("{err}"))
         .context("starting tmux session")?;
-    if !status.success() {
-        bail!("tmux new-session failed with {status}");
-    }
 
     // Session-scoped so the user's own tmux config is untouched. Without this
     // the tab shows a status line that plain `claude` never has.
@@ -270,29 +372,39 @@ pub fn cursor_is_visible(name: &str) -> Result<bool> {
 
 /// Type text literally. `-l` stops tmux from interpreting the text as key names,
 /// which matters the moment a user sends anything containing "C-c" or "Enter".
-pub fn send_literal(name: &str, text: &str) -> Result<()> {
-    let status = base()?
-        .args(["send-keys", "-t", &target_pane(name), "-l", "--", text])
-        .stdin(Stdio::null())
-        .status()
-        .context("tmux send-keys -l")?;
-    if !status.success() {
-        bail!("tmux send-keys failed with {status}");
-    }
-    Ok(())
+///
+/// The typed error matters here more than anywhere: a caller that asked for
+/// keys to be typed has to know whether a failure proves nothing landed
+/// ([`TmuxError::Spawn`], [`TmuxError::Failed`]) or proves nothing at all
+/// ([`TmuxError::TimedOut`] — the server may have acted before stalling).
+pub fn send_literal(name: &str, text: &str) -> Result<(), TmuxError> {
+    run_tmux(
+        base()
+            .map_err(|err| TmuxError::Spawn {
+                what: "send-keys".into(),
+                source: std::io::Error::other(err.to_string()),
+            })?
+            .args(["send-keys", "-t", &target_pane(name), "-l", "--", text]),
+        OPERATION_DEADLINE,
+        "send-keys",
+    )
+    .map(|_| ())
 }
 
-/// Send a named key (`Enter`, `Escape`, ...).
-pub fn send_key(name: &str, key: &str) -> Result<()> {
-    let status = base()?
-        .args(["send-keys", "-t", &target_pane(name), key])
-        .stdin(Stdio::null())
-        .status()
-        .context("tmux send-keys")?;
-    if !status.success() {
-        bail!("tmux send-keys {key} failed with {status}");
-    }
-    Ok(())
+/// Send a named key (`Enter`, `Escape`, ...). Same error contract as
+/// [`send_literal`], for the same reason.
+pub fn send_key(name: &str, key: &str) -> Result<(), TmuxError> {
+    run_tmux(
+        base()
+            .map_err(|err| TmuxError::Spawn {
+                what: format!("send-keys {key}"),
+                source: std::io::Error::other(err.to_string()),
+            })?
+            .args(["send-keys", "-t", &target_pane(name), key]),
+        OPERATION_DEADLINE,
+        &format!("send-keys {key}"),
+    )
+    .map(|_| ())
 }
 
 /// Replace this process with an attached tmux client, so the terminal tab hosts
@@ -419,6 +531,185 @@ mod tests {
         assert!(has_session(&name).unwrap(), "session target form broke");
         assert!(capture_pane(&name, 5).is_ok(), "pane target form broke");
         let _ = run(&["kill-session", "-t", &target_session(&name)]);
+    }
+
+    /// Whether `pid` is gone — killed and cleaned up — within a short bound.
+    /// `kill(pid, 0)` answering `ESRCH` is the only accepted proof; sending
+    /// `SIGKILL` is a request, not a fact.
+    fn proven_gone(pid: i32) -> bool {
+        for _ in 0..50 {
+            let answer = unsafe { libc::kill(pid, 0) };
+            if answer == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Owns a private tmux server for one test — and owns it from *before*
+    /// the spawn: the guard exists whatever the spawn does, teardown is
+    /// bounded (an unbounded `kill-server` against a wedged server would
+    /// recreate the hang inside the cleanup), and the exact server pid is
+    /// the fallback when asking nicely fails. The socket directory is only
+    /// removed after the server is dead — deleting a live server's socket
+    /// strands it unaddressable.
+    struct TestServer {
+        dir: std::path::PathBuf,
+        pid: std::cell::Cell<Option<i32>>,
+    }
+
+    impl TestServer {
+        fn socket(&self) -> String {
+            self.dir.join("sock").to_string_lossy().into_owned()
+        }
+
+        fn command(&self, args: &[&str]) -> Command {
+            let mut command = Command::new(tmux_bin().expect("tmux present"));
+            command.arg("-S").arg(self.socket());
+            command.args(args);
+            command
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            let asked = run_deadlined(&mut self.command(&["kill-server"]), Duration::from_secs(2));
+            // "no server" is as dead as a successful kill; anything else —
+            // a timeout, a spawn failure, an unexpected refusal — means the
+            // server may still be alive.
+            let mut dead = match &asked {
+                Ok(RunOutcome::Completed { status, stderr, .. }) => {
+                    status.success() || String::from_utf8_lossy(stderr).contains("no server")
+                }
+                _ => false,
+            };
+            if !dead {
+                if let Some(pid) = self.pid.get() {
+                    // Asking nicely failed and the exact pid is known: end
+                    // it directly. CONT first, so a stopped server takes
+                    // the KILL — and death is then *verified*, because a
+                    // sent signal is a request, not a fact.
+                    unsafe {
+                        libc::kill(pid, libc::SIGCONT);
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    dead = proven_gone(pid);
+                }
+            }
+            // The directory goes only once the server cannot still be using
+            // it: deleting a live server's socket strands it unaddressable,
+            // which is worse than a leftover directory.
+            if dead {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            } else {
+                eprintln!(
+                    "test server at {} could not be proven dead; leaving its directory",
+                    self.dir.display()
+                );
+            }
+        }
+    }
+
+    /// The wedge that motivated the bound, reproduced: a tmux server that
+    /// stops servicing clients while holding their connections. `SIGSTOP`
+    /// is the stand-in — a wedged server sits in `select` never replying;
+    /// a stopped one is frozen mid-loop; from the client's side both are a
+    /// command that will never be answered. The bound turns that into an
+    /// error in about a second — and the server, once resumed, must still
+    /// be servable, because killing the *client* at the deadline must not
+    /// damage the *server*.
+    #[test]
+    fn a_frozen_tmux_server_costs_the_deadline_not_forever() {
+        if tmux_bin().is_err() {
+            eprintln!("skipped: no tmux on this machine");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cc-wedge-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Guard first: from here on, however this test ends, the server dies.
+        let server = TestServer {
+            dir,
+            pid: std::cell::Cell::new(None),
+        };
+
+        // Plain `new-session`, not `-P -F '#{pid}'`: with `-P`, tmux writes
+        // the pid to the client's stdout and the server retains that piped
+        // fd, so the bounded runner would correctly wait for an EOF that
+        // never comes and time the *creation* out. The pid is read by a
+        // separate `display` instead — and read unconditionally, so a server
+        // that started even though `new-session` timed out is still owned.
+        let started = run_deadlined(
+            &mut server.command(&[
+                "new-session",
+                "-d",
+                "-s",
+                "wedge",
+                "-x",
+                "20",
+                "-y",
+                "5",
+                "--",
+                "/bin/sleep",
+                "60",
+            ]),
+            Duration::from_secs(5),
+        )
+        .expect("tmux spawns");
+        // The pid via a separate `display`, not `new-session -P`: with `-P`
+        // tmux prints through the client stdout the server retains, so the
+        // both-EOFs runner would time the creation itself out (verified on
+        // tmux 3.7b through a pipe). Read BEFORE the success assertion, so
+        // a server that started under a timed-out create is still owned by
+        // the guard when the panic unwinds.
+        if let Ok(RunOutcome::Completed { stdout, .. }) = run_deadlined(
+            &mut server.command(&["display", "-p", "-t", "wedge", "#{pid}"]),
+            Duration::from_secs(2),
+        ) {
+            if let Ok(pid) = String::from_utf8_lossy(&stdout).trim().parse::<i32>() {
+                server.pid.set(Some(pid));
+            }
+        }
+        assert!(
+            matches!(started, RunOutcome::Completed { status, .. } if status.success()),
+            "the test server starts: {started:?}"
+        );
+        let pid = server.pid.get().expect("a fresh server names its pid");
+
+        // Freeze the server; the next client is accepted and never served.
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        let asked = std::time::Instant::now();
+        let outcome = run_deadlined(
+            &mut server.command(&["send-keys", "-t", "wedge", "-l", "--", "x"]),
+            Duration::from_secs(1),
+        )
+        .expect("the client spawns even against a frozen server");
+        assert!(
+            matches!(outcome, RunOutcome::TimedOut { .. }),
+            "a never-answered client is a timeout, not a wait: {outcome:?}"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(4),
+            "the deadline bounded it: {:?}",
+            asked.elapsed()
+        );
+
+        // Thaw. The server must be undamaged by its client's death: the
+        // next command answers, which is what lets a live session survive a
+        // wedge instead of joining it.
+        unsafe { libc::kill(pid, libc::SIGCONT) };
+        let after = run_deadlined(
+            &mut server.command(&["list-sessions", "-F", "#{session_name}"]),
+            Duration::from_secs(2),
+        )
+        .expect("list runs");
+        match after {
+            RunOutcome::Completed { status, stdout, .. } => {
+                assert!(status.success());
+                assert!(String::from_utf8_lossy(&stdout).contains("wedge"));
+            }
+            RunOutcome::TimedOut { .. } => panic!("a resumed server answers"),
+        }
     }
 
     #[test]

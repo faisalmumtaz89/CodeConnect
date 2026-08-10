@@ -1050,3 +1050,179 @@ pub async fn slash_commands(target: &Target) -> Outcome {
     Outcome::passed("3 dialogs recovered with their panes; 3 immediate ordinary sends landed")
         .with_notes(notes)
 }
+
+/// Freeze the shared tmux server, ask the phone to type, and demand an
+/// *answer* — bounded, honest about what was not typed — rather than a
+/// supervisor silently stuck behind a client tmux will never service. Then
+/// thaw and retry with the **same** request id: the refusal must have
+/// released the claim, so the retry types fresh rather than being told
+/// "unknown".
+///
+/// The freeze is a `SIGSTOP` on the real server — the stand-in for a server
+/// that holds connections and never services them. Two layers put it back:
+/// a `Drop` guard for every ordinary exit, and a detached watchdog armed
+/// *before* the stop for the exits `Drop` never sees (Ctrl-C, a kill) — a
+/// soak must never leave the operator's real server frozen.
+pub async fn tmux_freeze(target: &Target) -> Outcome {
+    struct Thaw(u32);
+    impl Drop for Thaw {
+        fn drop(&mut self) {
+            // One syscall, no child: a guard that spawned a process to send
+            // a signal would be an unbounded wait inside the cleanup path.
+            unsafe { libc::kill(self.0 as i32, libc::SIGCONT) };
+        }
+    }
+
+    let uid = target.session.session_uid.clone();
+    let Some(tmux) = protocol::tmux::tmux_bin() else {
+        return Outcome::skipped("no tmux on this machine");
+    };
+    let server_pid = |tmux: &std::path::Path| match protocol::proc::run_deadlined(
+        std::process::Command::new(tmux).args([
+            "-L",
+            protocol::TMUX_SOCKET_NAME,
+            "display",
+            "-p",
+            "#{pid}",
+        ]),
+        Duration::from_secs(2),
+    ) {
+        Ok(protocol::proc::RunOutcome::Completed { status, stdout, .. }) if status.success() => {
+            String::from_utf8_lossy(&stdout).trim().parse::<u32>().ok()
+        }
+        _ => None,
+    };
+
+    let mut phone = match target.phone().await {
+        Ok(phone) => phone,
+        Err(err) => return Outcome::failed(format!("{err:#}")),
+    };
+    match phone.capture(&uid, 40).await {
+        Ok(pane) => {
+            if protocol::ipc::PromptPresence::InputBox
+                .find_match(&pane, None)
+                .is_none()
+            {
+                return Outcome::skipped(
+                    "the session's composer is busy; a send would be refused for the right \
+                     reason and prove nothing",
+                );
+            }
+        }
+        Err(err) => return Outcome::failed(format!("could not read the pane: {err:#}")),
+    }
+
+    let request_id = format!("soak-freeze-{}", protocol::time::now_unix_ms());
+    let text = "soak: tmux-freeze probe";
+
+    // Read once to arm the watchdog with, then revalidated immediately
+    // before the stop — a server restart in between would make the signal
+    // stop a stranger.
+    let Some(pid) = server_pid(&tmux) else {
+        return Outcome::failed("the tmux server did not name its pid");
+    };
+    // The watchdog first, the stop second: `Drop` runs on every ordinary
+    // exit, but not on Ctrl-C or a kill, and those must not leave the
+    // operator's server frozen. `set -m` gives the background job its own
+    // process group — a terminal Ctrl-C signals the whole foreground group,
+    // and a watchdog inside that group would rely on shells ignoring the
+    // signal for background jobs rather than on real isolation. The job's
+    // pid comes back on stdout so it can be disarmed once the thaw is
+    // verified.
+    let armed = protocol::proc::run_deadlined(
+        std::process::Command::new("/bin/sh").args([
+            "-c",
+            &format!("set -m; (/bin/sleep 30; /bin/kill -CONT {pid}) >/dev/null 2>&1 & echo $!"),
+        ]),
+        Duration::from_secs(2),
+    );
+    let watchdog_pid: i32 = match armed {
+        Ok(protocol::proc::RunOutcome::Completed { status, stdout, .. }) if status.success() => {
+            match String::from_utf8_lossy(&stdout).trim().parse() {
+                Ok(pid) => pid,
+                Err(_) => return Outcome::failed("the thaw watchdog did not name its pid"),
+            }
+        }
+        other => return Outcome::failed(format!("could not arm the thaw watchdog: {other:?}")),
+    };
+    let disarm = |watchdog_pid: i32| unsafe {
+        // The job's own group first, so the parked sleep goes with it.
+        libc::kill(-watchdog_pid, libc::SIGKILL);
+        libc::kill(watchdog_pid, libc::SIGKILL);
+    };
+    // Revalidated at the last instant: arming took real time, and a server
+    // restart inside that window would make the signal stop a stranger.
+    if server_pid(&tmux) != Some(pid) {
+        disarm(watchdog_pid);
+        return Outcome::failed("the tmux server changed while arming; nothing was stopped");
+    }
+    if unsafe { libc::kill(pid as i32, libc::SIGSTOP) } != 0 {
+        disarm(watchdog_pid);
+        return Outcome::failed(format!("could not stop tmux server {pid}"));
+    }
+    let _thaw = Thaw(pid);
+
+    // The whole point: an answer, within the daemon's own supervisor budget,
+    // that admits nothing was typed — not silence, not a claim held forever.
+    let asked = Instant::now();
+    let frozen = phone.send_text(&uid, text, Some(&request_id)).await;
+    let waited = asked.elapsed();
+    let refusal = match frozen {
+        Ok(protocol::ws::SendTextResult::Refused { reason })
+            if reason.contains("did not answer") =>
+        {
+            reason
+        }
+        Ok(protocol::ws::SendTextResult::Refused { reason }) => {
+            return Outcome::failed(format!(
+                "refused for a reason other than the tmux deadline — the freeze proved \
+                 nothing: {reason:?}"
+            ))
+        }
+        Ok(other) => {
+            return Outcome::failed(format!(
+                "a frozen tmux produced {other:?} instead of a refusal that released the claim"
+            ))
+        }
+        Err(err) => return Outcome::failed(format!("no answer from a frozen tmux: {err:#}")),
+    };
+    if waited > Duration::from_secs(8) {
+        return Outcome::failed(format!(
+            "the refusal took {waited:?}; the bound exists so a wedge costs seconds"
+        ));
+    }
+
+    drop(_thaw);
+    // The server needs a beat to drain what queued while it was stopped —
+    // and the thaw is verified before the watchdog is disarmed, because the
+    // watchdog is the only rescuer left if CONT did not land.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    match protocol::proc::run_deadlined(
+        std::process::Command::new(&tmux).args(["-L", protocol::TMUX_SOCKET_NAME, "list-sessions"]),
+        Duration::from_secs(2),
+    ) {
+        Ok(protocol::proc::RunOutcome::Completed { status, .. }) if status.success() => {
+            disarm(watchdog_pid);
+        }
+        other => {
+            return Outcome::failed(format!(
+                "the server did not answer after the thaw ({other:?}); the watchdog stays \
+                 armed to resume it"
+            ))
+        }
+    }
+
+    // Same request id, because the refusal released the claim: this must be a
+    // fresh, successful type — not a Duplicate, not an unknown.
+    match phone.send_text(&uid, text, Some(&request_id)).await {
+        Ok(protocol::ws::SendTextResult::Sent { .. }) => Outcome::passed(format!(
+            "frozen tmux refused in {}ms ({refusal:?}); the thawed retry typed fresh",
+            waited.as_millis()
+        )),
+        Ok(other) => Outcome::failed(format!(
+            "after the thaw, the retry produced {other:?} instead of typing fresh — the \
+             refusal did not release the claim"
+        )),
+        Err(err) => Outcome::failed(format!("the thawed retry got no answer: {err:#}")),
+    }
+}

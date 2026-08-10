@@ -26,6 +26,7 @@ pub mod hash;
 pub mod hook;
 pub mod ipc;
 pub mod pairing;
+pub mod proc;
 pub mod risk;
 pub mod secret;
 pub mod time;
@@ -157,6 +158,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     `complete_native_confirmation`, the command is one of those two with an
 ///     argument, and the pane it captured still shows that argument selected.
 ///     Advertised per session, so a supervisor below minor 10 keeps escaping.
+///   * `12` — a send carries **when its asker stops listening**.
+///     `SupervisorRequest::SendText.respond_by_monotonic_ms` stamps the
+///     daemon's own answer deadline, on the host's monotonic clock, into the
+///     request. The supervisor budgets every deliberate wait against it —
+///     stopping recovery honestly when the remainder cannot fit the next
+///     step — so an answer computed in time is delivered in time, including
+///     time the request spent queued. Additive: an older supervisor ignores
+///     the field and budgets from its own config; an older daemon omits it.
 ///   * `11` — a run carries the **project** it is working in.
 ///     `SessionSummary.project_label` is the final component of `cwd` — trimmed,
 ///     stripped of anything that would break a line, and bounded — resolved by
@@ -196,7 +205,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     serialise every hook behind a database write to close that instant — a
 ///     doorbell is best-effort by construction, the app reconciles from the
 ///     event log, and the cost of the alternative is paid by every hook.
-pub const PROTOCOL_MINOR: u32 = 11;
+pub const PROTOCOL_MINOR: u32 = 12;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

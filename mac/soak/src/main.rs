@@ -3,6 +3,7 @@
 //! ```sh
 //! ccsoak all                 # every scenario against the newest live session
 //! ccsoak kill --rounds 5     # just the kill storm
+//! ccsoak tmuxfreeze          # freeze the tmux server; sends must stay bounded
 //! ccsoak --session cc-1 all  # against a named run (uid or tmux name)
 //! ```
 //!
@@ -186,6 +187,9 @@ async fn main() -> Result<()> {
     if run_all || which == "commands" {
         results.push(timed("h slash recovery", scenarios::slash_commands(&target)).await);
     }
+    if run_all || which == "tmuxfreeze" {
+        results.push(timed("i tmux freeze", scenarios::tmux_freeze(&target)).await);
+    }
     if run_all || which == "tailtorture" {
         results.push(timed("e tailer torture", scenarios::tail_torture(&target)).await);
     }
@@ -320,6 +324,9 @@ ccsoak — chaos gauntlet against the running ccd
   commands      (h) /status, /usage, /cost from the phone path; assert each is
                     composer_recovered with its pane and an ordinary send lands
                     immediately after — the slash-command release criterion
+  tmuxfreeze    (i) SIGSTOP the tmux server mid-send; assert a bounded refusal
+                    naming the tmux deadline, then thaw and prove the same
+                    request id types fresh — the claim was released
 
 The kill scenarios need the LaunchAgent installed (`codeconnect daemon install`), because
 something has to bring the daemon back."

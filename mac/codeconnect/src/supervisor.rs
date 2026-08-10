@@ -282,16 +282,20 @@ fn handle_request(
             recover_composer,
             capture_recovered,
             confirm_view,
+            respond_by_monotonic_ms,
         } => send_text(
             args,
             config,
-            &text,
+            SendPlan {
+                text: &text,
+                submit,
+                expect: expect.as_ref(),
+                respond_by_monotonic_ms,
+            },
             Target {
                 presence: &require,
                 is_composer: targets_composer,
             },
-            submit,
-            expect.as_ref(),
             Recovery {
                 enabled: recover_composer,
                 capture: capture_recovered,
@@ -354,6 +358,18 @@ struct Recovery {
 const RECOVERY_FIRST_CHECK: Duration = Duration::from_millis(1_500);
 const RECOVERY_SECOND_CHECK: Duration = Duration::from_millis(3_000);
 const RECOVERY_VERIFY_WINDOW: Duration = Duration::from_millis(250);
+/// One recovery "look" at worst: a capture and a cursor read, each bounded
+/// by the tmux operation deadline.
+const LOOK_WORST: Duration = Duration::from_secs(2);
+/// One keystroke at worst — a single bounded tmux call.
+const KEY_WORST: Duration = Duration::from_secs(1);
+/// Answering costs a serialize and a socket write; the budget keeps this
+/// much aside so an answer computed in time is also *delivered* in time.
+const RESPONSE_MARGIN: Duration = Duration::from_millis(500);
+/// What a daemon too old to stamp its deadline (pre-minor-12) actually
+/// waits: its compiled default. An unstamped request is budgeted against
+/// this, never against the newer, larger default.
+const LEGACY_DAEMON_WAIT_MS: u64 = 5_000;
 /// The confirming path's own window. `Enter` commits a model change and Claude
 /// Code redraws the transcript around it, which the 250ms figure above — taken
 /// from dismissing an already-drawn view — was never measured against. Measured
@@ -380,16 +396,78 @@ fn look_at_pane(session: &str) -> Result<(String, bool)> {
     ))
 }
 
+/// One send as the daemon asked for it: the keys, whether they are
+/// submitted, the prompt identity they may be bound to, and when the daemon
+/// stops listening for the answer.
+struct SendPlan<'a> {
+    text: &'a str,
+    submit: bool,
+    expect: Option<&'a PromptFingerprint>,
+    respond_by_monotonic_ms: Option<u64>,
+}
+
 fn send_text(
     args: &SupervisorArgs,
     config: &Config,
-    text: &str,
+    plan: SendPlan<'_>,
     target: Target<'_>,
-    submit: bool,
-    expect: Option<&PromptFingerprint>,
     recovery: Recovery,
 ) -> SupervisorResult {
+    let SendPlan {
+        text,
+        submit,
+        expect,
+        respond_by_monotonic_ms,
+    } = plan;
+    // The whole request answers by this moment or the daemon stops
+    // listening; every deliberate wait below spends against it. The daemon
+    // stamps the deadline when it *sends* — the host's one monotonic clock,
+    // immune to wall steps — so
+    // time this request spent queued is already spent; a daemon old enough
+    // not to stamp gets the config-derived budget from when reading began.
+    let margin = |total_ms: u64| Duration::from_millis(total_ms).saturating_sub(RESPONSE_MARGIN);
+    // The local anchor is taken BEFORE the shared clock is read: any
+    // descheduling between the two samples then shrinks the budget instead
+    // of extending it past the daemon's patience. Clock failure never
+    // grants: a stamped request whose clock cannot be read is refused, and
+    // only a stamp-less legacy request falls back — capped at what that
+    // daemon actually waits.
+    let anchored = std::time::Instant::now();
+    let answer_by = match (respond_by_monotonic_ms, protocol::time::now_monotonic_ms()) {
+        (Some(stamp), Some(now)) => anchored + margin(stamp.saturating_sub(now)),
+        // No stamp: a daemon from before minor 12, whose compiled wait was
+        // five seconds and whose queue delay is unknowable. The budget is
+        // the smaller of the shared config value and that compiled wait —
+        // a larger config helps only a daemon new enough to stamp, and
+        // over-granting here is exactly the types-after-the-daemon-hung-up
+        // window; under-granting merely refuses, which a retry survives.
+        (None, _) => anchored + margin(config.supervisor_timeout_ms.min(LEGACY_DAEMON_WAIT_MS)),
+        // A stamp arrived and this process cannot read the clock it is
+        // written against. Any substitute budget could outlive the daemon's
+        // real wait; nothing has been typed, so refusing is the safe answer.
+        (Some(_), None) => {
+            let reason = "this Mac's monotonic clock could not be read, so the send could \
+                          not be bounded; nothing was typed"
+                .to_string();
+            log_line(args, &format!("refused: {reason}"));
+            return SupervisorResult::Refused { reason };
+        }
+    };
     let require = target.presence;
+    // A request that aged out in the queue — or that cannot afford even the
+    // first pane read — is refused before anything is looked at: nothing
+    // has been typed, so this is the one place lateness is still harmless.
+    if std::time::Instant::now() + LOOK_WORST > answer_by {
+        let reason = format!(
+            "the daemon stops listening in {}ms, which is not enough to read the pane; \
+             nothing was typed",
+            answer_by
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+        );
+        log_line(args, &format!("refused: {reason}"));
+        return SupervisorResult::Refused { reason };
+    }
     // One look: the pane, and who has the keyboard. Two facts, one moment,
     // one failure path — and **a look that failed is a refusal**, never a
     // permissive default. The interlock's whole job is to refuse when
@@ -413,28 +491,51 @@ fn send_text(
         }
     };
 
-    // ESC has no literal-send story that survives every tmux version; the named
-    // key does.
-    let typed = if text == "\u{1b}" {
-        tmux::send_key(&args.tmux_session, "Escape")
-    } else {
-        tmux::send_literal(&args.tmux_session, text)
-    };
-    if let Err(err) = typed {
-        return SupervisorResult::Error {
-            message: format!("{err:#}"),
+    // The two keystrokes and the settle between them, affordable *before*
+    // the first one goes out: there is deliberately no stop between typing
+    // and Enter — stopping there strands staged text — so the check that
+    // keeps this request inside the daemon's window lives here, where
+    // refusing is still a refusal.
+    let actuation_worst = KEY_WORST
+        + if submit {
+            Duration::from_millis(config.send_keys_delay_ms) + KEY_WORST
+        } else {
+            Duration::ZERO
         };
+    if std::time::Instant::now() + actuation_worst > answer_by {
+        let reason = format!(
+            "typing needs up to {}ms and the daemon stops listening in {}ms; nothing was typed",
+            actuation_worst.as_millis(),
+            answer_by
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+        );
+        log_line(args, &format!("refused: {reason}"));
+        return SupervisorResult::Refused { reason };
     }
 
-    if submit {
-        // Claude's composer needs a beat between the text landing and Enter, or
-        // the newline can be swallowed by the render pass.
-        std::thread::sleep(Duration::from_millis(config.send_keys_delay_ms));
-        if let Err(err) = tmux::send_key(&args.tmux_session, "Enter") {
-            return SupervisorResult::Error {
-                message: format!("{err:#}"),
-            };
+    // ESC has no literal-send story that survives every tmux version; the named
+    // key does.
+    let session = args.tmux_session.clone();
+    if let Err(failure) = actuate_with(
+        &|| {
+            if text == "\u{1b}" {
+                tmux::send_key(&session, "Escape")
+            } else {
+                tmux::send_literal(&session, text)
+            }
+        },
+        &|| tmux::send_key(&session, "Enter"),
+        submit,
+        Duration::from_millis(config.send_keys_delay_ms),
+    ) {
+        let result = failure.result();
+        match &result {
+            SupervisorResult::Refused { reason } => log_line(args, &format!("refused: {reason}")),
+            SupervisorResult::Error { message } => log_line(args, &format!("degraded: {message}")),
+            _ => {}
         }
+        return result;
     }
 
     log_line(
@@ -442,9 +543,72 @@ fn send_text(
         &format!("typed {} byte(s) after matching {matched:?}", text.len()),
     );
     if recovery.enabled && submit {
-        return recover_composer(args, require, &recovery, text, matched);
+        return recover_composer(args, answer_by, require, &recovery, text, matched);
     }
     SupervisorResult::Sent { matched }
+}
+
+/// Where the actuation failed — because the phase decides what the failure
+/// *means* to whoever asked for the keys.
+#[derive(Debug)]
+enum ActuationFailure {
+    /// Typing failed. Whether anything landed depends on how it failed.
+    Typing(tmux::TmuxError),
+    /// Enter failed after the text landed. The text is staged in the
+    /// composer whatever kind of failure this is.
+    Submitting(tmux::TmuxError),
+}
+
+impl ActuationFailure {
+    /// The honest answer for each phase, in the daemon's existing vocabulary:
+    /// `Refused` releases the claim (a retry types fresh), everything else
+    /// leaves it held (a retry is told "unknown" instead of typing twice).
+    ///
+    ///   * Typing failed provably — spawn failure or a tmux refusal — nothing
+    ///     landed: `Refused`, retry safe.
+    ///   * Typing was killed at the deadline — the server may have acted
+    ///     before stalling: indeterminate.
+    ///   * Enter failed in any way at all — the text is already staged, and a
+    ///     retry would stage it twice: indeterminate.
+    fn result(&self) -> SupervisorResult {
+        match self {
+            ActuationFailure::Typing(err) if !err.outcome_is_indeterminate() => {
+                SupervisorResult::Refused {
+                    reason: format!("{err}; nothing was typed"),
+                }
+            }
+            ActuationFailure::Typing(err) => SupervisorResult::Error {
+                message: format!(
+                    "{err}. The keys may have reached the session, so they will not be sent \
+                     again; check the Mac."
+                ),
+            },
+            ActuationFailure::Submitting(err) => SupervisorResult::Error {
+                message: format!(
+                    "the text was typed but Enter was not confirmed ({err}); it may or may \
+                     not have been submitted, so it will not be sent again — check the Mac."
+                ),
+            },
+        }
+    }
+}
+
+/// The two keystrokes of an injection, over injectable steps so a test can
+/// fail either one and prove what happens to the other. Claude's composer
+/// needs a beat between the text landing and Enter, or the newline can be
+/// swallowed by the render pass — hence the delay between them.
+fn actuate_with(
+    type_keys: &dyn Fn() -> Result<(), tmux::TmuxError>,
+    press_enter: &dyn Fn() -> Result<(), tmux::TmuxError>,
+    submit: bool,
+    settle: Duration,
+) -> Result<(), ActuationFailure> {
+    type_keys().map_err(ActuationFailure::Typing)?;
+    if submit {
+        std::thread::sleep(settle);
+        press_enter().map_err(ActuationFailure::Submitting)?;
+    }
+    Ok(())
 }
 
 /// Did the keys we just typed take the composer away — and if so, give it
@@ -457,6 +621,7 @@ fn send_text(
 /// the one state no key may be sent into.
 fn recover_composer(
     args: &SupervisorArgs,
+    answer_by: std::time::Instant,
     composer: &PromptPresence,
     recovery: &Recovery,
     text: &str,
@@ -464,16 +629,19 @@ fn recover_composer(
 ) -> SupervisorResult {
     let session = args.tmux_session.clone();
     let outcome = recover_composer_with(
+        RecoveryPass {
+            answer_by,
+            asking: recovery.asking.clone(),
+            matched,
+            capture: recovery.capture,
+            confirm: recovery.confirm.clone(),
+        },
         // One look is a pane *and* the cursor, taken together: apart, they
         // can describe two different moments, and the whole question is
         // whether this drawn composer has the keyboard.
         &|| look_at_pane(&session),
-        &|key| tmux::send_key(&session, key),
+        &|key| tmux::send_key(&session, key).map_err(anyhow::Error::from),
         composer,
-        recovery.asking.clone(),
-        matched,
-        recovery.capture,
-        recovery.confirm.clone(),
     );
     match &outcome {
         SupervisorResult::ComposerRecovered { .. } => log_line(
@@ -488,10 +656,15 @@ fn recover_composer(
             args,
             &format!("recovery: composer gone after {text:?}; Escape did not restore it"),
         ),
-        SupervisorResult::RecoveryUnconfirmed { reason, .. } => log_line(
-            args,
-            &format!("recovery: nothing claimed after {text:?}; {reason}"),
-        ),
+        SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
+            if reason.contains("did not answer") {
+                log_line(args, &format!("degraded: {reason}"));
+            }
+            log_line(
+                args,
+                &format!("recovery: nothing claimed after {text:?}; {reason}"),
+            )
+        }
         _ => {}
     }
     outcome
@@ -504,7 +677,30 @@ fn recover_composer(
 /// gone. The pane is read for meaning for exactly one purpose, and it is not
 /// to say what opened: to notice that the screen is **asking something**,
 /// which is the one state no key may be sent into.
+/// Everything one recovery pass needs beyond its two injectable steps.
+struct RecoveryPass {
+    /// When the daemon stops listening for this request's answer, minus the
+    /// response margin. Recovery's observation windows are deliberate and
+    /// are not shortened under pressure — a window too short to observe
+    /// honestly proves nothing — so when the remaining budget cannot fit
+    /// the next step, recovery stops and says so instead of answering after
+    /// the daemon has hung up.
+    answer_by: std::time::Instant,
+    /// The operator's definition of a prompt, when they have one.
+    asking: Option<PromptPresence>,
+    matched: String,
+    capture: bool,
+    /// Complete the view rather than dismiss it, and what must be on screen
+    /// for that to be allowed. `Enter` commits, so it is held to a standard
+    /// the dismissing path is not: the screen must show the selected
+    /// affirmative row for the value that was asked for, and must not have
+    /// moved since it appeared. When it cannot, the ordinary rescue runs
+    /// instead.
+    confirm: Option<String>,
+}
+
 fn recover_composer_with(
+    pass: RecoveryPass,
     look: &dyn Fn() -> Result<(String, bool)>,
     // Takes the key because the choice is made *here*, after the guards: a
     // confirmation that cannot be established downgrades to the ordinary
@@ -516,17 +712,14 @@ fn recover_composer_with(
     // recovery pass still looking for the defaults would find no composer on
     // a perfectly healthy screen and Escape it after every slash command.
     composer: &PromptPresence,
-    // The operator's definition of a prompt, when they have one.
-    asking: Option<PromptPresence>,
-    matched: String,
-    capture: bool,
-    // Complete the view rather than dismiss it, and what must be on screen for
-    // that to be allowed. `Enter` commits, so it is held to a standard the
-    // dismissing path is not: the screen must show the selected affirmative row
-    // for the value that was asked for, and must not have moved since it
-    // appeared. When it cannot, the ordinary rescue runs instead.
-    confirm: Option<String>,
 ) -> SupervisorResult {
+    let RecoveryPass {
+        answer_by,
+        asking,
+        matched,
+        capture,
+        confirm,
+    } = pass;
     // "Ready" means able to take keys, not merely drawn: a view rendered above
     // a live-looking composer is the measured lockout this postcondition
     // exists to clear, and it must not read as recovery already having
@@ -540,6 +733,27 @@ fn recover_composer_with(
         matched: matched.clone(),
         reason: format!("the pane could not be read {stage}"),
     };
+    // The reason carries the look's own error: "could not be read" without
+    // the why turned a killed-at-deadline tmux into an anonymous shrug.
+    let unconfirmed_because =
+        |stage: &str, err: &anyhow::Error| SupervisorResult::RecoveryUnconfirmed {
+            matched: matched.clone(),
+            reason: format!("the pane could not be read {stage}: {err:#}"),
+        };
+    let out_of_budget = |needs: Duration| SupervisorResult::RecoveryUnconfirmed {
+        matched: matched.clone(),
+        reason: format!(
+            "the keys were typed, but the next recovery step needs {}ms and the daemon \
+             stops listening in {}ms; recovery stopped rather than answer after the daemon hung up",
+            needs.as_millis(),
+            answer_by
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+        ),
+    };
+    // What each block below costs at worst: its deliberate wait plus its
+    // bounded tmux calls. Checked before spending, not after.
+    let budget_allows = |needs: Duration| std::time::Instant::now() + needs <= answer_by;
 
     // First look. A composer still here settles it — the overwhelmingly
     // common case, and it costs one look.
@@ -549,22 +763,30 @@ fn recover_composer_with(
     // this is when it appeared. Taking a second look for that would buy the
     // same frame at the price of another failure point on a path that never
     // confirms anything.
+    let first_window = RECOVERY_FIRST_CHECK + LOOK_WORST;
+    if !budget_allows(first_window) {
+        return out_of_budget(first_window);
+    }
     std::thread::sleep(RECOVERY_FIRST_CHECK);
     let first_absent = match look() {
         Ok((pane, cursor)) if ready(&pane, cursor) => return SupervisorResult::Sent { matched },
         Ok((pane, _)) => pane,
-        Err(_) => return unconfirmed("after the command was typed"),
+        Err(err) => return unconfirmed_because("after the command was typed", &err),
     };
 
     // Second look: a large inline render can hide the composer footer for a
     // while and then bring it back with nobody's help — measured on
     // `/context`, absent about 2.5s and self-restoring. Escaping into that
     // would be a rescue nothing needed.
+    let second_window = (RECOVERY_SECOND_CHECK - RECOVERY_FIRST_CHECK) + LOOK_WORST;
+    if !budget_allows(second_window) {
+        return out_of_budget(second_window);
+    }
     std::thread::sleep(RECOVERY_SECOND_CHECK - RECOVERY_FIRST_CHECK);
     let absent_pane = match look() {
         Ok((pane, cursor)) if ready(&pane, cursor) => return SupervisorResult::Sent { matched },
         Ok((pane, _)) => pane,
-        Err(_) => return unconfirmed("while checking whether a view had opened"),
+        Err(err) => return unconfirmed_because("while checking whether a view had opened", &err),
     };
 
     // **A decision on screen is never Escaped.** A slash command can be a
@@ -595,9 +817,12 @@ fn recover_composer_with(
     //
     // **One look, pane and cursor together.** Apart they describe two moments,
     // and the whole question is what this key will land on.
+    if !budget_allows(LOOK_WORST) {
+        return out_of_budget(LOOK_WORST);
+    }
     let (before_key, cursor_before_key) = match look() {
         Ok(look) => look,
-        Err(_) => return unconfirmed("just before the key was sent"),
+        Err(err) => return unconfirmed_because("just before the key was sent", &err),
     };
     if asking.find_match(&before_key, None).is_some()
         || asking.find_match(&absent_pane, None).is_some()
@@ -638,10 +863,20 @@ fn recover_composer_with(
     };
 
     let key = if confirming { "Enter" } else { "Escape" };
-    if send_key(key).is_err() {
+    let key_and_verify = KEY_WORST
+        + if confirming {
+            CONFIRM_VERIFY_WINDOW
+        } else {
+            RECOVERY_VERIFY_WINDOW
+        }
+        + LOOK_WORST;
+    if !budget_allows(key_and_verify) {
+        return out_of_budget(key_and_verify);
+    }
+    if let Err(err) = send_key(key) {
         return SupervisorResult::RecoveryUnconfirmed {
             matched,
-            reason: format!("{key} could not be sent"),
+            reason: format!("{key} could not be sent: {err:#}"),
         };
     }
 
@@ -660,19 +895,24 @@ fn recover_composer_with(
     };
     let deadline = std::time::Instant::now() + window;
     let mut saw_the_pane = false;
+    let mut last_failed_look: Option<anyhow::Error>;
     loop {
-        if let Ok((pane, cursor)) = look() {
-            saw_the_pane = true;
-            if ready(&pane, cursor) {
-                if confirming {
-                    return SupervisorResult::ViewConfirmed { matched };
+        match look() {
+            Ok((pane, cursor)) => {
+                saw_the_pane = true;
+                last_failed_look = None;
+                if ready(&pane, cursor) {
+                    if confirming {
+                        return SupervisorResult::ViewConfirmed { matched };
+                    }
+                    return SupervisorResult::ComposerRecovered {
+                        matched,
+                        pane_snapshot: capture.then_some(absent_pane),
+                        captured_at: protocol::time::now_rfc3339(),
+                    };
                 }
-                return SupervisorResult::ComposerRecovered {
-                    matched,
-                    pane_snapshot: capture.then_some(absent_pane),
-                    captured_at: protocol::time::now_rfc3339(),
-                };
             }
+            Err(err) => last_failed_look = Some(err),
         }
         if std::time::Instant::now() >= deadline {
             // `ComposerLost` is a claim — a key went out and the composer did
@@ -685,12 +925,17 @@ fn recover_composer_with(
             // the sheet would go terminal on it. The window not being long
             // enough to *see* the redraw is exactly the "typed, outcome
             // unknown" state, and the transcript receipt still settles it.
-            return if confirming {
-                unconfirmed("while waiting for the composer after the confirmation")
-            } else if saw_the_pane {
-                SupervisorResult::ComposerLost { matched }
-            } else {
-                unconfirmed("after the key was sent")
+            // A window that ended on a *failed* look proves nothing about
+            // the composer — `ComposerLost` is a claim, and it is only made
+            // when the last observation actually worked. The failure's own
+            // reason travels, so a tmux killed at its deadline is named.
+            return match (&last_failed_look, confirming, saw_the_pane) {
+                (Some(err), _, _) => unconfirmed_because("while verifying after the key", err),
+                (None, true, _) => {
+                    unconfirmed("while waiting for the composer after the confirmation")
+                }
+                (None, false, true) => SupervisorResult::ComposerLost { matched },
+                (None, false, false) => unconfirmed("after the key was sent"),
             };
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -877,7 +1122,346 @@ mod tests {
     use super::*;
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+
+    // ------------------------------------------------- actuation phases
+    //
+    // The injection's two keystrokes over injectable steps: what a failure
+    // *means* depends on where it happened, and these pin the mapping the
+    // phone's claim handling relies on. A send-keys killed at its deadline
+    // may or may not have typed — treating it as a refusal would let the
+    // retry type twice.
+
+    fn timed_out() -> tmux::TmuxError {
+        tmux::TmuxError::TimedOut {
+            what: "send-keys".into(),
+            waited: Duration::from_secs(1),
+        }
+    }
+
+    fn refused_by_tmux() -> tmux::TmuxError {
+        tmux::TmuxError::Spawn {
+            what: "send-keys".into(),
+            source: std::io::Error::other("no such file"),
+        }
+    }
+
+    #[test]
+    fn a_typing_timeout_is_indeterminate_and_enter_is_never_pressed() {
+        let entered = std::cell::Cell::new(false);
+        let failure = actuate_with(
+            &|| Err(timed_out()),
+            &|| {
+                entered.set(true);
+                Ok(())
+            },
+            true,
+            Duration::ZERO,
+        )
+        .expect_err("the typing failure must surface");
+        assert!(
+            !entered.get(),
+            "Enter after an unconfirmed typing is a second mutation into an unknown screen"
+        );
+        match failure.result() {
+            SupervisorResult::Error { message } => {
+                assert!(
+                    message.contains("will not be sent again"),
+                    "the phone must be told a retry will not type: {message}"
+                );
+            }
+            other => panic!("a deadline kill may have typed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_provable_typing_failure_is_a_refusal_a_retry_may_act_on() {
+        let failure = actuate_with(&|| Err(refused_by_tmux()), &|| Ok(()), true, Duration::ZERO)
+            .expect_err("the spawn failure must surface");
+        match failure.result() {
+            SupervisorResult::Refused { reason } => {
+                assert!(reason.contains("nothing was typed"), "{reason}");
+            }
+            other => panic!("nothing ran, so nothing was typed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_enter_failure_after_typing_is_indeterminate() {
+        // Even a *provable* Enter failure: the text is already staged, and a
+        // released claim would let a retry stage it twice.
+        for make_failure in [timed_out as fn() -> tmux::TmuxError, refused_by_tmux] {
+            let typed = std::cell::Cell::new(0u32);
+            let failure = actuate_with(
+                &|| {
+                    typed.set(typed.get() + 1);
+                    Ok(())
+                },
+                &|| Err(make_failure()),
+                true,
+                Duration::ZERO,
+            )
+            .expect_err("the Enter failure must surface");
+            assert_eq!(typed.get(), 1, "the text was typed exactly once");
+            match failure.result() {
+                SupervisorResult::Error { message } => {
+                    assert!(message.contains("the text was typed"), "{message}");
+                    assert!(message.contains("will not be sent again"), "{message}");
+                }
+                other => panic!("staged text must never map to Refused; got {other:?}"),
+            }
+        }
+    }
+
+    /// Recovery under a spent budget: it must stop before its first
+    /// deliberate wait — no look taken, no key sent — and say that the keys
+    /// were typed, because they were.
+    #[test]
+    fn recovery_with_no_budget_left_stops_before_spending_anything() {
+        let looked = std::cell::Cell::new(false);
+        let keyed = std::cell::Cell::new(false);
+        let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now(),
+                asking: None,
+                matched: "composer".into(),
+                capture: false,
+                confirm: None,
+            },
+            &|| {
+                looked.set(true);
+                Ok((String::new(), true))
+            },
+            &|_| {
+                keyed.set(true);
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+        );
+        assert!(!looked.get(), "an unaffordable look must not be taken");
+        assert!(!keyed.get(), "and certainly no key sent");
+        match outcome {
+            SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
+                assert!(
+                    reason.contains("the keys were typed"),
+                    "the phone must still learn the typing happened: {reason}"
+                );
+                assert!(reason.contains("recovery stopped"), "{reason}");
+            }
+            other => panic!("a spent budget is indeterminate, not {other:?}"),
+        }
+    }
+
+    /// A generous budget changes nothing: the first look sees a ready
+    /// composer and recovery concludes `Sent` exactly as before.
+    #[test]
+    fn recovery_with_budget_behaves_as_before() {
+        let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "composer".into(),
+                capture: false,
+                confirm: None,
+            },
+            &|| Ok(("composer > for shortcuts".into(), true)),
+            &|_| Ok(()),
+            &PromptPresence::AnyOf {
+                needles: vec!["for shortcuts".into()],
+            },
+        );
+        assert!(
+            matches!(outcome, SupervisorResult::Sent { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    /// A request whose daemon has already stopped listening is refused
+    /// before anything is looked at: the stamp is hours in the past, so a
+    /// pane read — up to two seconds of bounded tmux — would be spent on an
+    /// answer nobody will hear. The refusal must be immediate, which is
+    /// also what proves no look ran: a real look at even an absent session
+    /// costs a process spawn this assertion's bound does not allow.
+    #[test]
+    fn an_expired_request_is_refused_before_any_look() {
+        use std::io::{BufRead, Write};
+        let (daemon_side, supervisor_side) = UnixStream::pair().expect("socketpair");
+        let args = SupervisorArgs {
+            session_id: format!("cc-expired-{}", std::process::id()),
+            session_uid: None,
+            tmux_session: format!("cc-expired-{}", std::process::id()),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+        };
+        let config = Config::load();
+        let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
+        let writer = Arc::new(Mutex::new(supervisor_side));
+        let loop_thread = std::thread::spawn(move || {
+            let _ = read_frames(reader, &args, &config, &writer);
+        });
+
+        let mut ask = daemon_side.try_clone().expect("clone");
+        daemon_side
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut answers = std::io::BufReader::new(daemon_side);
+
+        let expired = DaemonFrame::SupervisorRequest {
+            id: "late".into(),
+            request: SupervisorRequest::SendText {
+                text: "too late".into(),
+                require: PromptPresence::InputBox,
+                asking: None,
+                targets_composer: true,
+                submit: true,
+                expect: None,
+                recover_composer: false,
+                capture_recovered: false,
+                confirm_view: None,
+                // A monotonic stamp of 1ms: hours behind any live reading.
+                respond_by_monotonic_ms: Some(1),
+            },
+        };
+        let mut line = serde_json::to_vec(&expired).unwrap();
+        line.push(b'\n');
+        let asked = std::time::Instant::now();
+        ask.write_all(&line).unwrap();
+
+        let mut answer = String::new();
+        answers.read_line(&mut answer).expect("the refusal arrives");
+        let waited = asked.elapsed();
+        match serde_json::from_str::<ClientFrame>(&answer).unwrap() {
+            ClientFrame::SupervisorResponse { id, result } => {
+                assert_eq!(id, "late");
+                match result {
+                    SupervisorResult::Refused { reason } => {
+                        assert!(reason.contains("nothing was typed"), "{reason}");
+                        assert!(
+                            reason.contains("stops listening"),
+                            "the refusal names the budget: {reason}"
+                        );
+                    }
+                    other => panic!("an expired request refuses; got {other:?}"),
+                }
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
+        assert!(
+            waited < Duration::from_millis(300),
+            "the refusal was immediate — no pane was read: {waited:?}"
+        );
+        drop(ask);
+        drop(answers);
+        loop_thread.join().expect("the loop ends");
+    }
+
+    /// The dispatch loop outlives a request that failed: a send aimed at a
+    /// session that does not exist is refused — quickly, through the real
+    /// bounded pane look — and the very next request on the same stream is
+    /// answered. This is the loop the wedge silenced, proven live over a
+    /// socket pair.
+    #[test]
+    fn the_dispatch_loop_answers_the_next_request_after_a_failed_send() {
+        use std::io::{BufRead, Write};
+        if tmux::tmux_bin().is_err() {
+            eprintln!("skipped: no tmux on this machine");
+            return;
+        }
+        let (daemon_side, supervisor_side) = UnixStream::pair().expect("socketpair");
+        let args = SupervisorArgs {
+            session_id: format!("cc-none-{}", std::process::id()),
+            session_uid: None,
+            tmux_session: format!("cc-none-{}", std::process::id()),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+        };
+        let config = Config::load();
+        let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
+        let writer = Arc::new(Mutex::new(supervisor_side));
+        let loop_thread = std::thread::spawn(move || {
+            let _ = read_frames(reader, &args, &config, &writer);
+        });
+
+        let mut ask = daemon_side.try_clone().expect("clone");
+        daemon_side
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .expect("read timeout");
+        let mut answers = std::io::BufReader::new(daemon_side);
+
+        let send = DaemonFrame::SupervisorRequest {
+            id: "one".into(),
+            request: SupervisorRequest::SendText {
+                text: "never lands".into(),
+                require: PromptPresence::InputBox,
+                asking: None,
+                targets_composer: true,
+                submit: true,
+                expect: None,
+                recover_composer: false,
+                capture_recovered: false,
+                confirm_view: None,
+                respond_by_monotonic_ms: None,
+            },
+        };
+        let ping = DaemonFrame::SupervisorRequest {
+            id: "two".into(),
+            request: SupervisorRequest::Ping,
+        };
+        for frame in [&send, &ping] {
+            let mut line = serde_json::to_vec(frame).unwrap();
+            line.push(b'\n');
+            ask.write_all(&line).unwrap();
+        }
+
+        let mut line = String::new();
+        answers
+            .read_line(&mut line)
+            .expect("the failed send answers");
+        let first: ClientFrame = serde_json::from_str(&line).unwrap();
+        match first {
+            ClientFrame::SupervisorResponse { id, result } => {
+                assert_eq!(id, "one");
+                assert!(
+                    matches!(result, SupervisorResult::Refused { .. }),
+                    "an absent session refuses the look: {result:?}"
+                );
+            }
+            other => panic!("wrong first frame: {other:?}"),
+        }
+        line.clear();
+        answers
+            .read_line(&mut line)
+            .expect("the next request answers");
+        let second: ClientFrame = serde_json::from_str(&line).unwrap();
+        match second {
+            ClientFrame::SupervisorResponse { id, result } => {
+                assert_eq!(id, "two");
+                assert!(matches!(result, SupervisorResult::Pong), "{result:?}");
+            }
+            other => panic!("wrong second frame: {other:?}"),
+        }
+        drop(ask);
+        drop(answers);
+        loop_thread
+            .join()
+            .expect("the loop ends when the daemon hangs up");
+    }
+
+    #[test]
+    fn a_send_without_submit_never_touches_enter() {
+        let entered = std::cell::Cell::new(false);
+        actuate_with(
+            &|| Ok(()),
+            &|| {
+                entered.set(true);
+                Ok(())
+            },
+            false,
+            Duration::ZERO,
+        )
+        .expect("typing succeeded");
+        assert!(!entered.get());
+    }
 
     /// Verbatim from `tmux -L codeconnect capture-pane -p -J` against a live
     /// permission prompt on claude 2.1.220.
@@ -931,6 +1515,9 @@ mod tests {
     struct FakeTui {
         socket_dir: std::path::PathBuf,
         session: String,
+        /// Recorded while the server is healthy, for the teardown that runs
+        /// when it no longer is: a wedged server cannot be asked its pid.
+        server_pid: std::cell::Cell<Option<i32>>,
     }
 
     impl FakeTui {
@@ -949,21 +1536,48 @@ mod tests {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).ok()?;
 
             let session = format!("faketui-{name}");
-            let status = Command::new(&tmux)
-                .args(["-S", root.join("sock").to_str()?])
-                .args(["new-session", "-d", "-s", &session, "-x", "80", "-y", "24"])
-                .arg("--")
-                .arg(&script)
-                .stdin(Stdio::null())
-                .status()
-                .ok()?;
-            if !status.success() {
-                return None;
-            }
+            // The guard exists BEFORE the spawn: a server created by a call
+            // whose status was never seen — a hang, a panic between spawn
+            // and construction — must still die with the test.
             let tui = FakeTui {
                 socket_dir: root,
                 session,
+                server_pid: std::cell::Cell::new(None),
             };
+            // Plain `new-session`, not `-P -F '#{pid}'`: `-P` writes the pid
+            // to the piped client stdout the server then retains, so the
+            // bounded runner would wait for an EOF that never comes and time
+            // the creation out. The pid is read by a separate `display`, and
+            // read before the success check so a server that started under a
+            // timed-out create is still owned by the guard.
+            let started = protocol::proc::run_deadlined(
+                Command::new(&tmux)
+                    .args(["-S", &tui.socket()])
+                    .args([
+                        "new-session",
+                        "-d",
+                        "-s",
+                        &tui.session,
+                        "-x",
+                        "80",
+                        "-y",
+                        "24",
+                    ])
+                    .arg("--")
+                    .arg(&script),
+                Duration::from_secs(5),
+            )
+            .ok()?;
+            if let Some(pid) = tui
+                .tmux(&["display", "-p", "#{pid}"])
+                .and_then(|out| out.trim().parse::<i32>().ok())
+            {
+                tui.server_pid.set(Some(pid));
+            }
+            match started {
+                protocol::proc::RunOutcome::Completed { status, .. } if status.success() => {}
+                _ => return None,
+            }
             // Wait for the composer rather than sleeping a guessed interval.
             // A fixed 700ms held while these tests ran one at a time and
             // stopped holding once six tmux servers started at once — and a
@@ -984,12 +1598,14 @@ mod tests {
         }
 
         fn tmux(&self, args: &[&str]) -> Option<String> {
-            let out = Command::new(protocol::tmux::tmux_bin()?)
-                .args(["-S", &self.socket()])
-                .args(args)
-                .output()
-                .ok()?;
-            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+            let mut command = Command::new(protocol::tmux::tmux_bin()?);
+            command.args(["-S", &self.socket()]).args(args);
+            match protocol::proc::run_deadlined(&mut command, Duration::from_secs(2)).ok()? {
+                protocol::proc::RunOutcome::Completed { stdout, .. } => {
+                    Some(String::from_utf8_lossy(&stdout).into_owned())
+                }
+                protocol::proc::RunOutcome::TimedOut { .. } => None,
+            }
         }
 
         fn pane(&self) -> String {
@@ -1017,8 +1633,62 @@ mod tests {
     impl Drop for FakeTui {
         fn drop(&mut self) {
             // Only ever this test's own socket — never the shared server.
-            let _ = self.tmux(&["kill-server"]);
-            let _ = std::fs::remove_dir_all(&self.socket_dir);
+            // Bounded, because an unbounded `kill-server` against a wedged
+            // server would recreate inside the cleanup the very hang some of
+            // these tests exist to prevent. If asking nicely fails, the
+            // exact server pid is killed; the directory goes only once the
+            // server cannot still be alive to be stranded by it.
+            // Only a zero exit from `kill-server` is "the server obeyed":
+            // a nonzero completion, a timeout, a spawn failure, or tmux not
+            // being locatable at all each leave a server that may still be
+            // alive — and the pid recorded while it was healthy is the
+            // answer to every one of them.
+            let obeyed = protocol::tmux::tmux_bin().is_some_and(|tmux| {
+                match protocol::proc::run_deadlined(
+                    Command::new(&tmux)
+                        .args(["-S", &self.socket()])
+                        .arg("kill-server"),
+                    Duration::from_secs(2),
+                ) {
+                    Ok(protocol::proc::RunOutcome::Completed { status, stderr, .. }) => {
+                        // "no server" is as dead as a successful kill.
+                        status.success() || String::from_utf8_lossy(&stderr).contains("no server")
+                    }
+                    _ => false,
+                }
+            });
+            let dead = obeyed
+                || match self.server_pid.get() {
+                    Some(pid) => {
+                        // A sent signal is a request, not a fact: death is
+                        // verified by `kill(pid, 0)` answering `ESRCH`,
+                        // boundedly, before the socket directory may go.
+                        unsafe {
+                            libc::kill(pid, libc::SIGCONT);
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                        (0..50).any(|_| {
+                            let gone = unsafe { libc::kill(pid, 0) } == -1
+                                && std::io::Error::last_os_error().raw_os_error()
+                                    == Some(libc::ESRCH);
+                            if !gone {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            gone
+                        })
+                    }
+                    None => false,
+                };
+            // Deleting a live server's socket strands it unaddressable; a
+            // leftover directory is the lesser harm.
+            if dead {
+                let _ = std::fs::remove_dir_all(&self.socket_dir);
+            } else {
+                eprintln!(
+                    "fake TUI server at {} could not be proven dead; leaving its directory",
+                    self.socket_dir.display()
+                );
+            }
         }
     }
 
@@ -1073,6 +1743,13 @@ done
         // of these tests running at once could look at each other's TUI.
         tui.type_line(text);
         recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture,
+                confirm: None,
+            },
             &|| Ok((tui.pane(), tui.cursor_is_visible())),
             &|key| {
                 assert_eq!(
@@ -1083,10 +1760,6 @@ done
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            capture,
-            None,
         )
     }
 
@@ -1119,6 +1792,13 @@ means the full history gets re-read on your next message.
         let index = Mutex::new(0usize);
         let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: Some(SONNET_NEEDLE.to_string()),
+            },
             &|| {
                 let mut i = index.lock().unwrap();
                 let at = (*i).min(looks.len() - 1);
@@ -1130,10 +1810,6 @@ means the full history gets re-read on your next message.
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            Some(SONNET_NEEDLE.to_string()),
         );
         let keys = sent.lock().unwrap().clone();
         (outcome, keys)
@@ -1197,16 +1873,19 @@ means the full history gets re-read on your next message.
         use std::sync::Mutex;
         let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let _ = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: None,
+            },
             &|| Ok(("some view".to_string(), false)),
             &|key| {
                 sent.lock().unwrap().push(key.to_string());
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            None,
         );
         assert_eq!(
             sent.lock().unwrap().as_slice(),
@@ -1232,6 +1911,13 @@ means the full history gets re-read on your next message.
         let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: Some("❯1.yes,switchtosonnet5".to_string()),
+            },
             &|| {
                 // The dialog at every look until the one taken immediately
                 // before the key, where a different screen has replaced it.
@@ -1276,10 +1962,6 @@ means the full history gets re-read on your next message.
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            Some("❯1.yes,switchtosonnet5".to_string()),
         );
         assert_eq!(
             sent.lock().unwrap().as_slice(),
@@ -1304,6 +1986,13 @@ means the full history gets re-read on your next message.
         let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: Some("❯1.yes,switchtosonnet5".to_string()),
+            },
             &|| {
                 // The same dialog, unmoved, at every look; the composer is back
                 // once the key has been sent.
@@ -1332,10 +2021,6 @@ means the full history gets re-read on your next message.
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            Some("❯1.yes,switchtosonnet5".to_string()),
         );
         assert_eq!(
             sent.lock().unwrap().as_slice(),
@@ -1420,6 +2105,13 @@ means the full history gets re-read on your next message.
     #[test]
     fn a_verify_pass_that_never_saw_the_pane_claims_nothing() {
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: None,
+            },
             &|| {
                 // Present at the first look so typing is authorised, then
                 // blind: the composer went away and nothing after that could
@@ -1435,14 +2127,14 @@ means the full history gets re-read on your next message.
             },
             &|_| Ok(()),
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
-                assert!(reason.contains("after the key was sent"), "{reason}");
+                assert!(reason.contains("while verifying after the key"), "{reason}");
+                assert!(
+                    reason.contains("the pane could not be read"),
+                    "the look's own failure travels in the reason: {reason}"
+                );
             }
             other => panic!("nothing was observed, so nothing may be claimed: {other:?}"),
         }
@@ -1497,6 +2189,13 @@ means the full history gets re-read on your next message.
         static ESCAPES: AtomicU32 = AtomicU32::new(0);
         static LOOKS: AtomicU32 = AtomicU32::new(0);
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: None,
+            },
             &|| match LOOKS.fetch_add(1, Ordering::SeqCst) {
                 // The two checks see a view and no question…
                 0 | 1 => Ok(("THE VIEW IS UP".to_string(), false)),
@@ -1508,10 +2207,6 @@ means the full history gets re-read on your next message.
                 Ok(())
             },
             &PromptPresence::InputBox,
-            None,
-            "forshortcuts".to_string(),
-            false,
-            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {
@@ -1536,18 +2231,21 @@ means the full history gets re-read on your next message.
         use std::sync::atomic::{AtomicU32, Ordering};
         static ESCAPES: AtomicU32 = AtomicU32::new(0);
         let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: Some(PromptPresence::AnyOf {
+                    needles: vec!["shall i go ahead".to_string()],
+                }),
+                matched: "forshortcuts".to_string(),
+                capture: false,
+                confirm: None,
+            },
             &|| Ok(("Shall I go ahead with this?".to_string(), false)),
             &|_| {
                 ESCAPES.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
             &PromptPresence::InputBox,
-            Some(PromptPresence::AnyOf {
-                needles: vec!["shall i go ahead".to_string()],
-            }),
-            "forshortcuts".to_string(),
-            false,
-            None,
         );
         match outcome {
             SupervisorResult::RecoveryUnconfirmed { reason, .. } => {

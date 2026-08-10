@@ -41,8 +41,22 @@ fn default_catalog_probe_ms() -> u64 {
 fn default_max_payload_bytes() -> usize {
     512 * 1024
 }
+/// How long the daemon waits for a supervisor's answer to one request.
+///
+/// The daemon stamps `now + this` into each send as `respond_by_monotonic_ms`,
+/// and the supervisor budgets every deliberate wait against that stamp —
+/// checking *before* each spend and stopping recovery honestly when the
+/// remainder cannot fit the next step. So this value does not need to
+/// dominate the theoretical worst path (every tmux call stalling to its
+/// full deadline through confirmation recovery sums past any sane wait);
+/// it needs to fit the *healthy* path and leave the phone standing. The
+/// healthy full path — looks and keystrokes in single-digit milliseconds,
+/// recovery's deliberate observation windows of 1.5s + 1.5s, a verify
+/// window up to 1.5s — is under six seconds; fifteen gives degraded tmux
+/// room to still finish ordinary sends, and stays inside the app's
+/// twenty-second request wait with margin for queue and transport.
 fn default_supervisor_timeout_ms() -> u64 {
-    5_000
+    15_000
 }
 fn default_pairing_ttl_secs() -> u64 {
     crate::pairing::PAIRING_TTL_SECS

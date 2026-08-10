@@ -403,6 +403,83 @@ enum SupervisorFailure {
     Unanswered(String),
 }
 
+/// The one translation from what a supervisor answered (or failed to) into
+/// what the phone is told — pure, because the claim's fate hangs on it:
+/// `Refused` is the only outcome that releases a text mutation's claim, so
+/// every arm here is an assertion about whether typing provably did not
+/// happen.
+/// The deadline stamp for one supervisor request, or the refusal to make
+/// one. A request whose bound cannot be established must not be issued:
+/// omitting the stamp would hand the supervisor a fresh full budget *after*
+/// whatever time the request spends queued, which is exactly the
+/// types-after-the-daemon-hung-up window the stamp exists to close. Nothing
+/// has been typed at this point, so refusing is retry-safe.
+fn respond_by_stamp(timeout_ms: u64) -> Result<u64, SupervisorFailure> {
+    protocol::time::now_monotonic_ms()
+        .map(|now| now + timeout_ms)
+        .ok_or_else(|| {
+            SupervisorFailure::NotSent(
+                "this Mac's monotonic clock could not be read, so the send could not be \
+                 bounded; nothing was typed"
+                    .to_string(),
+            )
+        })
+}
+
+fn send_text_result_of(outcome: Result<SupervisorResult, SupervisorFailure>) -> SendTextResult {
+    match outcome {
+        Ok(SupervisorResult::Sent { matched }) => SendTextResult::Sent { matched },
+        Ok(SupervisorResult::ComposerRecovered {
+            matched,
+            pane_snapshot,
+            captured_at,
+        }) => SendTextResult::ComposerRecovered {
+            matched,
+            pane_snapshot,
+            captured_at,
+        },
+        // Typed, and the composer never came back. Not indeterminate:
+        // the typing is certain and so is the state it left behind.
+        Ok(SupervisorResult::ComposerLost { matched }) => SendTextResult::ComposerLost { matched },
+        // Deliberately `Sent`. A completed confirmation is the same news
+        // to the phone as a clean inline send — the keys landed and the
+        // transcript decides — so it needs no wire status of its own, and
+        // a client that predates this cannot misread one.
+        Ok(SupervisorResult::ViewConfirmed { matched }) => SendTextResult::Sent { matched },
+        // Typed, and then something could not be observed. `indeterminate`
+        // is exactly this state's existing name on the wire, and it is the
+        // one the phone already handles by keeping the identity so a retry
+        // is recognised rather than typed twice.
+        Ok(SupervisorResult::RecoveryUnconfirmed { reason, .. }) => {
+            SendTextResult::Indeterminate { reason }
+        }
+        // A refusal is a positive statement that nothing was typed — the
+        // supervisor checks before it injects, and when actuation itself
+        // fails provably (tmux refused, or never ran), it says so as a
+        // refusal too. Either way the claim may be released.
+        Ok(SupervisorResult::Refused { reason }) => SendTextResult::Refused { reason },
+        // The supervisor's own "this may have acted and I cannot know":
+        // a keystroke killed at its deadline, or Enter unconfirmed after
+        // the text landed. The message is the supervisor's, verbatim —
+        // it names the phase and what the phone should expect.
+        Ok(SupervisorResult::Error { message }) => {
+            SendTextResult::Indeterminate { reason: message }
+        }
+        // Anything else means we never found out. It may have typed, and no
+        // later evidence can settle it, so it is reported as unknown rather
+        // than as a refusal a retry would act on.
+        Ok(other) => SendTextResult::Indeterminate {
+            reason: format!("unexpected supervisor result: {other:?}"),
+        },
+        // Never handed to a supervisor, so nothing was typed and a retry is
+        // a fresh attempt rather than a permanent unknown.
+        Err(SupervisorFailure::NotSent(reason)) => SendTextResult::Refused { reason },
+        Err(SupervisorFailure::Unanswered(reason)) => SendTextResult::Indeterminate {
+            reason: format!("the supervisor never confirmed this injection ({reason})"),
+        },
+    }
+}
+
 impl std::fmt::Display for SupervisorFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2442,6 +2519,16 @@ impl Daemon {
             None
         };
 
+        let respond_by = match respond_by_stamp(self.config.supervisor_timeout_ms) {
+            Ok(stamp) => stamp,
+            // Never handed to a supervisor, so it cannot have typed — the
+            // same refusal shape the NotSent arm below produces.
+            Err(SupervisorFailure::NotSent(reason))
+            | Err(SupervisorFailure::Unanswered(reason)) => {
+                // The helper's reason already ends with "nothing was typed".
+                return Actuation::Refused(reason);
+            }
+        };
         match self
             .supervisor_request(
                 &session.uid,
@@ -2453,6 +2540,11 @@ impl Daemon {
                     targets_composer: false,
                     // No recovery on this path, so nothing to guard.
                     asking: None,
+                    // The moment this daemon stops waiting for the answer,
+                    // stamped so the supervisor spends its budget against the
+                    // clock that actually matters — including whatever time
+                    // this request spends queued before it is read.
+                    respond_by_monotonic_ms: Some(respond_by),
                     submit,
                     expect,
                     // An answer to a permission prompt is never a slash
@@ -2678,78 +2770,44 @@ impl Daemon {
         // is decided in `supervisor_request`, against the handle that actually
         // receives the frame.
         let confirm_view = confirm_view_for(&text, complete_native_confirmation);
-        let outcome = self
-            .supervisor_request(
-                &session_uid,
-                SupervisorRequest::SendText {
-                    text,
-                    require,
-                    // This text goes to the composer, whatever needles the
-                    // operator configured for finding it — so the supervisor
-                    // may ask whether the composer has the keyboard.
-                    targets_composer: true,
-                    // And whatever they configured for recognising a prompt,
-                    // so recovery's "never Escape a screen that is asking"
-                    // guard sees the prompts they taught us to see. `None`
-                    // when nothing is configured; the supervisor then uses
-                    // the question itself.
-                    asking: self.configured_prompt_presence(),
-                    submit,
-                    // Free text is not an answer to a prompt; the composer being
-                    // ready is the whole interlock, and a permission prompt on
-                    // screen makes that check fail on its own.
-                    expect: None,
-                    recover_composer,
-                    capture_recovered,
-                    confirm_view,
-                },
-            )
-            .await;
-
-        let result = match outcome {
-            Ok(SupervisorResult::Sent { matched }) => SendTextResult::Sent { matched },
-            Ok(SupervisorResult::ComposerRecovered {
-                matched,
-                pane_snapshot,
-                captured_at,
-            }) => SendTextResult::ComposerRecovered {
-                matched,
-                pane_snapshot,
-                captured_at,
-            },
-            // Typed, and the composer never came back. Not indeterminate:
-            // the typing is certain and so is the state it left behind.
-            Ok(SupervisorResult::ComposerLost { matched }) => {
-                SendTextResult::ComposerLost { matched }
+        let outcome = match respond_by_stamp(self.config.supervisor_timeout_ms) {
+            Err(refused) => Err(refused),
+            Ok(respond_by) => {
+                self.supervisor_request(
+                    &session_uid,
+                    SupervisorRequest::SendText {
+                        text,
+                        require,
+                        // This text goes to the composer, whatever needles the
+                        // operator configured for finding it — so the supervisor
+                        // may ask whether the composer has the keyboard.
+                        targets_composer: true,
+                        // And whatever they configured for recognising a prompt,
+                        // so recovery's "never Escape a screen that is asking"
+                        // guard sees the prompts they taught us to see. `None`
+                        // when nothing is configured; the supervisor then uses
+                        // the question itself.
+                        asking: self.configured_prompt_presence(),
+                        submit,
+                        // Free text is not an answer to a prompt; the composer being
+                        // ready is the whole interlock, and a permission prompt on
+                        // screen makes that check fail on its own.
+                        expect: None,
+                        recover_composer,
+                        capture_recovered,
+                        confirm_view,
+                        // The moment this daemon stops waiting for the answer,
+                        // stamped so the supervisor spends its budget against the
+                        // clock that actually matters — including whatever time
+                        // this request spends queued before it is read.
+                        respond_by_monotonic_ms: Some(respond_by),
+                    },
+                )
+                .await
             }
-            // Deliberately `Sent`. A completed confirmation is the same news
-            // to the phone as a clean inline send — the keys landed and the
-            // transcript decides — so it needs no wire status of its own, and
-            // a client that predates this cannot misread one.
-            Ok(SupervisorResult::ViewConfirmed { matched }) => SendTextResult::Sent { matched },
-            // Typed, and then something could not be observed. `indeterminate`
-            // is exactly this state's existing name on the wire, and it is the
-            // one the phone already handles by keeping the identity so a retry
-            // is recognised rather than typed twice.
-            Ok(SupervisorResult::RecoveryUnconfirmed { reason, .. }) => {
-                SendTextResult::Indeterminate { reason }
-            }
-            // A refusal is a positive statement that nothing was typed — the
-            // supervisor checks before it injects, never after.
-            Ok(SupervisorResult::Refused { reason }) => SendTextResult::Refused { reason },
-            // Anything else means we never found out. It may have typed, and no
-            // later evidence can settle it, so it is reported as unknown rather
-            // than as a refusal a retry would act on.
-            Ok(other) => SendTextResult::Indeterminate {
-                reason: format!("unexpected supervisor result: {other:?}"),
-            },
-            // Never handed to a supervisor, so nothing was typed and a retry is
-            // a fresh attempt rather than a permanent unknown.
-            Err(SupervisorFailure::NotSent(reason)) => SendTextResult::Refused { reason },
-            Err(SupervisorFailure::Unanswered(reason)) => SendTextResult::Indeterminate {
-                reason: format!("the supervisor never confirmed this injection ({reason})"),
-            },
         };
+
+        let result = send_text_result_of(outcome);
 
         if let Some((request_id, _)) = &identity {
             match &result {
@@ -4556,6 +4614,88 @@ pub(crate) fn hook_event(
 
 #[cfg(test)]
 mod tests {
+
+    /// The one translation the claim's fate rides on, arm by arm: only
+    /// `Refused` may release a text mutation's claim, so every supervisor
+    /// answer that leaves typing possible must map to `Indeterminate`.
+    #[test]
+    fn supervisor_answers_map_to_claim_outcomes_exactly() {
+        use protocol::ipc::SupervisorResult;
+
+        // The supervisor's phase-aware "may have acted": verbatim to the
+        // phone, never rephrased into something a retry would act on.
+        match send_text_result_of(Ok(SupervisorResult::Error {
+            message: "the text was typed but Enter was not confirmed".into(),
+        })) {
+            SendTextResult::Indeterminate { reason } => {
+                assert_eq!(reason, "the text was typed but Enter was not confirmed")
+            }
+            other => panic!("a supervisor error may have typed; got {other:?}"),
+        }
+
+        // A refusal releases; the reason travels.
+        match send_text_result_of(Ok(SupervisorResult::Refused {
+            reason: "nothing was typed".into(),
+        })) {
+            SendTextResult::Refused { reason } => assert_eq!(reason, "nothing was typed"),
+            other => panic!("a refusal must release the claim; got {other:?}"),
+        }
+
+        // Never handed to a supervisor: retry-safe.
+        assert!(matches!(
+            send_text_result_of(Err(SupervisorFailure::NotSent("no supervisor".into()))),
+            SendTextResult::Refused { .. }
+        ));
+        // Handed over and never answered: permanently unknown.
+        assert!(matches!(
+            send_text_result_of(Err(SupervisorFailure::Unanswered("timed out".into()))),
+            SendTextResult::Indeterminate { .. }
+        ));
+        // Typed with recovery unconfirmed: unknown, reason preserved.
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::RecoveryUnconfirmed {
+                matched: "composer".into(),
+                reason: "budget".into(),
+            })),
+            SendTextResult::Indeterminate { .. }
+        ));
+
+        // The typing-proven outcomes carry through one to one…
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::Sent {
+                matched: "composer".into()
+            })),
+            SendTextResult::Sent { .. }
+        ));
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::ComposerRecovered {
+                matched: "composer".into(),
+                pane_snapshot: None,
+                captured_at: "2026-01-01T00:00:00Z".into(),
+            })),
+            SendTextResult::ComposerRecovered { .. }
+        ));
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::ComposerLost {
+                matched: "composer".into()
+            })),
+            SendTextResult::ComposerLost { .. }
+        ));
+        // …except a confirmed view, which is deliberately the same news as a
+        // clean send: the keys landed, the transcript decides.
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::ViewConfirmed {
+                matched: "composer".into()
+            })),
+            SendTextResult::Sent { .. }
+        ));
+        // A result that makes no sense as an answer to typing is unknown —
+        // it may have typed, and a refusal here would let a retry act on it.
+        assert!(matches!(
+            send_text_result_of(Ok(SupervisorResult::Pong)),
+            SendTextResult::Indeterminate { .. }
+        ));
+    }
     use super::*;
     use serde_json::json;
 

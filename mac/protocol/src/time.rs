@@ -5,6 +5,26 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Milliseconds on the host's monotonic clock — one clock for every process
+/// on this machine, immune to wall-time steps. This is the clock deadlines
+/// cross a process boundary on: a wall stamp can jump backward and grant a
+/// request more time than its sender will wait.
+///
+/// `None` when the clock cannot be read. Both callers fail closed on it:
+/// the daemon refuses to issue a send it cannot bound, and the supervisor
+/// refuses a stamped send it cannot clock — neither substitutes a budget.
+pub fn now_monotonic_ms() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ok != 0 {
+        return None;
+    }
+    Some((ts.tv_sec as u64) * 1_000 + (ts.tv_nsec as u64) / 1_000_000)
+}
+
 /// Milliseconds since the Unix epoch. Saturates at 0 for pre-epoch clocks
 /// (a Mac whose clock is that wrong has bigger problems than a negative ts).
 pub fn now_unix_ms() -> i64 {

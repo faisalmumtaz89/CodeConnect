@@ -284,11 +284,20 @@ pub fn session_presence_on(socket: &str, name: &str) -> SessionPresence {
     let Some(bin) = tmux_bin() else {
         return SessionPresence::Unknown("tmux is not installed at a known location".into());
     };
-    match Command::new(bin).args(&argv).stdin(Stdio::null()).output() {
-        Ok(output) => presence_from_probe(
-            output.status.success(),
-            &String::from_utf8_lossy(&output.stderr),
-        ),
+    // Bounded, because this probe runs on liveness sweeps: a tmux that stops
+    // answering must cost a deadline and read as "could not look", not hold
+    // the sweep hostage — and a timeout is *never* evidence of absence.
+    match crate::proc::run_deadlined(
+        Command::new(bin).args(&argv).stdin(Stdio::null()),
+        std::time::Duration::from_secs(1),
+    ) {
+        Ok(crate::proc::RunOutcome::Completed { status, stderr, .. }) => {
+            presence_from_probe(status.success(), &String::from_utf8_lossy(&stderr))
+        }
+        Ok(crate::proc::RunOutcome::TimedOut { waited }) => SessionPresence::Unknown(format!(
+            "tmux did not answer within {}ms",
+            waited.as_millis()
+        )),
         // tmux could not even be run: the binary moved, or the process is out
         // of descriptors. Certainly not evidence that an agent exited.
         Err(err) => SessionPresence::Unknown(format!("could not run tmux: {err}")),
