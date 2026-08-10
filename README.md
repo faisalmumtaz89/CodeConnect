@@ -34,7 +34,7 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 - **The terminal is tmux's while a session runs.** The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
   - *Scrolling*: the private server runs `mouse on`, so the wheel scrolls the session's own history — up to `tmux_history_limit` lines (50,000 by default) of conversation. The trade tmux imposes: dragging now selects through tmux's copy mode; hold **Shift** to select through your terminal natively instead.
   - *Padding*: some terminals draw full-screen apps edge to edge by design. Warp pads them with **0px by default** — Settings → Appearance → Full-screen Apps lets you set custom padding or match the blocks UI, which restores the exact framing plain `claude` gets. That is the terminal's presentation of tmux, and the terminal's setting is the right place to change it.
-- **Your phone runs your own build.** The Mac side updates itself from signed universal release binaries, so once installed it needs no toolchain — but the first install today is `./install.sh`, which builds from source and needs Rust. The app is an Xcode project: putting it on your phone needs Xcode 26 or newer and an Apple developer account. There is no App Store build.
+- **The app is not out yet.** It launches on the App Store soon. The iOS source is public to be read and audited — see the license. The Mac side updates itself from signed universal release binaries, so once installed it needs no toolchain; the first install today is `./install.sh`, which builds from source and needs Rust.
 - **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
 
 ## How it works
@@ -103,7 +103,11 @@ The interface is dark mode only, in a Vercel/Geist register. Two principles do m
 
 ## Status
 
-Personal tool, working daily. Claude Code is fully supported; observation of other CLIs (Codex, Grok, Kimi) is next. Mac updates arrive as signed release binaries; the iPhone app is not distributed.
+Personal tool, working daily. Claude Code is fully supported; observation of other CLIs (Codex, Grok, Kimi) is next. Mac updates arrive as signed release binaries. **The iPhone app launches on the App Store soon.**
+
+## License
+
+[MIT](LICENSE), except the iOS app (`ios/`), which is source-available — see [`ios/LICENSE`](ios/LICENSE).
 
 ## Tests
 
