@@ -439,6 +439,19 @@ final class SessionState {
 
     // MARK: - Timeline
 
+    #if DEBUG
+        /// Waits until any scheduled rebuild has actually run. Tests await
+        /// this fact instead of sleeping some multiple of the coalesce
+        /// window: the rebuild task starts whenever the scheduler gets to
+        /// it, so on a starved machine every fixed sleep is a bet the
+        /// machine eventually loses.
+        func settleForTesting() async {
+            while let task = rebuildTask {
+                _ = await task.value
+            }
+        }
+    #endif
+
     /// Rebuilding is a pure function of `events`, so a burst — a 500-event
     /// replay page — collapses into a single pass instead of one pass per event.
     private func scheduleRebuild() {

@@ -77,8 +77,9 @@ final class FixtureTests: XCTestCase {
             settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         model.connection.simulateConnectedForTesting()
         for frame in Fixtures.frames() { model.connection.injectForTesting(frame) }
-        // The timeline rebuild is scheduled on the main actor, so let it run.
-        try? await Task.sleep(for: .milliseconds(120))
+        // The timeline rebuild is scheduled on the main actor; await the
+        // fact rather than sleeping a guess at it.
+        for state in model.states.values { await state.settleForTesting() }
         XCTAssertEqual(model.summaries.count, 4)
         XCTAssertEqual(model.deckCount, 3, "three agents blocked")
         // Urgency-ranked, and the fixture is built to make the difference

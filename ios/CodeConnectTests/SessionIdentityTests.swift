@@ -138,7 +138,7 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.injectForTesting(
             try decode(
                 eventFrame(uid: deadUID, name: "cc-1", seq: 1, text: "the dead run said this")))
-        await settle()
+        await settle(model)
 
         XCTAssertEqual(model.states.count, 2, "one store per run, not one per name")
         XCTAssertEqual(model.fleet.count, 2)
@@ -179,7 +179,7 @@ final class SessionIdentityTests: XCTestCase {
             try decode(eventFrame(uid: nil, name: "cc-1", seq: 1, text: "one")))
         model.connection.injectForTesting(
             try decode(eventFrame(uid: nil, name: "cc-1", seq: 2, text: "two")))
-        await settle()
+        await settle(model)
 
         XCTAssertEqual(model.states.count, 1)
         XCTAssertEqual(model.states["cc-1"]?.events.count, 2)
@@ -199,7 +199,7 @@ final class SessionIdentityTests: XCTestCase {
             try decode(twoRunsSharingTheName(liveSeq: 1, deadSeq: 1)))
         model.connection.injectForTesting(
             try decode(eventFrame(uid: deadUID, name: "cc-1", seq: 1, text: "gone")))
-        await settle()
+        await settle(model)
         XCTAssertNotNil(model.states[deadUID])
 
         model.connection.injectForTesting(
@@ -210,7 +210,7 @@ final class SessionIdentityTests: XCTestCase {
                  "last_seq":1,"created_at":"2026-07-31T09:05:00.000Z",
                  "updated_at":"2026-07-31T09:05:00.000Z"}]}
                 """))
-        await settle()
+        await settle(model)
         XCTAssertNil(model.states[deadUID], "the daemon stopped vouching for it")
         XCTAssertNotNil(model.states[liveUID])
     }
@@ -221,7 +221,7 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.injectForTesting(try decode(helloAckJSON(minor: 2, sessionUID: true)))
         model.connection.injectForTesting(
             try decode(twoRunsSharingTheName(liveSeq: 1, deadSeq: 1)))
-        await settle()
+        await settle(model)
 
         XCTAssertEqual(
             model.resolveSessionKey(reference: "cc-1"), liveUID,
@@ -314,7 +314,7 @@ final class SessionIdentityTests: XCTestCase {
         for seq in UInt64(1)...5 {
             state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: seq)))
         }
-        await settle()
+        await state.settleForTesting()
         XCTAssertNil(state.gap, "the hole is closed, so the banner is not true any more")
         XCTAssertEqual(state.events.map(\.seq), [1, 2, 3, 4, 5])
     }
@@ -324,7 +324,7 @@ final class SessionIdentityTests: XCTestCase {
         state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: 1)))
         state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: 5)))
         state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: 3)))
-        await settle()
+        await state.settleForTesting()
         XCTAssertEqual(
             state.gap?.cause, .sequenceJump(missing: 2),
             "two of the three arrived; the banner must not claim all three are still missing")
@@ -336,7 +336,7 @@ final class SessionIdentityTests: XCTestCase {
         state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: 4)))
         state.dismissGap()
         state.ingest(try decodeEvent(eventJSON(uid: liveUID, name: "cc-1", seq: 5)))
-        await settle()
+        await state.settleForTesting()
         XCTAssertNil(state.gap, "re-raising a hole the reader has acknowledged is nagging")
     }
 
@@ -355,7 +355,7 @@ final class SessionIdentityTests: XCTestCase {
         // The tail we already hold, and the head we know we skipped.
         for event in log.suffix(60) { state.ingest(event) }
         state.noteTruncatedHead()
-        await settle()
+        await state.settleForTesting()
         let rebuildsBeforeReplay = state.rebuildCount
         XCTAssertTrue(state.headTruncated)
 
@@ -369,7 +369,7 @@ final class SessionIdentityTests: XCTestCase {
             await Task.yield()
         }
         let elapsed = clock.now - started
-        await settle()
+        await state.settleForTesting()
 
         XCTAssertEqual(state.events.map(\.seq), Array(UInt64(1)...260), "sorted and deduplicated")
         // Measured against the window rather than against a fixed number: the
@@ -447,9 +447,14 @@ final class SessionIdentityTests: XCTestCase {
         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
     }
 
-    /// Let the ingest coalescing window close and any cache task run.
-    private func settle() async {
-        try? await Task.sleep(for: .milliseconds(80))
+    /// Let every scheduled timeline rebuild run. Frame handling itself is
+    /// synchronous; the coalesced rebuild is the one thing it defers, and
+    /// awaiting the task is a fact where any fixed sleep is a bet a starved
+    /// machine eventually loses.
+    private func settle(_ model: AppModel) async {
+        for state in model.states.values {
+            await state.settleForTesting()
+        }
     }
 
     private func decode(_ json: String) throws -> ServerMessage {

@@ -569,7 +569,7 @@ final class LastConfirmedModelTests: XCTestCase {
                  "payload":{"type":"user","message":{"role":"user","content":
                  "<local-command-stdout>Kept model as Fable 5</local-command-stdout>"}}}
                 """))
-        try await Task.sleep(for: .milliseconds(400))
+        await state.settleForTesting()
         XCTAssertEqual(
             state.lastConfirmedModel?.name, "Sonnet 5",
             "a replayed older confirmation is history, not news")
@@ -655,7 +655,7 @@ final class ClearedNoticeTests: XCTestCase {
                 """))
         // `ingest` schedules the rebuild; read synchronously the timeline is
         // empty and the assertion passes for the wrong reason.
-        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        await state.settleForTesting()
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
         guard
             let item = state.timeline.first(where: {
@@ -680,7 +680,7 @@ final class ClearedNoticeTests: XCTestCase {
                  "payload":{"type":"user","message":{"role":"user","content":
                  "<command-name>/compact</command-name>\\n<command-message>compact</command-message>\\n<command-args>keep tests</command-args>"}}}
                 """))
-        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        await state.settleForTesting()
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
         XCTAssertTrue(
             state.timeline.contains(where: {

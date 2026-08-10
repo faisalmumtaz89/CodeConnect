@@ -75,7 +75,7 @@ final class FleetStatusTests: XCTestCase {
     ) async -> FleetStatus {
         let state = SessionState(sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
         for event in events { state.ingest(event) }
-        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        await state.settleForTesting()
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
         return FleetStatusRule.status(
             summary: summary(lifecycle: lifecycle, blockedOn: blockedOn),
@@ -212,7 +212,7 @@ final class FleetStatusTests: XCTestCase {
         ]
         let state = SessionState(sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
         for e in events { state.ingest(e) }
-        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        await state.settleForTesting()
         let notices = state.timeline.compactMap { item -> NoticeItem? in
             if case .notice(let n) = item.content { return n }
             return nil
@@ -235,7 +235,7 @@ final class FleetStatusTests: XCTestCase {
         ]
         let state = SessionState(sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR")
         for e in events { state.ingest(e) }
-        try? await Task.sleep(for: SessionState.coalesceWindow * 6)
+        await state.settleForTesting()
         let contentRows = state.timeline.filter {
             if case .agentMessage = $0.content { return true }
             return false
