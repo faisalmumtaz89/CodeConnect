@@ -309,6 +309,16 @@ jobs:
           echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
             -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          # The Developer ID intermediate, from Apple. A p12 exported from
+          # Keychain Access carries the leaf and its key but not the chain,
+          # and an identity only counts as valid once the chain to Apple's
+          # root closes — a developer's Mac has had this intermediate since
+          # Xcode first signed in; a fresh runner has only the roots, so
+          # without it `find-identity -v` hides the identity as invalid.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" \
+            -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           security list-keychain -d user -s "$keychain" login.keychain-db
           rm -f "$RUNNER_TEMP/cert.p12"
@@ -328,7 +338,13 @@ jobs:
           identity="$(security find-identity -v -p codesigning \
             | awk '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$identity" ]; then
-            echo "::error::no Developer ID Application identity in the keychain"
+            echo "::error::no valid Developer ID Application identity in the keychain"
+            # Certificate names are not secrets, and what is present decides
+            # what is wrong: an entry here that says "Apple Development"
+            # means the wrong certificate was exported into the p12; a
+            # "Developer ID Application" entry that is only listed without
+            # `-v` means its chain or key is incomplete.
+            security find-identity -p codesigning || true
             exit 1
           fi
           for binary in codeconnect ccd cc-hook; do
