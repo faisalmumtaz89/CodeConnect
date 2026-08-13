@@ -16,15 +16,10 @@ final class LiveDaemonUITests: XCTestCase {
 
     override func setUp() { continueAfterFailure = false }
 
-    private func launchApp(sshUsername: String? = nil) throws -> XCUIApplication {
+    private func launchApp() throws -> XCUIApplication {
         try XCTSkipIf(host.isEmpty || token.isEmpty, "CC_HOST/CC_TOKEN not provided")
         let app = XCUIApplication()
         app.launchArguments = ["-CC_HOST", host, "-CC_TOKEN", token, "-CC_RESET_CACHE", "YES"]
-        if let sshUsername {
-            // `AppSettings` is `UserDefaults`-backed, so the argument domain
-            // sets it with no test-only code in the app.
-            app.launchArguments += ["-codeconnect.ssh.username", sshUsername]
-        }
         app.launch()
         return app
     }
@@ -166,66 +161,6 @@ final class LiveDaemonUITests: XCTestCase {
                 + "conflated the two")
     }
 
-    /// The terminal against the real Mac.
-    ///
-    /// Passes either way, and that is the point: with an SSH server listening it
-    /// attaches; without one it must produce the setup card with the exact
-    /// commands and **must not** enable anything. Turning on Remote Login or
-    /// Tailscale SSH is the user's decision, at the Mac.
-    func testTerminalEitherAttachesOrExplainsHowToTurnSSHOn() throws {
-        // The Mac account name is normally read from a session's working
-        // directory; these test sessions live under /private/tmp, where there
-        // is nothing to read, so it is supplied. The app refusing to guess one
-        // is the correct behaviour and is covered by a unit test.
-        let app = try launchApp(sshUsername: ProcessInfo.processInfo.environment["CC_SSH_USER"])
-        try openFirstSession(app)
-
-        // `waitForExistence`, not a bare tap: `openFirstSession` returns once the
-        // row is gone, which is before the detail's segmented control exists.
-        // Observed 1 failure in 4 runs at 8.2s ("No matches found") against 11s
-        // for the passing runs — a race, not a product defect.
-        let terminalTab = app.buttons["Terminal"].firstMatch
-        XCTAssertTrue(
-            terminalTab.waitForExistence(timeout: 10),
-            "the session detail offers the Terminal tab")
-        terminalTab.tap()
-        let connect = app.buttons["Connect"].firstMatch
-        XCTAssertTrue(
-            connect.waitForExistence(timeout: 10),
-            "with a username and a paired host, the terminal offers to connect")
-        connect.tap()
-
-        let setup = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Tailscale SSH'")
-        ).firstMatch
-        let terminal = app.otherElements.matching(
-            NSPredicate(format: "label BEGINSWITH 'Terminal for'")
-        ).firstMatch
-
-        // Deliberately not a Timer: XCTest's own predicate expectation runs on
-        // the right queue, and polling `exists` from a timer callback trips the
-        // nested-run-loop guard.
-        let settled = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in setup.exists || terminal.exists }, object: nil)
-        wait(for: [settled], timeout: 45)
-        attach(app, "live-terminal")
-
-        if setup.exists {
-            XCTAssertTrue(
-                app.staticTexts.matching(
-                    NSPredicate(format: "label CONTAINS 'tailscale up --ssh'")
-                ).firstMatch.exists,
-                "the setup card carries the exact command")
-            XCTAssertTrue(
-                app.staticTexts.matching(
-                    NSPredicate(format: "label CONTAINS 'never enables a system service'")
-                ).firstMatch.exists,
-                "and says plainly that the app will not do it for you")
-        } else {
-            XCTAssertTrue(terminal.exists, "an SSH server was reachable, so the terminal attached")
-        }
-    }
-
     /// **The push path: a cold launch straight into the diff.**
     ///
     /// `codeconnect://session/<uid>/diff` at launch is the route the diff
@@ -295,60 +230,6 @@ final class LiveDaemonUITests: XCTestCase {
             settled.waitForExistence(timeout: 30),
             "a deep link that races the socket resolves rather than dead-ending")
         attach(app, "cold-launch-diff-deeplink")
-    }
-
-    /// The public key the app shows must be the one the daemon authorised.
-    func testSettingsShowsTheSSHPublicKeyAndFingerprint() throws {
-        let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
-        app.buttons["Settings and pairing"].tap()
-        let terminalSettings = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS 'Terminal and SSH'")
-        ).firstMatch
-        // The link sits below the connection and transport sections.
-        for _ in 0..<4 where !terminalSettings.isHittable { app.swipeUp() }
-        XCTAssertTrue(terminalSettings.waitForExistence(timeout: 10))
-        terminalSettings.tap()
-
-        let copy = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS 'Copy public key'")
-        ).firstMatch
-        let create = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS 'Create this iPhone'")
-        ).firstMatch
-        if !copy.waitForExistence(timeout: 5), create.exists {
-            create.tap()
-        }
-        XCTAssertTrue(
-            copy.waitForExistence(timeout: 5),
-            "the key is shown with a copy button, because authorized_keys is sometimes edited by hand"
-        )
-        // The fingerprint is a `CCFingerprint` now, not a bare `Text` with a
-        // hand-written label — the same component the pinned-host rows use, so
-        // one screen no longer draws two fingerprints two ways. It spells itself
-        // out character by character for VoiceOver, which is the point of it:
-        // this string is *compared*, not read. Hence `S, H, A, 2, 5, 6` rather
-        // than `Fingerprint SHA256:`.
-        //
-        // **It also says which key it is spelling**, and the predicate now
-        // requires that rather than forbidding it. `BEGINSWITH 'S, H, A'` was
-        // written before the component took its `name:`, and it failed the day
-        // the screen started answering the harder question: a screen that shows
-        // more than one fingerprint reads as two indistinguishable streams of
-        // letters without a name in front, and a label on the *outside* cannot
-        // supply one — it replaces the spelling instead.
-        let fingerprint = app.descendants(matching: .any).matching(
-            NSPredicate(
-                format:
-                    "label BEGINSWITH %@ AND label CONTAINS 'S, H, A, 2, 5, 6'",
-                "This iPhone's key fingerprint")
-        ).firstMatch
-        XCTAssertTrue(
-            fingerprint.exists,
-            "spelled out so it can be compared with the Mac by eye, and named so it is clear which key it is"
-        )
-        attach(app, "live-ssh-key")
-        print("APP SSH FINGERPRINT: \(fingerprint.label)")
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

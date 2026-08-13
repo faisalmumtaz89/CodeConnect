@@ -69,18 +69,22 @@ pub enum ClientFrame {
     CreatePairing {
         #[serde(default)]
         ttl_secs: u64,
-        /// `codeconnect pair --ssh`. Consent to install an SSH key is bound to *this
-        /// code*, not to the daemon's configuration, so it expires with the
-        /// code and cannot be reused by a later pairing.
+        /// `codeconnect pair --ssh` on a shim from before this daemon.
+        ///
+        /// Older CLIs may still send this; a true value is refused before
+        /// anything is mutated. See [`ClientFrame::ssh_refusal`].
         #[serde(default)]
         allow_ssh: bool,
     },
     ListDevices,
-    /// `codeconnect revoke <device>` (`ssh_only` for `codeconnect ssh-revoke <device>`).
+    /// `codeconnect revoke <device>`.
     RevokeDevice {
         /// A device id, a device id prefix, or an exact name.
         device: String,
-        /// Remove the SSH key but leave the device paired.
+        /// `codeconnect ssh-revoke <device>` on a shim from before this daemon.
+        ///
+        /// Older CLIs may still send this; a true value is refused before
+        /// anything is mutated. See [`ClientFrame::ssh_refusal`].
         #[serde(default)]
         ssh_only: bool,
     },
@@ -92,6 +96,60 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+}
+
+impl ClientFrame {
+    /// Why this frame is refused, when it asks the daemon to manage an SSH key.
+    ///
+    /// `ccd` grants a device token and nothing else; the only thing it does
+    /// near `~/.ssh` is remove, at startup, the entries earlier releases
+    /// installed. A shim from an earlier release still carries flags asking
+    /// for key management, and answering one with the ordinary success frame
+    /// would tell the operator a key was installed or revoked when nothing of
+    /// the sort happened. The caller sends this message back instead, and
+    /// performs no part of the request.
+    ///
+    /// `Some` only for a flag set *true*: absent and `false` both mean the
+    /// command carried no such request, and those proceed normally.
+    pub fn ssh_refusal(&self) -> Option<&'static str> {
+        match self {
+            ClientFrame::CreatePairing {
+                allow_ssh: true, ..
+            } => Some(
+                "this daemon does not manage SSH keys; re-run `codeconnect pair` \
+                 without --ssh, or update the codeconnect CLI",
+            ),
+            ClientFrame::RevokeDevice { ssh_only: true, .. } => Some(
+                "this daemon does not manage SSH keys; use `codeconnect revoke <device>` \
+                 to revoke the device itself, or update the codeconnect CLI",
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// A wire field that is always `false`.
+///
+/// A shim from an earlier release fails to decode a `pairing` or `revoked`
+/// frame that omits its SSH field, so the field is still serialized — and
+/// serialized as a type that cannot carry any other value, which is the whole
+/// truth about a daemon that does not manage SSH keys. Any value is accepted on
+/// the way in, because an older *daemon* answering a current shim may send
+/// `true`, and nothing here reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlwaysFalse;
+
+impl Serialize for AlwaysFalse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(false)
+    }
+}
+
+impl<'de> Deserialize<'de> for AlwaysFalse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer)?;
+        Ok(AlwaysFalse)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +182,10 @@ pub enum DaemonFrame {
         /// True when the daemon serves `wss://`, so the shim can tell the
         /// operator which scheme the phone will use.
         tls: bool,
-        allow_ssh: bool,
+        /// A shim from an earlier release requires this field to decode the
+        /// frame at all.
+        #[serde(default)]
+        allow_ssh: AlwaysFalse,
     },
     Devices {
         devices: Vec<crate::pairing::DeviceSummary>,
@@ -173,7 +234,10 @@ pub enum DaemonFrame {
         /// False when the device was already revoked — reported rather than
         /// treated as an error, so `codeconnect revoke` is idempotent.
         token_revoked: bool,
-        ssh_key_removed: bool,
+        /// A shim from an earlier release requires this field to decode the
+        /// frame at all.
+        #[serde(default)]
+        ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
 }
@@ -952,18 +1016,12 @@ mod tests {
     fn pairing_frames_round_trip() {
         let request = ClientFrame::CreatePairing {
             ttl_secs: crate::pairing::PAIRING_TTL_SECS,
-            allow_ssh: true,
+            allow_ssh: false,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(line.contains("\"type\":\"create_pairing\""), "{line}");
         match serde_json::from_str::<ClientFrame>(&line).unwrap() {
-            ClientFrame::CreatePairing {
-                allow_ssh,
-                ttl_secs,
-            } => {
-                assert!(allow_ssh);
-                assert_eq!(ttl_secs, 300);
-            }
+            ClientFrame::CreatePairing { ttl_secs, .. } => assert_eq!(ttl_secs, 300),
             other => panic!("wrong frame: {other:?}"),
         }
 
@@ -973,7 +1031,7 @@ mod tests {
             host: "host.ts.net".into(),
             port: 8787,
             tls: true,
-            allow_ssh: true,
+            allow_ssh: AlwaysFalse,
         };
         let line = serde_json::to_string(&reply).unwrap();
         assert!(line.contains("\"type\":\"pairing\""), "{line}");
@@ -981,25 +1039,103 @@ mod tests {
     }
 
     #[test]
-    fn ssh_consent_defaults_to_off_when_the_flag_is_absent() {
-        // A `codeconnect` too old to know about `--ssh` must never be read as consenting.
-        let frame: ClientFrame =
-            serde_json::from_str(r#"{"type":"create_pairing","ttl_secs":300}"#).unwrap();
-        match frame {
-            ClientFrame::CreatePairing { allow_ssh, .. } => assert!(!allow_ssh),
-            other => panic!("wrong frame: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn revoke_defaults_to_the_whole_device_not_just_ssh() {
+    fn revoke_names_the_device_to_revoke() {
         let frame: ClientFrame =
             serde_json::from_str(r#"{"type":"revoke_device","device":"iPhone"}"#).unwrap();
         match frame {
             ClientFrame::RevokeDevice { device, ssh_only } => {
                 assert_eq!(device, "iPhone");
-                assert!(!ssh_only, "a bare revoke must revoke everything");
+                assert!(!ssh_only, "a shim that omits the flag is not asking for it");
             }
+            other => panic!("wrong frame: {other:?}"),
+        }
+        assert!(frame_from(r#"{"type":"revoke_device","device":"iPhone"}"#)
+            .ssh_refusal()
+            .is_none());
+    }
+
+    fn frame_from(line: &str) -> ClientFrame {
+        serde_json::from_str(line).expect("a frame an older shim can send must still decode")
+    }
+
+    #[test]
+    fn a_shim_asking_for_an_ssh_key_is_refused_and_told_why() {
+        for (line, flag) in [
+            (
+                r#"{"type":"create_pairing","ttl_secs":300,"allow_ssh":true}"#,
+                "--ssh",
+            ),
+            (
+                r#"{"type":"revoke_device","device":"iPhone","ssh_only":true}"#,
+                "revoke <device>",
+            ),
+        ] {
+            let refusal = frame_from(line)
+                .ssh_refusal()
+                .unwrap_or_else(|| panic!("must be refused: {line}"));
+            assert!(
+                refusal.contains("does not manage SSH keys"),
+                "the refusal must say why: {refusal}"
+            );
+            assert!(
+                refusal.contains(flag) && refusal.contains("update the codeconnect CLI"),
+                "the refusal must name a way out: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_that_is_absent_or_false_is_not_a_refusal() {
+        for line in [
+            r#"{"type":"create_pairing","ttl_secs":300}"#,
+            r#"{"type":"create_pairing","ttl_secs":300,"allow_ssh":false}"#,
+            r#"{"type":"revoke_device","device":"iPhone"}"#,
+            r#"{"type":"revoke_device","device":"iPhone","ssh_only":false}"#,
+        ] {
+            assert!(
+                frame_from(line).ssh_refusal().is_none(),
+                "must proceed normally: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reply_frames_still_carry_the_field_an_older_shim_decodes_by() {
+        // Serialized as `false` and unsettable: the daemon holds no SSH key to
+        // report on, and a shim that cannot find the key at all refuses the
+        // whole frame rather than the field.
+        let pairing = serde_json::to_string(&DaemonFrame::Pairing {
+            code: "ABCD2345".into(),
+            expires_at: "2026-07-31T10:05:00.000Z".into(),
+            host: "host.ts.net".into(),
+            port: 8787,
+            tls: true,
+            allow_ssh: AlwaysFalse,
+        })
+        .unwrap();
+        assert!(pairing.contains(r#""allow_ssh":false"#), "{pairing}");
+
+        let revoked = serde_json::to_string(&DaemonFrame::Revoked {
+            device: crate::pairing::DeviceSummary {
+                device_id: "d1".into(),
+                name: "iPhone".into(),
+                created_at: "2026-07-31T10:00:00.000Z".into(),
+                last_seen_at: None,
+                revoked_at: Some("2026-07-31T10:05:00.000Z".into()),
+            },
+            token_revoked: true,
+            ssh_key_removed: AlwaysFalse,
+        })
+        .unwrap();
+        assert!(revoked.contains(r#""ssh_key_removed":false"#), "{revoked}");
+
+        // A `true` from an older *daemon* decodes and lands as false, so a
+        // current shim never reports a key it cannot have been told about.
+        let from_older: DaemonFrame =
+            serde_json::from_str(&pairing.replace(r#""allow_ssh":false"#, r#""allow_ssh":true"#))
+                .unwrap();
+        match from_older {
+            DaemonFrame::Pairing { allow_ssh, .. } => assert_eq!(allow_ssh, AlwaysFalse),
             other => panic!("wrong frame: {other:?}"),
         }
     }

@@ -2,9 +2,8 @@ import XCTest
 
 @testable import CodeConnect
 
-/// The diff parser, the QR payload, and the SSH key encoding — three places
-/// where being almost right is indistinguishable from being right until it
-/// matters.
+/// The diff parser and the QR payload — two places where being almost right is
+/// indistinguishable from being right until it matters.
 final class DiffAndPairingTests: XCTestCase {
 
     // MARK: Unified diff
@@ -235,65 +234,6 @@ final class DiffAndPairingTests: XCTestCase {
         let endpoint = try XCTUnwrap(DaemonEndpoint.parse(address: "mac.ts.net:9000", token: "t"))
         XCTAssertEqual(endpoint.url(useTLS: true)?.absoluteString, "wss://mac.ts.net:9000")
         XCTAssertEqual(endpoint.url(useTLS: false)?.absoluteString, "ws://mac.ts.net:9000")
-    }
-
-    // MARK: SSH identity
-
-    /// The public key has to be byte-identical to what `ssh-keygen` produces, or
-    /// `authorized_keys` will not match it. Framing is RFC 4253 section 6.6:
-    /// `string(algorithm) || string(key)`, each length-prefixed big-endian.
-    func testOpenSSHPublicKeyEncoding() throws {
-        let raw = Data(repeating: 0x42, count: 32)
-        let blob = SSHIdentity.wireBlob(raw)
-        XCTAssertEqual(blob.count, 4 + 11 + 4 + 32)
-        XCTAssertEqual(Array(blob.prefix(4)), [0, 0, 0, 11])
-        XCTAssertEqual(String(decoding: blob[4..<15], as: UTF8.self), "ssh-ed25519")
-        XCTAssertEqual(Array(blob[15..<19]), [0, 0, 0, 32])
-
-        let identity = SSHIdentity(
-            privateKeyRaw: Data(repeating: 1, count: 32), publicKeyRaw: raw, comment: "codeconnect-x")
-        let parts = identity.openSSHPublicKey.split(separator: " ")
-        XCTAssertEqual(parts.count, 3)
-        XCTAssertEqual(parts[0], "ssh-ed25519")
-        XCTAssertEqual(Data(base64Encoded: String(parts[1])), blob)
-        XCTAssertEqual(parts[2], "codeconnect-x")
-        XCTAssertTrue(identity.fingerprint.hasPrefix("SHA256:"))
-        XCTAssertFalse(identity.fingerprint.contains("="), "ssh-keygen strips base64 padding")
-    }
-
-    // MARK: Attach command
-
-    func testAttachCommandPinsTheExactSession() {
-        XCTAssertEqual(
-            SSHTerminalSession.attachCommand(sessionID: "cc-1"),
-            "tmux -L codeconnect attach -t =cc-1",
-            "the `=` is what stops cc-1 matching cc-12")
-    }
-
-    /// The session id comes off the wire. There is no session name that
-    /// legitimately contains a shell metacharacter, so anything that does is
-    /// refused rather than quoted.
-    func testAttachCommandRefusesAnythingUnsafe() {
-        for hostile in [
-            "cc-1; rm -rf ~", "cc 1", "$(whoami)", "`id`", "cc-1|sh", "..", ".", "",
-            String(repeating: "c", count: 65),
-        ] {
-            XCTAssertNil(
-                SSHTerminalSession.attachCommand(sessionID: hostile),
-                "\(hostile) must never reach a command line")
-        }
-    }
-
-    // MARK: Username inference
-
-    func testUsernameIsReadFromSessionWorkingDirectories() {
-        XCTAssertEqual(
-            AppSettings.inferredUsername(fromSessionPaths: ["/Users/ada/code/app"]), "ada")
-        XCTAssertEqual(
-            AppSettings.inferredUsername(fromSessionPaths: ["/Users/Shared/x", "/Users/dev/y"]),
-            "dev", "the shared folder names nobody")
-        XCTAssertNil(AppSettings.inferredUsername(fromSessionPaths: ["/opt/work", "/"]))
-        XCTAssertNil(AppSettings.inferredUsername(fromSessionPaths: []))
     }
 
     // MARK: Deep links

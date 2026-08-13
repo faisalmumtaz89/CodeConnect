@@ -1,9 +1,10 @@
 //! `wss://` via `tailscale cert`.
 //!
-//! Tailscale will issue a real, publicly-trusted certificate for a node's
-//! MagicDNS name, which is the only reason TLS here is worth having: the phone
-//! validates it with the system trust store and no custom CA, no pinning and no
-//! "accept this certificate?" dialog is involved anywhere.
+//! On a tailnet with HTTPS Certificates enabled, Tailscale issues a real,
+//! publicly-trusted certificate for a node's MagicDNS name, which is the only
+//! reason TLS here is worth having: the phone validates it with the system
+//! trust store and no custom CA, no pinning and no "accept this certificate?"
+//! dialog is involved anywhere.
 //!
 //! Three consequences follow, and they are not negotiable:
 //!

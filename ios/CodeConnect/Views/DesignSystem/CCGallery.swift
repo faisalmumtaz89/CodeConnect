@@ -24,7 +24,6 @@ import SwiftUI
         /// the gallery's own chrome is a live test of the kit.
         enum Page: String, CaseIterable, Identifiable {
             case foundations
-            case identity
             case buttons
             case rows
             case indicators
@@ -99,9 +98,6 @@ import SwiftUI
                 header
                 foundationsSection
                 proseSection
-            case .identity:
-                identitySection
-                gapSection
             case .buttons:
                 buttonSection
                 holdSection
@@ -129,6 +125,7 @@ import SwiftUI
                 bannerSection
                 screenMarkSection
                 waitSection
+                gapSection
             case .terminal:
                 keyCapSection
                 disclosureSection
@@ -159,18 +156,12 @@ import SwiftUI
 
         // MARK: Header
 
-        /// **The header states the rule the gallery is held to, and it is now
-        /// true.**
-        ///
-        /// It used to say "Design system gallery — dark only", which is a
-        /// description, not a claim anybody could fail. The file's own comment
-        /// made the real claim — *if a component is not in here, it is not
-        /// finished* — while nine renderable components had no page:
-        /// `CCKeyCap`, `CCKeyCapDivider`, `CCSkeleton`, `CCSkeletonRow`,
-        /// `CCWaitingNotice`, `CCProgressRing`, `CCScannerFrame`,
-        /// `CCDisclosure` and the diff strip. `CCKeyCap` was the worst of them:
-        /// no gallery page *and* a screen that needs a live SSH server, so
-        /// "a control is 44pt" could be written about it and never checked.
+        /// **The header states the rule the gallery is held to**, which makes
+        /// it a claim that can fail: *if a component is not in here, it is not
+        /// finished*. A description — "Design system gallery — dark only" —
+        /// would be a sentence nobody could hold the file to, and a component
+        /// with no page is one whose measurements can be written about and
+        /// never checked.
         ///
         /// The three lines are the kit's own components — `CCProse` resolves the
         /// backticks, `CCFactRow` renders the last action through `CCMeasured`,
@@ -419,46 +410,6 @@ import SwiftUI
                 .foregroundStyle(color)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-
-        // MARK: Identity
-
-        private var identitySection: some View {
-            section("CCFingerprint") {
-                VStack(alignment: .leading, spacing: CC.space.sm) {
-                    Text(
-                        "The bright text is always the part that identifies. Reading two 47-character fingerprints at equal brightness is a task nobody performs correctly at 2am, so only the characters that moved are lit."
-                    )
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                    Text("FINGERPRINT DIFF - SSH HOST KEY CHANGED")
-                        .ccType(CC.type.micro)
-                        .foregroundStyle(CC.text.tertiary)
-                    CCCard {
-                        VStack(alignment: .leading, spacing: CC.space.xs) {
-                            // `fieldLabel`, not `micro`: these name the value
-                            // directly beneath them, which is the whole
-                            // definition of the token. `micro` is section
-                            // labels, and nothing else.
-                            Text("PINNED")
-                                .ccType(CC.type.fieldLabel)
-                                .foregroundStyle(CC.text.secondary)
-                            CCFingerprint(
-                                value: "SHA256:9Xk2LmQpR7vN3wZ", reference: nil,
-                                name: "The key you pinned")
-                            Text("OFFERED NOW")
-                                .ccType(CC.type.fieldLabel)
-                                .foregroundStyle(CC.text.secondary)
-                            CCFingerprint(
-                                value: "SHA256:9Xk2LmQzR7vB3wZ",
-                                reference: "SHA256:9Xk2LmQpR7vN3wZ",
-                                name: "The key offered now")
-                        }
-                    }
-                }
-            }
         }
 
         // MARK: Gap marker
@@ -841,12 +792,10 @@ import SwiftUI
                             // carries the emphasis and the age stays quiet.
                             CCFactRow(
                                 "studio.tail1234.ts.net", labelStyle: .identifier,
-                                age: "pinned 3d ago",
+                                age: "last spoke 3s ago",
                                 detail: {
-                                    CCFingerprint.fingerprint(
-                                        "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
-                                        comparedTo: nil,
-                                        name: "Pinned key for studio.tail1234.ts.net")
+                                    CCMonoBlock(
+                                        "wss://studio.tail1234.ts.net:8787", isSmall: true)
                                 })
                             CCFactRow(
                                 "Last error", age: "2m ago", separator: false,
@@ -1209,7 +1158,7 @@ import SwiftUI
                         CCMonoBlock("/private/tmp/ccsoak-work.giePJZ/Sources/Feature.swift")
                         note("clears the copy button at every type size")
                         CCMonoBlock(
-                            "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", isSmall: true)
+                            "codeconnect sessions prune --dry-run", isSmall: true)
                         note("prose output, soft wrap; ↳ only where a token was cut")
                         CCMonoBlock(
                             "npm ERR! code ELIFECYCLE\nnpm ERR! Failed at the build script; log at /Users/you/.npm/_logs/2026-07-31T09_14_02_113Z-debug.log",
@@ -1227,11 +1176,11 @@ import SwiftUI
                         // The only thing that may be shortened, and there is no
                         // `.tail`: tail truncation cuts a command's arguments,
                         // which is the byte a hostile suffix hides behind.
-                        note("a key, wrapped, the default; nothing hidden")
-                        CCMonoBlock(Self.publicKey, lineLimit: 3, isSmall: true)
-                        note("middle, keeps the algorithm and the device comment")
+                        note("a generated name, wrapped, the default; nothing hidden")
+                        CCMonoBlock(Self.generatedName, lineLimit: 3, isSmall: true)
+                        note("middle, keeps the prefix and the run it names")
                         CCMonoBlock(
-                            Self.publicKey, lineLimit: 2, wraps: true, truncation: .middle,
+                            Self.generatedName, lineLimit: 2, wraps: true, truncation: .middle,
                             isSmall: true)
                         note("head, a hash is identified by its tail")
                         CCMonoBlock(
@@ -1267,8 +1216,8 @@ import SwiftUI
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        private static let publicKey =
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb3kZ9pQ2xM7vN4tR8sW1yU6cH0aJ5dF2gK9lP3oQxZ codeconnect-iphone17pro-K76F46"
+        private static let generatedName =
+            "ccsoak-tail-54568-1785466205-codeconnect-iphone17pro-K76F46-01K1B3XQ8ZC0DE5FGH7JKMNPQR"
 
         // MARK: Banners
 
@@ -1392,26 +1341,26 @@ import SwiftUI
                         VStack(spacing: 0) {
                             CCStepRow(
                                 index: 1,
-                                title: "Option 1 - Tailscale SSH",
+                                title: "Option 1 - Tailscale",
                                 message:
                                     "Authentication rides your tailnet ACLs, and no port is exposed anywhere.",
-                                command: "tailscale up --ssh"
+                                command: "tailscale up"
                             ) {
                                 CCBadge("Recommended", tone: .success)
                             }
                             CCHairline()
                             CCStepRow(
                                 index: 2,
-                                title: "Option 2 - macOS Remote Login",
+                                title: "Option 2 - Local network",
                                 message:
-                                    "System Settings → General → Sharing → Remote Login.",
+                                    "System Settings → General → Sharing.",
                                 isComplete: true)
                             CCHairline()
                             CCStepRow(
                                 index: 3,
                                 title: "Then authorise this iPhone",
                                 message: "Run this at the Mac and scan the QR it prints.",
-                                command: "codeconnect pair --ssh")
+                                command: "codeconnect pair")
                         }
                     }
                 }
@@ -1478,7 +1427,7 @@ import SwiftUI
                         "In `ios/CodeConnect/Net/Sender.swift` lines 12–28",
                         style: CC.type.footnote, color: CC.text.secondary)
                     CCProse(
-                        "The terminal will stop working until the new key is authorised at the Mac with `codeconnect pair --ssh`.",
+                        "The terminal will stop working until this iPhone is paired again at the Mac with `codeconnect pair`.",
                         style: CC.type.body, color: CC.text.primary)
                     CCProse(
                         "Send to CodeConnect · `cc-tests`", style: CC.type.headline,
@@ -1615,11 +1564,10 @@ import SwiftUI
 
         /// **The component this page exists for.**
         ///
-        /// `CCKeyCap` was the only thing in the kit with no reachable render:
-        /// not on a gallery page, and on a screen that needs a live SSH server
-        /// to reach. So "a control is 44pt" could be asserted about it and never
-        /// *checked* — which is exactly the class of claim the honest-target rule
-        /// exists to stop anybody making. Latched is here too, because the
+        /// `CCKeyCap`'s only other render is a screen that needs a live
+        /// terminal, so without this page "a control is 44pt" is a claim that
+        /// can be asserted and never *checked* — exactly what the honest-target
+        /// rule exists to stop anybody making. Latched is here too, because the
         /// modifier you cannot tell is on is the one that types the wrong
         /// character.
         private var keyCapSection: some View {
@@ -2020,8 +1968,8 @@ import SwiftUI
             .dynamicTypeSize(.accessibility5)
     }
 
-    // Per-page previews, so a component can be worked on without the other six
-    // recompiling in the canvas.
+    // Per-page previews, so a component can be worked on without the other
+    // seven recompiling in the canvas.
     #Preview("Buttons") { CCGallery(page: .buttons) }
     #Preview("Buttons · AX5") { CCGallery(page: .buttons).dynamicTypeSize(.accessibility5) }
     #Preview("Rows") { CCGallery(page: .rows) }
@@ -2032,7 +1980,6 @@ import SwiftUI
     }
     #Preview("Controls") { CCGallery(page: .controls) }
     #Preview("Controls · AX5") { CCGallery(page: .controls).dynamicTypeSize(.accessibility5) }
-    #Preview("Identity") { CCGallery(page: .identity) }
     #Preview("Feedback") { CCGallery(page: .feedback) }
     #Preview("Terminal") { CCGallery(page: .terminal) }
     #Preview("Terminal · AX5") { CCGallery(page: .terminal).dynamicTypeSize(.accessibility5) }

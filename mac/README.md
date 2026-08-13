@@ -34,10 +34,8 @@ codeconnect daemon restart        # launchctl kickstart -k
 codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
-codeconnect pair --ssh            # …and let that one pairing install the app's SSH key
 codeconnect devices               # paired devices
-codeconnect revoke <device>       # revoke a device's token and its SSH key
-codeconnect ssh-revoke <device>   # remove only that device's SSH key
+codeconnect revoke <device>       # revoke a device's token
 codeconnect token                 # the static fallback token
 ```
 
@@ -256,6 +254,91 @@ renders as silence: an advisory that can be wrong is worse than none. The
 `update_check` config switch disables the background check; identity stays
 visible through `--version` and `daemon status`.
 
+## Upgrading
+
+Three things behave differently on a Mac that has been running for a while.
+
+* **A `ws_bind` onto a LAN needs a certificate, or your word for that network.**
+  Plaintext is admitted only where the bytes are private already, so a Mac that
+  binds a LAN address and has never obtained a certificate refuses every phone
+  it was serving before — and logs that refusal, with both ways out of it, as it
+  starts. The ways out are a certificate for a name that resolves to the bound
+  address — its `<name>.crt` and `<name>.key` dropped in `~/.codeconnect/tls/`
+  and the name set in `tls_hostname`, since `tailscale cert` issues for this
+  node's MagicDNS name and nothing else, and that name points at the tailnet
+  interface this listener is not on — or `"ws_allow_plaintext": true`, and
+  [TLS](#tls) has the addresses each covers. Failing closed is the point: the
+  credential a paired phone holds is a bearer token, and an address nobody can
+  vouch for is not a place to put one by default. A daemon with no `ws_bind` set
+  is unaffected — it binds this node's tailnet address, where WireGuard has
+  already encrypted the path.
+* **SSH is retired.** The Terminal tab rides the same paired connection as the
+  rest of the app, so CodeConnect never installs a key. Taking one back is what
+  it does do: the daemon sweeps `~/.ssh/authorized_keys` before it serves
+  anything. It sweeps again on every `codeconnect revoke <device>`,
+  unconditionally and including on a device that was already revoked, so
+  re-running that command is the operator's retry for a sweep an unwritable
+  `~/.ssh` defeated earlier — and the only retry there is short of restarting
+  the daemon. What it removes is an entry matching the legacy format — a
+  `# codeconnect:<device id>` marker comment with a bare three-field
+  `ssh-ed25519` line carrying the same id directly beneath it — and it matches
+  on that shape, because nothing in a file's bytes says who wrote them. Both
+  lines go or neither does: a key line reached any other way stays, and so does
+  a marker with no such key under it, since removing the label while leaving the
+  key would strand a working grant with nothing left in the file to say whose it
+  is. No other line is altered and key material is never examined. Where it
+  removes nothing it leaves a grant standing if there is one, and each such
+  outcome is a warning naming what to delete rather than a daemon that refuses
+  to start or a revocation that reports failure: no absolute `$HOME` to resolve
+  the path against, a file that cannot be read, a replacement that cannot be
+  written in its place, a file another program rewrote or a symlink it repointed
+  while the sweep was working — retried, then declined, because a copy read
+  before that write is not a thing to rename over it — and tagged lines that are
+  not that whole pair. A phone
+  on an older version of the app reports the key as "not installed" and sends
+  its owner here to run `codeconnect pair --ssh` or `codeconnect ssh-revoke`;
+  both explain that they are retired and exit 1, rather than leaving that reader
+  at an unrecognised command having done nothing wrong, and both print the
+  search below. The remedy is to update the app — and then to settle the file
+  yourself, because a revocation sweeps it on best effort and reports nothing
+  about what it took. Run `grep -n codeconnect: ~/.ssh/authorized_keys`: nothing
+  printed, or `grep` reporting no such file, means nothing there carries the tag
+  — which is not the same as nothing being left, since a key line whose comment
+  field does not carry one prints nothing and stays, and the file records who
+  wrote no line. An `ssh-ed25519` line in that output is a grant still standing:
+  under its own marker it is one a sweep has not reached yet, and without one it
+  is a line no sweep will ever take, since the pair is the only shape this
+  daemon is willing to act on — delete it and its `# codeconnect:` comment
+  together, both halves or neither.
+* **A rollback keeps what a newer build added to the credential tables.** The
+  migration that clears the columns this project retired is drop-only: one
+  `ALTER TABLE … DROP COLUMN` per retired column — `devices.ssh_key_installed`,
+  `devices.ssh_fingerprint` and `pairing_codes.allow_ssh` — named one at a time,
+  never every column this build does not recognise. Nothing is rebuilt, no table
+  is dropped and no row is deleted, so a column a newer build added is never so
+  much as looked at: it survives a run of an older one and is still there on the
+  way back up. It survives the awkward case too, where the same table *also*
+  still carries a retired column, since dropping that one column reproduces
+  nothing else — every other column keeps the type and the constraints it was
+  declared with, and every row keeps its values. SQLite refuses the drop when
+  the column is a `PRIMARY KEY`, is `UNIQUE` or is indexed, or is named by a
+  view, a trigger, a `CHECK` or a generated column. That refusal is logged as a
+  warning naming the table, the column and what SQLite said, and the daemon
+  carries on: the column stays where it is and this build serves normally with
+  it there, since nothing it reads names it. Minting a pairing code still works
+  with a leftover `allow_ssh` in place, because that `INSERT` names the column
+  explicitly with a literal `0` for as long as it is present. To be rid of the
+  column, drop whatever depends on it — the logged error names it — and restart.
+  Nothing is written at all when nothing is retired, which is every boot after
+  the first. Two writes run on every open, outside those tables and outside that
+  guarantee. Adopted sessions — the `claude:*` rows cc-hook mints for runs this
+  daemon did not launch — have `tmux_session` and `tmux_socket` cleared, because
+  empty is the honest answer for a process this daemon cannot locate; a location
+  a newer build recorded there does not survive the trip down. And
+  `user_version` is stamped with this build's number. Nothing here ever reads it
+  back, so an older daemon opens a newer database, never compares the two, and
+  leaves its own number behind.
+
 ## The LaunchAgent
 
 `codeconnect daemon install` writes `~/Library/LaunchAgents/com.codeconnect.ccd.plist`
@@ -346,7 +429,7 @@ it once in `hello_ack{device_token}`; the app keeps it in the Keychain. Only the
 token's hash is stored here, so a leaked database cannot be replayed as a
 credential.
 
-### A code the phone could not reach is never printed
+### Both ends refuse what is unreachable by definition
 
 `ccd` resolves its address **once, at startup**, and every code minted afterwards
 carries whatever it resolved. launchd starts the daemon at login and does not wait
@@ -357,9 +440,17 @@ in that state. Every visible sign was success and only the code was dead.
 
 Two checks now make that state impossible to hand to a phone:
 
-* A daemon bound to loopback advertises **loopback**, never a MagicDNS name. The
-  endpoint and the socket are one claim, and a name that resolves somewhere nothing
-  is listening is worse than an address that is visibly local.
+* A daemon never advertises a host it knows its own listener does not answer at.
+  Bound to loopback it advertises **loopback**, never a MagicDNS name. Bound to
+  an address it was given — a LAN address, say — it looks the name up first, and
+  an answer putting some other address behind it refutes the name outright: the
+  QR carries the bind address instead, with no certificate obtained. A resolver
+  that fails, answers empty, or does not answer inside three seconds has refuted
+  nothing, and that case is settled by whether a certificate was obtained for
+  the name — the full rule is under [TLS](#tls). The endpoint and the socket are
+  one claim, and a name that resolves somewhere nothing is listening is worse
+  than an address that is visibly local: the address is visibly wrong, and the
+  name is not.
 * `codeconnect pair` refuses to print a code whose host is loopback, link-local or
   unspecified, and names the recovery: bring Tailscale up, then
   `codeconnect daemon restart`.
@@ -367,7 +458,10 @@ Two checks now make that state impossible to hand to a phone:
 The phone applies the same rule to a scanned code, offline, before it dials — see
 `PairingQRPayload.unreachableHost`. Both sides reject only what is *definitionally*
 unreachable; neither demands a `100.64/10` address or a `.ts.net` name, because a
-custom DNS name or a deliberately pinned `ws_bind` are legitimate.
+custom DNS name or a deliberately pinned `ws_bind` are legitimate. A name neither
+side can settle — one this Mac's resolver could not answer for, carried because a
+certificate was obtained for it — is past what either check can see, and the
+daemon says in its log that the name went out unconfirmed.
 
 The code's alphabet omits `I`, `O`, `0` and `1`, so reading it aloud when the
 camera fails has no ambiguous characters. The QR is drawn with explicit
@@ -402,15 +496,40 @@ event log and answering approvals. The reconnect authenticates against the same
 database, so a genuinely broken store denies access either way rather than
 grandfathering whoever was already inside.
 
-**The token is revoked before the SSH key is removed**, and a key that cannot be
-removed no longer prevents the revocation. The old order removed the key first
-and propagated its error, so an `authorized_keys` that could not be rewritten —
-a read-only directory, a full disk — returned a failure *before the token was
-ever revoked*: the operator saw an error and the phone kept a working
-credential. The two grants are independent. A key that survives is reported as
-`ssh_key_removed=false` and logged as `REVOCATION INCOMPLETE` with the line to
-delete by hand. (`codeconnect ssh-revoke` is the exception: it withdraws nothing else, so
-a failure there *is* the operation failing and is reported as an error.)
+**The device token is the whole of what this daemon grants a phone**, so
+revoking it takes away everything it issued: the terminal rides the same
+connection and dies with it, and nothing minted here outlives the token.
+Revocation closes open connections rather than waiting for the next reconnect,
+and a failure to revoke is reported as an error rather than as a partial
+success.
+
+**Revocation reaches `~/.ssh/authorized_keys` too, as far as a best-effort sweep
+reaches.** An earlier release appended the phone's public key there, and that
+grant lives entirely outside this database — no row here records it, and
+withdrawing the token does nothing to it, which is why a revocation also runs
+the sweep the daemon runs at startup ([Upgrading](#upgrading)): the whole file
+rather than the named device's entries, and unconditionally, so re-running the
+command retries a sweep that failed earlier. What it cannot do is promise. Five
+paths remove nothing and warn instead — no absolute `$HOME`, a file that cannot
+be read, a replacement that cannot be written, a file that changed under the
+sweep (retried, then declined rather than overwrite whoever else was writing),
+and a tagged line that is not the
+marker-and-key pair it recognises — and a key outside
+`$HOME/.ssh/authorized_keys`, or outside that shape, is one it never sees at
+all. Revoking a phone can therefore still leave it a shell. On a Mac that ever
+ran `codeconnect pair --ssh`, confirm the outcome rather than assume it:
+
+```sh
+grep -n codeconnect: ~/.ssh/authorized_keys
+```
+
+Nothing printed, or `grep` reporting no such file, means nothing there carries
+the tag — which is not the same as nothing being left, since a key line whose
+comment field does not carry one prints nothing and stays, and the file records
+who wrote no line. An `ssh-ed25519` line in that output is a grant no revocation
+took back: under its own marker, one a sweep tried and could not finish or has
+not run against since it appeared; without one, a line no sweep will ever claim.
+Delete it and its `# codeconnect:` comment together.
 
 The static token has no revocation record — delete the file and restart to
 retire it.
@@ -427,51 +546,68 @@ nothing about *why* it was refused: every failure gets the same opaque message,
 because telling a caller it is being rate-limited hands it the pacing
 information it needs.
 
-### `codeconnect pair --ssh`
-
-Only a code minted with `--ssh` lets the app's `ssh_pubkey` be appended to
-`~/.ssh/authorized_keys`. The consent is bound to that one five-minute code, not
-to the daemon's configuration, and the phone cannot request it — a key offered
-against an ordinary code is logged and dropped, and the pairing still succeeds
-so the app can fall back to another SSH credential.
-
-Only a bare `ssh-ed25519` entry is accepted: the first field must be the
-algorithm, which rejects the whole authorized_keys options grammar
-(`command="…"`, `from="…"`), and the base64 is decoded and structurally checked.
-Multi-line input is refused outright rather than sanitised. Entries are written
-atomically (temp file + `rename`, following a symlink to its target) and tagged
-twice — a marker comment and the key's comment field — so `codeconnect ssh-revoke`
-removes exactly ours and nothing else.
-
-The temporary carries **128 random bits** and is created with `O_CREAT|O_EXCL`.
-The old name was `.authorized_keys.codeconnect.<pid>` — entirely predictable, in
-the one directory whose purpose is deciding who may log in. Anything able to
-create a file in `~/.ssh` first could plant that name as a symlink and have
-CodeConnect write SSH keys through it, or plant a regular file and have it
-renamed into place as `authorized_keys`. The random name removes the guess and
-`create_new` removes the plant: `O_EXCL` fails outright on an existing path *and*
-refuses to follow a symlink at the final component. The open descriptor is then
-checked — regular file, one link, owned by us — before a single byte is written,
-and the directory is `fsync`ed after the rename so a crash cannot leave `~/.ssh`
-with neither the old file nor the new one.
-
-CodeConnect never enables Remote Login or Tailscale SSH. Installing a key is not
-the same as turning on a server; if neither is running, the key simply sits
-there unused.
-
 ## TLS
 
-At startup the daemon reads its MagicDNS name from `tailscale status --json`
-and, if `tailscale cert` succeeds, caches the certificate under
-`~/.codeconnect/tls/` and serves `wss://`. The certificate is re-issued when it
-has fewer than `cert_refresh_days` (30) of validity left — read out of the
-certificate's own `notAfter`, not from a sidecar note, so a certificate replaced
-by hand is still assessed on its merits.
+At startup the daemon settles on one name — `tls_hostname` where that is set,
+otherwise the MagicDNS name from `tailscale status --json` — and asks for that
+name's certificate. It looks in `~/.codeconnect/tls/` for `<name>.crt` and
+`<name>.key` first, and shells out to `tailscale cert` only when what is there
+is missing, unparseable, or has fewer than `cert_refresh_days` (30) of validity
+left — read out of the certificate's own `notAfter`, not from a sidecar note, so
+a certificate replaced by hand is still assessed on its merits. One found on
+disk and one `tailscale cert` has just written are served identically.
 
-**Clients must connect by MagicDNS hostname.** The certificate's SAN is a DNS
+**A certificate `tailscale cert` will not issue goes in that directory by
+hand.** It issues for this node's MagicDNS name and nothing else, so any other
+name — and a LAN `ws_bind` needs one, because MagicDNS points at the tailnet
+interface — has to be obtained however that name is served, written to
+`~/.codeconnect/tls/` as `<name>.crt` and `<name>.key`, and named in
+`tls_hostname`. That is the whole of the setup: the directory is read before
+Tailscale is asked for anything. Replace the file before it comes inside
+`cert_refresh_days` of expiry, because at that point the daemon tries to renew
+it, `tailscale cert` refuses a name that is not this node's, and the failure
+drops the certificate rather than falling back to the one on disk — logged as
+`tls: no certificate for <name>`, and on a LAN bind a listener that then refuses
+every connection.
+
+**Clients must connect by name, not by address.** The certificate's SAN is a DNS
 name; `wss://100.x.y.z:8787` cannot validate against it. That is why the QR
-carries the MagicDNS name rather than the tailnet IP, and why the daemon keeps
-using that name as the QR host even when it has no certificate.
+carries the MagicDNS name rather than the tailnet IP, and why it goes on carrying
+that name when no certificate could be obtained: the name survives a Tailscale IP
+change, which a literal does not, and it is what the phone will need once one is.
+
+**A name known to miss the listener is never carried.** On a tailnet bind the
+MagicDNS name maps to the bound address by construction — both describe the same
+node — and on `0.0.0.0` the listener is on every interface this Mac has, so every
+name of this Mac reaches it. Neither is looked up. On any other `ws_bind` nothing
+about the bind implies anything about where a name points, so the daemon resolves
+it, and there are three answers rather than two:
+
+* **It resolves to the bound address.** Carried, and served as `wss://` if a
+  certificate can be had for it. A `tls_hostname` that really does point at your
+  LAN address is the case this exists for.
+* **It resolves somewhere else.** Refused. The QR carries the bind address and no
+  certificate is obtained, because a certificate for a name no phone reaches this
+  daemon at protects a connection nobody opens. The refusal is logged with what
+  was refused, why, and how to serve `wss://` on that bind instead.
+* **Nothing answered** — the lookup failed, came back empty, or ran past its
+  three-second budget. Silence refutes nothing, so the certificate settles it.
+  With one, the name is carried and the daemon logs that it is advertising a name
+  it did not confirm: validating a certificate is the only reason a phone dials a
+  name rather than an address, so a name with one behind it earns its place
+  unconfirmed. Without one, no phone needs the name, and the QR carries the
+  address this daemon knows it listens on.
+
+Silence is read as refusal in exactly one place: the MagicDNS name beside a bind
+Tailscale never hands out — a private or link-local address, or a unique-local
+one outside Tailscale's own `fd7a:115c:a1e0::/48`. That name maps to this node's
+tailnet address and to nothing else, so the two are known to disagree before any
+lookup and a silent one adds nothing. A `tls_hostname` the operator set is theirs
+to vouch for and is not overruled the same way; split-horizon DNS, where the name
+answers for the phone and not for the Mac serving it, is the ordinary reason a
+lookup here settles nothing, and a daemon that refused on it would take a working
+`wss://` listener down to one that serves nobody. A QR that resolves perfectly
+and reaches nothing looks exactly like success from every side.
 
 Both schemes share port 8787. The listener peeks the first byte — a TLS record
 always starts `0x16`, an HTTP request never does — so a phone that has not been
@@ -480,8 +616,43 @@ updated keeps working. Set `tls_required: true` once every client speaks
 
 If `tailscale cert` fails (commonly: HTTPS Certificates are not enabled for the
 tailnet, under *admin console → DNS → HTTPS Certificates*), the daemon logs why,
-serves `ws://`, and reports `capabilities.tls: false`. Tailscale still encrypts
-the link; what is lost is the certificate, not the confidentiality.
+reports `capabilities.tls: false`, and serves `ws://` wherever plaintext is
+private. On loopback and on this node's tailnet address what is lost is the
+certificate and not the confidentiality — the bytes never leave the machine, or
+WireGuard encrypted the path before it touched a network. Where
+`ws_allow_plaintext` has opened a LAN bind as well, both are lost: Tailscale
+carries no part of that link, nothing else encrypts it, and that is the trade
+the key exists to make.
+
+**Plaintext is admitted only where the bytes are private already.** The
+credential is a bearer token, and a connection carries the event log and the
+approval path — so `ws://` is served on loopback, and on this
+node's own tailnet address, where WireGuard has encrypted the path before it
+touches a network. An explicit `ws_bind` onto a LAN is neither, and with no
+certificate that listener refuses every connection before the WebSocket
+handshake and says so in `ccd.err.log` as it starts. That line names both ways
+through — a certificate, and the key below — and offers the key only where it
+would work when followed.
+
+**`ws_allow_plaintext: true` is the one key that says otherwise** — an operator
+who knows the network their chosen address is on and accepts what crosses it in
+the clear. It buys back every capability except one: a connection admitted this
+way is advertised `terminal_pty: false` and its `terminal_attach` is refused
+`not_authorised`, because "I vouch for this network" and "these bytes are
+unreadable on it" are different statements, and a live shell's keystrokes are
+only sent on the second. The listener is `OperatorAllowed` rather than
+`TrustedPath` internally, which is exactly that distinction: admissible, not
+private. It is honoured only for a bind on the local network: loopback,
+private IPv4, IPv4 link-local, IPv6 unique-local (`fc00::/7`) or IPv6 link-local
+(`fe80::/10`). It is refused for `0.0.0.0` and `::`, where nobody can enumerate
+in advance which interfaces the token has just gone onto, and for a public
+address, where plaintext is private on no hop of the way; both refusals have the
+same way through, which is to bind this Mac's own LAN address. Honoured, it is
+logged at startup, because a bearer token crossing a network in the clear is a
+fact an operator has to be able to find later. `tls_required` still wins: an
+operator who has declared that every client speaks `wss://` is not also asking
+for an exception, and honouring one would announce plaintext that the admission
+gate then refuses.
 
 ## What the phone can ask for
 
@@ -592,6 +763,47 @@ means an incompatible peer cannot use the handshake to probe credentials.
 * **`ApprovalCard.generation` / `identity_bound`** and the
   `approval_prompt_bound` event — see [Prompt identity](#prompt-identity).
 
+### The live terminal (minor 13)
+
+`terminal_attach{attachment_id, session_uid, cols, rows, output_credit}` opens a
+tmux control-mode carrier on a hosted session, answered by `terminal_attached` or
+`terminal_closed`. Bytes ride base64 inside the JSON frames under a credit window
+in each direction; nothing streams before the attach is verified.
+
+**`terminal_attached` carries the ceilings**, `max_chunk_bytes` (16 KiB) and
+`max_outstanding_credit` (256 KiB), beside the initial `input_credit`. A client
+that hard-codes them instead enforces this daemon's numbers for the life of the
+install, and the first daemon to raise either one kills the terminal of every
+phone already out there. No `terminal_output` exceeds `max_chunk_bytes` decoded —
+including the screen an attach paints, which is one chunk the forwarder splits at
+the bound rather than a frame the phone's grant happened to size.
+
+**A terminal needs a private transport.** `terminal_pty` is advertised only to a
+paired device on a connection that is `wss://`, loopback, or this Mac's own
+tailnet address, and `terminal_attach` enforces the same rule independently of
+what the client was told. See [TLS](#tls).
+
+**One terminal per session, and a later attach takes it over.** Attaching to a
+session that already has one closes the incumbent with code `superseded` and then
+opens the new one — on the same connection or from another, and whichever device
+asked last wins. Refusing the newcomer, which is what the lease used to do, locks
+a phone out of its own session for as long as a dead connection holds the lease:
+iOS backgrounds the app, the socket dies with no FIN, and nothing frees it until
+TCP notices. The takeover waits up to five seconds for the displaced carrier's
+disposable tmux client to be reaped — two clients on one session must never
+overlap — and refuses with `session_busy` if it is not, which is a different code
+from `attachment_limit` precisely because it is worth retrying and the Mac's
+global cap of eight is not.
+
+**Frames behind an attach wait for it.** An `input`, `resize`, `credit` or
+`detach` that arrives while the attach is still opening is queued in arrival
+order (bounded at 128 frames; input's own credit window makes that unreachable
+for a client honouring the protocol) and applied the moment the terminal exists.
+Every *other* message — an approval answer, a ping, a subscribe — is read and
+handled throughout. It used to be that no message at all was read during an open,
+which cost an approval up to the twenty-second attach deadline and could make the
+user miss its `respond_by`.
+
 ## How it fits together
 
 ```
@@ -621,7 +833,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | Key | Default | Meaning |
 |---|---|---|
 | `ws_port` | `8787` | WebSocket port. |
-| `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. Bound to loopback, the daemon advertises loopback and `codeconnect pair` refuses to print a code — see [Pairing](#pairing). |
+| `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. The QR host is never one known to point somewhere else: bound to loopback the daemon advertises loopback and `codeconnect pair` refuses to print a code, and bound off the tailnet it drops a name this Mac's resolver puts at another address — see [Pairing](#pairing) and [TLS](#tls). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
 | `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. |
@@ -631,9 +843,10 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Show tmux's status bar inside the session. |
 | `claude_bin` | auto | Explicit path to the real `claude`. |
-| `tls` | `true` | Try for a `tailscale cert` and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
+| `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
-| `tls_hostname` | auto | Override the MagicDNS name used for the certificate and the QR host. |
+| `ws_allow_plaintext` | `false` | Serve `ws://` on a `ws_bind` whose privacy only you can vouch for. Honoured on a local-network address; refused on `0.0.0.0`, `::` and public addresses. `tls_required` wins over it. See [TLS](#tls). |
+| `tls_hostname` | auto | Override the MagicDNS name used for the certificate and the QR host. Dropped where this Mac's resolver puts the name at an address other than the bind; a resolver that says nothing is not a refusal, and the certificate settles that case. See [TLS](#tls). |
 | `cert_refresh_days` | `30` | Re-issue when the certificate has fewer days of validity left. |
 | `pairing_ttl_secs` | `300` | Pairing code lifetime. Clamped to 30…3600. |
 | `local_resolve` | `true` | Detect approvals answered at the Mac's keyboard. |
@@ -781,16 +994,15 @@ which is how a test can tell "read the screen" from "read the history".
 (`fixtures/`) through the production ingest path, so a Claude Code schema change
 fails the suite instead of failing silently in production.
 
-Tests that write to `~/.ssh` take `ssh_keys::test_home::FakeHome`, which
-serialises and restores `HOME`. `HOME` is process-global while tests run in
-parallel threads, so that guard is the only supported way to run one.
-
 ## Known limits
 
 * **APNs is a logging stub** until a `.p8` key exists; `hello_ack` advertises
   `push: false` so the phone can tell "not configured" from "failed".
-* **TLS depends on the tailnet.** `tailscale cert` needs HTTPS Certificates
-  enabled for the tailnet. Without it the daemon serves `ws://` and says so.
+* **A certificate from Tailscale depends on the tailnet.** `tailscale cert`
+  needs HTTPS Certificates enabled for the tailnet, and issues only for this
+  node's MagicDNS name. Without it the daemon serves `ws://` and says so; a
+  certificate obtained elsewhere and dropped in `~/.codeconnect/tls/` is the way
+  round it, and the only route open to a LAN `ws_bind`.
 * **`ResolvedBy::Local` is best-effort by construction.** A prompt that leaves
   the pane tells us it is gone, not what was chosen; that case is reported with
   `inferred: true`. The failure mode is deliberately biased towards leaving a
@@ -805,10 +1017,6 @@ parallel threads, so that guard is the only supported way to run one.
   degrades to the behaviour before risk classes existed — the full command on an
   ordinary card. The boundary is pinned by a test so moving it is a visible
   decision.
-* **`authorized_keys` edits are serialised inside this daemon only.** Concurrent
-  `install`/`remove` cannot lose an update, but an `authorized_keys` being
-  edited by a text editor at the same moment is outside what any lock here
-  could arbitrate.
 * **The descriptor budget is assumed, not measured.** [Bounds](#bounds) derives
   the connection caps from macOS's default soft `RLIMIT_NOFILE` of 256 for a
   launchd job. Nothing reads the actual limit at startup, so a plist that raised

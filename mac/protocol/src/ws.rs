@@ -23,6 +23,106 @@ pub const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
 /// close to this.
 pub const MAX_SEND_TEXT_BYTES: usize = 8 * 1024;
 
+// ------------------------------------------------------------------ terminal
+//
+// The Terminal tab attaches to the exact live tmux session over this same
+// paired connection. Bytes ride as base64 inside the JSON frames; flow is
+// governed by a **credit** window in each direction (WebSocket already gives
+// ordered reliable delivery, so there is no sequence number and no replay).
+// A grant of `n` credit permits the peer to send `n` more decoded bytes; the
+// receiver returns credit only once it has taken those bytes off the wire's
+// hands — the phone after feeding its terminal view, the daemon after handing
+// them to the tmux client for its active pane. Outstanding credit therefore
+// bounds the buffer each side itself keeps. tmux may still hold a stalled
+// pane's output in its own server-side buffer, but the daemon closes the
+// attachment once output credit has stalled past a deadline, so that backlog
+// is time-bounded rather than able to grow for as long as the phone is silent.
+
+/// The largest decoded chunk one `terminal_input`/`terminal_output` may carry.
+/// Small on purpose: a noisy pane must not monopolise the shared socket, and
+/// interactive traffic is tiny. Enforced by the receiver before the bytes go
+/// anywhere near the pane.
+pub const MAX_TERMINAL_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Bytes the phone lets the daemon send before the first replenishment
+/// (`terminal_attach.output_credit`), and the reverse (`terminal_attached.
+/// input_credit`). Enough to redraw a screen without a stall on attach.
+pub const TERMINAL_INITIAL_OUTPUT_CREDIT: u32 = 64 * 1024;
+pub const TERMINAL_INITIAL_INPUT_CREDIT: u32 = 32 * 1024;
+
+/// The most credit that may be outstanding in one direction. A grant that
+/// would push the total past this is a protocol error: it is the bound that
+/// keeps a misbehaving or hostile peer from asking for unbounded buffering.
+pub const TERMINAL_MAX_OUTSTANDING_CREDIT: u32 = 256 * 1024;
+
+// An initial grant at or above the ceiling would make the daemon's own first
+// `terminal_attach` a protocol error against itself, and the ceiling is what
+// bounds a hostile peer's buffering — so it stays the larger of the two, and
+// says so at compile time rather than waiting for a test run.
+const _: () = assert!(TERMINAL_INITIAL_OUTPUT_CREDIT < TERMINAL_MAX_OUTSTANDING_CREDIT);
+const _: () = assert!(TERMINAL_INITIAL_INPUT_CREDIT < TERMINAL_MAX_OUTSTANDING_CREDIT);
+
+/// Terminal geometry bounds. Below 2 is not a usable grid; the ceilings are
+/// far above any real display and exist only to reject a hostile resize.
+pub const TERMINAL_MIN_COLS: u16 = 2;
+pub const TERMINAL_MAX_COLS: u16 = 512;
+pub const TERMINAL_MIN_ROWS: u16 = 2;
+pub const TERMINAL_MAX_ROWS: u16 = 256;
+
+/// The longest an `attachment_id` may be. A canonical UUID is 36; this leaves
+/// room for a client that uses its own scheme without inviting an unbounded
+/// key.
+pub const MAX_ATTACHMENT_ID_BYTES: usize = 64;
+
+/// Why a terminal attachment ended, on the wire.
+///
+/// A stable string rather than a closed enum so a newer daemon can name a
+/// reason an older client renders verbatim without a decode failure — the
+/// same shape as [`ServerMessage::Error`]'s `code`. The canonical set:
+///
+///   * `session_not_hosted` — no live CodeConnect session carries that uid.
+///   * `identity_mismatch` — the uid resolved to a session that changed under
+///     us, or two sessions claim it; nothing was streamed.
+///   * `tmux_unavailable` — tmux could not be run or answered indeterminately.
+///   * `attachment_limit` — the Mac's *global* cap on open terminals, and only
+///     that. A session that already has one is `session_busy` or a takeover.
+///   * `session_busy` — the terminal this session already had was asked to
+///     close so this attach could take it over, and it had not finished closing
+///     within the daemon's bound. Retrying is the answer; the attach that was
+///     refused streamed nothing.
+///   * `superseded` — a *later* attach took this session's terminal over, so
+///     this one ended. The phone that sees it on the id it is showing has lost
+///     the terminal to another attach (its own reconnect, or another device);
+///     the phone that sees it on an id it just asked for lost a race to a
+///     third.
+///   * `not_authorised` — this connection may not open a terminal: the static
+///     bootstrap token, a connection whose transport is not private, or a
+///     device revoked while the attach was in flight.
+///   * `protocol_error` — a malformed, out-of-order, or over-credit input
+///     message. Input past the granted window comes back as this.
+///   * `slow_consumer` — the phone stopped returning *output* credit for long
+///     enough that the daemon closed the attachment rather than stay blind to
+///     the session behind a stalled stream. (Input has no such close: the
+///     credit protocol simply stops the phone.)
+///   * `window_changed` — the session is alive but its active window changed,
+///     and the single-window terminal does not follow a window switch.
+///   * `detached` — the phone asked to detach, or the tab closed.
+///   * `session_exited` — the session ended under its viewer.
+pub mod terminal_close {
+    pub const SESSION_NOT_HOSTED: &str = "session_not_hosted";
+    pub const IDENTITY_MISMATCH: &str = "identity_mismatch";
+    pub const TMUX_UNAVAILABLE: &str = "tmux_unavailable";
+    pub const ATTACHMENT_LIMIT: &str = "attachment_limit";
+    pub const SESSION_BUSY: &str = "session_busy";
+    pub const SUPERSEDED: &str = "superseded";
+    pub const NOT_AUTHORISED: &str = "not_authorised";
+    pub const PROTOCOL_ERROR: &str = "protocol_error";
+    pub const SLOW_CONSUMER: &str = "slow_consumer";
+    pub const WINDOW_CHANGED: &str = "window_changed";
+    pub const DETACHED: &str = "detached";
+    pub const SESSION_EXITED: &str = "session_exited";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -43,15 +143,6 @@ pub enum ClientMessage {
         /// Single-use, 5-minute pairing code from the QR.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pairing_code: Option<String>,
-        /// The app's ed25519 SSH public key, offered during pairing.
-        ///
-        /// Offering it is always allowed; *installing* it is not. The daemon
-        /// appends it to `~/.ssh/authorized_keys` only when the operator ran
-        /// `codeconnect pair --ssh`, because consent to hand out shell access has to be
-        /// given at the Mac's keyboard and cannot be requested by the peer that
-        /// benefits from it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ssh_pubkey: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +284,48 @@ pub enum ClientMessage {
         #[serde(default)]
         environment: Option<String>,
     },
+
+    /// Open a live terminal on the session named by `session_uid`. `cols`/
+    /// `rows` are this device's viewport; `output_credit` is how many decoded
+    /// bytes the daemon may send before the first [`ClientMessage::TerminalCredit`].
+    /// The daemon answers [`ServerMessage::TerminalAttached`] or
+    /// [`ServerMessage::TerminalClosed`]; it never streams a byte before the
+    /// attach is verified. `attachment_id` is the client's handle for this
+    /// stream and scopes every later terminal message.
+    TerminalAttach {
+        attachment_id: String,
+        session_uid: String,
+        cols: u16,
+        rows: u16,
+        output_credit: u32,
+    },
+    /// Keys for the pane, base64. Consumes the input credit the daemon
+    /// granted; the daemon replenishes it only once it has handed the bytes to
+    /// the tmux client, so credit reflects input the client has taken, not
+    /// input still queued in the daemon.
+    TerminalInput {
+        attachment_id: String,
+        /// base64 of the raw bytes.
+        data: String,
+    },
+    /// This device's viewport changed. The daemon applies it to its own
+    /// disposable client only; a human at the Mac is never resized by it.
+    TerminalResize {
+        attachment_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// The phone has consumed `bytes` of output and grants that much more.
+    TerminalCredit {
+        attachment_id: String,
+        bytes: u32,
+    },
+    /// Close this attachment. The tmux session and the agent are untouched;
+    /// only the daemon's disposable viewing client goes.
+    TerminalDetach {
+        attachment_id: String,
+    },
+
     Ping,
 }
 
@@ -223,12 +356,6 @@ pub enum ServerMessage {
         /// when that name was already taken.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_name: Option<String>,
-        /// Whether the offered `ssh_pubkey` was actually installed. Reported
-        /// even when false, so the app can tell "the operator did not consent"
-        /// from "the key was never offered" and pick its SSH auth accordingly
-        /// instead of failing at connect time.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ssh_key_installed: Option<bool>,
     },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -281,6 +408,47 @@ pub enum ServerMessage {
         code: String,
         message: String,
     },
+
+    /// The attach is verified and live. `input_credit` is how many decoded
+    /// bytes the phone may send before the first [`ServerMessage::TerminalCredit`].
+    /// No `terminal_output` precedes this.
+    ///
+    /// The two ceilings ride the ack for the same reason the credits do: a
+    /// client that hard-codes them enforces this daemon's numbers for the life
+    /// of the install, and raising either one later would kill every phone's
+    /// terminal mid-session. Required, not defaulted — this message is minor
+    /// 13, which has never shipped, so there is no older daemon to omit them.
+    TerminalAttached {
+        attachment_id: String,
+        input_credit: u32,
+        /// [`MAX_TERMINAL_CHUNK_BYTES`]: the largest decoded payload either
+        /// side may put on one `terminal_input`/`terminal_output`.
+        max_chunk_bytes: u32,
+        /// [`TERMINAL_MAX_OUTSTANDING_CREDIT`]: the most credit that may be
+        /// outstanding in one direction.
+        max_outstanding_credit: u32,
+    },
+    /// Pane bytes, base64. Consumes the output credit the phone granted; the
+    /// phone replenishes after `TerminalView.feed` returns.
+    TerminalOutput {
+        attachment_id: String,
+        data: String,
+    },
+    /// The daemon has handed `bytes` of input to the tmux client and grants
+    /// that much more input credit.
+    TerminalCredit {
+        attachment_id: String,
+        bytes: u32,
+    },
+    /// The attachment ended. `code` is one of [`terminal_close`]; `reason` is
+    /// human text the phone may show verbatim. Terminal for this
+    /// `attachment_id`; a new terminal is a fresh `terminal_attach`.
+    TerminalClosed {
+        attachment_id: String,
+        code: String,
+        reason: String,
+    },
+
     Pong,
 }
 
@@ -359,6 +527,16 @@ pub struct Capabilities {
     /// typed built-ins by its own static policy alone.
     #[serde(default)]
     pub command_catalog: bool,
+    /// The daemon can stream a live terminal (`terminal_attach` …) over this
+    /// connection. False means no terminal carrier — the phone offers no
+    /// Terminal tab and says to update the Mac. **Connection-scoped, not a
+    /// build fact:** a live terminal is shell-equivalent authority, so this is
+    /// false for the static bootstrap token — only a paired device may open
+    /// one. Transport is not this flag's concern: a connection whose wire
+    /// could be read in transit is refused at admission, terminal or not.
+    /// See `terminal_close::NOT_AUTHORISED`.
+    #[serde(default)]
+    pub terminal_pty: bool,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
@@ -633,13 +811,73 @@ pub struct ApprovalCard {
 mod tests {
     use super::*;
 
+    /// The flow-control numbers are a contract with a client this crate does
+    /// not compile, so they are pinned as literals rather than compared to
+    /// themselves.
+    ///
+    /// Every other reference to them in this workspace is symbolic — the
+    /// daemon enforces the ceiling *against the constant* and the soak harness
+    /// seeds its ledger *from the constant* — so both sides of every comparison
+    /// move together and a changed value stays green. Measured: raising
+    /// `TERMINAL_MAX_OUTSTANDING_CREDIT` to `999 * 1024` left all 659 Rust
+    /// tests passing. The phone carries its own copy in `Wire.Terminal`, and a
+    /// value that drifts from it is not a failing assertion but terminals dying
+    /// mid-keystroke on a device this suite never builds.
+    ///
+    /// So the point of the literals is that they must be edited deliberately,
+    /// in both places, by whoever changes the protocol.
+    #[test]
+    fn the_terminal_flow_control_constants_are_the_ones_the_phone_was_built_against() {
+        assert_eq!(MAX_TERMINAL_CHUNK_BYTES, 16 * 1024);
+        assert_eq!(TERMINAL_INITIAL_OUTPUT_CREDIT, 64 * 1024);
+        assert_eq!(TERMINAL_INITIAL_INPUT_CREDIT, 32 * 1024);
+        assert_eq!(TERMINAL_MAX_OUTSTANDING_CREDIT, 256 * 1024);
+        assert_eq!(MAX_ATTACHMENT_ID_BYTES, 64);
+        assert_eq!(TERMINAL_MIN_COLS, 2);
+        assert_eq!(TERMINAL_MAX_COLS, 512);
+        assert_eq!(TERMINAL_MIN_ROWS, 2);
+        assert_eq!(TERMINAL_MAX_ROWS, 256);
+    }
+
+    /// Each refusal an attach can meet has a wire code of its own, so no client
+    /// has to read the human `reason` to know which happened.
+    ///
+    /// This is the whole argument for the codes replacing the prose-matching
+    /// module that used to live here: `attachment_limit` once meant both "the
+    /// Mac is full" and "this session already has a terminal", and the only
+    /// thing telling them apart was an unversioned English sentence the phone
+    /// also displays verbatim.
+    #[test]
+    fn every_attach_refusal_has_a_code_of_its_own() {
+        use terminal_close::*;
+        let refusals = [
+            SESSION_NOT_HOSTED,
+            IDENTITY_MISMATCH,
+            TMUX_UNAVAILABLE,
+            ATTACHMENT_LIMIT,
+            SESSION_BUSY,
+            SUPERSEDED,
+            NOT_AUTHORISED,
+            PROTOCOL_ERROR,
+        ];
+        for (n, code) in refusals.iter().enumerate() {
+            assert!(
+                !refusals[..n].contains(code),
+                "{code} is used for two different refusals"
+            );
+        }
+        // Pinned as literals: the phone matches these strings by hand.
+        assert_eq!(ATTACHMENT_LIMIT, "attachment_limit");
+        assert_eq!(SESSION_BUSY, "session_busy");
+        assert_eq!(SUPERSEDED, "superseded");
+    }
+
     #[test]
     fn hello_round_trip() {
         let msg = ClientMessage::Hello {
             protocol_version: crate::PROTOCOL_VERSION,
             token: Some("t".into()),
             pairing_code: None,
-            ssh_pubkey: None,
             client_id: None,
             client_name: Some("iPhone".into()),
         };
@@ -663,12 +901,10 @@ mod tests {
             ClientMessage::Hello {
                 token,
                 pairing_code,
-                ssh_pubkey,
                 ..
             } => {
                 assert_eq!(token.as_deref(), Some("deadbeef"));
                 assert_eq!(pairing_code, None);
-                assert_eq!(ssh_pubkey, None);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -676,21 +912,24 @@ mod tests {
 
     #[test]
     fn a_pairing_hello_carries_no_token() {
+        // The extra key stands in for any field this daemon does not know:
+        // clients from other versions are decoded on the fields we recognise
+        // and the rest is ignored, so an unknown key never fails a handshake.
         let msg: ClientMessage = serde_json::from_str(
             r#"{"type":"hello","protocol_version":1,"pairing_code":"ABCD2345",
-                "ssh_pubkey":"ssh-ed25519 AAAAC3Nz phone","client_name":"iPhone"}"#,
+                "unknown_to_this_daemon":"ignored","client_name":"iPhone"}"#,
         )
         .unwrap();
         match msg {
             ClientMessage::Hello {
                 token,
                 pairing_code,
-                ssh_pubkey,
+                client_name,
                 ..
             } => {
                 assert_eq!(token, None);
                 assert_eq!(pairing_code.as_deref(), Some("ABCD2345"));
-                assert!(ssh_pubkey.is_some());
+                assert_eq!(client_name.as_deref(), Some("iPhone"));
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -706,7 +945,6 @@ mod tests {
             device_token: None,
             device_id: None,
             device_name: None,
-            ssh_key_installed: None,
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
@@ -772,10 +1010,15 @@ mod tests {
             "`SendText.respond_by_monotonic_ms` — the daemon's answer deadline riding \
              in the request so the supervisor can budget against it — is minor 12"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 13,
+            "the live terminal — `terminal_attach` … over the paired connection, gated \
+             by the `terminal_pty` capability — is minor 13"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 12);
+        assert_eq!(crate::PROTOCOL_MINOR, 13);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1076,6 +1319,7 @@ mod tests {
             prompt_identity: true,
             command_catalog: true,
             slash_composer_recovery: true,
+            terminal_pty: true,
         }
     }
 
@@ -1120,6 +1364,139 @@ mod tests {
         };
         let encoded = serde_json::to_string(&unavailable).unwrap();
         assert!(encoded.contains(r#""status":"unavailable""#), "{encoded}");
+    }
+
+    #[test]
+    fn every_terminal_message_round_trips() {
+        let client = [
+            ClientMessage::TerminalAttach {
+                attachment_id: "att-1".into(),
+                session_uid: "01KZ".into(),
+                cols: 80,
+                rows: 24,
+                output_credit: TERMINAL_INITIAL_OUTPUT_CREDIT,
+            },
+            ClientMessage::TerminalInput {
+                attachment_id: "att-1".into(),
+                data: "bHM=".into(),
+            },
+            ClientMessage::TerminalResize {
+                attachment_id: "att-1".into(),
+                cols: 100,
+                rows: 40,
+            },
+            ClientMessage::TerminalCredit {
+                attachment_id: "att-1".into(),
+                bytes: 4096,
+            },
+            ClientMessage::TerminalDetach {
+                attachment_id: "att-1".into(),
+            },
+        ];
+        for message in client {
+            let encoded = serde_json::to_string(&message).unwrap();
+            let decoded: ClientMessage = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_string(&decoded).unwrap(),
+                encoded,
+                "round trip changed {encoded}"
+            );
+        }
+
+        let server = [
+            ServerMessage::TerminalAttached {
+                attachment_id: "att-1".into(),
+                input_credit: TERMINAL_INITIAL_INPUT_CREDIT,
+                max_chunk_bytes: MAX_TERMINAL_CHUNK_BYTES as u32,
+                max_outstanding_credit: TERMINAL_MAX_OUTSTANDING_CREDIT,
+            },
+            ServerMessage::TerminalOutput {
+                attachment_id: "att-1".into(),
+                data: "aGk=".into(),
+            },
+            ServerMessage::TerminalCredit {
+                attachment_id: "att-1".into(),
+                bytes: 8192,
+            },
+            ServerMessage::TerminalClosed {
+                attachment_id: "att-1".into(),
+                code: terminal_close::DETACHED.into(),
+                reason: "the tab was closed".into(),
+            },
+        ];
+        for message in server {
+            let encoded = serde_json::to_string(&message).unwrap();
+            let decoded: ServerMessage = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        }
+
+        // The tags are snake_case and stable — the phone matches these strings
+        // by hand.
+        let attach = serde_json::to_string(&ClientMessage::TerminalAttach {
+            attachment_id: "a".into(),
+            session_uid: "u".into(),
+            cols: 80,
+            rows: 24,
+            output_credit: 1,
+        })
+        .unwrap();
+        assert!(attach.contains("\"type\":\"terminal_attach\""), "{attach}");
+    }
+
+    /// The attach ack carries both flow-control ceilings, under the names the
+    /// phone reads them by.
+    ///
+    /// Without them a client can only hard-code this daemon's numbers, and the
+    /// first daemon that raises either one kills the terminal of every phone
+    /// already installed — which is the whole reason they are on the wire and
+    /// not merely in this file.
+    #[test]
+    fn the_attach_ack_advertises_both_ceilings() {
+        let encoded = serde_json::to_string(&ServerMessage::TerminalAttached {
+            attachment_id: "att-1".into(),
+            input_credit: TERMINAL_INITIAL_INPUT_CREDIT,
+            max_chunk_bytes: MAX_TERMINAL_CHUNK_BYTES as u32,
+            max_outstanding_credit: TERMINAL_MAX_OUTSTANDING_CREDIT,
+        })
+        .unwrap();
+        assert!(
+            encoded.contains(&format!("\"max_chunk_bytes\":{MAX_TERMINAL_CHUNK_BYTES}")),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains(&format!(
+                "\"max_outstanding_credit\":{TERMINAL_MAX_OUTSTANDING_CREDIT}"
+            )),
+            "{encoded}"
+        );
+        // Required, not defaulted: an ack without them is a decode failure
+        // rather than a silent zero a client would then enforce.
+        let missing = r#"{"type":"terminal_attached","attachment_id":"a","input_credit":1}"#;
+        assert!(serde_json::from_str::<ServerMessage>(missing).is_err());
+    }
+
+    /// The `terminal_pty` capability defaults to false, so a client parsing an
+    /// ack from a daemon that predates minor 13 offers no Terminal rather than
+    /// one that cannot work — and a new client decodes an old ack cleanly.
+    #[test]
+    fn terminal_capability_is_absent_by_default() {
+        let old_ack = r#"{"type":"hello_ack","protocol_version":1,"server_time":"t",
+            "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",
+            "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,
+            "push":false,"tls":false}}"#;
+        match serde_json::from_str::<ServerMessage>(old_ack).unwrap() {
+            ServerMessage::HelloAck { capabilities, .. } => {
+                assert!(
+                    !capabilities.terminal_pty,
+                    "absent must read as no terminal"
+                );
+                assert!(
+                    !capabilities.command_catalog,
+                    "and so must every later flag"
+                );
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
     }
 
     #[test]

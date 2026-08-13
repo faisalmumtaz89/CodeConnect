@@ -5,7 +5,10 @@ members = ["protocol", "cc-hook", "ccd", "codeconnect", "soak"]
 [workspace.package]
 version = "0.4.1"
 edition = "2021"
-rust-version = "1.80"
+# CI pins this exact version so the floor is tested, not merely declared. 1.85 is
+# what the lockfile actually needs: `rustls` pulls `zeroize`, which is published
+# with `edition2024`, and no earlier Cargo can parse that manifest.
+rust-version = "1.85"
 license = "MIT"
 
 [workspace.dependencies]
@@ -66,6 +69,9 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 # QR rendering for `codeconnect pair`. `default-features = false` drops the `image`
 # renderer and leaves the crate with no transitive dependencies at all.
 qrcode = { version = "0.14", default-features = false }
+
+# The terminal wire carries raw bytes as base64 inside the existing JSON frames.
+base64 = "0.22"
 
 [profile.release]
 opt-level = "z"

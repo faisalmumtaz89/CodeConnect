@@ -72,7 +72,7 @@ struct CCEmptyState<Detail: View>: View {
             if let message {
                 // `CCProse`: an empty state is where the product explains how to
                 // leave it, and the way out is usually a command — `codeconnect token`,
-                // `codeconnect pair --ssh`. Set as plain text those arrived wearing their
+                // `codeconnect pair`. Set as plain text those arrived wearing their
                 // own backticks on the scanner-unsupported screen.
                 CCProse(message, style: CC.type.callout, color: CC.text.secondary)
                     .multilineTextAlignment(.center)

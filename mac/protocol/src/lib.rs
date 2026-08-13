@@ -158,6 +158,30 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     `complete_native_confirmation`, the command is one of those two with an
 ///     argument, and the pane it captured still shows that argument selected.
 ///     Advertised per session, so a supervisor below minor 10 keeps escaping.
+///   * `13` — a client can open a **live terminal** on a hosted session over
+///     this same connection. `terminal_attach`/`terminal_input`/
+///     `terminal_resize`/`terminal_credit`/`terminal_detach` from the client;
+///     `terminal_attached`/`terminal_output`/`terminal_credit`/
+///     `terminal_closed` from the daemon; gated by the `terminal_pty`
+///     capability. Bytes ride as base64 in the JSON frames, flow-controlled by
+///     a credit window in each direction (no sequence number — the socket is
+///     ordered). The daemon speaks tmux **control mode** through a disposable
+///     `tmux -N -C attach -f ignore-size` client against the exact session:
+///     keystrokes are delivered with `send-keys` to a scoped
+///     `session:window.pane` target — the bound pane the phone is shown, so a
+///     migrated pane fails closed — and can never be interpreted as a tmux
+///     control-protocol command (the shell in the pane can of course run `tmux`
+///     itself — a terminal is a real shell); the phone never resizes a human at
+///     the Mac; and the tmux
+///     server, agent and supervisor outlive the attachment. The first bytes
+///     after `terminal_attached` repaint the pane's current screen (clear,
+///     rows, cursor), so an attach shows the session as it stands rather than
+///     a blank viewport waiting for new output — ordinary `terminal_output`
+///     bytes, spending credit like any others. Because a terminal
+///     is shell-equivalent authority, the capability is connection-scoped:
+///     false for the static bootstrap token.
+///     Additive: an older daemon omits the capability and the phone offers no
+///     Terminal; an older client ignores the messages.
 ///   * `12` — a send carries **when its asker stops listening**.
 ///     `SupervisorRequest::SendText.respond_by_monotonic_ms` stamps the
 ///     daemon's own answer deadline, on the host's monotonic clock, into the
@@ -205,7 +229,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     serialise every hook behind a database write to close that instant — a
 ///     doorbell is best-effort by construction, the app reconciles from the
 ///     event log, and the cost of the alternative is paid by every hook.
-pub const PROTOCOL_MINOR: u32 = 12;
+pub const PROTOCOL_MINOR: u32 = 13;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

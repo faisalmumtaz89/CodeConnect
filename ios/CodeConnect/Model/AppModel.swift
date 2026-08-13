@@ -97,6 +97,8 @@ final class AppModel {
     let pairing: PairingStore
     let connection: DaemonConnection
     let settings: AppSettings
+    /// The live terminal, riding the same paired connection as everything else.
+    let terminal: TerminalCarrier
     private let cache: EventCache
 
     private(set) var summaries: [SessionSummary] = []
@@ -165,10 +167,17 @@ final class AppModel {
         pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
         settings: AppSettings = AppSettings()
     ) {
+        // Startup housekeeping, on the one object the app builds exactly once.
+        LegacyCredentials.purge()
         self.pairing = pairing
         self.connection = DaemonConnection()
         self.settings = settings
         self.cache = cache
+        // Owned here, not by the Terminal tab: the terminal rides the paired
+        // connection, and a view that owns it would drop the session every time
+        // SwiftUI rebuilt the tab. One carrier per connection is also what makes
+        // "one terminal at a time" true on this end, matching the daemon.
+        self.terminal = TerminalCarrier(connection: connection)
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
@@ -378,15 +387,10 @@ final class AppModel {
         }
     }
 
-    /// Start the connection, offering the SSH public key.
-    ///
-    /// The key is only *offered*; a daemon acts on it only when its operator ran
-    /// `codeconnect pair --ssh`. It is not minted here — `existingIdentity` deliberately
-    /// does not create one — so a user who never opens the terminal never
-    /// generates a key they did not ask for.
+    /// Start the connection. One connection carries everything: the timeline,
+    /// approvals, and the live terminal.
     private func connect(to endpoint: DaemonEndpoint) {
-        connection.start(
-            endpoint: endpoint, sshPublicKey: SSHIdentityStore.existingIdentity()?.openSSHPublicKey)
+        connection.start(endpoint: endpoint)
     }
 
     /// The daemon answered a pairing code with a durable device token.
@@ -670,16 +674,12 @@ final class AppModel {
     /// pairing that looks valid and can never connect. The durable device token
     /// arrives in `hello_ack` and *that* is what gets saved.
     ///
-    /// The SSH public key is minted here, because scanning a QR is the moment
-    /// the user has decided to trust this Mac — and `codeconnect pair --ssh` on the other
-    /// end can only file a key that was offered.
     func pair(withQR payload: PairingQRPayload) {
         let endpoint = payload.endpoint
         pendingPairing = endpoint
         subscribed.removeAll()
         forgetDaemonKeying()
-        connection.start(
-            endpoint: endpoint, sshPublicKey: SSHIdentityStore.identity()?.openSSHPublicKey)
+        connection.start(endpoint: endpoint)
     }
 
     /// True while a scanned code is being exchanged for a device token.
@@ -931,6 +931,11 @@ final class AppModel {
             break
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
+            break
+        case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
+            // The terminal is a byte stream with its own flow control, delivered
+            // to `TerminalCarrier` on `connection.onTerminal`. Nothing here may
+            // read it: bytes off that screen are never facts this model holds.
             break
         case .sessions(let list):
             markFleetLive()

@@ -43,19 +43,16 @@ in it says which parts belong to the run now offering that uid. The sessions tha
 lost history say so (`GapNotice.cacheDiscarded`); a cold re-sync costs one
 bounded backfill.
 
-Two third-party dependencies, both pinned, both only for the live terminal:
+One third-party dependency, pinned, only for the live terminal:
 
 | Package | Pin | Why |
 |---|---|---|
 | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | exact `1.15.0` | terminal emulator (`TerminalView`) |
-| [swift-nio-ssh](https://github.com/apple/swift-nio-ssh) | exact `0.9.1` | SSH client |
-| [swift-nio](https://github.com/apple/swift-nio) | `2.83.0..<3` | `NIOCore` + `NIOPosix`, the transport `NIOSSH` runs on |
 
-swift-nio-ssh was chosen over Citadel because Citadel is a strict superset of
-the same tree (it depends on swift-nio-ssh and adds BigInt and its own layer),
-and because a raw PTY session with window-change events is about eighty lines
-against NIOSSH directly. Everything else resolved is transitive and Apple-owned;
-`Package.resolved` is committed and is the real pin.
+The terminal needs no network library of its own: it rides the paired
+`URLSessionWebSocketTask` the rest of the app already holds. Everything else
+resolved is transitive and Apple-owned; `Package.resolved` is committed and is
+the real pin.
 
 ## Open and run
 
@@ -69,18 +66,17 @@ xcodebuild -project CodeConnect.xcodeproj -scheme CodeConnect \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-Pair by scanning the QR that `codeconnect pair` prints on the Mac. `codeconnect pair --ssh` also
-authorises this iPhone's SSH key — that flag is the only thing that installs it,
-and the Mac says so at the terminal before it does. Manual entry takes either the
-eight-character code from the same output or the static `codeconnect token`.
+Pair by scanning the QR that `codeconnect pair` prints on the Mac. Manual entry
+takes either the eight-character code from the same output or the static
+`codeconnect token`.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `CodeConnect/Protocol/` | `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, and typed reads over raw hook/transcript payloads. |
-| `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`), `SSHTerminalSession` (NIOSSH → `tmux attach`), `SSHReachability`. |
-| `CodeConnect/Store/` | Keychain pairing, the app's ed25519 SSH identity, pinned host keys, preferences, the on-disk event cache. |
+| `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
+| `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
 | `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
 | `CodeConnect/Views/` | Fleet, Deck, session detail (Timeline / Terminal), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
@@ -110,10 +106,7 @@ Against a live `ccd`, the environment has to reach the **test runner**, not
 `xcodebuild`:
 
 ```sh
-# `CC_SSH_USER` only matters when your sessions' working directories are not
-# under /Users, where the account name cannot be read.
 TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(codeconnect token)" \
-TEST_RUNNER_CC_SSH_USER="$(whoami)" \
 xcodebuild test … -only-testing:CodeConnectUITests/LiveDaemonUITests
 
 # Pairing needs a fresh code — they are single-use and expire in five minutes.
@@ -166,7 +159,7 @@ release build:
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
 | `-cc.debug.diff truncated` | a capture the daemon cut at its 512KB cap, longer than the grid draws in one pass — the truncation banner, the per-hunk `N more lines` marker, `Draw more`, and the terminal `Truncated at 512KB`. Reaching this state for real took a generated 13,000-line file and a live Mac, which is why it shipped as a blank black rectangle |
 | `-cc.debug.diffRows <n>` | lowers the grid's per-hunk row budget from 400, so the held-back marker is on screen without dragging through 400 rows |
-| `-cc.debug.terminalState needsSetup\|hostKeyChanged\|ended` | the three terminal states that need an SSH server misbehaving to reach |
+| `-cc.debug.terminalState attaching\|ended\|endedLive` | the terminal states a healthy Mac never shows, which otherwise need a session killed mid-flight or the link dropped |
 | `-cc.debug.sendText sent\|recovered\|recovered-empty\|lost` | resolves typed sends locally, the way `-CC_FIXTURE` resolves decisions, so the snapshot sheet's four outcomes can be photographed. `recovered` carries a real 80-column `/status` capture measured off a live Mac. Against a daemon these states need a Mac view opened and its Escape failing on cue, which is not something a render pass can arrange |
 | `-cc.debug.sendText kept-model\|kept-effort\|set-effort-session\|duplicate` | answers `sent` **and** injects Claude Code's own transcript receipt, the way the real daemon delivers it — the send returns, the line follows. These reach the Model and Effort sheets' `no change` states and a scope-bearing confirmation, none of which any render could reach before: a `kept` receipt needs Claude Code's `Switch model?` / `Change effort level?` confirmation opened and then declined. Every line is verbatim from the 2.1.223 rig, escape codes included, so the render exercises the same parsing the live path does |
 
@@ -265,6 +258,11 @@ is enforced.
 * **A disconnected terminal says so.** The last bytes stay on screen under an
   explicit not-live banner, because a frozen terminal is indistinguishable from
   a live one and clearing it would lie about what you just read.
+* **A terminal rebuilt from a capped buffer says so.** Coming back to a session
+  replays the last 224 KiB the carrier held, which for a chatty agent begins
+  mid-session; the pane that was handed those remains draws a `CCGapMarker`
+  above itself until the Mac repaints it whole. Out of band on purpose — a
+  notice written *into* the emulator is erased by the next `ESC[2J` it replays.
 * **A diff carries its capture time and its truncation.** An empty diff renders
   the daemon's `note`, which is the only thing that tells a clean tree from a
   directory that was never a git repository.
@@ -308,12 +306,10 @@ is enforced.
   `deviceOwnerAuthentication` — the flag that invalidates when the enrolled set
   changes. A phone with no passcode cannot approve a HIGH card at all; it says
   so and sends you to the Mac.
-* **Host keys are pinned on first use** and a change is a hard stop with both
-  fingerprints shown. Pins live in the Keychain because what matters about them
-  is integrity, not secrecy.
-* **The attach command is built from validated input only.**
-  `SSHTerminalSession.attachCommand` refuses any session id that is not a plain
-  identifier, and keeps the `=` that stops `cc-1` matching `cc-12`.
+* **The app names a session, never a pane.** `TerminalCarrier` sends the
+  `session_uid` and nothing else; the daemon resolves it to one live pane and
+  addresses every write there, so the phone has no way to reach a pane it was
+  not shown. Keystrokes are delivered as data, never as tmux commands.
 
 ## Transport
 
@@ -473,7 +469,6 @@ haptic is not motion, and removing it removes information.
 | `CCActionPair` | `CCActionPair { deny } allow: { allow }` — **40 : 60, 12pt gap**, and no ratio parameter. A `Layout`, not a measurement: exact on the first frame, no `@State`, no `PreferenceKey`. Stacks at accessibility sizes |
 | `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with the diff grid's `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
 | `CCSegmented` | `CCSegmented(selection:options:accessibilityLabel:)` with `CCSegmentedOption(value, title:, icon:)` |
-| `CCFingerprint` | `CCFingerprint.fingerprint(_:comparedTo:name:referenceName:)` lights only the characters that differ from a reference; **`name:` prefixes the spoken label**, because an outer `.accessibilityLabel` would replace the spelling rather than introduce it, and **`referenceName:`** says what they differ *from* — a screen that diffs both keys against each other has one block whose reference is the other |
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
 | `CCHunkHeader` | `CCHunkHeader(header:fontSize:actions: CCHunkActions(comment:copyHunk:copyPath:))` — the kit draws the glyph, owns the menu and **is** the 44pt target. Pass actions as values, not a built control; the `menu:` closure form is legacy and cannot carry the gesture |
@@ -563,7 +558,7 @@ type requires.
 `CCColumn.hang(from:)` is the one implementation, and `CCMonoBlock` is the one
 caller. Three cases, and the component is told which it is in rather than the
 call site being asked: inside a container that declares its column (`CCCard`,
-`CCStepRow`, `CCFactRow`'s detail slot, the host-key alarm) it hangs the 12 its
+`CCStepRow`, `CCFactRow`'s detail slot) it hangs the 12 its
 own padding will add; free-standing on a page it finds the content column itself,
 exactly as `CCSectionHeader` does, and hangs back from there; and inside a
 **centred** container — `CCEmptyState`, `CCCard(contentColumn: false)`, both of
@@ -571,9 +566,9 @@ which declare themselves with `.ccCentredContent()` — nothing moves, because
 there is no gutter and a 12pt step on one side of a centred 280pt block is a 6pt
 error in the middle of it.
 
-Measured before this, on the changed-host-key screen at AX5: every string on the
-card at 32.00 and the command at **44.00** — the last extra text edge on the
-app's most serious screen. In a card it was 64.00 against 52.00.
+Measured at AX5 before the rule existed: every string on the card at 32.00 and
+the command at **44.00** — one leftover text edge. In a card it was 64.00
+against 52.00.
 
 `CCBanner` lands on the same two edges by the same construction as a row: the
 glyph takes the 8pt gutter slot and bleeds symmetrically, the words start on 52.
@@ -606,7 +601,7 @@ backtick in a value is never silently eaten.
 `CCSheetChrome`'s title and subtitle, `CCButton`'s label, `CCBanner`'s message,
 `CCEmptyState`'s message, `CCField`'s hint and error, `ccDisabled`'s reason and
 the gallery's own captions all resolve it. Strings that already carry backticks
-— the comment sheet's ``In `…/Sender.swift` lines 12–28``, `codeconnect pair --ssh`, `cc
+— the comment sheet's ``In `…/Sender.swift` lines 12–28``, `codeconnect pair`, `cc
 token` — became correct without their call sites being touched.
 
 ### A value nobody measured
@@ -797,32 +792,30 @@ as a tall portrait box with a word wedged into it.
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
 (`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold. `CCFingerprint` spells host-key fingerprints
-character by character. `CCFreshnessPill` speaks ages as words ("14 seconds
-ago"), never "fourteen ess".
+VoiceOver cannot express a hold. `CCFreshnessPill` speaks ages as words
+("14 seconds ago"), never "fourteen ess".
 
 ## Reviewing the system
 
-`CCGallery` (DEBUG only) renders every component in every state across nine
+`CCGallery` (DEBUG only) renders every component in every state across eight
 pages. Open `CodeConnect/Views/DesignSystem/CCGallery.swift` and run any
 `#Preview` — `Gallery · AX5 (worst case)` is the one that matters. Pressed
 states are live, not mocked.
 
 **Every component under `Views/DesignSystem/` has a page**, and the gallery's own
-header now says so, which makes it a claim that can fail. Nine renderable
-components had none — `CCKeyCap`, `CCKeyCapDivider`, `CCSkeleton`,
+header says so, which makes it a claim that can fail. The `terminal` and `diff`
+pages exist for the components whose only other render is a screen needing a
+live terminal or a real diff — `CCKeyCap`, `CCKeyCapDivider`, `CCSkeleton`,
 `CCSkeletonRow`, `CCWaitingNotice`, `CCProgressRing`, `CCScannerFrame`,
-`CCDisclosure`, and the diff strip. `CCKeyCap` was the worst: no gallery page
-*and* a screen that needs a live SSH server, so "a control is 44pt" could be
-written about it and never checked. The `terminal` and `diff` pages exist for
-them, and `render-screens.sh` photographs all nine at `L` and AX5.
+`CCDisclosure` and the diff strip — because "a control is 44pt" written about a
+component nobody can photograph is a claim nobody has checked.
+`render-screens.sh` photographs all eight at `L` and AX5.
 
 To drive it on a simulator, launch with `SIMCTL_CHILD_CC_GALLERY_PAGE=buttons`
-(or `rows`, `indicators`, `controls`, `identity`, `feedback`, `terminal`,
-`diff`) — the app boots into the gallery whenever `CC_GALLERY_PAGE` is set (DEBUG
-only, `CodeConnectApp.swift`). It used to require editing the app root by hand
-before every render, which is how a gallery goes release after release without
-anyone looking at it. A page is long enough that "scroll to the component"
+(or `rows`, `indicators`, `controls`, `feedback`, `terminal`, `diff`) — the app
+boots into the gallery whenever `CC_GALLERY_PAGE` is set (DEBUG only,
+`CodeConnectApp.swift`), rather than needing the app root edited by hand before
+every render. A page is long enough that "scroll to the component"
 is not an instruction anyone follows to the end, so
 `SIMCTL_CHILD_CC_GALLERY_SECTION=CCFactRow` opens directly on a section — the
 string is the section's own heading. Set the type size with

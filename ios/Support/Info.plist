@@ -18,8 +18,8 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<!-- Declared here so every upload does not stop and ask.
 
-	     CodeConnect uses TLS for `wss://`, SSH for the terminal, and Apple's own
-	     Keychain and APNs. All of those are exempt under the "standard encryption
+	     CodeConnect uses TLS for `wss://` and Apple's own Keychain and APNs.
+	     All of those are exempt under the "standard encryption
 	     bundled with the OS or used only for authentication" categories, so this
 	     is `false` in the sense Apple means: no *non-exempt* encryption. It is a
 	     legal declaration — reread it if the app ever ships its own cipher. -->

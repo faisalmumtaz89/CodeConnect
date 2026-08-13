@@ -21,7 +21,7 @@ Terminal bytes are read for exactly one purpose: confirming that the prompt we a
 │ Fleet                │  WSS   │  ccd  (Rust, launchd)            │
 │ Session timeline     │◄──────►│  ┌────────────────────────────┐  │
 │ Approval card        │ tailnet│  │ ingest → assign seq → dedup│  │
-│ Live terminal (SSH)  │        │  │ SQLite WAL   PK(uid, seq)  │◄─┼── source of truth
+│ Live terminal (tmux) │        │  │ SQLite WAL   PK(uid, seq)  │◄─┼── source of truth
 └──────────────────────┘        │  └──────────▲─────────────────┘  │
                                 │             │ unix socket        │
                                 │      ┌──────┴───────┐            │

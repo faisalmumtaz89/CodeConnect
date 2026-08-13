@@ -21,3 +21,7 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 rusqlite = { workspace = true }
+# The terminal wire carries pane bytes as base64 inside the JSON frames, and
+# `ccd` already links this exact crate — so the harness cannot disagree with the
+# daemon about an encoding, which a hand-rolled codec here eventually would.
+base64 = { workspace = true }

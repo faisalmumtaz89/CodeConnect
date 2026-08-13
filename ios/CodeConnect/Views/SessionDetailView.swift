@@ -240,7 +240,29 @@ struct SessionDetailView: View {
     /// prevents.
     @State private var tailWatch = TailWatch()
     @State private var didAutoOpen = false
-    @State private var surface: Surface = .timeline
+    @State private var ownSurface: Surface = .timeline
+    /// Whether the Terminal surface has ever been selected on this screen. The
+    /// emulator is kept alive once built, and this is what keeps it in the view
+    /// tree while the timeline is the one on show.
+    @State private var terminalHasBeenOpened = false
+    #if DEBUG
+        /// Test seam: drive the picker from outside.
+        ///
+        /// The terminal's emulator has to survive a trip to the timeline and
+        /// back, and that is a claim about one `UIView` instance rather than
+        /// about anything a value can report. Proving it needs the switch
+        /// thrown against a hosted screen, and the switch is `@State`.
+        var surfaceForTesting: Binding<Surface>?
+    #endif
+
+    /// The picker's selection: this screen's own, or a test's.
+    private var surfaceBinding: Binding<Surface> {
+        #if DEBUG
+            if let surfaceForTesting { return surfaceForTesting }
+        #endif
+        return $ownSurface
+    }
+    private var surface: Surface { surfaceBinding.wrappedValue }
     @State private var showDiff = false
     @State private var showLinkDetail = false
     @State private var appearedAt = Date()
@@ -278,7 +300,7 @@ struct SessionDetailView: View {
             // Type sizes. Below the bar it has the whole width and grows.
             if !composerFocused {
                 CCSegmented(
-                    selection: $surface,
+                    selection: surfaceBinding,
                     options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
                     accessibilityLabel: "Session surface")
                 .padding(.horizontal, CC.space.md)
@@ -293,21 +315,46 @@ struct SessionDetailView: View {
                 .background(CC.color.bg)
             }
 
-            switch surface {
-            case .timeline:
-                if let state {
-                    timeline(state)
-                } else {
-                    notInTheList
+            // **Two slots, not two branches.** A `switch` here puts the two
+            // surfaces in one structural position, so flipping the picker
+            // dismantles whichever was showing — and the terminal's emulator
+            // is not a view that can be rebuilt from its inputs. It *is* the
+            // scrollback: `cargo build` scrolls megabytes through it, the
+            // carrier keeps only the last 224 KiB, and a glance at the
+            // timeline would throw the rest away while the session is still
+            // running. Separate `if`s keep the terminal in a slot of its own,
+            // so it is hidden rather than destroyed.
+            ZStack {
+                if surface == .timeline {
+                    if let state {
+                        timeline(state)
+                    } else {
+                        notInTheList
+                    }
                 }
-            case .terminal:
-                // The tmux name comes from the fleet, not from the route: tmux
-                // has never heard of a uid, and a name the daemon no longer
-                // vouches for could attach to a different agent.
-                TerminalTabView(
-                    tmuxName: model.tmuxName(for: key),
-                    unhosted: model.summary(for: key)?.tmuxSession.isEmpty == true,
-                    runLabel: label.spoken)
+                // Built the first time it is asked for and kept after that.
+                // Mounting it with the screen would cost every reader an
+                // emulator they may never open; keeping it once opened costs
+                // one, and buys back the pane they were reading.
+                if surface == .terminal || terminalHasBeenOpened {
+                    // Attached **by uid**: the daemon resolves the uid to the
+                    // one live session that carries it, so a reused tmux name
+                    // can never hand this tab a different agent's keyboard.
+                    // The name is carried alongside only as something to show.
+                    TerminalTabView(
+                        sessionUID: key,
+                        tmuxName: model.tmuxName(for: key),
+                        unhosted: model.summary(for: key)?.tmuxSession.isEmpty == true,
+                        runLabel: label.spoken,
+                        onScreen: surface == .terminal
+                    )
+                    .opacity(surface == .terminal ? 1 : 0)
+                    // A hidden pane takes no taps and is not read out. The
+                    // keyboard is `onScreen`'s to give back — see
+                    // `TerminalPaneView.acceptsInput`.
+                    .allowsHitTesting(surface == .terminal)
+                    .accessibilityHidden(surface != .terminal)
+                }
             }
         }
         .background(CC.color.bg)
@@ -315,6 +362,9 @@ struct SessionDetailView: View {
         // the header and picker collapse and return as a unit. The focus
         // change itself is never wrapped in `withAnimation`; the keyboard owns
         // its own transition and fights any second one.
+        .onChange(of: surface, initial: true) { _, new in
+            if new == .terminal { terminalHasBeenOpened = true }
+        }
         .ccAnimation(CC.motion.small, value: composerFocused)
         .ccNavigationChrome()
         // Empty on purpose. The header below carries the project, at a width
@@ -384,7 +434,7 @@ struct SessionDetailView: View {
                 onLanded: consumeDraft,
                 onOpenTerminal: {
                     snapshotCommand = nil
-                    surface = .terminal
+                    surfaceBinding.wrappedValue = .terminal
                 }
             )
             .environment(model)

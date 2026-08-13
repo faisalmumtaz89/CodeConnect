@@ -115,8 +115,16 @@ fn default_true() -> bool {
 pub struct Config {
     #[serde(default = "default_ws_port")]
     pub ws_port: u16,
-    /// Explicit bind address. When absent the daemon asks `tailscale ip -4`,
-    /// and falls back to loopback if Tailscale is not up.
+    /// Explicit bind address. When absent the daemon asks `tailscale ip` and
+    /// binds the IPv4 address in the answer, because that is the one the QR
+    /// advertises.
+    ///
+    /// Loopback is the fallback, and three different roads lead to it:
+    /// Tailscale is not up, it did not answer inside the daemon's three-second
+    /// probe budget, or it answered with no IPv4 address at all. All three end
+    /// with a daemon no phone can reach, which is why it says so loudly at
+    /// startup and keeps watching for a tailnet address rather than settling
+    /// there.
     pub ws_bind: Option<String>,
     /// Also listen on `127.0.0.1`, for tools running on the Mac itself.
     ///
@@ -210,9 +218,22 @@ pub struct Config {
     pub input_box_needles: Vec<String>,
     pub permission_prompt_needles: Vec<String>,
 
-    /// Try to obtain a `tailscale cert` and serve `wss://`. When this is on but
-    /// no certificate can be had, the daemon falls back to `ws://` and says so
-    /// in `hello_ack.capabilities.tls` rather than refusing to start.
+    /// Try to obtain a certificate — one already sitting in
+    /// `~/.codeconnect/tls/` as `<name>.crt` and `<name>.key`, else
+    /// `tailscale cert` — and serve `wss://`.
+    ///
+    /// Failing to get one never stops the daemon starting: the listener falls
+    /// back to `ws://` on the bind address. Whether that fallback serves
+    /// anybody is the bind's question rather than this one's. On loopback or
+    /// this node's tailnet address the bytes are private in transit already, so
+    /// the connection is served and `hello_ack.capabilities.tls` tells the
+    /// client there is no certificate behind it. On an explicit `ws_bind` that
+    /// is neither of those, plaintext would put the bearer token on a network
+    /// in the clear, so the admission gate refuses every connection before the
+    /// WebSocket handshake — nothing gets far enough to be told anything, and
+    /// `ws_allow_plaintext` is the one key that changes it. `tls_required`
+    /// refuses the same way on every address, which is what an operator sets it
+    /// for.
     pub tls: bool,
     /// Refuse plaintext connections once every client speaks `wss://`.
     ///
@@ -220,8 +241,68 @@ pub struct Config {
     /// turning TLS on must not lock out a phone that has not been updated yet.
     /// Turning this on is the deliberate second step.
     pub tls_required: bool,
+    /// Say that plaintext is acceptable on the address `ws_bind` names.
+    ///
+    /// The daemon's credential is a bearer token, and a connection carries the
+    /// event log, the approval path and the terminal — so plaintext is admitted
+    /// only where the bytes are private already: loopback, or this node's own
+    /// tailnet address, where WireGuard encrypts the path before it touches a
+    /// network. An explicit `ws_bind` onto a LAN is neither, and with no
+    /// certificate that listener refuses every connection. This is the one key
+    /// that says otherwise, for an operator who knows the network their chosen
+    /// address is on and accepts what crosses it in the clear.
+    ///
+    /// It is honoured only for a bind on the local network: loopback, private
+    /// IPv4, IPv4 link-local, IPv6 unique-local (`fc00::/7`) or IPv6 link-local
+    /// (`fe80::/10`). It is refused for `0.0.0.0` and `::`, where the operator
+    /// cannot know which interfaces they have just put the token on, and for a
+    /// public address, where plaintext is not defensible on any hop. Both
+    /// refusals have the same way through: bind the LAN address itself.
+    ///
+    /// `tls_required` still wins. An operator who has declared that every
+    /// client speaks `wss://` is not also asking for an exception, and
+    /// honouring one would log a promise the admission gate then breaks.
+    pub ws_allow_plaintext: bool,
     /// Override the MagicDNS name used for the certificate and the QR host.
     /// Normally discovered from `tailscale status --json`.
+    ///
+    /// Whatever the QR names, a phone dialling it has to arrive at this
+    /// listener, and a name that lands elsewhere is worse than an IP literal:
+    /// the literal is visibly wrong, while the name is dialled, answered
+    /// perfectly by DNS, and nothing is listening. So the name is weighed
+    /// against the bind, and three things come back.
+    ///
+    /// **Known to point elsewhere**, when the resolver answers with addresses
+    /// and the bound one is not among them. The name is never carried: the QR
+    /// gets the bind address, and no certificate is obtained, because one for a
+    /// name that reaches this daemon nowhere protects a connection nobody
+    /// opens.
+    ///
+    /// **Confirmed to reach this listener**, and it is carried. Either the
+    /// resolver puts the bound address behind it, or the shape of the bind
+    /// settles it with no lookup at all: `0.0.0.0` and `::` answer on every
+    /// interface this Mac has, and on one of this node's own tailnet addresses
+    /// the MagicDNS name *is* that address — the one bind where looking up is
+    /// actively wrong, since a Mac running `--accept-dns=false` cannot resolve
+    /// its own tailnet name and checking would refuse names that work.
+    ///
+    /// **Nothing decided it**, when the resolver errors, times out, or answers
+    /// with no address. Silence is not evidence against a name — reading it as
+    /// evidence is what turned a daemon serving `wss://` on a LAN bind into one
+    /// refusing every connection, since dropping the name dropped the
+    /// certificate request with it and plaintext is not admissible there. So
+    /// the name survives, and it is carried whenever a certificate was obtained
+    /// for it: validating one is the whole reason a phone dials a name rather
+    /// than an address, and that is what earns an unconfirmed name its place.
+    /// With no certificate nothing needs the name at all, and the QR carries
+    /// the bind address — the one thing here known to be right.
+    ///
+    /// Setting this field is what buys silence that benefit of the doubt: a
+    /// name the operator vouches for is not overruled by a resolver that stayed
+    /// quiet. A discovered name gets less. Beside a private or link-local bind
+    /// outside Tailscale's own `fd7a:115c:a1e0::/48`, silence refutes it
+    /// outright, because a MagicDNS name names this node's tailnet address and
+    /// nothing else — no lookup is needed to know the two disagree.
     pub tls_hostname: Option<String>,
     /// Re-issue the certificate when it has fewer days of validity than this.
     #[serde(default = "default_cert_refresh_days")]
@@ -399,6 +480,7 @@ impl Default for Config {
             permission_prompt_needles: Vec::new(),
             tls: true,
             tls_required: false,
+            ws_allow_plaintext: false,
             tls_hostname: None,
             cert_refresh_days: default_cert_refresh_days(),
             pairing_ttl_secs: default_pairing_ttl_secs(),
@@ -728,6 +810,20 @@ mod tests {
         // A config file written before the field existed keeps the default.
         let config: Config = serde_json::from_str(r#"{"ws_port": 8787}"#).unwrap();
         assert!(config.ws_loopback);
+    }
+
+    #[test]
+    fn plaintext_on_a_chosen_address_is_refused_until_it_is_asked_for() {
+        // Fail-closed by default: an operator who has said nothing about their
+        // network is not asking for the bearer token to cross it in the clear.
+        assert!(!Config::default().ws_allow_plaintext);
+        let config: Config = serde_json::from_str(r#"{"ws_allow_plaintext": true}"#).unwrap();
+        assert!(config.ws_allow_plaintext);
+        // The upgrade case this exists for: a config file written before the
+        // field existed keeps the default, so nobody opts in by accident.
+        let config: Config = serde_json::from_str(r#"{"ws_bind": "192.168.1.20"}"#).unwrap();
+        assert!(!config.ws_allow_plaintext);
+        assert_eq!(config.ws_bind.as_deref(), Some("192.168.1.20"));
     }
 
     #[test]

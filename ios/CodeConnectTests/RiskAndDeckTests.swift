@@ -256,7 +256,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// LOW `Read` at AX5 measured `Allow` enabled, as the filled white primary
     /// in the thumb zone, over **13 of the 24 characters** of
     /// `/Users/dev/app/README.md`; the eleven that were behind the action bar
-    /// are the ones that tell a README from `~/.ssh/id_ed25519`.
+    /// are the ones that tell a README from `~/.aws/credentials`.
     ///
     /// The old exemption's argument — "a `Read` that costs a scroll is a gate
     /// people learn to defeat" — is answered by

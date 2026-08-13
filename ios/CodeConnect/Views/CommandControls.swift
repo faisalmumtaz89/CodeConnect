@@ -871,9 +871,9 @@ struct CompactSheet: View {
                         // and a field's own border sit on the container's edge —
                         // so a field standing free on a sheet puts its label 36pt
                         // right of the box it names. The card is what gives all
-                        // three the same edge. Measured against the shipped
-                        // Terminal and SSH screen, where label, border and hint
-                        // share one column inside exactly this container.
+                        // three the same edge. Measured against a shipped screen
+                        // where label, border and hint share one column inside
+                        // exactly this container.
                         CCCard {
                             CCField(
                                 label: "Instructions (optional)", text: $instructions,

@@ -31,7 +31,7 @@ import SwiftUI
 /// are highest. It reads well and it is wrong twice: it moves the primary
 /// treatment onto something that is not the primary action, and it spends `red`
 /// on approving, which is not destruction. Red belongs to `Unpair and erase
-/// cache`, `Forget this iPhone's SSH key`, and to failures. A reader who learns
+/// cache` and to failures. A reader who learns
 /// that red means "destroys something" is then told, on the busiest screen, that
 /// it also means "the ordinary affirmative, but carefully" — and the signal is
 /// gone from both.
@@ -760,8 +760,8 @@ struct DecisionCardView: View {
     /// — a white fill and the colour red — on something that is neither the
     /// primary action nor destructive.
     ///
-    /// Red is reserved for destroying something (`Unpair and erase cache`,
-    /// `Forget this iPhone's SSH key`) and for reporting a failure.
+    /// Red is reserved for destroying something (`Unpair and erase cache`) and
+    /// for reporting a failure.
     @ViewBuilder
     private var denyButton: some View {
         CCButton(
@@ -999,7 +999,7 @@ struct ReadGate: Equatable {
     /// behaviours differ, and that is precisely the case an AX5 render of a LOW
     /// card measured: `Allow` enabled, in the thumb zone, over **13 of the 24
     /// characters** of `/Users/dev/app/README.md` — the 11 that were missing
-    /// being the ones that tell a README from `~/.ssh/id_ed25519`.
+    /// being the ones that tell a README from `~/.aws/credentials`.
     ///
     /// A tier-shaped exception here is not "less friction for a small risk", it
     /// is "the product will let you approve something it never showed you", and

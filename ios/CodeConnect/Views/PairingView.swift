@@ -4,7 +4,7 @@ import UIKit
 /// Pairing and settings — two screens in one file, split by purpose.
 ///
 /// **Onboarding** is the first thing anyone sees: a full-screen flow with one
-/// job. **Settings** is configuration: pairing, transport, SSH, unpair. What it
+/// job. **Settings** is configuration: pairing, transport, unpair. What it
 /// deliberately no longer is, is a second Link Health screen — the numbers live
 /// in one place and this one links to it, rather than restating connection,
 /// transport and capability rows in a second style.
@@ -25,7 +25,6 @@ struct PairingView: View {
     @State private var showScanner = false
     @State private var scanError: String?
     @State private var showManualEntry = false
-    @State private var showTerminalSettings = false
     @State private var showLinkHealth = false
     @State private var confirmingUnpair = false
     @State private var pairingStartedAt: Date?
@@ -144,7 +143,7 @@ struct PairingView: View {
                     index: 4,
                     title: "Scan the code it prints",
                     message:
-                        "Add --ssh to that command if you also want the live terminal. It authorises this iPhone's key, and tells you so first.")
+                        "That is everything. The timeline and the live terminal both run over this one paired connection.")
             }
         }
         .padding(.top, CC.rhythm.textSurface)
@@ -266,22 +265,18 @@ struct PairingView: View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             // **Flush, and in a card, and the two go together.**
             //
-            // The header owns the content column now, so it lands on 52 from
-            // either of this block's two homes — inline under the onboarding
-            // screen's 16pt page inset, and inside the repair sheet's. It was
-            // the one header in the app with no inset at all (x=16.00), because
-            // a call site cannot be told what column it is on.
+            // The header owns the content column, so it lands on 52 from either
+            // of this block's two homes — inline under the onboarding screen's
+            // 16pt page inset, and inside the repair sheet's. A call site
+            // cannot be told what column it is on, so it cannot be asked to
+            // inset this itself.
             //
-            // Moving it alone would have been half a fix: the rule the eleven
-            // headers broke is *a header agrees with the rows it names*, and
-            // these two fields sat on the page column at 16, so a header on 52
-            // would have been adrift of its own content by the same 36pt — in
-            // the other direction. The fields take the content column instead,
-            // in the card that is what puts text there, which is exactly how
-            // `TerminalSettingsView.whereToConnect` draws the same object: a
-            // section header over a card of `CCField`s. The fields themselves
-            // are untouched — 52pt tall, `micro` labels, both placeholders
-            // verbatim — and the block still expands in place.
+            // The card is the other half of that. The rule is *a header agrees
+            // with the rows it names*, and fields sitting on the page column at
+            // 16 under a header on 52 are adrift by 36pt just as surely as the
+            // reverse. Putting the fields in a card is what puts them on the
+            // content column: a section header over a card of `CCField`s, 52pt
+            // tall with `micro` labels, expanding in place.
             //
             // `Save and connect` stays outside it: the card holds what you type,
             // and the button that spends it belongs to the page, at page width,
@@ -373,9 +368,6 @@ struct PairingView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { doneItem }
-            .navigationDestination(isPresented: $showTerminalSettings) {
-                TerminalSettingsView().environment(model)
-            }
             .sheet(isPresented: $showLinkHealth) {
                 LinkHealthSheet().environment(model)
             }
@@ -411,9 +403,8 @@ struct PairingView: View {
 
     private var macSection: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
-            // Flush: the header owns the content column itself now — see
-            // `TerminalSettingsView.keySection`. Anything added here is added
-            // twice.
+            // Flush: the header owns the content column itself. Anything added
+            // here is added twice.
             CCSectionHeader("Mac")
 
             CCCard(padding: 0) {
@@ -437,11 +428,6 @@ struct PairingView: View {
                             .ccType(CC.type.monoSmall)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize()
-                    }
-
-                    CCRow("Terminal and SSH", action: { showTerminalSettings = true }) {
-                        CCIcon("terminal", size: CC.size.icon, weight: .medium)
-                            .foregroundStyle(CC.text.tertiary)
                     }
 
                     CCRow(
@@ -612,7 +598,7 @@ struct PairingView: View {
             }
 
             Text(
-                "Removes the token from the Keychain and deletes cached events. The SSH key stays until you remove it under Terminal and SSH; revoke it at the Mac with `codeconnect ssh-revoke`."
+                "Removes the token from the Keychain and deletes cached events. Revoke this iPhone at the Mac with `codeconnect revoke`."
             )
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)

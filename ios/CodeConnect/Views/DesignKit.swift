@@ -679,7 +679,7 @@ extension CC {
             design: .monospaced, relativeTo: .footnote, documentedColor: CC.text.primary,
             monospacedDigits: true)
 
-        /// 12/16, `textTertiary`. Ages, durations, fingerprints, line numbers.
+        /// 12/16, `textTertiary`. Ages, durations, clock times, counts.
         static let monoSmall = CCTextStyle(
             size: 12, lineHeight: 16, weight: .regular, tracking: 0,
             design: .monospaced, relativeTo: .caption, documentedColor: CC.text.tertiary,

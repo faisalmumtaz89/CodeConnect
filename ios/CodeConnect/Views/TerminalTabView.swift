@@ -1,3 +1,4 @@
+import Combine
 import SwiftTerm
 import SwiftUI
 import UIKit
@@ -7,22 +8,31 @@ import UIKit
 // qualifying at twenty call sites and beats importing SwiftTerm submodules.
 private typealias UIColour = SwiftUI.Color
 
-/// The live terminal: SSH to the Mac, attached to the agent's own tmux session.
+/// The live terminal: the agent's own tmux pane, streamed over the connection
+/// this phone is *already* paired on.
 ///
 /// This is the half of the product that is Termius. It is deliberately the
 /// *second* surface, not the first — everything the app knows about state comes
 /// from the daemon's event log, and this is where you go when you want to be the
 /// Mac's keyboard instead.
 ///
+/// The terminal rides the same paired WebSocket as the timeline. There is no
+/// second transport and nothing to switch on at the Mac: if the timeline is
+/// live, the terminal can open, and no screen has to explain a second
+/// connection failing while the first one works.
+///
 /// The reason for the strip at the top of every state: **the terminal is the
 /// degraded layer and it must say which layer it is on at all times.** A
 /// terminal showing the last bytes it received looks exactly like a live one. A
 /// banner can be scrolled past; a 28pt strip that never moves cannot.
 struct TerminalTabView: View {
-    /// The tmux session name to attach to, or nil when the daemon no longer
-    /// lists this run — or never hosted it. There is no fallback: `tmux attach
-    /// -t =<uid>` cannot work, and attaching to a name nothing vouches for
-    /// could hand the user a different agent's keyboard.
+    /// The run to attach to, by uid. The daemon resolves it to the one live
+    /// session carrying that stamp, so a reused tmux name can never hand this
+    /// tab a different agent's keyboard.
+    let sessionUID: String
+    /// The tmux name, for display only — nil when the daemon no longer lists
+    /// this run, or never hosted it, which is also when there is nothing to
+    /// attach to.
     let tmuxName: String?
     /// True when the run is listed but has no tmux location: adopted, observed
     /// through its hooks, launched by something other than CodeConnect. The
@@ -33,21 +43,54 @@ struct TerminalTabView: View {
     /// still what this view *attaches* to; it is simply not what a reader is
     /// told they are looking at.
     let runLabel: String
+    /// Whether this tab is the surface on show.
+    ///
+    /// It stays mounted while it is not, because its emulator holds scrollback
+    /// nothing else has a copy of — so "not on screen" has to be said rather
+    /// than inferred from being torn down. A pane behind another surface must
+    /// not hold the keyboard, and coming back to one is the moment to try the
+    /// connection again.
+    var onScreen = true
 
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    @State private var session = SSHTerminalSession()
-    /// When the current connection attempt started, for the elapsed counter
-    /// every wait owes the reader.
+    /// Owned by the model, not by this view: the terminal rides the paired
+    /// connection, and a view-owned carrier would drop the session every time
+    /// SwiftUI rebuilt the tab.
+    private var session: TerminalCarrier { model.terminal }
+    /// When the current attach started, for the elapsed counter every wait owes
+    /// the reader.
     @State private var startedAt: Date?
-    /// When bytes last arrived. Sampled at most once a second — the strip shows
-    /// a clock time, and re-rendering on every chunk would cost the terminal
-    /// its scroll performance to gain nothing.
-    @State private var lastOutputAt: Date?
-    @State private var showSSHSettings = false
     @State private var showPairing = false
+    /// Whether *this tab's emulator* was handed a buffer that had already lost
+    /// its head to the cap.
+    ///
+    /// **A fact about one emulator, which is why it is view state.** The
+    /// carrier's `transcriptIsTruncated` says the buffer is short of the
+    /// session; it says nothing about what any pane is showing. A pane that
+    /// survived a rebuild still holds every byte in its own scrollback while
+    /// that flag is true, and telling its reader something is missing is the
+    /// lie in the other direction. Only the moment a *fresh* emulator is
+    /// seeded turns the buffer's shortfall into a claim about a screen, so that
+    /// is the only moment this is written — see `SwiftTermView.seeded`.
+    ///
+    /// **Written from exactly one place, which is what makes it clear itself.**
+    /// Every route that empties the transcript is an attach, every attach is
+    /// rendered as the connecting card, and the card is not the pane — so the
+    /// emulator is built again on the other side of it and seeded from what the
+    /// daemon has since repainted, which is whole. The same one line reports
+    /// that, and the notice goes. A second writer that watched the carrier for
+    /// the clearing would be a second answer to the same question, and this
+    /// defect began as an indication whose truth depended on something other
+    /// than the site that knows.
+    ///
+    /// It follows that a pane which one day *survives* an attach — the emulator
+    /// is the only copy of its own scrollback, and keeping it across a reattach
+    /// would be a real improvement — has to report its re-seeding here too, or
+    /// this goes stale over a screen the Mac has just painted whole.
+    @State private var seededFromTrimmedBuffer = false
 
     var body: some View {
         // One measurement, so the strip can be told what 45% of the viewport
@@ -62,61 +105,126 @@ struct TerminalTabView: View {
         }
         .background(CC.color.bg)
         .onAppear(perform: connectIfPossible)
+        .onChange(of: onScreen) { _, showing in
+            // Returning to this tab is a fresh chance to reattach, the same as
+            // arriving at it. The view outlives the visit now, so `onAppear`
+            // alone would only ever fire for the first one.
+            guard showing else { return }
+            connectIfPossible()
+        }
         .onChange(of: scenePhase) { _, phase in
-            // Reconnect on foreground. iOS tears down sockets in the
-            // background, so coming back to a terminal that *looks* attached is
-            // the normal case, not the exception.
+            // Reconnect on foreground, for a terminal that ended while the link
+            // itself held: a frame that failed to write, a session detached
+            // from the Mac. It is deliberately *not* the recovery for a dropped
+            // socket — waking is not being connected, and at the moment the app
+            // is foregrounded the link is still being dialled, so an attach
+            // then is refused. That case is the closure below.
             guard phase == .active else { return }
             connectIfPossible()
         }
-        .onChange(of: session.transcript.count) { _, _ in
-            let now = Date()
-            guard lastOutputAt == nil || now.timeIntervalSince(lastOutputAt!) > 1 else { return }
-            lastOutputAt = now
+        .onChange(of: model.connection.phase) { _, link in
+            // The reattach after a dropped socket, at the only moment it can
+            // work. iOS tears sockets down in the background and the drop ends
+            // the terminal as it happens — before the app is ever foregrounded
+            // — so the terminal becomes reopenable when the handshake lands,
+            // which is here and nowhere earlier.
+            //
+            // Still only ever back into a terminal that was already open:
+            // `connectIfPossible` refuses an idle carrier, so a handshake never
+            // opens a shell nobody asked for.
+            guard link.isConnected else { return }
+            connectIfPossible()
         }
-        .sheet(isPresented: $showSSHSettings) {
-            NavigationStack { TerminalSettingsView().environment(model) }
-        }
+        // No observer of the byte count here, deliberately. The stamp this
+        // screen renders is sampled at the carrier — see
+        // `TerminalCarrier.lastOutputAt` — because a view body that read a
+        // per-chunk counter would be re-run at chunk rate, up to a hundred
+        // times a second on the main thread, competing with the emulator's own
+        // drawing for the sake of a clock that shows whole seconds.
         .sheet(isPresented: $showPairing) {
             PairingView().environment(model)
         }
-        // Leaving the tab is deliberately *not* leaving the session: the SSH
-        // connection stays up so switching to the timeline and back does not
-        // drop you out of tmux. It is torn down when the view is destroyed.
+        // Leaving the tab is deliberately *not* leaving the terminal: the
+        // carrier lives on the model, so switching to the timeline and back
+        // does not drop you out of tmux.
     }
 
     /// The phase every part of this screen renders from — the strip included, so
     /// the design inspection seam produces a *faithful* screen rather than a real
     /// strip over a forced card.
     ///
-    /// The seam is handed this tab's **real** target. It used to mint its own
-    /// (`studio.tail1234.ts.net:22`), which drew a host-key card about one Mac
-    /// above a liveness strip reading another — a review seam whose entire
-    /// purpose is a truthful screen cannot invent the one identifier the screen
-    /// is about.
-    private var phase: SSHTerminalSession.Phase {
-        TerminalDesignState.override(host: host, port: model.settings.sshPort) ?? session.phase
+    /// The seam forces only the phase, never an identifier: a review seam
+    /// whose entire purpose is a truthful screen cannot invent the one thing
+    /// the screen is about.
+    ///
+    /// **Only ever this run's.** One carrier serves the whole app, so a screen
+    /// that rendered its phase unasked would draw another run's live pane under
+    /// this run's label and type into it. A carrier that is not this run's reads
+    /// as `idle` here — nothing of it is drawn — and `connectState` below says
+    /// whether opening this run's terminal is free or means ending theirs.
+    /// The seam cannot outrank a terminal that is genuinely open somewhere
+    /// else: a forced `endedLive` would build a real emulator, take delivery of
+    /// the output, and put this screen's keystrokes into that run's pane. A
+    /// review seam is allowed to invent a screen, never a keyboard.
+    private var phase: TerminalCarrier.Phase {
+        if case .heldByAnotherRun = standing { return .idle }
+        return TerminalDesignState.override() ?? session.phase(forRun: sessionUID)
+    }
+
+    /// Whose terminal the shared carrier is holding, from this run's screen.
+    private var standing: TerminalCarrier.Standing {
+        session.standing(forRun: sessionUID)
+    }
+
+    /// What the tab draws under the strip.
+    ///
+    /// **The terminal's two forms are one case, and that is the whole point of
+    /// this type.** Every arm of a `@ViewBuilder` switch is its own identity, so
+    /// a live pane and a snapshot pane written as two arms are two different
+    /// views: SwiftUI dismantles the emulator and builds a fresh one at the
+    /// exact moment the session ends — which is the moment the emulator's
+    /// scrollback becomes the only copy of what the reader is looking at. All a
+    /// replacement can replay is the capped transcript, so a build that printed
+    /// megabytes would come back as its last couple of hundred kilobytes. One
+    /// case with a parameter keeps the pane.
+    private enum Pane {
+        case connect
+        case connecting
+        /// The emulator: live, or holding what it last received.
+        case terminal(live: Bool)
+        case closed(reason: String)
+    }
+
+    private var pane: Pane {
+        switch phase {
+        case .idle:
+            return .connect
+        case .attaching:
+            return .connecting
+        case .attached:
+            return .terminal(live: true)
+        case .ended(let reason, let wasAttached):
+            // A terminal that was ever live keeps its pane. The bytes on it are
+            // what the reader came back for, and a card in their place discards
+            // the only copy of them.
+            guard wasAttached || !session.transcript(forRun: sessionUID).isEmpty else {
+                return .closed(reason: reason)
+            }
+            return .terminal(live: false)
+        }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch phase {
-        case .idle:
+        switch pane {
+        case .connect:
             connectCard
-        case .probing, .connecting, .authenticating:
+        case .connecting:
             connectingCard
-        case .needsSetup(let guidance):
-            SSHSetupCard(guidance: guidance) { connect() }
-        case .hostKeyChanged(let change):
-            HostKeyChangedCard(change: change) { session.trustNewHostKey() }
-        case .attached:
-            terminal(live: true)
-        case .ended(let reason, let wasAttached):
-            if wasAttached || !session.transcript.isEmpty {
-                terminal(live: false)
-            } else {
-                ended(reason)
-            }
+        case .terminal(let live):
+            terminal(live: live)
+        case .closed(let reason):
+            ended(reason)
         }
     }
 
@@ -132,31 +240,27 @@ struct TerminalTabView: View {
     /// than as a bar bolted above a screen.
     ///
     /// **And it follows the card when the card moves.** At accessibility sizes
-    /// `HostKeyChangedCard` abandons the gutter — a 52pt inset leaves about
-    /// thirty characters of measure on a 402pt screen — and drops every string
-    /// to 32. The strip held 52 through that, which measured as a *separate
-    /// text column* on the one screen in the product that can least afford one
-    /// (four edges at AX5, this being one of them). So at accessibility sizes
-    /// the dot moves **above** the word rather than beside it, exactly as
-    /// `SSHSetupCard` does with `lock.slash` and as this card's own header now
-    /// does with its shield, and the strip's strings start on 32 with the
-    /// card's. One column at every size, which is what the paragraph above
-    /// claims and what it now does.
+    /// a card abandons the gutter — a 52pt inset leaves about thirty characters
+    /// of measure on a 402pt screen — and drops every string to 32. The strip
+    /// goes with it: the dot moves **above** the word rather than beside it,
+    /// and the strip's strings start on 32 with the card's. A strip that held
+    /// 52 through that would measure as a *separate text column* on the one
+    /// screen in the product that can least afford one — four edges at AX5,
+    /// this being one of them.
     ///
-    /// **The orphaned separator this replaces.** The strip used to render
-    /// `· detail` as one wrapping `Text` beside a fixed-size word. At AX5 that
-    /// put the `·` alone, centred, on a line of its own above `Not live`, with
-    /// the host wrapped underneath in a third alignment — measured on
-    /// at accessibility sizes. A separator only means anything between two things
-    /// on one line, so the stacked form does not have one.
+    /// **No separator in the stacked form.** On one line the word and its
+    /// detail are joined by `· `; stacked, they are two lines and there is
+    /// nothing for a separator to sit between. Rendering `· detail` as one
+    /// wrapping `Text` beside a fixed-size word puts the `·` alone, centred, on
+    /// a line of its own above `Not live`, with the host wrapped underneath in
+    /// a third alignment.
     private func livenessStrip(maxHeight: CGFloat) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             // Centred on one line; stacked, and leading-aligned, once the
-            // strip takes an accessibility size. Measured failure from the
-            // version this replaces: `.top` in the single-line form floated
-            // the dot above the word, because a `Reconnect` button on the same
-            // row makes the row taller than the text and the text centres
-            // inside it.
+            // strip takes an accessibility size. `.center` rather than `.top`
+            // in the single-line form: a `Reconnect` button on the same row
+            // makes the row taller than the text, the text centres inside it,
+            // and a top-aligned dot floats above the word it belongs to.
             CCAdaptiveStack(
                 horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs,
                 horizontalAlignment: .leading, verticalAlignment: .center
@@ -193,9 +297,9 @@ struct TerminalTabView: View {
         }
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         // **Only scrollable when it has actually been capped.** Found by
-        // rendering: a always-scrollable 145pt strip at AX5 swallowed every
-        // vertical drag that began inside it, so the card underneath — the one
-        // carrying the fingerprints — could not be scrolled at all from the top
+        // rendering: an always-scrollable 145pt strip at AX5 swallowed every
+        // vertical drag that began inside it, so the card underneath could
+        // not be scrolled at all from the top
         // half of the screen.
         .scrollDisabled(stripHeight <= maxHeight)
         // Sizes to its content, then stops at 45% of the viewport and scrolls
@@ -270,7 +374,7 @@ struct TerminalTabView: View {
     @ViewBuilder
     private var trailingStripItem: some View {
         if case .attached = phase {
-            if let sessionID = session.target?.sessionID {
+            if let sessionID = tmuxName {
                 // tmux's exact-match name, whole. It used to render
                 // `tmux -L codeconnect =cc-1` truncated from the head, which is
                 // a *command* with its verb cut off; the full attach line lives
@@ -290,13 +394,43 @@ struct TerminalTabView: View {
         }
     }
 
-    /// On a changed host key there is **no dismiss path that silently
-    /// continues**. `session.canConnect` already refuses, but the strip states
-    /// the rule itself rather than inheriting it — a Reconnect button on that
-    /// screen would be the one exit the design forbids.
+    /// Offered only when attaching again could actually work: the carrier is
+    /// free, nothing structural blocks it, and the daemon's own close code says
+    /// a retry is not futile. A `Reconnect` that the connection would refuse is
+    /// the control this screen must never show.
     private var canOfferReconnect: Bool {
-        if case .hostKeyChanged = phase { return false }
-        return session.canConnect && blockedReason == nil
+        Self.mayOfferReconnect(
+            canAttach: session.canAttach,
+            isBlocked: blockedReason != nil,
+            servesThisRun: standing.isMine,
+            lastClose: session.lastClose)
+    }
+
+    /// The one answer to "may this screen offer a retry", so that the two places
+    /// that ask cannot give two.
+    ///
+    /// Both the liveness strip and the "Terminal closed" card show a `Reconnect`,
+    /// and they used to decide separately: the strip consulted the close code and
+    /// the card consulted only whether something structural was blocking. On a
+    /// close a retry cannot change — `session_not_hosted`, `session_exited` — the
+    /// strip therefore hid the control while the card, on the same screen, still
+    /// offered it, and the one a reader can tap was the one that re-sent an
+    /// attach into the same refusal.
+    ///
+    /// Static and pure so the rule can be read and tested on its own. What that
+    /// does not do is prove a caller asks it; only two call sites do, and they
+    /// are one line each.
+    static func mayOfferReconnect(
+        canAttach: Bool, isBlocked: Bool, servesThisRun: Bool,
+        lastClose: TerminalCarrier.CloseCode?
+    ) -> Bool {
+        guard canAttach, !isBlocked else { return false }
+        // The close code answers for the run that closed. Another run's says
+        // nothing about this one, and letting it speak here hides this screen's
+        // only control because a session in a different tab exited.
+        guard servesThisRun else { return true }
+        if let lastClose, !lastClose.isRetryable { return false }
+        return true
     }
 
     private struct Liveness {
@@ -314,7 +448,7 @@ struct TerminalTabView: View {
             return Liveness(
                 word: "Live", wordColor: CC.color.success, dotColor: CC.color.success,
                 detail: userAtHost)
-        case .probing, .connecting, .authenticating:
+        case .attaching:
             return Liveness(
                 word: "Connecting", wordColor: CC.color.info, dotColor: CC.color.info,
                 pulses: true, detail: userAtHost)
@@ -325,15 +459,20 @@ struct TerminalTabView: View {
         }
     }
 
-    private var userAtHost: String? {
-        guard let host else { return nil }
-        guard let username else { return host }
-        return "\(username)@\(host)"
-    }
+    /// Which Mac this keyboard is wired to. The host alone: the terminal rides
+    /// the paired connection, so there is no second account to name.
+    private var userAtHost: String? { host }
 
+    /// When this run's terminal last received bytes, as the strip says it.
+    ///
+    /// **Only ever this run's**, the same rule `phase(forRun:)` follows and for
+    /// the same reason: one carrier serves the whole app, so an unscoped read
+    /// would stamp another run's output onto this screen — a terminal that has
+    /// never drawn a byte claiming it was live a moment ago, under this run's
+    /// label.
     private var lastOutputText: String? {
-        guard let lastOutputAt else { return nil }
-        return "last output \(Self.clock.string(from: lastOutputAt))"
+        guard case .mine = standing, let at = session.lastOutputAt else { return nil }
+        return "last output \(Self.clock.string(from: at))"
     }
 
     private static let clock: DateFormatter = {
@@ -347,19 +486,17 @@ struct TerminalTabView: View {
     /// A centred composition that becomes scrollable **exactly when it stops
     /// fitting**, and not before.
     ///
-    /// Found by rendering at AX5, after the fix to the ended state made the
-    /// screen taller: the connect card's `Terminal and SSH` button measured
-    /// y=1169 on an 874pt screen — **295pt below the fold, in a container with
-    /// no scroll view**, so the one control that could unblock the terminal
-    /// could not be reached at all. The ended state was one line of prose away
-    /// from the same fault. `SSHSetupCard` and `HostKeyChangedCard` have always
-    /// scrolled; these three were the exception only because at the default size
-    /// they always fit, which is the definition of a defect nobody sees.
+    /// **Every full-screen state on this tab uses it, including the ones that
+    /// always fit at the default size.** At AX5 the connect card's fix button
+    /// measures y=1169 on an 874pt screen — 295pt below the fold — and a
+    /// container with no scroll view puts the one control that can unblock the
+    /// terminal out of reach. A state that fits at `L` and not at AX5 is a
+    /// defect nobody sees, so no state here is trusted to fit.
     ///
     /// `minHeight: proxy.size.height` is what keeps the centring: while the
-    /// content is shorter than the viewport it is centred in it, exactly as it
-    /// is today, and the scroll view has nothing to do. `.basedOnSize` stops it
-    /// bouncing a card that fits.
+    /// content is shorter than the viewport it is centred in it and the scroll
+    /// view has nothing to do. `.basedOnSize` stops it bouncing a card that
+    /// fits.
     private func centredState<Content: View>(
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
@@ -462,7 +599,7 @@ struct TerminalTabView: View {
                     // connection that has hung, so it has to read as one —
                     // which, borderless and centred under a spinner, it did not.
                     CCButton("Cancel", variant: .ghost, size: .sm) {
-                        session.disconnect(reason: "Cancelled.")
+                        session.detach(reason: "Cancelled.")
                     }
                     .padding(.top, CC.space.xxs)
                 }
@@ -476,9 +613,7 @@ struct TerminalTabView: View {
 
     private var busyText: String {
         switch phase {
-        case .probing: return "Checking whether the Mac is listening for SSH…"
-        case .connecting: return "Connecting to \(host ?? "the Mac")…"
-        case .authenticating: return "Authenticating with this iPhone's key…"
+        case .attaching: return "Opening a terminal on \(host ?? "the Mac")…"
         default: return "Working…"
         }
     }
@@ -515,31 +650,34 @@ struct TerminalTabView: View {
             .ccGlyphContainer(CC.size.emptyGlyphCircle, relativeTo: .largeTitle)
     }
 
-    /// The third of this tab's three reconnect affordances to consult the
-    /// block, which is what it was measured failing to do.
+    /// The third of this tab's three reconnect affordances, and it consults the
+    /// block like the other two. The strip suppresses its own `Reconnect` when
+    /// a connection cannot be made (`canOfferReconnect`); the connect card
+    /// replaces `Connect` with the reason plus a route to the fix.
     ///
-    /// The strip suppresses its own `Reconnect` when a connection cannot be
-    /// made (`canOfferReconnect`) and the connect card replaces `Connect` with
-    /// the reason plus a route to the fix. This one offered `Reconnect`
-    /// unconditionally: a coordinate tap at its exact centre changed nothing at
-    /// 2s or 6s, because `connect()` returned at `guard let username` — and it
-    /// was the only control on the screen. "There are no dead buttons without
-    /// an explanation."
-    ///
-    /// It now builds what the connect card builds, from the same value: the
+    /// This builds what the connect card builds, from the same value: the
     /// reason above the control it explains, and the route in place of an
     /// action that would be refused. Where there is no route — the daemon has
     /// stopped listing the run — there is no button either, and the reason is
-    /// the whole answer, exactly as on the card.
+    /// the whole answer. **There are no dead buttons without an explanation**,
+    /// and on a screen whose only control is this one, a `Reconnect` that
+    /// `connect()` would return from at an unmentioned guard is exactly that.
     private func ended(_ reason: String) -> some View {
         let blocked = blockedReason
         // Resolved once: nothing blocking makes reconnecting itself the route;
         // a block hands over its own route, which is `nil` when there honestly
         // is not one. The title and the action come from the same value, so a
         // label can no longer outlive the action under it.
+        // `canOfferReconnect` and not `blocked == nil`: nothing blocking is only
+        // half the question, and the half this card used to ask alone. The other
+        // half is whether the daemon's close code leaves a retry any room — a
+        // session that is not hosted, or has ended, answers the same way however
+        // many times it is asked. The strip already refused to show the control
+        // on that answer, so a card that showed it put two different answers to
+        // one question on one screen, and the tappable one was the wrong one.
         let route: Blocked.Fix? =
             blocked == nil
-            ? Blocked.Fix(title: "Reconnect", run: { connect() })
+            ? (canOfferReconnect ? Blocked.Fix(title: "Reconnect", run: { connect() }) : nil)
             : blocked?.fix
 
         return centredState {
@@ -567,27 +705,86 @@ struct TerminalTabView: View {
 
     // MARK: - Terminal
 
+    /// One pane, in two states — never two panes. Every modifier below is
+    /// applied in both states and switches on `live` by value, because a
+    /// modifier applied to only one of them is a second view type at this
+    /// position and costs the emulator its buffer. See `Pane`.
+    ///
+    /// **The marker above it is a sibling, not a modifier and not an arm.** An
+    /// `if` with no `else` is an `Optional` view: the pane stays the second
+    /// element of this stack's tuple whether the marker is drawn or not, so
+    /// showing it does not rebuild the emulator underneath — which would throw
+    /// away the very scrollback the marker is there to describe.
+    /// `testTheNoticeDoesNotCostTheEmulatorWhatItIsDescribing` measures that.
     private func terminal(live: Bool) -> some View {
         VStack(spacing: 0) {
-            if live, let fingerprint = session.firstUseFingerprint {
-                CCBanner(
-                    "Pinned this Mac's SSH host key", message: fingerprint, tone: .info,
-                    icon: "lock.shield")
-                    .padding(CC.space.md)
+            if seededFromTrimmedBuffer {
+                // **Out of band, and view-local.** This used to be bytes fed to
+                // the emulator ahead of the replay, which put a claim about the
+                // stream inside the stream: the replayed tail erases it with
+                // `ESC[2J`, hides it by switching to the alternate screen, or
+                // simply scrolls it out of the retained region — and the pane
+                // then presents a partial tail as the whole session, silently.
+                // Nothing the far end sends can reach a SwiftUI row.
+                //
+                // **And `CCGapMarker` is the right component after all.** The
+                // objection to it was that a gap belongs at its position rather
+                // than pinned above a pane that scrolls, and that a pinned row
+                // cannot know whether a surviving pane really lost anything.
+                // Neither survives the change: `seededFromTrimmedBuffer` is set
+                // at the one site that seeds a *fresh* emulator, so the row is
+                // only ever drawn over a pane that genuinely began in the middle
+                // of the session; and that pane's whole content — scrollback
+                // included — begins after the cut, so the top of the pane *is*
+                // the gap's position, and it is a boundary that cannot drift.
+                CCGapMarker(label: Self.trimmedBufferNotice)
+                    // The live pane's own leading inset, so the rule starts on
+                    // the same edge as the first column of terminal output.
+                    .padding(.horizontal, CC.space.md)
             }
-
-            SwiftTermView(session: session, fontSize: model.settings.terminalFontSize)
+            SwiftTermView(
+                session: session, sessionUID: sessionUID, acceptsInput: live && onScreen,
+                fontSize: model.settings.terminalFontSize,
+                seeded: { fromTrimmedBuffer in
+                    // Off the update pass. Seeding happens inside
+                    // `makeUIView`/`updateUIView`, and writing view state from
+                    // there is undefined behaviour by SwiftUI's own rules.
+                    DispatchQueue.main.async { seededFromTrimmedBuffer = fromTrimmedBuffer }
+                })
                 // Never a 55% dim. A dimmed terminal is unreadable *and* still
                 // looks live; the content stays at full opacity and the frame
                 // carries the fact.
                 .padding(.leading, live ? CC.space.md : 0)
                 .modifier(SnapshotFrame(isLive: live, stamp: lastOutputText))
-                .accessibilityLabel("Terminal for \(runLabel)")
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(paneLabel(live: live))
                 // Pinch to scale, the same preference the diff surface has.
                 // `simultaneousGesture` so the emulator keeps its own selection
                 // and scroll gestures.
                 .simultaneousGesture(pinch)
         }
+    }
+
+    /// What the marker says, on screen and out loud — `CCGapMarker` speaks its
+    /// own label, so this string is both.
+    ///
+    /// A sentence about what is missing rather than a word about the buffer.
+    /// A listener who is handed "truncated" has been told the app hit a limit;
+    /// what they need to know is that the session printed more than this pane
+    /// is showing. Short enough not to be cut at two lines, which is the one
+    /// thing the component asks of a label.
+    static let trimmedBufferNotice = "Earlier output not shown"
+
+    /// What the pane is called out loud, which has to carry *which of the two
+    /// it is*. The strip and the frame both say so on screen and neither is
+    /// legible to a listener, so a snapshot announced as a terminal is the same
+    /// lie those two exist to prevent, in the one channel that cannot see them.
+    private func paneLabel(live: Bool) -> String {
+        if live { return "Terminal for \(runLabel)" }
+        guard let stamp = lastOutputText else {
+            return "Snapshot of the terminal for \(runLabel)"
+        }
+        return "Snapshot of the terminal for \(runLabel), \(stamp)"
     }
 
     private var pinch: some Gesture {
@@ -606,12 +803,10 @@ struct TerminalTabView: View {
 
     // MARK: - Target
 
-    private var username: String? {
-        model.settings.effectiveUsername(sessionPaths: model.sessionPaths)
-    }
-
+    /// The paired daemon's host. There is nothing to override: the terminal goes
+    /// wherever the timeline already is.
     private var host: String? {
-        model.settings.effectiveHost(pairedHost: model.pairing.endpoint?.host)
+        model.pairing.endpoint?.host.isEmpty == false ? model.pairing.endpoint?.host : nil
     }
 
     /// Where this terminal would connect, as an identifier — never a sentence.
@@ -619,9 +814,8 @@ struct TerminalTabView: View {
     /// reason underneath is the whole answer.
     private var targetLine: String? {
         guard let host else { return nil }
-        guard let username else { return host }
-        guard let tmuxName else { return "\(username)@\(host)" }
-        return "\(username)@\(host) · tmux -L codeconnect attach -t =\(tmuxName)"
+        guard let tmuxName else { return host }
+        return "\(host) · =\(tmuxName)"
     }
 
     /// Why Connect is not offered, and where to go to change that.
@@ -645,35 +839,43 @@ struct TerminalTabView: View {
     /// which case it carries the sentence the screen has to print and the
     /// route to the fix.
     ///
-    /// It is one value because the defect it replaces was these two answers
-    /// being computed in two places. `blockedReason` consulted three facts and
-    /// the *ended* state ignored it, so `Reconnect` was offered into a
-    /// `connect()` that returned at `guard let username` — a control that did
-    /// nothing at 2s and nothing at 6s, on the one screen where it was the only
-    /// control. Three reconnect affordances on one tab; two consulted the block
-    /// and one did not. Deriving both from this makes "an action the connection
-    /// would refuse" unconstructible rather than something three call sites have
-    /// to remember.
+    /// **One value, because the two answers have to agree.** Three reconnect
+    /// affordances share this tab, and each of them needs both halves: what to
+    /// dial, and what to say instead. Computed separately they drift, and the
+    /// drift shows up as a control that does nothing — `connect()` returning at
+    /// a guard the screen never stated. Deriving both from here makes "an
+    /// action the connection would refuse" unconstructible rather than
+    /// something three call sites have to remember.
     private enum ConnectState {
-        case ready(SSHTerminalSession.Target)
+        /// Everything the attach needs: the run's uid, which the daemon
+        /// resolves to the one live session carrying it.
+        case ready(sessionUID: String)
         case blocked(Blocked)
     }
 
     private var connectState: ConnectState {
-        guard let host else {
+        guard host != nil else {
             return .blocked(
                 Blocked(
-                    reason: "Pair with your Mac first; the terminal uses the same address.",
+                    reason: "Pair with your Mac first; the terminal uses the same connection.",
                     fix: .init(title: "Pair", run: { showPairing = true })))
         }
-        guard let username else {
+        // The terminal is the same connection as everything else, so a link
+        // that is down is the whole story — there is no second thing to try.
+        guard model.connection.phase.isConnected else {
+            return .blocked(
+                Blocked(reason: "Not connected to the Mac. The terminal uses the same connection."))
+        }
+        // Shell-equivalent authority is never granted to the bootstrap token,
+        // so the daemon says per connection whether it will open one at all.
+        guard model.connection.capabilities?.servesTerminal == true else {
             return .blocked(
                 Blocked(
                     reason:
-                        "CodeConnect could not read the Mac's account name from your sessions. Set it under Settings › Terminal and SSH.",
-                    fix: .init(title: "Terminal and SSH", run: { showSSHSettings = true })))
+                        "This connection may not open a terminal. Pair this device with the Mac, then try again.",
+                    fix: .init(title: "Pair", run: { showPairing = true })))
         }
-        guard let tmuxName else {
+        guard tmuxName != nil else {
             // No route to a fix, and honestly so — but two different truths.
             // An adopted run was never in CodeConnect's tmux, so "no longer
             // lists" would be a lie about a session the fleet is showing.
@@ -684,10 +886,18 @@ struct TerminalTabView: View {
                         : "The daemon no longer lists this run, so there is no tmux session to attach to."
                 ))
         }
-        return .ready(
-            .init(
-                host: host, port: model.settings.sshPort, username: username,
-                sessionID: tmuxName))
+        // The daemon allows one terminal per connection and the carrier is
+        // shared, so this is the one block whose route ends something the
+        // reader owns. It names the run it would end: a control that closes
+        // another agent's keyboard without saying whose is not one to offer.
+        if case .heldByAnotherRun(let held) = standing {
+            return .blocked(
+                Blocked(
+                    reason:
+                        "\(model.runLabel(for: held).spoken) has the terminal open, and this connection allows one at a time.",
+                    fix: .init(title: "End that terminal and open this one", run: takeOver)))
+        }
+        return .ready(sessionUID: sessionUID)
     }
 
     private var blockedReason: Blocked? {
@@ -696,20 +906,38 @@ struct TerminalTabView: View {
     }
 
     private func connectIfPossible() {
-        guard session.canConnect else { return }
-        // Only auto-connect back into a session that was already established.
-        // A first connection is a deliberate act — it mints an SSH key and may
-        // pin a host key.
-        if case .idle = session.phase, session.transcript.isEmpty { return }
+        // Back into *this run's* terminal or none. The carrier is shared, so
+        // anything automatic here would open a shell for a run the reader
+        // merely navigated to — and, where another run holds the terminal,
+        // end that one to do it. A takeover is a decision, never a side
+        // effect of appearing.
+        guard case .mine = standing, session.canAttach else { return }
+        // Only auto-attach back into a terminal that was already open. Opening
+        // one is a deliberate act: it is shell-equivalent authority, and a tab
+        // that opens a shell merely by being looked at is not something to do
+        // on the user's behalf.
+        if case .idle = session.phase, session.transcript(forRun: sessionUID).isEmpty { return }
+        // And never re-open one the daemon closed for a reason a retry cannot
+        // change — a session that ended does not come back by asking again.
+        if let close = session.lastClose, !close.isRetryable { return }
         connect()
+    }
+
+    /// Take the terminal from the run that has it, which is the only way this
+    /// run gets one while another is open. Reachable from the block's own
+    /// route and nowhere else: every automatic path stops at `standing`.
+    private func takeOver() {
+        startedAt = Date()
+        session.takeOver(
+            sessionUID: sessionUID, cols: session.lastSize.cols, rows: session.lastSize.rows)
     }
 
     private func connect() {
         // The same value the screen renders from. There is no second guard
         // here that could disagree with the reason the user was shown.
-        guard case .ready(let target) = connectState else { return }
+        guard case .ready(let uid) = connectState else { return }
         startedAt = Date()
-        session.connect(to: target)
+        session.attach(sessionUID: uid, cols: session.lastSize.cols, rows: session.lastSize.rows)
     }
 }
 
@@ -717,46 +945,37 @@ struct TerminalTabView: View {
 
 /// Renders a terminal phase that needs a broken Mac to reach.
 ///
-/// `needsSetup`, `hostKeyChanged` and `ended` are three of the most consequential
-/// screens in the product and none of them can be reached without switching off
-/// an SSH server, regenerating a host key, or killing a session mid-flight.
-/// Design review that cannot *see* the host-key screen is design review that
-/// approves it by description, which is how the alarming screen ends up being
-/// the one nobody looked at.
+/// The `ended` screens are among the most consequential in the product and
+/// neither can be reached without killing a session mid-flight or dropping the
+/// link. Design review that cannot *see* them is review that approves them by
+/// description, which is how the alarming screen ends up being the one nobody
+/// looked at.
 ///
 /// `#if DEBUG` and driven from the launch command line, exactly like the
 /// `-CC_FIXTURE` and `-CC_BIOMETRICS` seams the app already ships (see the
 /// README's "Test seams"): none of this exists in a release build.
 ///
 ///     xcrun simctl launch <udid> com.codeconnect.remote \
-///       -cc.debug.terminalState hostKeyChanged
+///       -cc.debug.terminalState endedLive
 enum TerminalDesignState {
-    /// - Parameters:
-    ///   - host: **the tab's real target.** A seam that mints its own host
-    ///     renders a card about `studio.tail1234.ts.net:22` above a liveness
-    ///     strip reading `127.0.0.1`, and a review pass then approves a screen
-    ///     nobody could ever see. The fixture only invents what there is no
-    ///     truth to borrow.
-    ///   - port: likewise, from settings.
-    static func override(host: String?, port: Int) -> SSHTerminalSession.Phase? {
+    /// The states worth inspecting are the ones a healthy Mac never shows.
+    /// `ended` is reachable only by killing a session mid-flight, and design
+    /// review that cannot *see* it is review that approves it by description.
+    static func override() -> TerminalCarrier.Phase? {
         #if DEBUG
-            let target = host ?? "studio.tail1234.ts.net"
             switch UserDefaults.standard.string(forKey: "cc.debug.terminalState") {
-            case "needsSetup":
-                return .needsSetup(
-                    SSHSetupGuidance.forOutcome(.refused, host: target, port: port)
-                        ?? SSHSetupGuidance(title: "", detail: "", steps: []))
-            case "hostKeyChanged":
-                return .hostKeyChanged(
-                    .init(
-                        host: target, port: port,
-                        pinned: "SHA256:8Wt1qKMz0mB4vJ7dR2xLp9NcYfT6hQeA3sVuE5oXgIk",
-                        offered: "SHA256:8Wt1qKMz0mB4vJ7dR2xLp9NcYfT6hQeA3sVuE5oXgZk",
-                        pinnedAt: pinnedAt))
+            case "attaching":
+                return .attaching
             case "ended":
                 return .ended(
-                    reason: "tmux detached. The agent is still running on the Mac.",
+                    reason: "The session ended.",
                     wasAttached: false)
+            case "endedLive":
+                // The other half of `ended`: a terminal that *was* live, so the
+                // screen keeps the transcript under a snapshot frame instead of
+                // replacing it with a card.
+                return .ended(
+                    reason: "The connection to the Mac dropped.", wasAttached: true)
             default:
                 return nil
             }
@@ -764,19 +983,6 @@ enum TerminalDesignState {
             return nil
         #endif
     }
-
-    #if DEBUG
-        /// Fixed once per process, and deliberately a little past four days.
-        ///
-        /// `override` is read on every render, so a date computed inside it slid
-        /// forward continuously — the card's own evidence changed under the
-        /// reader. And `Format.age` truncates whole days, so a fixture minted
-        /// from `Date()` and read against the model's once-a-second clock
-        /// rendered a four-day-old pin as `PINNED 3D AGO`. On this screen the
-        /// age *is* evidence; the fixture may not round it down by a day
-        /// because of a sub-second race with its own clock.
-        private static let pinnedAt = Date().addingTimeInterval(-4 * 24 * 3600 - 60)
-    #endif
 }
 
 // MARK: - Snapshot frame
@@ -792,17 +998,29 @@ private struct SnapshotFrame: ViewModifier {
     let isLive: Bool
     let stamp: String?
 
+    /// **`content` appears once here, at one position, in both states.** An
+    /// `if` would put the live pane and the snapshot pane in two arms of a
+    /// `_ConditionalContent`, which is two identities: SwiftUI would dismantle
+    /// the emulator and build a fresh one at the moment the session ends and
+    /// its scrollback becomes the only copy of itself. So the decoration
+    /// switches on values instead — insets that go to zero, and overlays that
+    /// are absent while the terminal is live, both of which leave the type of
+    /// this view the same either way.
+    ///
+    /// The frame is not labelled here. The pane carries one label for both
+    /// states, in `TerminalTabView.paneLabel`, because a listener needs the
+    /// snapshot and its stamp said once rather than as two elements.
     func body(content: Content) -> some View {
-        if isLive {
-            content
-        } else {
-            content
-                .padding(CC.space.xs)
-                .overlay {
+        content
+            .padding(isLive ? 0 : CC.space.xs)
+            .overlay {
+                if !isLive {
                     RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous)
                         .strokeBorder(CC.color.borderStrong, lineWidth: CC.stroke.hairline)
                 }
-                .overlay(alignment: .top) {
+            }
+            .overlay(alignment: .top) {
+                if !isLive {
                     // `badgeLabel`: `SNAPSHOT · 09:14:22` classifies the frame
                     // it is punched into. It is not a section header.
                     Text(label)
@@ -813,11 +1031,10 @@ private struct SnapshotFrame: ViewModifier {
                         // reads as part of the frame rather than on top of it.
                         .background(CC.color.bg)
                         .offset(y: -CC.space.xs + 1)
+                        .accessibilityHidden(true)
                 }
-                .padding(CC.space.md)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel(label)
-        }
+            }
+            .padding(isLive ? 0 : CC.space.md)
     }
 
     private var label: String {
@@ -828,16 +1045,76 @@ private struct SnapshotFrame: ViewModifier {
 
 // MARK: - SwiftTerm bridge
 
-/// Hosts SwiftTerm's `TerminalView` and wires it to the SSH session.
+/// A terminal pane that can be told it is no longer a keyboard.
+///
+/// The pane outlives its session on purpose — it holds the scrollback, and the
+/// carrier's capped transcript is not a copy of it — so when the session ends,
+/// this one view has to stop offering input it cannot deliver. Every route from
+/// a keystroke to the wire ends at `TerminalCarrier.send`, which drops what
+/// arrives for a terminal that is not attached, silently and by design.
+///
+/// **Refusing first responder is the mechanism, and it is chosen because one
+/// refusal covers every way in.** The soft keyboard is shown to a first
+/// responder; the esc/tab/ctrl/^C row is an `inputAccessoryView`, so it comes
+/// up with that keyboard or not at all; and hardware key presses travel the
+/// responder chain, which a view that is neither first responder nor focusable
+/// is not on. Scrolling is untouched — a scroll view does not need to be first
+/// responder — so the scrollback the pane is kept for stays readable.
+///
+/// It costs the dead pane UIKit's edit menu, which is validated against the
+/// first responder — Paste included, which is the one menu action that puts
+/// bytes on the wire. A snapshot that cannot be copied from is a smaller loss
+/// than a keyboard that swallows what is typed into it.
+final class TerminalPaneView: TerminalView {
+    /// Whether the session behind this pane can still receive what is typed
+    /// into it.
+    var acceptsInput = true {
+        didSet {
+            // A pane that goes dead with the keyboard already up gives it back.
+            // The refusal below governs only *becoming* first responder, and a
+            // session commonly ends under someone who is mid-command.
+            guard !acceptsInput, isFirstResponder else { return }
+            _ = resignFirstResponder()
+        }
+    }
+
+    override var canBecomeFirstResponder: Bool { acceptsInput }
+
+    override var canBecomeFocused: Bool { acceptsInput }
+}
+
+/// Hosts SwiftTerm's `TerminalView` and wires it to the terminal carrier.
 ///
 /// Bytes flow one way through the emulator and one way back out; nothing in this
 /// app ever reads them for meaning.
 struct SwiftTermView: UIViewRepresentable {
-    let session: SSHTerminalSession
+    let session: TerminalCarrier
+    /// The run this emulator shows. The carrier is shared, so replay is asked
+    /// for by run rather than taken: bytes it happens to be holding may belong
+    /// to a run that is not this one.
+    let sessionUID: String
+    /// Whether this pane may take what is typed into it. False for a session
+    /// that has ended, and equally for one that is live behind another surface
+    /// — a pane nobody is looking at must not be holding the keyboard. The same
+    /// pane is kept across both changes, so this is carried as a value the view
+    /// is updated with rather than expressed as a second view.
+    let acceptsInput: Bool
     let fontSize: Double
+    /// Called once for every emulator this view builds, with whether the bytes
+    /// it was seeded with had already lost their head to the carrier's cap.
+    ///
+    /// The only honest place the question can be answered: a rebuild is the one
+    /// path where a fresh emulator is handed a capped buffer, and this is the
+    /// one line that hands it over.
+    ///
+    /// **Reported for every seeding, including the whole ones**, which is what
+    /// makes this the notice's only writer. A pane re-seeded for another run
+    /// must stop claiming the first run's gap; a pane built after a reattach is
+    /// seeded from the daemon's repaint and must stop claiming any gap at all.
+    let seeded: (_ fromTrimmedBuffer: Bool) -> Void
 
-    func makeUIView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: .zero)
+    func makeUIView(context: Context) -> TerminalPaneView {
+        let view = TerminalPaneView(frame: .zero)
         view.terminalDelegate = context.coordinator
         // The hosted tmux server runs `mouse on` (that is what makes wheel
         // scrolling work at the Mac), so it advertises mouse tracking to every
@@ -864,18 +1141,22 @@ struct SwiftTermView: UIViewRepresentable {
         view.installColors(
             CC.ansi.table.map { Color(red: $0.red, green: $0.green, blue: $0.blue) })
         view.inputAccessoryView = context.coordinator.makeAccessory(for: view)
-        context.coordinator.attach(view: view, session: session)
+        view.acceptsInput = acceptsInput
+        context.coordinator.attach(
+            view: view, session: session, sessionUID: sessionUID, seeded: seeded)
         return view
     }
 
-    func updateUIView(_ view: TerminalView, context: Context) {
+    func updateUIView(_ view: TerminalPaneView, context: Context) {
         if abs(view.font.pointSize - fontSize) > 0.5 {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
-        context.coordinator.attach(view: view, session: session)
+        view.acceptsInput = acceptsInput
+        context.coordinator.attach(
+            view: view, session: session, sessionUID: sessionUID, seeded: seeded)
     }
 
-    static func dismantleUIView(_ view: TerminalView, coordinator: Coordinator) {
+    static func dismantleUIView(_ view: TerminalPaneView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
@@ -892,29 +1173,51 @@ struct SwiftTermView: UIViewRepresentable {
     /// state this class can touch off the main actor at all.
     final class Coordinator: NSObject, TerminalViewDelegate, @unchecked Sendable {
         @MainActor private weak var view: TerminalView?
-        @MainActor private var session: SSHTerminalSession?
+        @MainActor private var session: TerminalCarrier?
         @MainActor private var accessory: UIHostingController<TerminalKeyRow>?
-        @MainActor private var replayed = false
+        /// The run whose transcript has been replayed into this emulator, so a
+        /// rebuild replays once and a *different* run replays its own rather
+        /// than inheriting a screen it never wrote.
+        @MainActor private var replayedRun: String?
 
         @MainActor
-        func attach(view: TerminalView, session: SSHTerminalSession) {
+        func attach(
+            view: TerminalView, session: TerminalCarrier, sessionUID: String,
+            seeded: (_ fromTrimmedBuffer: Bool) -> Void
+        ) {
             self.view = view
-            guard self.session !== session || !replayed else { return }
             self.session = session
+            guard replayedRun != sessionUID else { return }
+            replayedRun = sessionUID
             // Replay what already arrived, so switching tabs or rotating does
-            // not show an empty terminal for a live session.
-            if !replayed, !session.transcript.isEmpty {
-                view.feed(byteArray: ArraySlice(session.transcript))
+            // not show an empty terminal for a live session. Asked for by run:
+            // the carrier is shared, and what it holds may be another run's.
+            let transcript = session.transcript(forRun: sessionUID)
+            if !transcript.isEmpty {
+                view.feed(byteArray: transcript)
             }
-            replayed = true
-            session.onOutput = { [weak view] bytes in
+            // A trimmed buffer begins in the middle of the session, and a pane
+            // that draws it without saying so presents a partial tail as the
+            // whole of what was printed. Reported *from here* rather than read
+            // off the carrier by the view, because this is the only place a
+            // genuinely fresh emulator is seeded: the pane that survived the
+            // rebuild still holds every byte in its own scrollback, and telling
+            // that reader something is missing would be the lie in the other
+            // direction.
+            seeded(!transcript.isEmpty && session.transcriptIsTruncated)
+            session.deliverOutput(to: self) { [weak view] bytes in
                 view?.feed(byteArray: bytes)
             }
         }
 
         @MainActor
         func detach() {
-            session?.onOutput = nil
+            // Stamped with this coordinator, so a teardown that lands after the
+            // next emulator is already receiving cannot silence it. SwiftUI
+            // routinely builds the replacement before dismantling what it
+            // replaces, and a live terminal drawing nothing reads as a hung
+            // agent rather than as a bug on this side.
+            session?.stopDeliveringOutput(to: self)
             accessory = nil
         }
 
@@ -926,7 +1229,10 @@ struct SwiftTermView: UIViewRepresentable {
                 onControl: { [weak self] in self?.toggleControl() },
                 onInterrupt: { [weak self] in self?.sendKey([0x03]) },
                 onArrow: { [weak self] direction in self?.sendArrow(direction) },
-                isControlActive: { [weak self] in self?.view?.controlModifier ?? false })
+                // The view in hand, not the one stored on this coordinator:
+                // `attach` sets that a line later than this is built, and a cap
+                // reading a modifier off `nil` is dark while Control is held.
+                isControlActive: { [weak view] in view?.controlModifier ?? false })
             let controller = UIHostingController(rootView: row)
             controller.view.backgroundColor = .clear
             // An input accessory needs a concrete height; the width follows the
@@ -1040,6 +1346,9 @@ struct TerminalKeyRow: View {
     let onArrow: (Arrow) -> Void
     let isControlActive: () -> Bool
 
+    /// Whether the ctrl cap is lit. SwiftTerm owns the modifier itself and
+    /// clears it as soon as it has applied it to one character, so this is
+    /// never written from a guess about what it holds — only re-read from it.
     @State private var controlOn = false
 
     var body: some View {
@@ -1069,372 +1378,19 @@ struct TerminalKeyRow: View {
         .background(CC.color.surfaceRaised)
         .overlay(alignment: .top) { CCHairline() }
         .onAppear { controlOn = isControlActive() }
-    }
-}
-
-// MARK: - SSH setup
-
-/// What to switch on at the Mac, with the exact commands — and nothing that
-/// switches anything on from here.
-///
-/// The highest-friction screen in the app, and the one where the product's
-/// promise is most concrete: *CodeConnect never enables a system service on your
-/// Mac.* Every string the daemon supplied is rendered verbatim.
-struct SSHSetupCard: View {
-    let guidance: SSHSetupGuidance
-    let retry: () -> Void
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: CC.space.md) {
-                // The mark sits *above* the headline rather than beside it.
-                // Inline, it indented the title 28pt from the sentence
-                // underneath — one ragged line in an otherwise straight stack,
-                // and at AX5 a 40pt glyph wrapping against a 40pt headline.
-                // Above, every string in this block starts on the page column
-                // and the mark reads as an alarm rather than as a bullet.
-                VStack(alignment: .leading, spacing: CC.space.xs) {
-                    CCIcon("lock.slash", size: CC.size.iconLg, weight: .semibold)
-                        .foregroundStyle(CC.color.warning)
-                        .padding(.bottom, CC.space.xxs)
-
-                    Text(guidance.title)
-                        .ccType(CC.type.headline)
-                        .foregroundStyle(CC.text.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text(guidance.detail)
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .accessibilityElement(children: .combine)
-
-                CCCard(padding: 0) {
-                    VStack(spacing: 0) {
-                        ForEach(Array(guidance.steps.enumerated()), id: \.element.id) { index, step in
-                            if index > 0 { CCHairline() }
-                            CCStepRow(
-                                index: index + 1,
-                                title: step.title,
-                                message: Self.body(of: step),
-                                command: step.command
-                            ) {
-                                if Self.isRecommended(step) {
-                                    CCBadge("Recommended", tone: .success)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text(
-                    "CodeConnect never enables a system service on your Mac. These are things only you can turn on."
-                )
-                .ccType(CC.type.footnote)
-                .foregroundStyle(CC.text.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                CCButton("Try again", variant: .primary, size: .lg, fullWidth: true, action: retry)
-            }
-            .padding(CC.space.md)
+        // SwiftTerm clears `controlModifier` the moment it has applied it to a
+        // character, and posts this as it does. Without it the cap stays lit
+        // after `^C`, and the `d` typed next for `^D` reaches the agent's pane
+        // as a literal `d` under a cap still claiming Control is held — the
+        // wrong-character failure this row exists to prevent.
+        //
+        // The notification is the trigger, never the value: the modifier on the
+        // view stays the single source of truth, so all three paths that clear
+        // it — an ordinary character, a Kitty-protocol character, a mouse event
+        // — resolve to one answer that is read rather than inferred.
+        .onReceive(NotificationCenter.default.publisher(for: .terminalViewControlModifierReset)) {
+            _ in
+            controlOn = isControlActive()
         }
-        .accessibilityElement(children: .contain)
-    }
-
-    private static func isRecommended(_ step: SSHSetupGuidance.Step) -> Bool {
-        step.body.hasPrefix("Recommended")
-    }
-
-    /// The daemon's own sentence, minus the one word the badge beside it now
-    /// carries. Nothing else is edited — the daemon's guidance is rendered
-    /// verbatim, always — but rendering `RECOMMENDED` and "Recommended:" on the
-    /// same row reads as a bug rather than as emphasis.
-    private static func body(of step: SSHSetupGuidance.Step) -> String {
-        guard isRecommended(step) else { return step.body }
-        let stripped = step.body.replacingOccurrences(of: "Recommended: ", with: "")
-        return stripped.prefix(1).uppercased() + stripped.dropFirst()
-    }
-}
-
-// MARK: - Host key changed
-
-/// A changed host key is a hard stop, not a warning.
-///
-/// **The app's most serious screen**, and the one place the design is allowed to
-/// be alarming, because the situation is. The alarm is carried by the glyph and
-/// the border; the words stay legible, because red type at this length fails
-/// contrast and reads as a broken stylesheet rather than as danger.
-///
-/// The two fingerprints are diffed character by character and the differing
-/// characters are lit — nobody reads two 47-character strings correctly at 2am,
-/// so the component does it for them and shows its work.
-struct HostKeyChangedCard: View {
-    let change: SSHTerminalSession.HostKeyChange
-    let trustNew: () -> Void
-
-    @Environment(\.dynamicTypeSize) private var typeSize
-    @State private var confirming = false
-
-    /// **This card's own clock.**
-    ///
-    /// `PINNED 3D AGO` changes once an hour at most. It used to be handed
-    /// `AppModel.now`, which advances every second, so the whole alarm — two
-    /// diffed 47-character fingerprints, a wrapped command, a hold control — was
-    /// rebuilt once a second on the app's most serious screen, to redraw a
-    /// string that had not moved since the key was pinned.
-    ///
-    /// Read, not merely written. See `AgeTick.renderTime` for why that sentence
-    /// is here.
-    @State private var lastTick = Date()
-
-    private var pinnedClock: AgeClock { AgeClock(since: change.pinnedAt, scale: .age) }
-
-    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
-
-    /// **The spine, on the screen that most needs one.**
-    ///
-    /// The card measured four text columns before this: prose at 32, the
-    /// fingerprint labels at 48 inside a nested card, the mono block's content
-    /// at 44, and the headline at 68 because the shield pushed it. Now the
-    /// shield takes the 32–40 gutter, every string on the card starts at **52**,
-    /// and the two full-bleed structures — the hairlines and the fingerprint
-    /// band — run the card's whole width.
-    ///
-    /// 16 to the gutter, 8 of gutter, 12 of gap. Written as its three parts
-    /// rather than as `36` so the arithmetic is checkable against the two left
-    /// edges every other screen holds — 32 for marks, 52 for language.
-    private var textInset: CGFloat {
-        // At accessibility sizes the gutter is abandoned rather than defended:
-        // a 52pt inset on a 402pt screen leaves ~30 characters of measure at
-        // AX5, and a paragraph is worth more than a column here.
-        typeSize.isAccessibilitySize
-            ? CC.space.md : CC.space.md + CC.size.dot + CC.space.sm
-    }
-
-    /// The header's own leading inset — the *gutter*, so the shield hangs at
-    /// 32–40 and the title lands on 52 with the prose.
-    ///
-    /// Once the gutter is abandoned there is no gutter to hang in, so the
-    /// header takes the text inset like everything else. The two happen to be
-    /// the same 16 today; written as a derivation rather than as a repeated
-    /// constant, so a change to `textInset` cannot leave the title behind on a
-    /// column of its own — which is exactly how the title came to sit 72.80pt
-    /// right of the paragraph it heads.
-    private var headerInset: CGFloat {
-        typeSize.isAccessibilitySize ? textInset : CC.space.md
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: CC.space.md) {
-                header
-                    .padding(.leading, headerInset)
-                    .padding(.trailing, CC.space.md)
-                    .padding(.top, CC.space.md)
-
-                Text(
-                    "CodeConnect pinned a key for \(change.host):\(change.port) and is being offered a different one. That happens when a Mac is rebuilt or its host keys are regenerated, and it also happens when something else is answering on that address. Nothing has been sent."
-                )
-                .ccType(CC.type.body)
-                .foregroundStyle(CC.text.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, textInset)
-                .padding(.trailing, CC.space.md)
-
-                fingerprints
-
-                VStack(alignment: .leading, spacing: CC.space.xs) {
-                    Text("Check it at the Mac with")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                    // The kit's default — the grid wrap, with `↳` on the
-                    // continuation. A command is never truncated, anywhere. On
-                    // the highest-stakes screen in the product this line used to
-                    // run under the copy button and dissolve into a gradient at
-                    // `…key.pub`, which is precisely where a hostile suffix
-                    // would sit. No `wraps:` — that is the *prose* wrap, and a
-                    // command is not prose.
-                    CCMonoBlock("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", isSmall: true)
-                    Text("before you trust it.")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                }
-                .padding(.leading, textInset)
-                .padding(.trailing, CC.space.md)
-                // The block is a nested surface, and the two-left-edges rule has
-                // a corollary for those: its *text* belongs on this card's text
-                // column and its *border* hangs 12pt left of it. The card is the
-                // one place `textInset` is not a kit constant — it collapses to
-                // the card's own inset at accessibility sizes — so the column is
-                // declared rather than assumed, and the block reads it. Measured
-                // before this at AX5: every string on the card at 32.00 and the
-                // command at **44.00**, the last extra text edge here.
-                .ccColumnInset(textInset)
-
-                // Transparent fill, `danger` border and label. It fills solid
-                // only inside the confirmation dialog — a filled red button is
-                // the last confirmation, and this is not it.
-                //
-                // Inset on the card's own edge rather than the text column: a
-                // full-width control belongs to its container, which is why the
-                // pairing screen's primary spans the page and not the prose.
-                // **Neutral, not red.** Trusting a changed key destroys nothing,
-                // and red in this app means exactly one thing: this erases
-                // something. The warning lives where it belongs — the banner
-                // above, the fingerprint diff, and the confirmation that
-                // follows — none of which this button needs to repeat in the
-                // one colour reserved for `Forget this iPhone's SSH key`.
-                CCButton(
-                    "I checked - trust the new key", variant: .secondary, size: .lg,
-                    fullWidth: true
-                ) {
-                    confirming = true
-                }
-                .padding(.horizontal, CC.space.md)
-
-                // There is no dismiss path that silently continues. The only
-                // exits are trusting the key or leaving the tab.
-                Text(
-                    "Until you do, this terminal stays closed. Nothing was typed and nothing was sent."
-                )
-                .ccType(CC.type.footnote)
-                .foregroundStyle(CC.text.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, textInset)
-                .padding(.trailing, CC.space.md)
-                .padding(.bottom, CC.space.md)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // `danger` at 8% with a 60% border. Not a `CCCard`: the card takes
-            // its fill from the surface ladder, and this is the one surface in
-            // the product that is allowed to be tinted.
-            .ccSurface(
-                fill: CC.color.danger.opacity(0.08), radius: CC.radius.lg,
-                border: CC.color.danger.opacity(0.6))
-            .padding(CC.space.md)
-        }
-        .confirmationDialog(
-            "Trust the new host key?", isPresented: $confirming, titleVisibility: .visible
-        ) {
-            Button("Trust it", role: .destructive, action: trustNew)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Only do this if you verified the fingerprint at the Mac itself.")
-        }
-        .task(id: pinnedClock) { await AgeTick.follow(pinnedClock) { lastTick = $0 } }
-    }
-
-    /// The shield is a *gutter mark*, not a word in the headline: it takes the
-    /// 8pt column at 32–40 and is allowed to bleed symmetrically out of it, the
-    /// same trade `CCStepRow` documents for its index badge. The title starts
-    /// on 52 with every other string on the card.
-    ///
-    /// **At accessibility sizes the mark moves above the title**, exactly as
-    /// `SSHSetupCard` does with `lock.slash`. Kept inline, a scaled shield is
-    /// its own width plus a gap wide, and it pushed the title to **104.80**
-    /// while `textInset` moved every other string on the card *left* to 32 —
-    /// the one string that travelled the wrong way, +72.80pt from the paragraph
-    /// it heads, and the fourth text edge on a card that is allowed two. Above,
-    /// the mark and the title both start on the card's own scaled inset and the
-    /// alarm reads as an alarm rather than as a bullet.
-    private var header: some View {
-        CCAdaptiveStack(
-            horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs,
-            horizontalAlignment: .leading, verticalAlignment: .top
-        ) {
-            CCIcon("exclamationmark.shield.fill", size: CC.size.icon, weight: .semibold)
-                .foregroundStyle(CC.color.danger)
-                .frame(width: typeSize.isAccessibilitySize ? nil : CC.size.dot)
-
-            Text("The Mac's SSH key changed")
-                .ccType(CC.type.title)
-                .foregroundStyle(CC.text.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("The Mac's SSH key changed")
-    }
-
-    /// A full-bleed band, not a nested card.
-    ///
-    /// It used to be a `CCCard` inside the alarm surface: a second 1pt border
-    /// and a second 12pt radius 16pt inside the first — boxes inside boxes, and
-    /// it pushed the two fingerprints onto a third column at 48. A
-    /// `surfaceRaised` band with hairlines top and bottom groups them exactly as
-    /// well, costs no border, and puts the labels on 52 with the prose above
-    /// them.
-    ///
-    /// What the band keeps, because between them they are how a reader tells the
-    /// two keys apart before reading either: `PINNED 3D AGO` in `success` over
-    /// one key, `OFFERED NOW` in `danger` over the other, and the differing
-    /// characters lit by `CCFingerprint`.
-    private var fingerprints: some View {
-        VStack(spacing: 0) {
-            CCHairline(color: CC.color.danger.opacity(0.3))
-            fingerprint(
-                label: "Pinned \(Format.age(since: change.pinnedAt, now: now)) ago",
-                tone: .success,
-                // **Diffed too.** It is *the two* fingerprints that are diffed
-                // against each other; this line was passed `comparedTo: nil` —
-                // so it rendered as one uniform run at `textSecondary` and its
-                // own differing character was the only one on the card not lit.
-                // Worse, at #A1A1A1 it measured **1.49× the contrast of the
-                // offered key's body** (7.19:1 against 4.83:1), which put the
-                // second-brightest thing in the band on the 49 characters
-                // carrying no information — the emphasis inversion this
-                // component exists to prevent, applied one level up. Both lines
-                // now run one rule: matching characters `textTertiary`, the
-                // character that moved at full `text`, and — because both keys
-                // wrap at the same character — the two lit glyphs sit one
-                // directly above the other.
-                //
-                // `name:` is not decoration on this screen: the two blocks
-                // below are the same 47 characters differing in a handful of
-                // places, and each spells itself out one character at a time so
-                // it can be checked against the Mac. Spoken without a name they
-                // are two indistinguishable streams of letters — and a label on
-                // the *outside* cannot fix that, because it would replace the
-                // spelling rather than introduce it.
-                //
-                // `referenceName:` because a diffed line names what it is being
-                // compared against, and this one is compared against the *other*
-                // key. Without it the spoken label read "The key you pinned: …
-                // 1 character differs from the pinned key" — a line naming
-                // itself as its own reference, on the screen where knowing which
-                // key is which is the entire task.
-                view: CCFingerprint.fingerprint(
-                    change.pinned, comparedTo: change.offered, name: "The key you pinned",
-                    referenceName: "the key offered now"))
-            CCHairline(color: CC.color.danger.opacity(0.3))
-            fingerprint(
-                label: "Offered now",
-                tone: .danger,
-                // Diffed against the pinned key: the characters that moved
-                // are the bright ones.
-                view: CCFingerprint.fingerprint(
-                    change.offered, comparedTo: change.pinned, name: "The key offered now"))
-            CCHairline(color: CC.color.danger.opacity(0.3))
-        }
-        .background(CC.color.surfaceRaised)
-    }
-
-    private func fingerprint(label: String, tone: CCTone, view: CCFingerprint) -> some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
-            // `fieldLabel`: this *names the value underneath it* — which key,
-            // and how old — exactly as `ACCOUNT NAME` names the field below it.
-            // The one documented departure is the colour: `success` over the
-            // pinned key and `danger` over the offered one is the whole reason
-            // a reader can tell the two apart before reading either.
-            Text(label.uppercased())
-                .ccType(CC.type.fieldLabel)
-                .foregroundStyle(tone.color)
-                .accessibilityLabel(label)
-            view
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, textInset)
-        .padding(.trailing, CC.space.md)
-        .padding(.vertical, CC.space.md)
     }
 }

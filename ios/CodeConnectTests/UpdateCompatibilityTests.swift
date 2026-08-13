@@ -31,8 +31,7 @@ final class UpdateCompatibilityTests: XCTestCase {
             capabilities: capabilities(push: false),
             deviceToken: nil,
             deviceID: nil,
-            deviceName: nil,
-            sshKeyInstalled: nil)
+            deviceName: nil)
     }
 
     /// A legacy daemon that predates the server's own `protocol_mismatch`

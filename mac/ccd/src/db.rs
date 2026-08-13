@@ -288,13 +288,12 @@ impl Db {
     pub async fn create_pairing_code(
         &self,
         code_hash: String,
-        allow_ssh: bool,
         expires_at: String,
         expires_ms: i64,
         now_ms: i64,
     ) -> Result<()> {
         self.run(move |store| {
-            store.create_pairing_code(&code_hash, allow_ssh, &expires_at, expires_ms, now_ms)
+            store.create_pairing_code(&code_hash, &expires_at, expires_ms, now_ms)
         })
         .await
     }
@@ -336,34 +335,12 @@ impl Db {
             .await
     }
 
-    pub async fn set_ssh_installed(
-        &self,
-        device_id: String,
-        installed: bool,
-        fingerprint: Option<String>,
-    ) -> Result<()> {
-        self.run(move |store| {
-            store.set_ssh_installed(&device_id, installed, fingerprint.as_deref())
-        })
-        .await
-    }
-
-    /// Device summaries with the SSH state read from the file rather than the
-    /// row. Done here, on the blocking pool, because `is_installed` reads
-    /// `~/.ssh/authorized_keys` — filesystem I/O that has no more business on a
-    /// runtime worker than SQLite does.
     pub async fn device_summaries(&self) -> Result<Vec<DeviceSummary>> {
         self.run(|store| {
             Ok(store
                 .list_devices()?
                 .iter()
-                .map(|row| {
-                    let mut summary = row.to_summary();
-                    // The file is the truth. A key removed by hand outside
-                    // CodeConnect must not keep showing as installed.
-                    summary.ssh_key_installed = crate::ssh_keys::is_installed(&row.device_id);
-                    summary
-                })
+                .map(DeviceRow::to_summary)
                 .collect())
         })
         .await

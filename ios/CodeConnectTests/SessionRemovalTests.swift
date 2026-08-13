@@ -84,7 +84,7 @@ final class SessionRemovalTests: XCTestCase {
             protocolVersion: 1, protocolMinor: 6,
             capabilities: capabilities(
                 #"{"can_approve_reliably":true,"fail_mode":"fail_open","answer_path":"hook_return","hold_secs":25,"send_text":true,"capture":true,"push":true,"tls":false}"#),
-            deviceName: nil, sshKeyInstalled: nil)
+            deviceName: nil)
         XCTAssertFalse(profile.removesSessions)
     }
 
@@ -93,7 +93,7 @@ final class SessionRemovalTests: XCTestCase {
             protocolVersion: 1, protocolMinor: 7,
             capabilities: capabilities(
                 #"{"can_approve_reliably":true,"fail_mode":"fail_open","answer_path":"hook_return","hold_secs":25,"send_text":true,"capture":true,"push":true,"tls":false,"delete_session":true}"#),
-            deviceName: nil, sshKeyInstalled: nil)
+            deviceName: nil)
         XCTAssertTrue(profile.removesSessions)
     }
 
