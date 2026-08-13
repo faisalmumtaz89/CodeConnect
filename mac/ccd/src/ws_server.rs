@@ -7003,6 +7003,16 @@ mod tests {
         // `OPEN_GATE`, and either one turns the refusal it is about into
         // `tmux_unavailable`. A guard only excludes when both sides hold it.
         let _serial = crate::terminal::fixture_test_guard().await;
+        // Only a present tmux can answer `session_not_hosted`: it takes the
+        // running binary to ask the server-less socket and be told no session
+        // is there. Absent the binary the open returns `tmux_unavailable`, a
+        // true answer about that machine but not the distinction this proves, so
+        // skip where the fixture tests skip rather than assert one this machine
+        // cannot draw.
+        if protocol::tmux::tmux_bin().is_none() {
+            eprintln!("skipped: no tmux");
+            return;
+        }
         let (daemon, device) = daemon_with_a_device();
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
