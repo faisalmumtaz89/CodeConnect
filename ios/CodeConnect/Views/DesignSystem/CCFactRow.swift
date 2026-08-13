@@ -9,8 +9,8 @@ enum CCFactLabelStyle {
     /// `body` `textSecondary`. The label *names* a fact and the value answers
     /// it: `Round trip` / `18ms`. The common case.
     case prose
-    /// `mono` `text`. The row **is** the identifier — a pinned host, a file
-    /// path — and whatever sits at the trailing edge is its age.
+    /// `mono` `text`. The row **is** the identifier — the daemon's host name —
+    /// and whatever sits at the trailing edge is its age.
     case identifier
     /// `mono` `textSecondary`. A machine-written key the app did not choose the
     /// spelling of, whose *value* is the point: `answer_path` / `hook`.
@@ -24,10 +24,9 @@ enum CCFactLabelStyle {
 /// its colours are the system's, and it is drawn for a light-mode grouped list.
 ///
 /// It exists because the same fifteen lines were being written out by hand on
-/// Link Health, in Settings and beside every pinned host key, and three
-/// hand-written copies of one row is three chances for one of them to print a
-/// measurement in the wrong colour. Three rules it enforces that a hand-written
-/// row forgets:
+/// Link Health and in Settings, and hand-written copies of one row are that
+/// many chances for one of them to print a measurement in the wrong colour.
+/// Three rules it enforces that a hand-written row forgets:
 ///
 ///  * **A value nobody measured renders `—`, never `0`.** `0` is a measurement.
 ///    That is what `isUnmeasured` is for, and it is the one permitted use of
@@ -93,10 +92,9 @@ struct CCFactRow<Value: View, Detail: View>: View {
                 }
                 detail()
                     // Where this row's own text edge ended up, so a nested
-                    // surface in this slot — the daemon's verbatim note, a
-                    // fingerprint — hangs from the label above it instead of
-                    // adding a second text edge under it. See
-                    // `CCColumn.hang(from:)`.
+                    // surface in this slot — the daemon's verbatim note — hangs
+                    // from the label above it instead of adding a second text
+                    // edge under it. See `CCColumn.hang(from:)`.
                     .ccColumnInset(max(columnInset, CC.space.md))
             }
             // **The container's edge, not the content column.** A fact row is a
@@ -117,9 +115,8 @@ struct CCFactRow<Value: View, Detail: View>: View {
 
             if separator { CCHairline() }
         }
-        // A row whose detail is a `CCMonoBlock` or a `CCFingerprint` keeps those
-        // as their own elements: the block has a copy button and the
-        // fingerprint spells itself character by character, and `.combine`
+        // A row whose detail is a `CCMonoBlock` keeps it as its own element:
+        // the block has a copy button and its own spoken form, and `.combine`
         // would flatten both into one unreadable run.
         .accessibilityElement(children: Detail.self == EmptyView.self ? .combine : .contain)
         .accessibilityLabel(spokenLabel)
@@ -232,9 +229,8 @@ extension CCFactRow where Detail == EmptyView {
 }
 
 extension CCFactRow where Value == EmptyView {
-    /// A fact whose body is underneath it: a pinned key's fingerprint, a
-    /// daemon's verbatim error. The trailing edge carries the age and nothing
-    /// else.
+    /// A fact whose body is underneath it: a daemon's verbatim error, a command
+    /// as it will be run. The trailing edge carries the age and nothing else.
     init(
         _ label: String,
         labelStyle: CCFactLabelStyle = .prose,

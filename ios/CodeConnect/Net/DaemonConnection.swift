@@ -95,11 +95,17 @@ final class DaemonConnection {
             protocolVersion: helloAck.protocolVersion,
             protocolMinor: helloAck.protocolMinor,
             capabilities: helloAck.capabilities,
-            deviceName: helloAck.deviceName,
-            sshKeyInstalled: helloAck.sshKeyInstalled)
+            deviceName: helloAck.deviceName)
     }
     /// When a frame last arrived from the daemon. The only honest basis for a
     /// freshness claim — a socket that is open but silent is not fresh.
+    ///
+    /// **Written at most once a second**, by `noteContact`. This is observable
+    /// state on an `@Observable` class that every mounted Fleet row reads, and
+    /// the terminal puts frames on this connection at chunk rate — so writing it
+    /// per frame invalidated the whole fleet a hundred times a second. Nothing
+    /// is lost: every surface renders it as an age in whole seconds, and a stamp
+    /// that is under a second old is one that would print the same string.
     private(set) var lastContactAt: Date?
     private(set) var serverTime: String?
     private(set) var reconnectCount = 0
@@ -135,6 +141,15 @@ final class DaemonConnection {
     /// Fired when the transport that actually worked is not the one that was
     /// stored, so the pairing can remember it.
     var onTransportSettled: ((Bool) -> Void)?
+    /// The live terminal's own delivery channel: `terminal_attached`,
+    /// `terminal_output`, `terminal_credit` and `terminal_closed`, in arrival
+    /// order. Separate from `onMessage` because the terminal is a byte stream
+    /// with its own flow control, and its ordering must not depend on anything
+    /// the model chooses to do with a message.
+    var onTerminal: ((ServerMessage) -> Void)?
+    /// Fired when a connection that was up goes down, so a live terminal learns
+    /// its carrier is gone rather than showing the last thing it received.
+    var onDisconnected: (() -> Void)?
 
     /// Whether the *current* attempt is `wss://`. Reported, never assumed: the
     /// pairing's stored preference is only a starting point.
@@ -163,13 +178,36 @@ final class DaemonConnection {
 
     private var endpoint: DaemonEndpoint?
 
+    /// One decoder and one encoder for the life of the connection.
+    ///
+    /// Both are stateless configuration objects and this class is `@MainActor`,
+    /// so there is exactly one caller of each. Building a fresh pair per frame
+    /// was allocation on the hottest path this app has: a live terminal is
+    /// hundreds of frames a second through the decoder, and every keystroke and
+    /// credit grant a frame through the encoder.
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    /// Record that a frame arrived, at the resolution anything renders it.
+    ///
+    /// The write is skipped while the stored stamp is under a second old. It is
+    /// not a sampling *of* the fact — every frame really does refresh the link —
+    /// it is a sampling of the write, because the write is what invalidates
+    /// every observer of this object.
+    private func noteContact() {
+        let now = Date()
+        if let lastContactAt, now.timeIntervalSince(lastContactAt) < Self.contactStampInterval {
+            return
+        }
+        lastContactAt = now
+    }
+
+    private static let contactStampInterval: TimeInterval = 1
+
     /// Whether this connection still holds a credential that can only be spent
     /// once. False from the moment a pairing exchange has upgraded it to the
     /// durable token, which is the invariant `PairingUpgradeTests` pins.
     var holdsPairingCode: Bool { endpoint?.isPairingCode ?? false }
-    /// Offered on every hello. Only a daemon whose operator ran `codeconnect pair --ssh`
-    /// does anything with it.
-    private var sshPublicKey: String?
     /// True while the ladder is trying the scheme the pairing does *not* prefer.
     private var schemeAlternate = false
     private var supervisor: Task<Void, Never>?
@@ -213,15 +251,14 @@ final class DaemonConnection {
 
     // MARK: - Lifecycle
 
-    func start(endpoint: DaemonEndpoint, sshPublicKey: String? = nil) {
-        if self.endpoint == endpoint, self.sshPublicKey == sshPublicKey, supervisor != nil,
+    func start(endpoint: DaemonEndpoint) {
+        if self.endpoint == endpoint, supervisor != nil,
             !isFailed
         {
             return
         }
         stop()
         self.endpoint = endpoint
-        self.sshPublicKey = sshPublicKey
         schemeAlternate = false
         lastErrorMessage = nil
         lastErrorAt = nil
@@ -561,8 +598,7 @@ final class DaemonConnection {
             .hello(
                 credential: credential,
                 clientID: Self.installationID,
-                clientName: Self.clientName,
-                sshPublicKey: sshPublicKey))
+                clientName: Self.clientName))
 
         let pinger = Task { [weak self] in await self?.pingLoop() }
         defer { pinger.cancel() }
@@ -593,18 +629,25 @@ final class DaemonConnection {
                 throw ConnectionError.transport((error as NSError).localizedDescription)
             }
 
-            let text: String
+            // Straight to the bytes the decoder wants. Every frame the daemon
+            // sends is text — terminal output included, since pane bytes ride
+            // base64 inside the JSON — so the transcode below is the one this
+            // path always paid and the `.data` arm is for a frame it does not
+            // send. It is kept because the API can hand one over and dropping
+            // it would lose the connection over a shape, not because it saves
+            // anything today.
+            let payload: Data
             switch message {
             case .string(let value):
-                text = value
+                payload = Data(value.utf8)
             case .data(let value):
-                text = String(decoding: value, as: UTF8.self)
+                payload = value
             @unknown default:
                 continue
             }
 
-            lastContactAt = Date()
-            guard let decoded = try? JSONDecoder().decode(ServerMessage.self, from: Data(text.utf8))
+            noteContact()
+            guard let decoded = try? decoder.decode(ServerMessage.self, from: payload)
             else {
                 // An undecodable frame is a bug worth seeing, never a reason to
                 // drop a working connection.
@@ -660,8 +703,14 @@ final class DaemonConnection {
         guard socket == nil || self.socket === socket else { return }
         self.socket = nil
         self.session = nil
-        if phase.isConnected { phase = .connecting }
+        let wasConnected = phase.isConnected
+        if wasConnected { phase = .connecting }
         failAllWaiters(with: ConnectionError.notConnected)
+        // A live terminal rides this socket. Telling it now is what keeps a
+        // dead terminal from looking live: the alternative is a view still
+        // showing the last bytes it received, which is the one thing the
+        // terminal is never allowed to do.
+        if wasConnected { onDisconnected?() }
     }
 
     private func closeCurrentSocket() {
@@ -681,8 +730,11 @@ final class DaemonConnection {
     // MARK: - Sending
 
     func send(_ message: ClientMessage) async throws {
+        #if DEBUG
+            if let sendStub { return try sendStub(message) }
+        #endif
         guard let socket else { throw ConnectionError.notConnected }
-        let data = try JSONEncoder().encode(message)
+        let data = try encoder.encode(message)
         guard data.count <= Wire.maxClientMessageBytes else {
             throw ConnectionError.transport("Message too large for the daemon to accept")
         }
@@ -1007,6 +1059,12 @@ final class DaemonConnection {
             // The one place a string arrives having been written by the daemon.
             lastDaemonErrorMessage = lastErrorMessage
             lastDaemonErrorAt = lastErrorAt
+        case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
+            // A stream, not a request/response: there is no waiter to resolve,
+            // and the carrier — not the model — owns the sequence. Delivered on
+            // its own channel so terminal bytes never depend on the model's
+            // dispatch, and in arrival order like everything else here.
+            onTerminal?(message)
         case .pong, .sessions, .event, .unknown:
             break
         }
@@ -1084,6 +1142,25 @@ final class DaemonConnection {
         var catalogStub: ((String) async throws -> CommandCatalogResult)?
         private(set) var sendTextIdentities: [(requestID: String?, payloadHash: String?)] = []
 
+        /// Test seam: take a frame here instead of writing it to the socket.
+        ///
+        /// **Without it the terminal's own screens are unreachable.** The
+        /// carrier reaches `.attached` only by sending `terminal_attach` and
+        /// being answered for the id it chose, and that id is private and
+        /// unguessable by design. An `AppModel` built in a test has no socket,
+        /// so the send fails and the carrier ends the terminal — which leaves
+        /// every screen past the connect card provable only by asserting things
+        /// about the carrier a tab renders, never about the tab. Answering here
+        /// drives the real carrier through the real connection into the real
+        /// view. Throwing here is how a *failed* write is reached, which is the
+        /// other half nothing else can stage.
+        ///
+        /// It stands in for the socket and the framing both, so a test holding
+        /// it proves what the carrier does, not what goes on the wire. The wire
+        /// shape is asserted directly, against the encoder, in
+        /// `TerminalCarrierTests`.
+        var sendStub: ((ClientMessage) throws -> Void)?
+
         /// Test seam: claim a set of capabilities without a handshake.
         ///
         /// `DaemonProfile` is derived from the ack, so a test that wants to
@@ -1100,7 +1177,7 @@ final class DaemonConnection {
             helloAck = HelloAck(
                 protocolVersion: Wire.protocolVersion, protocolMinor: minor,
                 serverTime: "", capabilities: capabilities, deviceToken: nil,
-                deviceID: deviceID, deviceName: nil, sshKeyInstalled: nil)
+                deviceID: deviceID, deviceName: nil)
             self.capabilities = capabilities
         }
     #endif
@@ -1109,8 +1186,7 @@ final class DaemonConnection {
     // MARK: - Identity
 
     /// Stable per-install id so the daemon's logs can tell two phones apart.
-    /// Shared with the SSH key comment, so one device is one identity wherever
-    /// it shows up on the Mac.
+    /// One device is one identity wherever it shows up on the Mac.
     private static var installationID: String { DeviceIdentity.installationID }
 
     private static let clientName = "CodeConnect iPhone"

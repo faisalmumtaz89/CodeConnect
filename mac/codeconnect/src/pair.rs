@@ -1,4 +1,4 @@
-//! `codeconnect pair`, `codeconnect devices`, `codeconnect revoke`, `codeconnect ssh-revoke`.
+//! `codeconnect pair`, `codeconnect devices`, `codeconnect revoke`.
 //!
 //! ## Why the QR is drawn with explicit colours
 //!
@@ -14,14 +14,6 @@
 //! stays about 45 columns wide and 25 rows tall — small enough to fit a normal
 //! terminal without scrolling, which matters because a QR split across a scroll
 //! boundary cannot be scanned at all.
-//!
-//! ## Why `--ssh` is a flag on this command
-//!
-//! Consent to install an SSH key has to be expressed at the Mac's keyboard,
-//! bound to one pairing, and impossible for the phone to request on its own.
-//! A flag on the command that mints the code is exactly that: it lives and dies
-//! with the five-minute code (`ccd` stores the permission alongside it), and no
-//! amount of anything the phone sends can turn it on.
 
 use std::io::IsTerminal;
 
@@ -40,17 +32,13 @@ const INK: &str = "\u{1b}[30;47m";
 const RESET: &str = "\u{1b}[0m";
 
 pub fn pair(args: &[String]) -> Result<()> {
-    let mut allow_ssh = false;
-    for arg in args {
-        match arg.as_str() {
-            "--ssh" => allow_ssh = true,
-            other => bail!("unknown option {other:?}; usage: codeconnect pair [--ssh]"),
-        }
+    if let Some(first) = args.first() {
+        bail!("unknown option {first:?}; usage: codeconnect pair");
     }
 
     let reply = daemon::request(&ClientFrame::CreatePairing {
         ttl_secs: PAIRING_TTL_SECS,
-        allow_ssh,
+        allow_ssh: false,
     })?;
     let DaemonFrame::Pairing {
         code,
@@ -58,7 +46,7 @@ pub fn pair(args: &[String]) -> Result<()> {
         host,
         port,
         tls,
-        allow_ssh,
+        ..
     } = reply
     else {
         bail!("unexpected reply from ccd: {reply:?}");
@@ -110,32 +98,14 @@ pub fn pair(args: &[String]) -> Result<()> {
     println!("  {json}");
     println!();
 
-    if !tls {
-        // Said plainly rather than buried: the operator is choosing a transport
-        // here, and "no certificate" is a fact about their setup, not a bug.
-        //
-        // The claim about Tailscale is only true because `unreachable_host` has
-        // already refused every address that is not on the tailnet. It used to be
-        // printed unconditionally, which meant the one case where it was false —
-        // a loopback host, no tailnet involved at all — was also the one case
-        // where it was reassuring somebody about a code that could never work.
-        println!("  note: this daemon has no tailscale certificate, so the app will");
-        println!("        connect over ws://. Tailscale still encrypts the tailnet link.");
-        println!();
-    } else if host.parse::<std::net::IpAddr>().is_ok() {
-        println!("  warning: TLS is on but the host above is an IP address. The");
-        println!("           certificate is issued for a MagicDNS name and will not");
-        println!("           validate against an IP.");
+    let advisory = transport_advisory(tls, &host);
+    if !advisory.is_empty() {
+        for line in advisory {
+            println!("{line}");
+        }
         println!();
     }
 
-    if allow_ssh {
-        println!("  --ssh: if the app offers an ed25519 public key while redeeming");
-        println!("         this code, it will be appended to ~/.ssh/authorized_keys");
-        println!("         and that device will be able to open a shell on this Mac.");
-        println!("         Remove it later with `codeconnect ssh-revoke <device>`.");
-        println!();
-    }
     println!(
         "  the code is single-use and expires in {} minutes.",
         PAIRING_TTL_SECS / 60
@@ -175,13 +145,10 @@ pub fn devices(args: &[String]) -> Result<()> {
     // the daemon appends when a second device claims it. At 18 the two read as
     // "CodeConnect iPhone" and "CodeConnect iPhon…", which is a poor thing to
     // choose between when the choice is which credential to revoke.
-    println!(
-        "{:<14} {:<24} {:<10} {:<5} LAST SEEN",
-        "DEVICE", "NAME", "STATUS", "SSH"
-    );
+    println!("{:<14} {:<24} {:<10} LAST SEEN", "DEVICE", "NAME", "STATUS");
     for device in &devices {
         println!(
-            "{:<14} {:<24} {:<10} {:<5} {}",
+            "{:<14} {:<24} {:<10} {}",
             device.device_id,
             truncate(&device.name, 24),
             if device.is_active() {
@@ -189,56 +156,85 @@ pub fn devices(args: &[String]) -> Result<()> {
             } else {
                 "revoked"
             },
-            if device.ssh_key_installed { "yes" } else { "-" },
             device.last_seen_at.as_deref().unwrap_or("never"),
         );
-    }
-    // Only printed when there is one, and worth the line: it is how an operator
-    // checks that the key on the Mac is the key on the phone.
-    for device in devices.iter().filter(|d| d.ssh_fingerprint.is_some()) {
-        if device.ssh_key_installed {
-            println!(
-                "\n{}  ssh key {}",
-                device.device_id,
-                device.ssh_fingerprint.as_deref().unwrap_or("")
-            );
-        }
     }
     Ok(())
 }
 
-pub fn revoke(args: &[String], ssh_only: bool) -> Result<()> {
+pub fn revoke(args: &[String]) -> Result<()> {
     let Some(device) = args.first() else {
-        bail!(
-            "usage: cc {} <device>   (`codeconnect devices` lists them)",
-            if ssh_only { "ssh-revoke" } else { "revoke" }
-        );
+        bail!("usage: cc revoke <device>   (`codeconnect devices` lists them)");
     };
     let reply = daemon::request(&ClientFrame::RevokeDevice {
         device: device.clone(),
-        ssh_only,
+        ssh_only: false,
     })?;
     let DaemonFrame::Revoked {
         device,
         token_revoked,
-        ssh_key_removed,
+        ..
     } = reply
     else {
         bail!("unexpected reply from ccd: {reply:?}");
     };
 
     println!("{} ({})", device.device_id, device.name);
-    match (token_revoked, ssh_only) {
-        (true, _) => println!("  token     revoked; that device can no longer connect"),
-        (false, true) => println!("  token     left alone (--ssh-revoke only removes the key)"),
-        (false, false) => println!("  token     was already revoked"),
-    }
-    if ssh_key_removed {
-        println!("  ssh key   removed from ~/.ssh/authorized_keys");
+    if token_revoked {
+        println!("  token     revoked; that device can no longer connect");
     } else {
-        println!("  ssh key   none was installed");
+        println!("  token     was already revoked");
     }
     Ok(())
+}
+
+/// What to say about the transport under the QR, or nothing when there is
+/// nothing to say. Lines carry their own indentation, so what is asserted here
+/// is what reaches the screen.
+///
+/// **A note about a transport has to be a fact about a transport.** It lives
+/// out here rather than inside [`pair`] because that is the only way any of it
+/// can be checked: `pair` needs a daemon answering the socket to get as far as
+/// the line that prints this, so every claim it made used to ship untested.
+///
+/// The plaintext arm names no network, and that is the whole of the fix.
+/// `tls == false` establishes exactly one thing — this daemon serves `ws://` —
+/// and the shim holds no second fact to build on. It never sees the bind
+/// address, and `host` is not a stand-in for one: an explicit non-tailnet
+/// `ws_bind` with `ws_allow_plaintext` set leaves `ccd` advertising the LAN
+/// address it listens on, and [`unreachable_host`] passes every private
+/// address through on purpose. That operator used to be answered with
+/// "Tailscale still encrypts the tailnet link" — reassurance about a tunnel
+/// carrying none of it, printed over the one configuration where the pairing
+/// code really does cross a network in the clear. The comment that justified
+/// it said `unreachable_host` had already refused every address not on the
+/// tailnet; it refuses addresses that do not *route*, which is a different set
+/// and never held `192.168.0.0/16`.
+///
+/// Nor can the host be classified into the claim. `100.64.0.0/10` is where
+/// Tailscale allocates and is also ordinary carrier-grade NAT, and a
+/// MagicDNS-shaped name is a string anybody may put in `tls_hostname`. Only
+/// `ccd` knows whether its listener sits on one of this node's own tailnet
+/// addresses — it decides exactly that at bind time — and it keeps the answer
+/// to itself: it reaches neither the `Daemon` state nor the `Pairing` frame.
+/// Until it does, the honest note is this one.
+fn transport_advisory(tls: bool, host: &str) -> &'static [&'static str] {
+    if !tls {
+        return &[
+            "  note: this daemon is not serving TLS, so the app will connect over",
+            "        ws://. CodeConnect encrypts nothing on that connection: the",
+            "        pairing code, the token it returns and every message after",
+            "        them are exactly as private as the path to the host above.",
+        ];
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return &[
+            "  warning: TLS is on but the host above is an IP address. The",
+            "           certificate is issued for a MagicDNS name and will not",
+            "           validate against an IP.",
+        ];
+    }
+    &[]
 }
 
 /// Render `payload` as a QR code on stdout.
@@ -336,6 +332,96 @@ mod tests {
             art.lines().count() <= 30,
             "a QR taller than the terminal scrolls, and half a QR cannot be scanned"
         );
+    }
+
+    #[test]
+    fn a_plaintext_endpoint_is_never_promised_a_network_that_encrypts_it() {
+        // The shipped configuration this arm exists for: an explicit LAN
+        // `ws_bind`, `ws_allow_plaintext` set, and no certificate for a name
+        // that reaches the bind. `ccd` then advertises the address it listens
+        // on — its own `an_explicit_lan_bind_advertises_the_address_it_listens_on`
+        // asserts host `192.168.1.20` with `tls: false` — and the check above
+        // waves it through, which is what puts this note on the screen. No
+        // tailnet is anywhere on that path.
+        //
+        // Pinned here rather than taken on trust, because the deleted note was
+        // justified by a comment claiming this very check had already refused
+        // every non-tailnet address.
+        assert_eq!(unreachable_host("192.168.1.20"), None);
+        assert_eq!(unreachable_host("10.0.0.5"), None);
+
+        let note = transport_advisory(false, "192.168.1.20").join("\n");
+        let lower = note.to_lowercase();
+        assert!(
+            !lower.contains("tailscale") && !lower.contains("tailnet"),
+            "the shim cannot see the bind address, so it may not name the \
+             network carrying the bytes: {note}"
+        );
+        assert!(
+            note.contains("ws://") && note.contains("encrypts nothing"),
+            "what `tls == false` proves is all this may say: {note}"
+        );
+        // The stake, named rather than left to be inferred: this is the
+        // connection the pairing code goes up and the device token comes back
+        // down on (`hello_ack`, in ccd).
+        assert!(
+            note.contains("pairing code") && note.contains("token"),
+            "an operator deciding about this transport needs to know what is \
+             on it: {note}"
+        );
+    }
+
+    #[test]
+    fn a_tailnet_shaped_host_buys_no_softer_note_than_a_lan_one() {
+        // `100.64.0.0/10` is where Tailscale allocates *and* ordinary
+        // carrier-grade NAT; `fd7a:115c:a1e0::/48` is Tailscale's range but an
+        // address in it still reaches this shim unverified; a MagicDNS-shaped
+        // name is a string anybody may put in `tls_hostname`. None of the
+        // three is proof, so none may earn the reassurance. Byte-identical
+        // output is what stops a shape test from creeping back in.
+        let lan = transport_advisory(false, "192.168.1.20");
+        for host in [
+            "100.64.12.34",
+            "fd7a:115c:a1e0::1",
+            "some-mac.tailnet-example.ts.net",
+        ] {
+            assert_eq!(transport_advisory(false, host), lan, "{host}");
+        }
+    }
+
+    #[test]
+    fn every_advisory_fits_the_screen_and_hangs_under_its_label() {
+        // The other two transports, here so that pulling the advisory out of
+        // `pair` cannot quietly have dropped one.
+        let tls_on_an_ip = transport_advisory(true, "100.64.12.34");
+        assert!(
+            tls_on_an_ip[0].contains("warning:"),
+            "a certificate cannot validate against an address, and the operator \
+             is the only one who can fix that: {tls_on_an_ip:?}"
+        );
+        assert!(
+            transport_advisory(true, "some-mac.tailnet-example.ts.net").is_empty(),
+            "a name with a certificate behind it needs no advisory"
+        );
+
+        for advisory in [transport_advisory(false, "192.168.1.20"), tls_on_an_ip] {
+            let (first, rest) = advisory.split_first().expect("an advisory has lines");
+            for line in advisory {
+                // The budget the QR above it is drawn to. An advisory that
+                // wraps under a code that does not is the same defect twice.
+                assert!(line.chars().count() <= 76, "{line:?} is too wide to read");
+            }
+            // `  note: ` and `  warning: ` — a continuation that does not hang
+            // under its label reads as a separate, unrelated line.
+            let label = first.find(": ").expect("an advisory leads with a label") + 2;
+            for line in rest {
+                assert_eq!(
+                    line.len() - line.trim_start().len(),
+                    label,
+                    "{line:?} does not hang under its label"
+                );
+            }
+        }
     }
 
     #[test]

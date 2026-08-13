@@ -26,7 +26,7 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 - **Nothing decides without you.** Claude Code auto-answers an unanswered question after ~60 seconds; CodeConnect holds it open instead. If the daemon can't be reached, the prompt falls back to your keyboard rather than being silently answered.
 - **Diff review that works on a phone.** Unified, monospace, word-level highlighting, comment-to-agent on any hunk.
 - **Talk to it — out loud if you like.** The compose bar stages text into the agent's prompt; template chips insert, never send. Dictation is Apple's own speech recognition — on-device wherever your language supports it; where it doesn't, Apple's speech service does the transcription. A transcript is always staged for review, never auto-sent.
-- **A real terminal.** SSH into the live tmux session and take over completely.
+- **A real terminal.** Attach to the live tmux session over the connection the app is already paired on, and take over completely.
 - **It never lies about state.** Every fact shows its age. A stale link disables actions and says why. "Answered at the keyboard" is a state the phone renders, not a guess.
 
 ## Why you might not want this (yet)
@@ -40,11 +40,11 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 ## How it works
 
 ```
-iPhone (SwiftUI)  ──WSS over Tailscale──▶  ccd (Rust daemon, launchd)
-      ▲                                          │
-      └── APNs (a doorbell: the project and why) ──┘
-                                                  │ unix socket
-                                    codeconnect claude ────┘  (tmux-hosted session)
+iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daemon, launchd)
+      ▲                                                       │
+      └── APNs (a doorbell: the project and why) ───────────────┘
+                                                               │ unix socket
+                                                 codeconnect claude ────┘  (tmux-hosted session)
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
@@ -66,7 +66,7 @@ cd mac && ./install.sh
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
 codeconnect daemon install     # run ccd under launchd (restarts on crash)
-codeconnect pair               # QR code to pair the phone (--ssh also authorises the app's SSH key)
+codeconnect pair               # QR code to pair the phone
 codeconnect claude             # start a session in the current directory
 ```
 
@@ -76,9 +76,18 @@ The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same 
 
 **Requests that leave the tailnet:** by default, after `codeconnect claude` starts a session, CodeConnect makes a background request to GitHub's public Releases API when its 24-hour update cache is stale. `codeconnect update`, when you run it, asks the same API and then downloads that release's files from GitHub. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable the background check; `codeconnect update` is only ever a thing you type.
 
-**Requirements to build from source** — not needed to install a release: Rust stable (1.80+) and **Xcode 26 or newer**. The app deploys to iOS 17, but one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available` is a runtime check, so the symbol still has to exist in the SDK to compile.
+**Requirements to build from source** — not needed to install a release: Rust stable (1.85+) and **Xcode 26 or newer**. The app deploys to iOS 17, but one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available` is a runtime check, so the symbol still has to exist in the SDK to compile.
 
-For the live terminal, enable Remote Login (System Settings → General → Sharing) or Tailscale SSH. **CodeConnect never enables a system service for you**: it shows you the command and lets you decide.
+The live terminal needs nothing switched on at the Mac: it rides the paired connection the app already holds. It does need that connection to be private — `wss://`, loopback, or this Mac's own tailnet address — so it is the one thing not offered over the cleartext LAN that `ws_allow_plaintext` opens. Opening it on a session that already has one takes it over: the terminal that was open is told it was superseded, and the new one streams.
+
+## Upgrading
+
+Two things are worth knowing before the daemon comes back up.
+
+- **A `ws_bind` onto a LAN, with no certificate, refuses every connection.** Plaintext is served only where the bytes are private already — loopback, or this Mac's own tailnet address, where WireGuard encrypts the path before it touches a network. An address you named yourself on a LAN is neither, so without a certificate that listener turns away every phone before the WebSocket handshake and says so in `ccd.err.log` as it starts. Both ways through are in that line: obtain a certificate for a name that resolves to the address you bound, put its `<name>.crt` and `<name>.key` in `~/.codeconnect/tls/`, and set `tls_hostname` to that name — not with `tailscale cert`, which issues only for this node's MagicDNS name, and that name points at the tailnet interface rather than at your LAN address, which is why the daemon will not carry it beside a LAN listener — or set `"ws_allow_plaintext": true` in `~/.codeconnect/config.json` if you accept what crosses that network in the clear — which buys back everything except the Terminal tab, refused on a connection whose bytes anything on that LAN could read. Leave `ws_bind` unset and none of this applies — the daemon picks its own tailnet address.
+- **CodeConnect does not use SSH.** The terminal rides the paired connection, and at startup — and again on every `codeconnect revoke <device>`, whether or not that device was already revoked — the daemon removes what an earlier release wrote into `~/.ssh/authorized_keys`: a `# codeconnect:<id>` marker comment with a bare `ssh-ed25519` line carrying the same id directly beneath it. Four things leave such a grant in place, each a warning in `ccd.err.log` rather than a daemon that refuses to start or a revocation that fails — no absolute `$HOME` to resolve the path against, a file it cannot read or rewrite, a file some other program rewrote while the sweep was working (it retries, then declines rather than overwrite what that program wrote), and tagged lines that are not that whole pair. A phone running an older version of the app shows the key as "not installed" and tells you to run `codeconnect pair --ssh` or `codeconnect ssh-revoke`; both commands explain that they are retired rather than failing as unrecognised, and print the same search. Update the app, then settle the file yourself: `grep -n codeconnect: ~/.ssh/authorized_keys`. Nothing printed means nothing there carries the tag, and `grep` reporting no such file means the same — neither says that nothing is left, because a key line whose comment field does not carry the tag prints nothing and stays, and nothing in the file records who wrote a line. An `ssh-ed25519` line in that output with no `# codeconnect:` marker directly above it is a live grant no sweep will touch, however many times you revoke — that pairing rule is deliberate, since removing a key the file cannot identify is not the daemon's call — so delete it by hand. A whole pair is one a sweep has not reached: `codeconnect revoke <device>` again is the retry, and deleting both lines together is the certainty.
+
+[`mac/README.md`](mac/README.md#upgrading) has the detail: which addresses `ws_allow_plaintext` covers, which it refuses, and every configuration key.
 
 ## Documentation
 
@@ -124,7 +133,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). The house rules there are short and ea
 
 ## Security
 
-CodeConnect can write keystrokes into your terminal and, with an explicit flag, authorise an SSH key. [`SECURITY.md`](SECURITY.md) sets out the trust boundaries, what it deliberately does not protect against, and how to report a vulnerability privately.
+CodeConnect can write keystrokes into your terminal and open a live shell on a paired device. [`SECURITY.md`](SECURITY.md) sets out the trust boundaries, what it deliberately does not protect against, and how to report a vulnerability privately.
 
 ## Licence
 

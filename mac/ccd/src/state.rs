@@ -195,6 +195,9 @@ pub struct Daemon {
     /// directory for the life of the process, which on a machine with a
     /// history is hundreds of files nobody will ever write to again.
     transcript_tx: mpsc::UnboundedSender<crate::tailer::TailCommand>,
+    /// Leases for the live-terminal carrier: the global attachment cap and the
+    /// one-terminal-per-session rule. Shared across every connection.
+    pub terminal_leases: crate::terminal::TerminalLeases,
 }
 
 /// How a `hello` was (or was not) authenticated.
@@ -209,7 +212,6 @@ pub enum AuthOutcome {
         device_id: String,
         device_name: String,
         token: String,
-        ssh_key_installed: bool,
     },
     /// Refused. The string is for *our* log; the peer gets one opaque error,
     /// because telling an unauthenticated caller which of "wrong", "expired"
@@ -217,12 +219,11 @@ pub enum AuthOutcome {
     Rejected(String),
 }
 
-/// What `codeconnect revoke` / `codeconnect ssh-revoke` did.
+/// What `codeconnect revoke` did.
 #[derive(Debug)]
 pub struct RevokeOutcome {
     pub device: DeviceSummary,
     pub token_revoked: bool,
-    pub ssh_key_removed: bool,
 }
 
 /// What one liveness sweep established, counted in *sessions* rather than in
@@ -742,6 +743,7 @@ impl Daemon {
             publish_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
+            terminal_leases: crate::terminal::TerminalLeases::new(),
         })
     }
 
@@ -4099,7 +4101,7 @@ impl Daemon {
     // --------------------------------------------------------- pairing
 
     /// Mint a single-use pairing code. Only the hash is stored.
-    pub async fn create_pairing(&self, ttl_secs: u64, allow_ssh: bool) -> Result<(String, String)> {
+    pub async fn create_pairing(&self, ttl_secs: u64) -> Result<(String, String)> {
         let code = crate::secret::pairing_code()?;
         let now_ms = protocol::time::now_unix_ms();
         let expires_ms = now_ms + (ttl_secs as i64) * 1000;
@@ -4107,20 +4109,12 @@ impl Daemon {
         self.db
             .create_pairing_code(
                 sha256_hex(code.as_bytes()),
-                allow_ssh,
                 expires_at.clone(),
                 expires_ms,
                 now_ms,
             )
             .await?;
-        crate::log_info!(
-            "pairing code issued, valid until {expires_at}{}",
-            if allow_ssh {
-                " (SSH key installation permitted for this code)"
-            } else {
-                ""
-            }
-        );
+        crate::log_info!("pairing code issued, valid until {expires_at}");
         Ok((code, expires_at))
     }
 
@@ -4162,7 +4156,6 @@ impl Daemon {
         static_token: &str,
         token: Option<&str>,
         pairing_code: Option<&str>,
-        ssh_pubkey: Option<&str>,
         client_name: Option<&str>,
     ) -> AuthOutcome {
         if let Some(token) = token.filter(|t| !t.is_empty()) {
@@ -4191,15 +4184,10 @@ impl Daemon {
                 "hello carried neither a token nor a pairing code".into(),
             );
         };
-        self.pair(code, ssh_pubkey, client_name).await
+        self.pair(code, client_name).await
     }
 
-    async fn pair(
-        &self,
-        code: &str,
-        ssh_pubkey: Option<&str>,
-        client_name: Option<&str>,
-    ) -> AuthOutcome {
+    async fn pair(&self, code: &str, client_name: Option<&str>) -> AuthOutcome {
         let now_ms = protocol::time::now_unix_ms();
         if !self.admit_pairing_attempt(now_ms).await {
             // Loud: a human pairs a phone by typing one code. Reaching this
@@ -4215,7 +4203,7 @@ impl Daemon {
             // itself under the limit.
             return AuthOutcome::Rejected("too many pairing attempts".into());
         }
-        let outcome = self.pair_once(code, ssh_pubkey, client_name).await;
+        let outcome = self.pair_once(code, client_name).await;
         if matches!(outcome, AuthOutcome::Rejected(_)) {
             self.record_pairing_failure(now_ms).await;
         }
@@ -4268,24 +4256,19 @@ impl Daemon {
         }
     }
 
-    async fn pair_once(
-        &self,
-        code: &str,
-        ssh_pubkey: Option<&str>,
-        client_name: Option<&str>,
-    ) -> AuthOutcome {
+    async fn pair_once(&self, code: &str, client_name: Option<&str>) -> AuthOutcome {
         let code = protocol::pairing::normalize_code(code);
         // Shape-checked before the database is touched, so a malformed code
         // costs a string scan rather than a query.
         if !protocol::pairing::is_well_formed(&code) {
             return AuthOutcome::Rejected("malformed pairing code".into());
         }
-        let allow_ssh = match self
+        match self
             .db
             .consume_pairing_code(sha256_hex(code.as_bytes()), protocol::time::now_unix_ms())
             .await
         {
-            Ok(PairingConsume::Consumed { allow_ssh }) => allow_ssh,
+            Ok(PairingConsume::Consumed) => {}
             Ok(PairingConsume::NotFound) => {
                 return AuthOutcome::Rejected("unknown pairing code".into())
             }
@@ -4296,12 +4279,11 @@ impl Daemon {
                 return AuthOutcome::Rejected("pairing code already used".into())
             }
             Err(err) => return AuthOutcome::Rejected(format!("pairing store failed: {err:#}")),
-        };
+        }
 
         // Past this point the code is spent. Any failure below must therefore
         // be reported rather than retried with the same code.
-        let outcome = self.mint_device(allow_ssh, ssh_pubkey, client_name).await;
-        match outcome {
+        match self.mint_device(client_name).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 crate::log_error!("pairing consumed a code but failed to complete: {err:#}");
@@ -4310,12 +4292,7 @@ impl Daemon {
         }
     }
 
-    async fn mint_device(
-        &self,
-        allow_ssh: bool,
-        ssh_pubkey: Option<&str>,
-        client_name: Option<&str>,
-    ) -> Result<AuthOutcome> {
+    async fn mint_device(&self, client_name: Option<&str>) -> Result<AuthOutcome> {
         let device_id = crate::secret::device_id()?;
         let token = crate::secret::device_token()?;
         let name = self
@@ -4331,105 +4308,61 @@ impl Daemon {
             )
             .await?;
 
-        let ssh_key_installed = self
-            .maybe_install_ssh_key(&device_id, &name, allow_ssh, ssh_pubkey)
-            .await;
-        crate::log_info!(
-            "paired device {device_id} ({name}); ssh_key_installed={ssh_key_installed}"
-        );
+        crate::log_info!("paired device {device_id} ({name})");
         Ok(AuthOutcome::Paired {
             device_id,
             device_name: name,
             token,
-            ssh_key_installed,
         })
     }
 
-    /// The consent gate for `~/.ssh/authorized_keys`.
-    ///
-    /// A key is installed only when the operator minted this code with
-    /// `codeconnect pair --ssh`. A key offered against a code without that flag is
-    /// logged and dropped: the phone asking is not consent, and pairing still
-    /// succeeds so the app can fall back to another SSH credential.
-    async fn maybe_install_ssh_key(
-        &self,
-        device_id: &str,
-        device_name: &str,
-        allow_ssh: bool,
-        ssh_pubkey: Option<&str>,
-    ) -> bool {
-        let Some(offered) = ssh_pubkey.filter(|key| !key.trim().is_empty()) else {
-            return false;
-        };
-        if !allow_ssh {
-            crate::log_warn!(
-                "device {device_id} offered an SSH key but this code was not created with \
-                 `codeconnect pair --ssh`; the key was NOT installed"
-            );
-            return false;
-        }
-        let key = match crate::ssh_keys::validate(offered) {
-            Ok(key) => key,
-            Err(err) => {
-                crate::log_warn!("refused the SSH key offered by {device_id}: {err:#}");
-                return false;
-            }
-        };
-        match crate::ssh_keys::install(device_id, device_name, &key) {
-            Ok(installed) => {
-                if installed.replaced {
-                    crate::log_info!(
-                        "device {device_id} already had a key; it was replaced, not duplicated"
-                    );
-                }
-                if let Err(err) = self
-                    .db
-                    .set_ssh_installed(
-                        device_id.to_string(),
-                        true,
-                        Some(installed.fingerprint.clone()),
-                    )
-                    .await
-                {
-                    crate::log_error!("failed to record the SSH key for {device_id}: {err:#}");
-                }
-                true
-            }
-            Err(err) => {
-                crate::log_error!("failed to install the SSH key for {device_id}: {err:#}");
-                false
-            }
-        }
-    }
-
-    /// Every paired device, with its SSH state read from `authorized_keys`.
-    ///
-    /// The whole thing runs on the blocking pool: it is a database read *and* a
-    /// file read per device, and doing either on a runtime worker is the defect
-    /// this indirection removes.
+    /// Every paired device. Runs on the blocking pool, because a database read
+    /// has no business on a runtime worker.
     pub async fn list_devices(&self) -> Result<Vec<DeviceSummary>> {
         self.db.device_summaries().await
     }
 
     /// Revoke a device's access.
     ///
-    /// A bare revoke takes away *everything* that device was granted, SSH key
-    /// included: "this phone no longer has access" is what the operator means,
-    /// and leaving a working shell key behind would be a surprise of the worst
-    /// kind. `ssh_only` is the narrower tool for keeping a phone paired while
-    /// dropping its shell access.
+    /// The device token is the whole of what this daemon hands out, so taking it
+    /// away takes away everything *it* granted. A failure to revoke is fatal and
+    /// reported as such — an operator who is told a phone was cut off must not
+    /// have to wonder.
     ///
-    /// **Order is the security property.** This used to remove the SSH key
-    /// first and propagate any error from doing so, which meant an
-    /// `authorized_keys` that could not be rewritten — a permissions problem, a
-    /// full disk, an immutable file — aborted the function *before the token was
-    /// revoked*. The operator saw an error and the phone kept its credential and
-    /// its live connections. Revoking the token is therefore done first and its
-    /// failure is fatal; removing the key is best-effort afterwards and is
-    /// *reported* rather than allowed to undo the revocation. The two grants are
-    /// independent, and failing to withdraw one is no reason to leave the other
-    /// in place.
-    pub async fn revoke(&self, needle: &str, ssh_only: bool) -> Result<RevokeOutcome> {
+    /// **It is not the only thing a phone may hold, which is why the legacy
+    /// sweep runs here too.** Earlier releases also wrote the phone's public key
+    /// into `~/.ssh/authorized_keys`, and that grant is outside this database
+    /// entirely: withdrawing the token does nothing to it. The daemon sweeps
+    /// that file at startup, but a startup sweep only describes startup — a
+    /// `~/.ssh` that was unwritable then, a backup restored since, a Mac that has
+    /// not rebooted in months — and this command is the one the documentation
+    /// presents as *the* way to take a device's access away. Revoking a phone
+    /// and leaving it a working shell is the gap that narrows here.
+    ///
+    /// **Narrows, and not more than that: a revocation is the whole truth about
+    /// the token and a best effort at everything else.** The token is this
+    /// daemon's to withdraw and it is withdrawn or this call fails. The sweep
+    /// edits a file this daemon does not own, and it removes nothing at all in
+    /// five situations it can see — no absolute `$HOME`, a file it cannot read, a
+    /// file it cannot rewrite, a file somebody else rewrote while it was
+    /// working, and tagged lines that are not the marker-and-key pair it
+    /// recognises — none of which fails the revocation. Beyond those it is
+    /// blind by construction: a key outside `$HOME/.ssh/authorized_keys`, or
+    /// inside it in any shape other than the one earlier releases wrote, is
+    /// never a candidate. So this command withdrawing the token is a fact, and
+    /// the shell being gone is a claim only `grep -n codeconnect:` on the file
+    /// itself can settle — which is why every one of those five says so in the
+    /// daemon log rather than being folded into what this returns.
+    ///
+    /// The sweep takes the whole file rather than this device's tag: see
+    /// [`crate::legacy_credentials`] for why a tag's id decides nothing. It is
+    /// never fatal, and quiet when there is nothing to do — a revocation must
+    /// still succeed, and still report accurately, over a file it does not
+    /// control, and a Mac that never granted SSH access has one file read and
+    /// nothing written on every revoke. It is not silent when it fails: every
+    /// path that removes nothing warns, which is the only place that fact is
+    /// recorded.
+    pub async fn revoke(&self, needle: &str) -> Result<RevokeOutcome> {
         let device = match self.db.find_device(needle.to_string()).await? {
             DeviceLookup::Found(device) => *device,
             DeviceLookup::NotFound => {
@@ -4442,61 +4375,35 @@ impl Daemon {
             ),
         };
 
-        let token_revoked = if ssh_only {
-            false
-        } else {
-            let revoked = self
-                .db
-                .revoke_device(device.device_id.clone(), protocol::time::now_rfc3339())
-                .await?;
-            // Published before the SSH work, and before the re-read: the point
-            // of revocation is that it takes effect *now*, and a socket that is
-            // idle would otherwise keep serving the event log until its next
-            // keepalive. `send` fails only when nobody is subscribed, which is
-            // the ordinary case for a Mac with no phone connected.
-            let _ = self.revocations_tx.send(device.device_id.clone());
-            self.push_gate.evict_device(&device.device_id);
-            // And the sender's queue for it, which holds work authorised before
-            // this moment and a worker that would otherwise wait on a phone
-            // that is never coming back.
-            self.push.retire(&device.device_id);
-            revoked
-        };
+        let token_revoked = self
+            .db
+            .revoke_device(device.device_id.clone(), protocol::time::now_rfc3339())
+            .await?;
+        // Published before the re-read: the point of revocation is that it takes
+        // effect *now*, and a socket that is idle would otherwise keep serving
+        // the event log until its next keepalive. `send` fails only when nobody
+        // is subscribed, which is the ordinary case for a Mac with no phone
+        // connected.
+        let _ = self.revocations_tx.send(device.device_id.clone());
+        self.push_gate.evict_device(&device.device_id);
+        // And the sender's queue for it, which holds work authorised before this
+        // moment and a worker that would otherwise wait on a phone that is never
+        // coming back.
+        self.push.retire(&device.device_id);
 
-        let ssh_key_removed = match crate::ssh_keys::remove(&device.device_id) {
-            Ok(removed) => {
-                if removed {
-                    if let Err(err) = self
-                        .db
-                        .set_ssh_installed(device.device_id.clone(), false, None)
-                        .await
-                    {
-                        crate::log_error!(
-                            "removed {}'s SSH key but could not record it: {err:#}",
-                            device.device_id
-                        );
-                    }
-                }
-                removed
-            }
-            // `ssh_only` withdrew nothing else, so its failure *is* the
-            // operation's failure and saying otherwise would report a
-            // revocation that did not happen.
-            Err(err) if ssh_only => return Err(err),
-            Err(err) => {
-                // Loud, and specific about what is still granted. The token is
-                // already gone; what survives is shell access, and the operator
-                // needs to know to go and take it away by hand.
-                crate::log_error!(
-                    "REVOCATION INCOMPLETE: {}'s token is revoked but its SSH key could not be \
-                     removed ({err:#}); delete the `# codeconnect:{}` line from \
-                     ~/.ssh/authorized_keys by hand",
-                    device.device_id,
-                    device.device_id
-                );
-                false
-            }
-        };
+        // And the grant that is not this daemon's to begin with. Unconditional,
+        // including on a device that was already revoked: re-running `revoke` is
+        // then the operator's retry for a sweep the file refused earlier, and
+        // the only one they have short of restarting the daemon.
+        //
+        // The count is deliberately not folded into what this function returns.
+        // Zero covers six different outcomes there — nothing to do, no `$HOME`,
+        // unreadable, unwritable, rewritten by somebody else mid-sweep, a tagged
+        // line that is not a whole pair — and a number carried up to
+        // `codeconnect revoke` would be read as "the file is clean now" on five
+        // of them. The sweep says which of the six it was in the daemon log, in
+        // its own words, and that is the honest record.
+        crate::legacy_credentials::purge_authorized_keys_off_runtime().await;
 
         // Re-read so the reported state is what is now stored, not what we
         // believe we just wrote.
@@ -4504,16 +4411,14 @@ impl Daemon {
             DeviceLookup::Found(row) => *row,
             _ => device,
         };
-        let mut summary = fresh.to_summary();
-        summary.ssh_key_installed = crate::ssh_keys::is_installed(&summary.device_id);
+        let summary = fresh.to_summary();
         crate::log_info!(
-            "revoked device {} (token_revoked={token_revoked} ssh_key_removed={ssh_key_removed})",
+            "revoked device {} (token_revoked={token_revoked})",
             summary.device_id
         );
         Ok(RevokeOutcome {
             device: summary,
             token_revoked,
-            ssh_key_removed,
         })
     }
 }
@@ -4699,6 +4604,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // The sweep's own fixtures, so the tests that hold `revoke` to running it
+    // and the tests that hold the sweep to its rules cannot drift into
+    // disagreeing about what an installed entry looks like.
+    use crate::legacy_credentials::test_support::{
+        write as legacy_write, FakeHome, MIXED, SURVIVORS,
+    };
+
+    /// **Every test that reaches `revoke` needs one of these, including the ones
+    /// that are not about the sweep at all.**
+    ///
+    /// `revoke` sweeps `$HOME/.ssh/authorized_keys` unconditionally, so a test
+    /// that revokes under the developer's own `$HOME` points a function whose
+    /// job is deleting lines from `authorized_keys` at the developer's
+    /// `authorized_keys`. It also runs beside the sweep's own tests, which is
+    /// its own kind of wrong: `FakeHome` holds a process-wide lock precisely so
+    /// that only one test at a time is inside a sweep, and a test that skips it
+    /// is a second sweep running through the seams the first one armed.
+    ///
+    /// Named for the test so a leftover directory in `$TMPDIR` says who left it.
+    fn redirected_home(tag: &str) -> FakeHome {
+        FakeHome::new(tag)
+    }
+
     fn input_from(raw: &str) -> HookInput {
         serde_json::from_str(raw).unwrap()
     }
@@ -4789,8 +4717,17 @@ mod tests {
 
     async fn hello_with_code(daemon: &Arc<Daemon>, code: &str) -> AuthOutcome {
         daemon
-            .authenticate(STATIC_TOKEN, None, Some(code), None, Some("iPhone"))
+            .authenticate(STATIC_TOKEN, None, Some(code), Some("iPhone"))
             .await
+    }
+
+    /// One paired phone, and the id `revoke` takes it away by.
+    async fn paired_device(daemon: &Arc<Daemon>) -> String {
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
+        let AuthOutcome::Paired { device_id, .. } = hello_with_code(daemon, &code).await else {
+            panic!("pairing must succeed");
+        };
+        device_id
     }
 
     // ------------------------------------------------------------ pairing
@@ -4798,17 +4735,13 @@ mod tests {
     #[tokio::test]
     async fn a_pairing_code_buys_exactly_one_device_token() {
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
 
         let token = match hello_with_code(&daemon, &code).await {
             AuthOutcome::Paired {
-                token,
-                device_name,
-                ssh_key_installed,
-                ..
+                token, device_name, ..
             } => {
                 assert_eq!(device_name, "iPhone");
-                assert!(!ssh_key_installed, "no key was offered");
                 assert_eq!(token.len(), 64);
                 token
             }
@@ -4817,7 +4750,7 @@ mod tests {
 
         // The minted token authenticates on its own from now on.
         match daemon
-            .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+            .authenticate(STATIC_TOKEN, Some(&token), None, None)
             .await
         {
             AuthOutcome::Device(device) => assert_eq!(device.name, "iPhone"),
@@ -4834,7 +4767,7 @@ mod tests {
     #[tokio::test]
     async fn codes_are_normalised_the_way_a_human_would_type_them() {
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         let typed = format!(
             "  {}  ",
             protocol::pairing::format_for_display(&code).to_lowercase()
@@ -4864,7 +4797,7 @@ mod tests {
     async fn an_expired_code_pairs_nothing() {
         let daemon = test_daemon();
         // A TTL already in the past: the code exists but can never be redeemed.
-        let (code, _) = daemon.create_pairing(0, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(0).await.unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(matches!(
             hello_with_code(&daemon, &code).await,
@@ -4876,14 +4809,12 @@ mod tests {
     async fn a_hello_with_no_credential_at_all_is_refused() {
         let daemon = test_daemon();
         assert!(matches!(
-            daemon
-                .authenticate(STATIC_TOKEN, None, None, None, None)
-                .await,
+            daemon.authenticate(STATIC_TOKEN, None, None, None).await,
             AuthOutcome::Rejected(_)
         ));
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(""), None, None, None)
+                .authenticate(STATIC_TOKEN, Some(""), None, None)
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -4896,13 +4827,13 @@ mod tests {
         let daemon = test_daemon();
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), None, None, None)
+                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), None, None)
                 .await,
             AuthOutcome::Static
         ));
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some("not-the-token"), None, None, None)
+                .authenticate(STATIC_TOKEN, Some("not-the-token"), None, None)
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -4911,11 +4842,11 @@ mod tests {
     #[tokio::test]
     async fn a_token_wins_over_a_pairing_code_and_leaves_it_unspent() {
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         // Re-pairing an already-paired phone would strand its first credential.
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), Some(&code), None, None)
+                .authenticate(STATIC_TOKEN, Some(STATIC_TOKEN), Some(&code), None)
                 .await,
             AuthOutcome::Static
         ));
@@ -4930,8 +4861,9 @@ mod tests {
 
     #[tokio::test]
     async fn revoking_a_device_stops_its_token_working() {
+        let _home = redirected_home("revoke-token");
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         let AuthOutcome::Paired {
             token, device_id, ..
         } = hello_with_code(&daemon, &code).await
@@ -4939,12 +4871,11 @@ mod tests {
             panic!("pairing must succeed");
         };
 
-        let outcome = daemon.revoke(&device_id, false).await.unwrap();
+        let outcome = daemon.revoke(&device_id).await.unwrap();
         assert!(outcome.token_revoked);
-        assert!(!outcome.ssh_key_removed);
         assert!(matches!(
             daemon
-                .authenticate(STATIC_TOKEN, Some(&token), None, None, None)
+                .authenticate(STATIC_TOKEN, Some(&token), None, None)
                 .await,
             AuthOutcome::Rejected(_)
         ));
@@ -4960,14 +4891,15 @@ mod tests {
         // `hello` would let a revoked device keep answering approvals and typing
         // into the session's TTY until the socket happened to drop. The ws loop
         // re-reads this on every message and on the keepalive tick.
+        let _home = redirected_home("revoke-active");
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         let AuthOutcome::Paired { device_id, .. } = hello_with_code(&daemon, &code).await else {
             panic!("pairing must succeed");
         };
         assert!(daemon.store.device_is_active(&device_id).unwrap());
 
-        daemon.revoke(&device_id, false).await.unwrap();
+        daemon.revoke(&device_id).await.unwrap();
         assert!(
             !daemon.store.device_is_active(&device_id).unwrap(),
             "a live connection must be able to notice the revocation"
@@ -4977,122 +4909,134 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ssh_only_revoke_leaves_the_connection_alive() {
-        // The narrower tool must not also cut the phone off; `codeconnect revoke` is for
-        // that, and conflating them would make dropping shell access far more
-        // disruptive than the operator asked for.
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-sshonly");
-        let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
-        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
-        let AuthOutcome::Paired { device_id, .. } = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some(offered),
-                Some("iPhone"),
-            )
-            .await
-        else {
-            panic!("pairing must succeed");
-        };
-        daemon.revoke(&device_id, true).await.unwrap();
-        assert!(
-            daemon.store.device_is_active(&device_id).unwrap(),
-            "ssh-revoke must not disconnect the device"
-        );
-        assert!(!home.read().contains("codeconnect:"));
-    }
-
-    #[tokio::test]
     async fn revoking_something_that_does_not_exist_says_so() {
         let daemon = test_daemon();
-        let err = daemon.revoke("ghost", false).await.unwrap_err().to_string();
+        let err = daemon.revoke("ghost").await.unwrap_err().to_string();
         assert!(err.contains("no device matches"), "{err}");
     }
 
-    // ------------------------------------------------------------ ssh gate
+    // ------------------------------- revoke and the legacy `authorized_keys`
+    //
+    // The daemon also sweeps `~/.ssh/authorized_keys` at startup, and these
+    // four are about everything that happens *after* startup: `revoke` is the
+    // command an operator is told takes a device's access away, and it used to
+    // leave a phone's shell exactly where it was.
+    //
+    // Every one of them redirects `HOME` through `FakeHome`, which is the only
+    // supported way to reach a sweep from a test — see `legacy_credentials`.
 
+    /// **The restored backup.** The daemon started, swept, and has been up ever
+    /// since; the file comes back afterwards, from a Time Machine restore or a
+    /// dotfiles resync. Nothing retries a startup sweep, so before this the
+    /// phone kept its shell for as long as the Mac stayed booted — and the
+    /// operator was told the revocation had taken everything.
     #[tokio::test]
-    async fn a_key_offered_without_cc_pair_ssh_is_never_installed() {
-        // The single most important assertion in this file. A code minted
-        // without `--ssh` must leave ~/.ssh untouched no matter what the peer
-        // sends, so the test runs against a redirected HOME and then asserts
-        // that nothing whatsoever was created there.
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-consent");
+    async fn revoking_a_device_sweeps_a_grant_that_appeared_after_startup() {
+        let home = FakeHome::new("revoke-restored");
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let device_id = paired_device(&daemon).await;
 
-        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
-        let outcome = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some(offered),
-                Some("iPhone"),
-            )
-            .await;
-        match outcome {
-            AuthOutcome::Paired {
-                ssh_key_installed, ..
-            } => {
-                assert!(!ssh_key_installed, "consent was never given");
-            }
-            other => panic!("pairing itself must still succeed: {other:?}"),
-        }
+        // After the daemon is up and serving: this is the whole point.
+        legacy_write(&home.keys(), MIXED, 0o600);
+        daemon.revoke(&device_id).await.unwrap();
+
         assert_eq!(
-            home.read(),
-            "",
-            "authorized_keys must not exist or have content"
-        );
-        assert!(
-            !home.dir.join(".ssh").exists(),
-            "~/.ssh must not be created"
+            home.read_keys().as_deref(),
+            Some(SURVIVORS),
+            "the tagged pair goes and the user's own keys come through byte for byte"
         );
     }
 
+    /// The common case, and the reason running this on every revocation is
+    /// affordable: a file with nothing of ours in it is read and not written.
     #[tokio::test]
-    async fn a_consented_key_is_installed_and_revocable() {
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-consented");
+    async fn revoking_a_device_leaves_a_file_with_nothing_to_sweep_untouched() {
+        let home = FakeHome::new("revoke-quiet");
         let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
+        let device_id = paired_device(&daemon).await;
+        legacy_write(&home.keys(), SURVIVORS, 0o644);
 
-        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
-        let AuthOutcome::Paired {
-            device_id,
-            ssh_key_installed,
-            ..
-        } = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some(offered),
-                Some("iPhone"),
-            )
-            .await
-        else {
-            panic!("pairing must succeed");
-        };
-        assert!(ssh_key_installed);
-        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
+        let before = std::fs::metadata(home.keys()).unwrap();
+        daemon.revoke(&device_id).await.unwrap();
+        let after = std::fs::metadata(home.keys()).unwrap();
 
-        let devices = daemon.list_devices().await.unwrap();
-        assert!(devices[0].ssh_key_installed);
-        assert!(devices[0]
-            .ssh_fingerprint
-            .as_deref()
-            .unwrap()
-            .starts_with("SHA256:"));
+        assert_eq!(home.read_keys().as_deref(), Some(SURVIVORS));
+        // The inode is the proof that no replacement was renamed into place:
+        // every write goes through a fresh temporary, so an untouched file is
+        // the same file.
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&before),
+            std::os::unix::fs::MetadataExt::ino(&after),
+            "a revoke with nothing to sweep must not rewrite the file"
+        );
+        let strays = home.strays();
+        assert!(
+            strays.is_empty(),
+            "no half-written replacement either: {strays:?}"
+        );
+    }
 
-        // `ssh-revoke` takes the key and leaves the pairing.
-        let outcome = daemon.revoke(&device_id, true).await.unwrap();
-        assert!(outcome.ssh_key_removed);
-        assert!(!outcome.token_revoked);
-        assert!(outcome.device.is_active(), "the device stays paired");
-        assert!(!home.read().contains("codeconnect:"), "{}", home.read());
+    /// **A file this command does not own may not decide what it reports.** The
+    /// token withdrawal is done and stored by the time the sweep runs; a
+    /// revocation that failed over an unwritable `~/.ssh` would tell the
+    /// operator their phone still holds a token it no longer holds, and invite a
+    /// retry of something that already happened.
+    #[tokio::test]
+    async fn a_revoke_succeeds_when_the_sweep_cannot_rewrite_the_file() {
+        let home = FakeHome::new("revoke-readonly");
+        let daemon = test_daemon();
+        let device_id = paired_device(&daemon).await;
+        legacy_write(&home.keys(), MIXED, 0o600);
+        home.seal();
+
+        let outcome = daemon.revoke(&device_id).await.unwrap();
+
+        assert!(
+            outcome.token_revoked,
+            "the withdrawal that did happen is what this reports"
+        );
+        assert!(!daemon.store.device_is_active(&device_id).unwrap());
+        assert_eq!(
+            home.read_keys().as_deref(),
+            Some(MIXED),
+            "a failed replacement leaves the original whole"
+        );
+    }
+
+    /// **The retry, which is the only one an operator has short of restarting
+    /// the daemon.** The sweep is best-effort, and the two ways it fails on a
+    /// file it can see — `~/.ssh` unwritable, the file rewritten underneath it —
+    /// both tell the operator to run `codeconnect revoke` again. That advice is
+    /// worth nothing if the second call short-circuits on a device whose token
+    /// is already gone: the sweep is unconditional, or the documented recovery
+    /// path does not exist.
+    #[tokio::test]
+    async fn revoking_an_already_revoked_device_sweeps_again() {
+        let home = FakeHome::new("revoke-twice");
+        let daemon = test_daemon();
+        let device_id = paired_device(&daemon).await;
+
+        // The first revocation takes the token, over a Mac that has no such
+        // file at all — the sweep runs and finds nothing.
+        let first = daemon.revoke(&device_id).await.unwrap();
+        assert!(first.token_revoked);
+        assert!(home.read_keys().is_none(), "there was nothing to sweep yet");
+
+        // And then the grant comes back — a restore, a resync, or an `~/.ssh`
+        // that was unwritable at the first attempt and is not now.
+        legacy_write(&home.keys(), MIXED, 0o600);
+        let second = daemon.revoke(&device_id).await.unwrap();
+
+        assert!(
+            !second.token_revoked,
+            "the token was already gone, and the command still reports honestly"
+        );
+        assert_eq!(
+            home.read_keys().as_deref(),
+            Some(SURVIVORS),
+            "the sweep runs on a device that was already revoked, or the retry an operator \
+             is told to run does nothing"
+        );
     }
 
     #[tokio::test]
@@ -5125,7 +5069,7 @@ mod tests {
 
         // And a *real* code is refused too, which is the point: the window has
         // to close for everybody or it closes for nobody.
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         assert!(matches!(
             hello_with_code(&daemon, &code).await,
             AuthOutcome::Rejected(_)
@@ -5142,7 +5086,7 @@ mod tests {
             ..Config::default()
         });
         for _ in 0..5 {
-            let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+            let (code, _) = daemon.create_pairing(300).await.unwrap();
             assert!(matches!(
                 hello_with_code(&daemon, &code).await,
                 AuthOutcome::Paired { .. }
@@ -5190,126 +5134,6 @@ mod tests {
                 AuthOutcome::Rejected(ref why) if why.contains("unknown")
             ));
         }
-    }
-
-    #[tokio::test]
-    async fn an_unwritable_authorized_keys_no_longer_blocks_the_revocation() {
-        // The defect, in order: the old `revoke` removed the SSH key first and
-        // used `?` on the result, so an `authorized_keys` that could not be
-        // rewritten — read-only directory, full disk, immutable file — returned
-        // an error *before the token was ever revoked*. The operator saw a
-        // failure, and the phone kept a working credential. The two grants are
-        // independent: failing to withdraw one is no reason to leave the other.
-        use std::os::unix::fs::PermissionsExt;
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-revoke-locked");
-        let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
-        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
-        let AuthOutcome::Paired { device_id, .. } = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some(offered),
-                Some("iPhone"),
-            )
-            .await
-        else {
-            panic!("pairing must succeed");
-        };
-        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
-
-        // A directory the daemon cannot write into: the atomic replace needs to
-        // create a sibling temporary, and that is what now fails.
-        let ssh_dir = home.dir.join(".ssh");
-        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let outcome = daemon.revoke(&device_id, false).await;
-        // Restored before any assertion, so a failure here still leaves a
-        // removable temp directory behind.
-        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let outcome = outcome.expect("a key-file failure must not fail the revocation");
-        assert!(
-            outcome.token_revoked,
-            "the token must be revoked even when the key could not be removed"
-        );
-        assert!(
-            !outcome.ssh_key_removed,
-            "and the daemon must say plainly that the key is still there"
-        );
-        assert!(
-            !outcome.device.is_active(),
-            "the device must be reported as revoked"
-        );
-        assert!(
-            !daemon.store.device_is_active(&device_id).unwrap(),
-            "and the store must agree, which is what every later auth reads"
-        );
-        // The key really is still installed — the report was honest.
-        assert!(home.read().contains(&format!("codeconnect:{device_id}")));
-    }
-
-    #[tokio::test]
-    async fn an_ssh_only_revoke_still_reports_a_key_it_could_not_remove() {
-        // The mirror image. `codeconnect ssh-revoke` withdraws nothing *but* the key, so
-        // a failure to remove it is the whole operation failing, and swallowing
-        // it would report a revocation that did not happen.
-        use std::os::unix::fs::PermissionsExt;
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-sshonly-locked");
-        let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
-        let offered = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0JGKZ3rL5vhF2dxJ8kX9wQqM4tN6pS1aB7cD3eF5gH phone";
-        let AuthOutcome::Paired { device_id, .. } = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some(offered),
-                Some("iPhone"),
-            )
-            .await
-        else {
-            panic!("pairing must succeed");
-        };
-
-        let ssh_dir = home.dir.join(".ssh");
-        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let outcome = daemon.revoke(&device_id, true).await;
-        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        assert!(
-            outcome.is_err(),
-            "ssh-revoke must report a key it could not remove"
-        );
-        assert!(
-            daemon.store.device_is_active(&device_id).unwrap(),
-            "and it must not have revoked the token as a side effect"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_malformed_key_does_not_fail_the_pairing() {
-        // Pairing is what the user asked for; the key is a bonus. Refusing the
-        // key and reporting it beats refusing the pairing.
-        let home = crate::ssh_keys::test_home::FakeHome::new("state-badkey");
-        let daemon = test_daemon();
-        let (code, _) = daemon.create_pairing(300, true).await.unwrap();
-        let outcome = daemon
-            .authenticate(
-                STATIC_TOKEN,
-                None,
-                Some(&code),
-                Some("command=\"/bin/sh\" ssh-rsa AAAAB3 evil"),
-                Some("iPhone"),
-            )
-            .await;
-        match outcome {
-            AuthOutcome::Paired {
-                ssh_key_installed, ..
-            } => assert!(!ssh_key_installed),
-            other => panic!("pairing must still succeed: {other:?}"),
-        }
-        assert_eq!(home.read(), "");
     }
 
     // --------------------------------------------------- session identity
@@ -5984,31 +5808,27 @@ mod tests {
         // label makes `codeconnect daemon status` claim a hand-started daemon belongs to
         // "a different job (0)".
         //
-        // `HOME` is process-global and these tests run in threads, but no other
-        // test touches this variable, and the guard restores it either way.
-        struct Restore(Option<String>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("XPC_SERVICE_NAME", value),
-                    None => std::env::remove_var("XPC_SERVICE_NAME"),
-                }
-            }
-        }
-        let _restore = Restore(std::env::var("XPC_SERVICE_NAME").ok());
+        // `XPC_SERVICE_NAME` is process-global and these tests run in threads,
+        // and one other test writes it: `main`'s
+        // `only_codeconnects_own_launchd_job_counts_as_something_that_would_restart_it`,
+        // which asserts what `managed_by_codeconnect_job` makes of the same
+        // values. Two writers with no lock between them read each other's
+        // settings, so both take [`crate::LaunchdLabelEnv`] — the same one — and
+        // it restores what was there when the last of them lets go.
+        let env = crate::LaunchdLabelEnv::take();
 
-        std::env::set_var("XPC_SERVICE_NAME", "0");
+        env.set(Some("0"));
         assert_eq!(launchd_label(), None, "0 means 'not an XPC service'");
-        std::env::set_var("XPC_SERVICE_NAME", "");
+        env.set(Some(""));
         assert_eq!(launchd_label(), None);
-        std::env::remove_var("XPC_SERVICE_NAME");
+        env.set(None);
         assert_eq!(launchd_label(), None);
 
         // A real label is passed through, ours or not — "managed by somebody
         // else" is a distinct problem and must stay visible.
-        std::env::set_var("XPC_SERVICE_NAME", protocol::LAUNCHD_LABEL);
+        env.set(Some(protocol::LAUNCHD_LABEL));
         assert_eq!(launchd_label().as_deref(), Some(protocol::LAUNCHD_LABEL));
-        std::env::set_var("XPC_SERVICE_NAME", "com.example.other");
+        env.set(Some("com.example.other"));
         assert_eq!(launchd_label().as_deref(), Some("com.example.other"));
     }
 
@@ -6936,7 +6756,7 @@ mod tests {
     async fn re_registering_a_token_retires_the_row_it_was_taken_from() {
         let (daemon, capture) = capture_daemon();
         async fn pair(daemon: &Arc<Daemon>) -> String {
-            let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+            let (code, _) = daemon.create_pairing(300).await.unwrap();
             match hello_with_code(daemon, &code).await {
                 AuthOutcome::Paired { device_id, .. } => device_id,
                 other => panic!("pairing must succeed: {other:?}"),
@@ -6973,14 +6793,15 @@ mod tests {
     /// again, an inference never happens.
     #[tokio::test]
     async fn revoking_a_device_retires_the_queue_holding_its_pushes() {
+        let _home = redirected_home("revoke-pushes");
         let (daemon, capture) = capture_daemon();
-        let (code, _) = daemon.create_pairing(300, false).await.unwrap();
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
         let AuthOutcome::Paired { device_id, .. } = hello_with_code(&daemon, &code).await else {
             panic!("pairing must succeed");
         };
         assert!(capture.1.lock().unwrap().is_empty(), "nothing retired yet");
 
-        daemon.revoke(&device_id, false).await.unwrap();
+        daemon.revoke(&device_id).await.unwrap();
         assert_eq!(
             *capture.1.lock().unwrap(),
             vec![device_id],

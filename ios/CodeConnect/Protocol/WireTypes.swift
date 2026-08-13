@@ -12,6 +12,46 @@ enum Wire {
     static let protocolVersion: UInt32 = 1
     /// Matches `MAX_CLIENT_MESSAGE_BYTES`; the daemon closes anything larger.
     static let maxClientMessageBytes = 1024 * 1024
+
+    /// The live terminal's flow control, mirroring `protocol/src/ws.rs`. Bytes
+    /// ride as base64 inside the JSON frames and each direction is governed by a
+    /// credit window: a grant of `n` lets the peer send `n` more decoded bytes,
+    /// and credit is returned only once those bytes have been consumed — for
+    /// this side, once they have been fed to the terminal view. Exceeding a
+    /// window is a protocol error the daemon closes the terminal for, so these
+    /// numbers must match the Mac's exactly.
+    ///
+    /// **The two ceilings are now advertised, and these are the fallback.**
+    /// `terminal_attached` carries `max_chunk_bytes` and
+    /// `max_outstanding_credit`, and a carrier enforces what the daemon it is
+    /// talking to actually said. Hand-mirrored numbers were a version-skew trap:
+    /// they are enforced as protocol errors, so raising either at the Mac would
+    /// have killed the terminal of every phone still compiled against the old
+    /// pair. They stay here for three jobs that outlive the advertisement: the
+    /// window before it arrives (a `terminal_attach` names its own output
+    /// credit, and it is sent before any ack), the local queue bound, and the
+    /// parity test that reads the Mac's source. They are *not* here for an
+    /// older daemon: the Mac makes both fields required, and a daemon too old
+    /// to carry them is one that never sends `terminal_attached` at all,
+    /// because it does not advertise the capability the phone attaches on.
+    enum Terminal {
+        /// The largest decoded chunk one `terminal_input` may carry.
+        static let maxChunkBytes = 16 * 1024
+        /// What this phone grants the daemon at attach, and the ceiling it will
+        /// let outstanding credit reach in either direction.
+        static let initialOutputCredit: UInt32 = 64 * 1024
+        /// What the daemon grants *this phone* at attach. Not this side's to
+        /// choose — it arrives in `terminal_attached` — but pinned here so a
+        /// test can drive a carrier with the window a real daemon opens rather
+        /// than one that happens to be to hand.
+        static let initialInputCredit: UInt32 = 32 * 1024
+        static let maxOutstandingCredit: UInt32 = 256 * 1024
+        /// Geometry the daemon accepts; anything outside is refused.
+        static let minCols = 2
+        static let maxCols = 512
+        static let minRows = 2
+        static let maxRows = 256
+    }
 }
 
 // MARK: - Scalars
@@ -398,6 +438,11 @@ struct Capabilities: Codable, Sendable, Hashable {
     var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
+    /// A live terminal can be opened over *this* connection. Connection-scoped,
+    /// not a build fact: a terminal is shell-equivalent authority, so the daemon
+    /// answers false for the static bootstrap token. False means the Terminal
+    /// tab must say what to fix rather than offer a session it cannot open.
+    var servesTerminal: Bool { advertises(["terminal_pty"]) }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
     /// false, so an older Mac simply does not offer the swipe rather than offering
     /// one that silently does nothing.
@@ -828,12 +873,7 @@ enum HelloCredential: Sendable, Hashable {
 /// can resolve to a *different run* than the one the screen is showing — and for
 /// `sendText` that would type into the wrong agent's TTY.
 enum ClientMessage: Sendable {
-    /// `sshPublicKey` is offered on every hello but only ever *acted on* by a
-    /// daemon whose operator ran `codeconnect pair --ssh` — consent lives at the Mac's
-    /// terminal, not in this message.
-    case hello(
-        credential: HelloCredential, clientID: String?, clientName: String?,
-        sshPublicKey: String?)
+    case hello(credential: HelloCredential, clientID: String?, clientName: String?)
     case sessions
     case subscribe(session: String, afterSeq: UInt64)
     case unsubscribe(session: String)
@@ -861,6 +901,22 @@ enum ClientMessage: Sendable {
     /// handshake: permission can be granted mid-session and the token is
     /// reissued on reinstall and on restore-from-backup.
     case registerPush(token: String, environment: String)
+    /// Open a live terminal on a hosted session. Minor 13.
+    ///
+    /// By uid, like every other session-scoped message: a tmux name is reused,
+    /// a uid is not. `outputCredit` is how many decoded bytes the daemon may
+    /// send before this phone replenishes.
+    case terminalAttach(
+        attachmentID: String, sessionUID: String, cols: Int, rows: Int, outputCredit: UInt32)
+    /// Keystrokes for the pane, base64 of the raw bytes. Spends input credit.
+    case terminalInput(attachmentID: String, base64: String)
+    /// This phone's viewport changed. Applied to the daemon's own disposable
+    /// client only, so a human at the Mac is never resized by it.
+    case terminalResize(attachmentID: String, cols: Int, rows: Int)
+    /// `bytes` of output have been consumed; grant that much more.
+    case terminalCredit(attachmentID: String, bytes: UInt32)
+    /// Close the terminal. The session and the agent are untouched.
+    case terminalDetach(attachmentID: String)
     case ping
 }
 
@@ -870,7 +926,6 @@ extension ClientMessage: Encodable {
         case protocolVersion = "protocol_version"
         case token
         case pairingCode = "pairing_code"
-        case sshPublicKey = "ssh_pubkey"
         case clientID = "client_id"
         case clientName = "client_name"
         case sessionID = "session_id"
@@ -885,12 +940,18 @@ extension ClientMessage: Encodable {
         case submit
         case lines
         case completeNativeConfirmation = "complete_native_confirmation"
+        case attachmentID = "attachment_id"
+        case cols
+        case rows
+        case outputCredit = "output_credit"
+        case bytes
+        case data
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let credential, let clientID, let clientName, let sshPublicKey):
+        case .hello(let credential, let clientID, let clientName):
             try c.encode("hello", forKey: .type)
             try c.encode(Wire.protocolVersion, forKey: .protocolVersion)
             switch credential {
@@ -907,7 +968,6 @@ extension ClientMessage: Encodable {
             }
             try c.encodeIfPresent(clientID, forKey: .clientID)
             try c.encodeIfPresent(clientName, forKey: .clientName)
-            try c.encodeIfPresent(sshPublicKey, forKey: .sshPublicKey)
         case .getDiff(let session):
             try c.encode("get_diff", forKey: .type)
             try c.encode(session, forKey: .sessionID)
@@ -963,6 +1023,30 @@ extension ClientMessage: Encodable {
             try c.encode("register_push", forKey: .type)
             try c.encode(token, forKey: .token)
             try c.encode(environment, forKey: .environment)
+        case .terminalAttach(
+            let attachmentID, let sessionUID, let cols, let rows, let outputCredit):
+            try c.encode("terminal_attach", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(sessionUID, forKey: .sessionUID)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+            try c.encode(outputCredit, forKey: .outputCredit)
+        case .terminalInput(let attachmentID, let base64):
+            try c.encode("terminal_input", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(base64, forKey: .data)
+        case .terminalResize(let attachmentID, let cols, let rows):
+            try c.encode("terminal_resize", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+        case .terminalCredit(let attachmentID, let bytes):
+            try c.encode("terminal_credit", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
+            try c.encode(bytes, forKey: .bytes)
+        case .terminalDetach(let attachmentID):
+            try c.encode("terminal_detach", forKey: .type)
+            try c.encode(attachmentID, forKey: .attachmentID)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -989,10 +1073,6 @@ struct HelloAck: Sendable, Hashable {
     /// What `codeconnect devices` lists this phone as, and what `codeconnect revoke` takes. May
     /// differ from the requested name when that one was taken.
     var deviceName: String?
-    /// Whether the offered SSH key was actually installed. Reported even when
-    /// false, so "the operator did not consent" is distinguishable from "no key
-    /// was offered" — the two need very different things said about them.
-    var sshKeyInstalled: Bool?
 }
 
 /// What became of a `delete_session`.
@@ -1160,6 +1240,31 @@ enum ServerMessage: Sendable {
     case deleteSessionResult(sessionUID: String, result: DeleteSessionResult)
     case testPushResult(requestID: String, result: TestPushResult)
     case diff(SessionDiff)
+    /// The terminal is live. `inputCredit` is how many decoded bytes this phone
+    /// may send before the first `terminal_credit`. Minor 13.
+    ///
+    /// `maxChunkBytes` and `maxOutstandingCredit` are **the daemon's own flow
+    /// control ceilings**. They are carried rather than assumed for one reason:
+    /// exceeding either is a protocol error the daemon closes the terminal for,
+    /// so a Mac that raised one would otherwise be killing terminals on every
+    /// phone compiled against the old number.
+    ///
+    /// Optional here, required at the Mac. That is not a compatibility window —
+    /// a daemon too old to carry them never sends this message at all — it is
+    /// this side declining to lose a whole ack over a field: `nil` falls back to
+    /// the mirrored `Wire.Terminal` constants, which is what the phone enforced
+    /// before the ceilings were advertised and what it still sends its own
+    /// attach against.
+    case terminalAttached(
+        attachmentID: String, inputCredit: UInt32, maxChunkBytes: UInt32?,
+        maxOutstandingCredit: UInt32?)
+    /// Pane bytes, base64. Spends the output credit this phone granted.
+    case terminalOutput(attachmentID: String, base64: String)
+    /// The daemon has taken `bytes` of input and grants that much more.
+    case terminalCredit(attachmentID: String, bytes: UInt32)
+    /// The terminal ended. `code` is one of the `terminal_close` strings and
+    /// `reason` is human text; terminal for this attachment id.
+    case terminalClosed(attachmentID: String, code: String, reason: String)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -1178,7 +1283,6 @@ extension ServerMessage: Decodable {
         case deviceID = "device_id"
         case sessionUID = "session_uid"
         case deviceName = "device_name"
-        case sshKeyInstalled = "ssh_key_installed"
         case sessions
         case event
         case requestID = "request_id"
@@ -1187,6 +1291,13 @@ extension ServerMessage: Decodable {
         case text
         case code
         case message
+        case attachmentID = "attachment_id"
+        case inputCredit = "input_credit"
+        case maxChunkBytes = "max_chunk_bytes"
+        case maxOutstandingCredit = "max_outstanding_credit"
+        case bytes
+        case data
+        case reason
     }
 
     init(from decoder: Decoder) throws {
@@ -1202,8 +1313,7 @@ extension ServerMessage: Decodable {
                         ?? Capabilities(),
                     deviceToken: try c.decodeIfPresent(String.self, forKey: .deviceToken),
                     deviceID: try c.decodeIfPresent(String.self, forKey: .deviceID),
-                    deviceName: try c.decodeIfPresent(String.self, forKey: .deviceName),
-                    sshKeyInstalled: try c.decodeIfPresent(Bool.self, forKey: .sshKeyInstalled)))
+                    deviceName: try c.decodeIfPresent(String.self, forKey: .deviceName)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
         case "sessions":
@@ -1238,6 +1348,30 @@ extension ServerMessage: Decodable {
             self = .error(
                 code: try c.decode(String.self, forKey: .code),
                 message: try c.decode(String.self, forKey: .message))
+        case "terminal_attached":
+            self = .terminalAttached(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                inputCredit: try c.decodeIfPresent(UInt32.self, forKey: .inputCredit) ?? 0,
+                // Absent stays absent rather than defaulting here: the fallback
+                // belongs where the ceiling is enforced, and a decoder that
+                // silently substituted a constant would make "the daemon said
+                // 16 KiB" and "the daemon said nothing" the same fact.
+                maxChunkBytes: try c.decodeIfPresent(UInt32.self, forKey: .maxChunkBytes),
+                maxOutstandingCredit: try c.decodeIfPresent(
+                    UInt32.self, forKey: .maxOutstandingCredit))
+        case "terminal_output":
+            self = .terminalOutput(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                base64: try c.decode(String.self, forKey: .data))
+        case "terminal_credit":
+            self = .terminalCredit(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                bytes: try c.decodeIfPresent(UInt32.self, forKey: .bytes) ?? 0)
+        case "terminal_closed":
+            self = .terminalClosed(
+                attachmentID: try c.decode(String.self, forKey: .attachmentID),
+                code: try c.decodeIfPresent(String.self, forKey: .code) ?? "",
+                reason: try c.decodeIfPresent(String.self, forKey: .reason) ?? "")
         case "pong":
             self = .pong
         case let other:

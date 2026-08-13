@@ -29,8 +29,8 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
     /// A command the user copies and runs. Nil for "click here in System
     /// Settings", which cannot be copied and must not pretend to be.
     var command: String?
-    /// Provably done — SSH answered, the key is installed. Swaps the number for
-    /// a `success` checkmark and drops the body to `textTertiary`.
+    /// Provably done — the daemon answered and the step is verified. Swaps the
+    /// number for a `success` checkmark and drops the body to `textTertiary`.
     var isComplete: Bool = false
 
     private let accessory: () -> Accessory
@@ -177,8 +177,8 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
 
     /// Step prose, with backticked fragments set in monospace.
     ///
-    /// The daemon's own copy writes commands as `` `--ssh` `` and this screen
-    /// renders it **verbatim** — but verbatim means the *words*, not the
+    /// The daemon's own copy writes commands backticked and this screen renders
+    /// it **verbatim** — but verbatim means the *words*, not the
     /// punctuation a markup convention uses to mark them. Rendering the
     /// backticks literally puts a command in prose type and two stray glyphs on
     /// screen; parsing them puts it in monospace, which is the rule everywhere
@@ -255,26 +255,26 @@ extension CCStepRow where Detail == EmptyView {
                 VStack(spacing: 0) {
                     CCStepRow(
                         index: 1,
-                        title: "Option 1 - Tailscale SSH",
+                        title: "Option 1 - Tailscale",
                         message:
                             "Authentication and access control ride your tailnet ACLs, and no port is exposed anywhere.",
-                        command: "tailscale up --ssh"
+                        command: "tailscale up"
                     ) {
                         CCBadge("Recommended", tone: .success)
                     }
                     CCHairline()
                     CCStepRow(
                         index: 2,
-                        title: "Option 2 - macOS Remote Login",
+                        title: "Option 2 - Local network",
                         message:
-                            "System Settings → General → Sharing → Remote Login. Limit access to your own user.",
+                            "System Settings → General → Sharing. Limit access to your own user.",
                         isComplete: true)
                     CCHairline()
                     CCStepRow(
                         index: 3,
                         title: "Then authorise this iPhone",
                         message: "Run this at the Mac and scan the QR it prints.",
-                        command: "codeconnect pair --ssh")
+                        command: "codeconnect pair")
                 }
             }
         }

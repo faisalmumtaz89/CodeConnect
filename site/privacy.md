@@ -14,7 +14,7 @@ CodeConnect is an iOS app that connects your iPhone to the CodeConnect daemon (`
 - **Pairing** uses your iPhone camera to read a QR code shown in your terminal. The code is processed on-device; nothing is recorded or uploaded.
 - **Dictation** in the compose bar uses Apple's speech recognition, on-device wherever your language supports it. Audio is transcribed while you dictate and is not recorded or kept.
 - **Face ID / passcode** is used to confirm high-risk approvals. Biometric data never leaves your device and is never visible to the app; the app only receives Apple's yes/no result.
-- **Credentials** (per-device pairing tokens, SSH host keys) are stored in the iOS Keychain on your iPhone. You can revoke a device's token at any time from your computer.
+- **Credentials** (per-device pairing tokens) are stored in the iOS Keychain on your iPhone. You can revoke a device's token at any time from your computer.
 - **Push notifications** (when enabled) are sent by *your own daemon* directly to Apple's push service, so their content passes through Apple. That content is deliberately minimal and fixed in shape: the **project** a run is working in — the last component of its working directory, for example `Aion` — one of four canned sentences ("Waiting on an approval", "Waiting for your input", "Finished a turn", "Waiting for you") or a count of how many runs need you, and one word saying which of those four rang so a tap knows where to go. Nothing an agent wrote, ran, or changed is ever included: no command text, no file paths, no diffs, no session or request identifiers. We never see any of it — CodeConnect operates no servers.
 
 ## Third parties

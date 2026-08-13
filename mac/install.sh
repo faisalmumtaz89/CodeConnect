@@ -56,6 +56,5 @@ else
     echo "  export PATH=\"$bin:\$PATH\""
     echo "  codeconnect daemon install   # run ccd under launchd (restarts on crash)"
     echo "  codeconnect claude          # run a session in the current directory"
-    echo "  codeconnect pair            # QR code to pair the phone (add --ssh to"
-    echo "                             # also install the app's SSH key)"
+    echo "  codeconnect pair            # QR code to pair the phone"
 fi

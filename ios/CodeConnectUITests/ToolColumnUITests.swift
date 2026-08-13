@@ -105,40 +105,28 @@ final class ToolColumnUITests: XCTestCase {
     func testEveryHittableControlMeetsTheTouchFloor() {
         // Every surface that carries controls. The per-screen sweep measured
         // each of these once; this is what keeps them measured.
-        for screen in ["fleet", "detail", "link-health", "settings-ssh", "hostkey"] {
+        for screen in ["fleet", "detail", "link-health", "settings"] {
             let app = XCUIApplication()
             app.launchArguments = [
                 "-CC_FIXTURE", "stacked", "-CC_BIOMETRICS", "allow",
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ]
-            if screen == "hostkey" {
-                app.launchArguments += ["-cc.debug.terminalState", "hostKeyChanged"]
-            }
             app.launch()
             XCTAssertTrue(app.staticTexts.firstMatch.waitForExistence(timeout: 25))
             switch screen {
-            case "detail", "hostkey":
+            case "detail":
                 let row = app.buttons.matching(
                     NSPredicate(format: "identifier BEGINSWITH 'session-'")
                 ).firstMatch
                 XCTAssertTrue(row.waitForExistence(timeout: 25))
                 row.tap()
-                if screen == "hostkey" {
-                    let terminal = app.buttons["Terminal"].firstMatch
-                    if terminal.waitForExistence(timeout: 20) { terminal.tap() }
-                } else {
-                    XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20))
-                }
+                XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20))
             case "link-health":
                 let pill = app.buttons["Link health"].firstMatch
                 if pill.waitForExistence(timeout: 20) { pill.tap() }
-            case "settings-ssh":
+            case "settings":
                 let gear = app.buttons["Settings and pairing"].firstMatch
                 if gear.waitForExistence(timeout: 20) { gear.tap() }
-                let row = app.buttons.matching(
-                    NSPredicate(format: "label CONTAINS 'Terminal and SSH'")
-                ).firstMatch
-                if row.waitForExistence(timeout: 20) { row.tap() }
             default:
                 break
             }

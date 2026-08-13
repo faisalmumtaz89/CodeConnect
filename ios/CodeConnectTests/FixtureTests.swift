@@ -8,11 +8,11 @@ import XCTest
 @MainActor
 final class FixtureTests: XCTestCase {
 
-    /// Pinned rather than derived: the fixture's `hello_ack` is a literal, so
-    /// this is the one place that says out loud which daemon it is pretending
-    /// to be. A capability added to the app without adding it here would make
-    /// its UI unrenderable and unrendered.
-    private let protocolMinorTheAppWasBuiltAgainst: UInt32 = 11
+    /// `protocol::PROTOCOL_MINOR` on the Mac. Pinned rather than derived: the
+    /// fixture's `hello_ack` is a literal, so this is the one place that says
+    /// out loud which daemon it is pretending to be, and raising the Mac's
+    /// minor without raising this one is what the assertion below catches.
+    private let currentProtocolMinor: UInt32 = 13
 
     func testEveryFixtureFrameDecodes() {
         let frames = Fixtures.frames()
@@ -22,16 +22,46 @@ final class FixtureTests: XCTestCase {
 
         guard case .helloAck(let ack) = frames[0] else { return XCTFail("no hello_ack") }
         XCTAssertEqual(
-            ack.protocolMinor, protocolMinorTheAppWasBuiltAgainst,
+            ack.protocolMinor, currentProtocolMinor,
             "the fixture daemon speaks this build's protocol, or capability-gated UI is unreachable")
-        XCTAssertTrue(ack.capabilities.canApproveReliably)
-        XCTAssertTrue(
-            ack.capabilities.recoversComposer,
-            "without this the snapshot rows are correctly omitted and cannot be rendered")
 
         guard case .sessions(let sessions) = frames[1] else { return XCTFail("no sessions") }
         XCTAssertEqual(sessions.count, 4)
         XCTAssertEqual(sessions[0].link, .attached)
+    }
+
+    /// Every gate the app puts in front of a screen, asked of the fixture.
+    ///
+    /// A capability the fixture withholds is a screen the fixture cannot reach:
+    /// the UI is correctly omitted, nothing fails, and the render harness
+    /// photographs an app with a hole in it. So the whole set is asserted by
+    /// name rather than a chosen two, and the two that are honestly false are
+    /// asserted false for the same reason — a fixture daemon holds no APNs key
+    /// and terminates no TLS.
+    func testTheFixtureDaemonAdvertisesEveryCapabilityTheAppGatesOn() {
+        guard case .helloAck(let ack) = Fixtures.frames()[0] else { return XCTFail("no hello_ack") }
+        let capabilities = ack.capabilities
+
+        XCTAssertTrue(capabilities.canApproveReliably)
+        XCTAssertTrue(capabilities.sendText)
+        XCTAssertTrue(capabilities.capture)
+        XCTAssertTrue(capabilities.servesDiff)
+        XCTAssertTrue(capabilities.sendTextIdempotent)
+        XCTAssertTrue(capabilities.servesCommandCatalog)
+        XCTAssertTrue(
+            capabilities.recoversComposer,
+            "without this the snapshot rows are correctly omitted and cannot be rendered")
+        XCTAssertTrue(capabilities.classifiesRisk)
+        XCTAssertTrue(
+            capabilities.servesTerminal,
+            "without this the Terminal tab draws its update-the-Mac state and nothing else")
+        XCTAssertTrue(capabilities.deletesSessions)
+        XCTAssertTrue(capabilities.scopesSessionsByUID)
+
+        XCTAssertFalse(capabilities.push)
+        XCTAssertFalse(capabilities.testsPush)
+        XCTAssertFalse(capabilities.tls)
+        XCTAssertFalse(capabilities.tlsActive)
     }
 
     /// A fixture card whose hash did not verify would exercise the *blocked*

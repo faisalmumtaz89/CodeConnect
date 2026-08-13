@@ -88,6 +88,59 @@ pub fn wait_for_daemon(timeout: Duration) -> Result<(DaemonInfo, Duration)> {
     }
 }
 
+/// Mint a pairing code, exactly as `codeconnect pair` does.
+///
+/// Over the unix socket, which is the operator's own authority: a process that
+/// can reach `~/.codeconnect/ccd.sock` can already do everything the CLI can.
+/// The terminal scenarios need this because a live terminal is refused to the
+/// static token, and a code is the only thing that buys a device credential.
+pub fn create_pairing() -> Result<String> {
+    match request(&ClientFrame::CreatePairing {
+        ttl_secs: 0,
+        allow_ssh: false,
+    })? {
+        DaemonFrame::Pairing { code, .. } => Ok(code),
+        DaemonFrame::Error { message } => {
+            bail!("the daemon refused to mint a pairing code: {message}")
+        }
+        other => bail!("unexpected reply to create_pairing: {other:?}"),
+    }
+}
+
+/// Every device the daemon has a row for, revoked ones included.
+///
+/// The terminal scenarios read this immediately before and immediately after
+/// the one pairing they perform, because the difference is the only
+/// *authoritative* answer to "what did this run create". The pairing ack is
+/// not: the code is redeemed and the row written before the ack is composed, so
+/// a lost ack orphans a grant the run then cannot name. See
+/// [`crate::scenarios::release_device`].
+pub fn devices() -> Result<Vec<protocol::pairing::DeviceSummary>> {
+    match request(&ClientFrame::ListDevices)? {
+        DaemonFrame::Devices { devices } => Ok(devices),
+        DaemonFrame::Error { message } => bail!("{message}"),
+        other => bail!("unexpected reply to list_devices: {other:?}"),
+    }
+}
+
+/// Revoke a device by name, as `codeconnect revoke` does. `false` means it was
+/// already revoked, which is not an error.
+///
+/// `device` is whatever `RevokeDevice` accepts — a device id, an id prefix or
+/// an exact name. The gauntlet passes the **id**, because the daemon uniquifies
+/// a requested name against every row it has including revoked ones, so the
+/// name this run asked for is routinely not the name it was given.
+pub fn revoke_device(device: &str) -> Result<bool> {
+    match request(&ClientFrame::RevokeDevice {
+        device: device.to_string(),
+        ssh_only: false,
+    })? {
+        DaemonFrame::Revoked { token_revoked, .. } => Ok(token_revoked),
+        DaemonFrame::Error { message } => bail!("{message}"),
+        other => bail!("unexpected reply to revoke_device: {other:?}"),
+    }
+}
+
 pub fn token() -> Result<String> {
     let path = protocol::token_path();
     Ok(std::fs::read_to_string(&path)
@@ -230,6 +283,135 @@ where
     }
 }
 
+// ----------------------------------------------------------------------- tmux
+
+/// How long one tmux command gets. A shared server under load answers in
+/// milliseconds; a stopped one never answers at all, which is what the deadline
+/// is for and what [`TmuxAnswer::Unknown`] then reports.
+const TMUX_DEADLINE: Duration = Duration::from_secs(5);
+
+/// What one tmux command answered — and, before anything else, *whether it
+/// answered at all*.
+///
+/// The three outcomes [`protocol::proc::run_deadlined`] distinguishes are kept
+/// distinct here because every assertion downstream turns on the difference.
+/// tmux exiting non-zero is a **real answer**: `has-session` exiting 1 means
+/// the session is gone, `list-clients` exiting 1 means there is no session to
+/// count clients on. tmux not answering — no binary, or a deadline blown —
+/// means **nothing was learned**, and the one thing a gauntlet must never do is
+/// let nothing-learned take the value that passes.
+///
+/// This existed as `Option<String>` and collapsed all three into `None`.
+/// Measured consequence, reachable in every `ccsoak all` run: the `tmuxfreeze`
+/// scenario SIGSTOPs this same shared server a few scenarios earlier, and a
+/// loaded server blows the five-second deadline routinely — after which
+/// "0 tmux clients are attached" and "the scratch session is verifiably gone"
+/// were both being reported off a command that never ran to completion. The
+/// second of those disarmed the only watchdog left over a live session on the
+/// operator's server.
+#[derive(Debug)]
+pub enum TmuxAnswer {
+    /// tmux ran and exited zero; its stdout.
+    Ok(String),
+    /// tmux ran and exited non-zero. An answer, and often the interesting one.
+    Failed {
+        /// `None` when the child was signalled rather than exiting.
+        status: Option<i32>,
+        stderr: String,
+    },
+    /// Nothing was learned, and why not.
+    Unknown(String),
+}
+
+impl TmuxAnswer {
+    /// The stdout of a command that succeeded, for callers that genuinely
+    /// cannot act on the difference between the other two.
+    pub fn ok(self) -> Option<String> {
+        match self {
+            TmuxAnswer::Ok(out) => Some(out),
+            _ => None,
+        }
+    }
+
+    /// One sentence naming what happened, for an assertion message that must
+    /// never read as a measurement. `doing` is the present-tense thing being
+    /// attempted, e.g. "counting the session's tmux clients".
+    pub fn complaint(&self, doing: &str) -> String {
+        match self {
+            TmuxAnswer::Ok(_) => format!("{doing}: tmux answered"),
+            TmuxAnswer::Failed { status, stderr } => {
+                let said = stderr.trim();
+                match status {
+                    Some(code) => format!("{doing}: tmux exited {code} ({said})"),
+                    None => format!("{doing}: tmux was signalled ({said})"),
+                }
+            }
+            TmuxAnswer::Unknown(why) => format!("{doing}: {why}"),
+        }
+    }
+}
+
+/// One bounded command against the **shared** `codeconnect` server.
+///
+/// Note what is absent: nothing here ever issues `kill-server`. The operator's
+/// agents live on this socket, and a harness that took the whole server down to
+/// clean up after itself would be the worst failure in this file.
+pub fn tmux_answer(args: &[&str]) -> TmuxAnswer {
+    let Some(bin) = protocol::tmux::tmux_bin() else {
+        return TmuxAnswer::Unknown("tmux is not installed, so nothing was asked".to_string());
+    };
+    let mut command = std::process::Command::new(bin);
+    command
+        .args(["-L", protocol::TMUX_SOCKET_NAME])
+        .args(args)
+        .env_remove("TMUX");
+    classify(protocol::proc::run_deadlined(&mut command, TMUX_DEADLINE))
+}
+
+/// The outcome-to-answer mapping, free of the spawn so it can be exercised.
+///
+/// Split out because it is the whole of the fix and none of it needs tmux: as
+/// an inline `match` it could only ever be checked by freezing the operator's
+/// server, which is to say never under `cargo test`.
+fn classify(outcome: std::io::Result<protocol::proc::RunOutcome>) -> TmuxAnswer {
+    match outcome {
+        Ok(protocol::proc::RunOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+        }) => {
+            if status.success() {
+                TmuxAnswer::Ok(String::from_utf8_lossy(&stdout).into_owned())
+            } else {
+                TmuxAnswer::Failed {
+                    status: status.code(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                }
+            }
+        }
+        // Indeterminate on purpose: `run_deadlined` kills and reaps a child that
+        // overran, and whether it *acted* first is unknowable. A `kill-session`
+        // that times out may or may not have killed the session.
+        Ok(protocol::proc::RunOutcome::TimedOut { waited }) => TmuxAnswer::Unknown(format!(
+            "tmux did not answer within {waited:?}, so nothing was learned — the shared server \
+             may be stopped or loaded"
+        )),
+        Err(err) => TmuxAnswer::Unknown(format!("tmux could not be started: {err}")),
+    }
+}
+
+/// The stdout of a successful tmux command, for the callers that do not care
+/// why an unsuccessful one failed.
+///
+/// Kept beside [`tmux_answer`] rather than migrating every caller: for a
+/// `send-keys` that makes a pane print, or a best-effort `kill-session` whose
+/// result is verified separately, "it did not work" is the whole of the useful
+/// information and a tri-state at the call site would be noise. Every caller
+/// whose *assertion* turns on the difference uses [`tmux_answer`].
+pub fn tmux(args: &[&str]) -> Option<String> {
+    tmux_answer(args).ok()
+}
+
 // -------------------------------------------------------------------- process
 
 /// `kill -9` by pid, through `/bin/kill` so no libc dependency is needed.
@@ -253,4 +435,83 @@ pub fn scratch_dir(tag: &str) -> Result<PathBuf> {
     ));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::proc::RunOutcome;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn completed(code: i32, stdout: &str, stderr: &str) -> std::io::Result<RunOutcome> {
+        Ok(RunOutcome::Completed {
+            // The wait(2) encoding: the exit code lives in the high byte.
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn a_refusal_and_a_silence_are_not_the_same_answer() {
+        // The distinction the tri-state exists for. `has-session` exiting 1 is
+        // tmux saying the session is gone; a blown deadline is tmux saying
+        // nothing at all, and a soak that read the second as the first would
+        // disarm a live session's last rescuer.
+        assert!(matches!(
+            classify(completed(1, "", "can't find session: nosuch\n")),
+            TmuxAnswer::Failed {
+                status: Some(1),
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify(Ok(RunOutcome::TimedOut {
+                waited: Duration::from_secs(5)
+            })),
+            TmuxAnswer::Unknown(_)
+        ));
+        assert!(matches!(
+            classify(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            TmuxAnswer::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn a_successful_command_yields_its_stdout_and_nothing_else_does() {
+        assert!(matches!(
+            classify(completed(0, "12345\n", "")),
+            TmuxAnswer::Ok(out) if out == "12345\n"
+        ));
+        // The `ok()` shim collapses the two non-answers, which is exactly why
+        // it may not be used where an assertion turns on them.
+        assert_eq!(
+            classify(completed(0, "12345\n", "")).ok().as_deref(),
+            Some("12345\n")
+        );
+        assert_eq!(classify(completed(1, "", "boom")).ok(), None);
+    }
+
+    #[test]
+    fn a_complaint_never_reads_as_a_measurement() {
+        // The failure mode this replaces printed "0 tmux client(s) attached"
+        // for a command that never completed. Whatever the reason, the sentence
+        // has to name the reason.
+        for answer in [
+            classify(completed(1, "", "can't find session: nosuch\n")),
+            classify(Ok(RunOutcome::TimedOut {
+                waited: Duration::from_secs(5),
+            })),
+        ] {
+            let said = answer.complaint("counting the session's tmux clients");
+            assert!(
+                said.starts_with("counting the session's tmux clients: "),
+                "{said}"
+            );
+            assert!(
+                said.len() > "counting the session's tmux clients: ".len(),
+                "{said}"
+            );
+        }
+    }
 }

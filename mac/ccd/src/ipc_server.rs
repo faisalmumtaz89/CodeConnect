@@ -178,6 +178,20 @@ async fn read_loop(
             }
         };
 
+        // Before the dispatch below, so a request that asks this daemon to
+        // manage an SSH key is answered without any part of it being carried
+        // out — a device must not end up revoked, or a code minted, on the
+        // strength of a flag the daemon then declines to honour.
+        if let Some(refusal) = frame.ssh_refusal() {
+            crate::log_warn!("ipc: refused an SSH request from an older shim ({refusal})");
+            let _ = tx
+                .send(DaemonFrame::Error {
+                    message: refusal.to_string(),
+                })
+                .await;
+            continue;
+        }
+
         match frame {
             ClientFrame::Hook(post) => {
                 let wait = post.wait;
@@ -315,27 +329,20 @@ async fn read_loop(
                 };
                 let _ = tx.send(frame).await;
             }
-            ClientFrame::CreatePairing {
-                ttl_secs,
-                allow_ssh,
-            } => {
-                // The socket is 0600, so reaching this point already means the
-                // caller is the owner of this account — the same person who
-                // would be typing at the keyboard. That is what makes
-                // `codeconnect pair --ssh` count as consent.
+            ClientFrame::CreatePairing { ttl_secs, .. } => {
                 let ttl = if ttl_secs == 0 {
                     daemon.config.pairing_ttl_secs
                 } else {
                     ttl_secs
                 };
-                let frame = match daemon.create_pairing(ttl, allow_ssh).await {
+                let frame = match daemon.create_pairing(ttl).await {
                     Ok((code, expires_at)) => DaemonFrame::Pairing {
                         code,
                         expires_at,
                         host: daemon.endpoint.host.clone(),
                         port: daemon.endpoint.port,
                         tls: daemon.endpoint.tls,
-                        allow_ssh,
+                        allow_ssh: protocol::ipc::AlwaysFalse,
                     },
                     Err(err) => DaemonFrame::Error {
                         message: format!("{err:#}"),
@@ -352,12 +359,21 @@ async fn read_loop(
                 };
                 let _ = tx.send(frame).await;
             }
-            ClientFrame::RevokeDevice { device, ssh_only } => {
-                let frame = match daemon.revoke(&device, ssh_only).await {
+            ClientFrame::RevokeDevice { device, .. } => {
+                let frame = match daemon.revoke(&device).await {
+                    // `AlwaysFalse` is not "no sweep was attempted": `revoke`
+                    // does sweep `~/.ssh/authorized_keys`. It is that this
+                    // reply carries no count, because five of the sweep's
+                    // outcomes remove nothing — no absolute `$HOME`, a file it
+                    // cannot read, one it cannot rewrite, one that changed
+                    // underneath it, and tagged lines that are not the
+                    // marker-and-key pair — and a `0` on the wire
+                    // would read as "the file is clean now" for all of them.
+                    // The sweep says which it was in the daemon's log.
                     Ok(outcome) => DaemonFrame::Revoked {
                         device: outcome.device,
                         token_revoked: outcome.token_revoked,
-                        ssh_key_removed: outcome.ssh_key_removed,
+                        ssh_key_removed: protocol::ipc::AlwaysFalse,
                     },
                     Err(err) => DaemonFrame::Error {
                         message: format!("{err:#}"),
@@ -411,5 +427,161 @@ async fn read_line_limited(
         if out.len() > max {
             bail!("frame exceeds {max} bytes");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::pairing::DeviceSummary;
+    use tokio::io::AsyncBufReadExt;
+
+    /// A daemon on its own database, served over a socket in a temp directory.
+    ///
+    /// The whole point of these tests is what the *socket* does with a frame, so
+    /// they go through `serve` rather than calling the handler: the refusal has
+    /// to sit ahead of the dispatch, and only a real round trip can show that.
+    async fn served_daemon() -> (Arc<Daemon>, PathBuf) {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stamp = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            n,
+            protocol::time::now_unix_ms()
+        );
+
+        let db = std::env::temp_dir().join(format!("ccd-ipc-{stamp}.db"));
+        let _ = std::fs::remove_file(&db);
+        let store = Arc::new(crate::store::Store::open(&db).unwrap());
+
+        let (tail_tx, tail_rx) = mpsc::unbounded_channel();
+        // Kept alive: a dropped receiver fails every transcript registration,
+        // which is not what these tests are about.
+        Box::leak(Box::new(tail_rx));
+        let daemon = Daemon::new(
+            protocol::config::Config::default(),
+            store,
+            Arc::new(crate::apns::LoggingPushSender::new()),
+            crate::state::Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tail_tx,
+        );
+
+        let socket = std::env::temp_dir().join(format!("ccd-ipc-{stamp}.sock"));
+        tokio::spawn(serve(Arc::clone(&daemon), socket.clone()));
+        // The listener binds inside the task, so the first connect may arrive
+        // before the path exists.
+        for _ in 0..200 {
+            if UnixStream::connect(&socket).await.is_ok() {
+                return (daemon, socket);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the ipc server never came up on {}", socket.display());
+    }
+
+    /// Send one frame, read one reply.
+    async fn exchange(socket: &Path, line: &str) -> DaemonFrame {
+        let stream = UnixStream::connect(socket).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        write_half.write_all(line.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let mut reply = String::new();
+        BufReader::new(read_half)
+            .read_line(&mut reply)
+            .await
+            .unwrap();
+        serde_json::from_str(&reply)
+            .unwrap_or_else(|err| panic!("undecodable reply {reply:?}: {err}"))
+    }
+
+    fn error_message(frame: DaemonFrame) -> String {
+        match frame {
+            DaemonFrame::Error { message } => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    async fn paired_device(daemon: &Arc<Daemon>) -> DeviceSummary {
+        let (code, _) = daemon.create_pairing(300).await.unwrap();
+        daemon
+            .authenticate("static-token-for-tests", None, Some(&code), Some("iPhone"))
+            .await;
+        let devices = daemon.list_devices().await.unwrap();
+        assert_eq!(devices.len(), 1, "the pairing code must buy one device");
+        devices.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_shim_asking_to_install_an_ssh_key_is_refused_instead_of_paired() {
+        let (_daemon, socket) = served_daemon().await;
+        let message = error_message(
+            exchange(
+                &socket,
+                r#"{"type":"create_pairing","ttl_secs":300,"allow_ssh":true}"#,
+            )
+            .await,
+        );
+        assert!(message.contains("does not manage SSH keys"), "{message}");
+        assert!(message.contains("--ssh"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn an_ssh_only_revoke_leaves_the_device_exactly_as_it_was() {
+        let (daemon, socket) = served_daemon().await;
+        let before = paired_device(&daemon).await;
+        assert!(before.is_active(), "the device starts paired");
+
+        let message = error_message(
+            exchange(
+                &socket,
+                &format!(
+                    r#"{{"type":"revoke_device","device":"{}","ssh_only":true}}"#,
+                    before.device_id
+                ),
+            )
+            .await,
+        );
+        assert!(message.contains("does not manage SSH keys"), "{message}");
+
+        // The refusal is worth nothing if the device was revoked on the way to
+        // it: a shim asking for half an operation must get none of it.
+        let after = daemon.list_devices().await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].is_active(), "the device must still be paired");
+        assert_eq!(after[0].revoked_at, None);
+    }
+
+    #[tokio::test]
+    async fn a_revoke_without_the_flag_still_revokes() {
+        // This drives a real revocation, and a revocation sweeps
+        // `$HOME/.ssh/authorized_keys`. Without a redirect it sweeps the
+        // developer's own file — and, running beside the sweep's own tests,
+        // it sweeps *theirs*: `$HOME` is process-global, so a sweep taken
+        // without this lock reads whichever fake home another test currently
+        // has installed and rewrites that test's fixture underneath it.
+        let _home = crate::legacy_credentials::test_support::FakeHome::new("ipc-revoke");
+        let (daemon, socket) = served_daemon().await;
+        let device = paired_device(&daemon).await;
+
+        let reply = exchange(
+            &socket,
+            &format!(
+                r#"{{"type":"revoke_device","device":"{}"}}"#,
+                device.device_id
+            ),
+        )
+        .await;
+        match reply {
+            DaemonFrame::Revoked { token_revoked, .. } => assert!(token_revoked),
+            other => panic!("expected a revocation, got {other:?}"),
+        }
+        assert!(!daemon.list_devices().await.unwrap()[0].is_active());
     }
 }

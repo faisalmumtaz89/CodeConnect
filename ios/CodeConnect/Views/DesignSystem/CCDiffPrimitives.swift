@@ -760,9 +760,8 @@ private struct CCDiffChipStyle: ButtonStyle {
 /// The sticky 40pt band that names the file you are reading.
 ///
 /// The path truncates from the **head**: the tail is what you need. A renamed
-/// file inverts its emphasis the same way `CCFingerprint` does — the old path is
-/// `textTertiary` because it is context, the new one is `text` because it is the
-/// answer.
+/// file puts its emphasis on the half that answers the question — the old path
+/// is `textTertiary` because it is context, the new one is `text`.
 struct CCDiffFileHeader: View {
     let file: UnifiedDiff.FileDiff
 

@@ -32,21 +32,18 @@ final class ProtocolTests: XCTestCase {
     func testPairingHelloOmitsTokenEntirely() throws {
         let fields = try encodeClient(
             .hello(
-                credential: .pairingCode("ABCD2345"), clientID: "id", clientName: "iPhone",
-                sshPublicKey: "ssh-ed25519 AAAAC3Nz phone"))
+                credential: .pairingCode("ABCD2345"), clientID: "id", clientName: "iPhone"))
         XCTAssertEqual(fields["type"]?.stringValue, "hello")
         XCTAssertEqual(fields["pairing_code"]?.stringValue, "ABCD2345")
         XCTAssertNil(fields["token"], "a pairing hello that carries a token is authenticated as one")
-        XCTAssertEqual(fields["ssh_pubkey"]?.stringValue, "ssh-ed25519 AAAAC3Nz phone")
         XCTAssertEqual(fields["protocol_version"]?.intValue, Int(Wire.protocolVersion))
     }
 
     func testTokenHelloOmitsPairingCode() throws {
         let fields = try encodeClient(
-            .hello(credential: .token("deadbeef"), clientID: nil, clientName: nil, sshPublicKey: nil))
+            .hello(credential: .token("deadbeef"), clientID: nil, clientName: nil))
         XCTAssertEqual(fields["token"]?.stringValue, "deadbeef")
         XCTAssertNil(fields["pairing_code"])
-        XCTAssertNil(fields["ssh_pubkey"], "a key that was not offered must not appear as null")
     }
 
     // MARK: hello_ack
@@ -59,14 +56,12 @@ final class ProtocolTests: XCTestCase {
              "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",
                "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,
                "push":false,"tls":true,"tls_active":true,"diff":true,"risk_class":true},
-             "device_token":"tok_123","device_id":"dev_1","device_name":"iPhone 2",
-             "ssh_key_installed":true}
+             "device_token":"tok_123","device_id":"dev_1","device_name":"iPhone 2"}
             """)
         guard case .helloAck(let ack) = message else { return XCTFail("wrong message") }
         XCTAssertEqual(ack.protocolMinor, 1)
         XCTAssertEqual(ack.deviceToken, "tok_123")
         XCTAssertEqual(ack.deviceName, "iPhone 2")
-        XCTAssertEqual(ack.sshKeyInstalled, true)
         XCTAssertTrue(ack.capabilities.servesDiff)
         XCTAssertTrue(ack.capabilities.classifiesRisk)
         XCTAssertTrue(ack.capabilities.tlsActive)

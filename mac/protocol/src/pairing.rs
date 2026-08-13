@@ -178,13 +178,6 @@ pub struct DeviceSummary {
     /// "this device was revoked on the 3rd" is a fact worth keeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
-    /// True when this device's SSH key is currently in `~/.ssh/authorized_keys`.
-    #[serde(default)]
-    pub ssh_key_installed: bool,
-    /// OpenSSH `SHA256:…` of the installed key, so the operator can check it
-    /// against what the phone reports rather than taking our word for it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_fingerprint: Option<String>,
 }
 
 impl DeviceSummary {
@@ -278,8 +271,6 @@ mod tests {
             created_at: "2026-07-31T10:00:00.000Z".into(),
             last_seen_at: None,
             revoked_at: None,
-            ssh_key_installed: false,
-            ssh_fingerprint: None,
         };
         let encoded = serde_json::to_string(&device).unwrap();
         assert!(!encoded.contains("revoked_at"), "{encoded}");

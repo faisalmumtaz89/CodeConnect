@@ -238,14 +238,22 @@
 
         // MARK: JSON builders
 
+        /// A current daemon's ack, capability for capability, as a paired
+        /// device sees it. Anything the fixture withholds is UI the fixture
+        /// cannot reach — `terminal_pty` alone gates the whole Terminal tab —
+        /// so this stays level with `protocol::PROTOCOL_MINOR` and with
+        /// `ws_server::capabilities`. `push` is false because a fixture daemon
+        /// holds no APNs key, and `test_push` follows it for that reason.
         private static let helloAckJSON = """
-            {"type":"hello_ack","protocol_version":1,"protocol_minor":11,\
+            {"type":"hello_ack","protocol_version":1,"protocol_minor":13,\
             "server_time":"2026-07-31T09:14:00.000Z",\
             "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
             "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
-            "push":false,"tls":false,"tls_active":false,"diff":true,"risk_class":true,\
-            "delete_session":true,"command_catalog":true,"slash_composer_recovery":true},\
-            "device_name":"iPhone","ssh_key_installed":true}
+            "delete_session":true,"test_push":false,"push":false,"tls":false,\
+            "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
+            "send_text_idempotent":true,"slash_composer_recovery":true,\
+            "prompt_identity":true,"command_catalog":true,"terminal_pty":true},\
+            "device_name":"iPhone"}
             """
 
         /// The `/status` view exactly as a narrow (80-column) tmux pane

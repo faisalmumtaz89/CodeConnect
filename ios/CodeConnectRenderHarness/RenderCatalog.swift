@@ -610,28 +610,6 @@ enum RenderCatalog {
             }),
 
         RenderScenario(
-            name: "terminal-setup",
-            purpose: "the app never enables a system service; it says what to run",
-            arguments: ["-CC_FIXTURE", "deck", "-cc.debug.terminalState", "needsSetup"],
-            reach: { app, driver in
-                try driver.openTerminal(app)
-                try driver.require(
-                    driver.text(containing: "Tailscale SSH", in: app), "the SSH setup card")
-            }),
-
-        RenderScenario(
-            name: "terminal-hostkey-changed",
-            purpose:
-                "the app's most serious screen: two fingerprints, diffed, and a hard stop",
-            arguments: ["-CC_FIXTURE", "deck", "-cc.debug.terminalState", "hostKeyChanged"],
-            reach: { app, driver in
-                try driver.openTerminal(app)
-                try driver.require(
-                    driver.text(containing: "SSH key changed", in: app),
-                    "the changed-host-key alarm")
-            }),
-
-        RenderScenario(
             name: "terminal-ended",
             purpose: "a session that has ended, and the one control it offers",
             arguments: ["-CC_FIXTURE", "deck", "-cc.debug.terminalState", "ended"],
@@ -642,44 +620,6 @@ enum RenderCatalog {
             purpose: "the trust screen: what this daemon advertises, verbatim",
             arguments: ["-CC_FIXTURE", "deck"],
             reach: { app, driver in try driver.openSettings(app) }),
-
-        RenderScenario(
-            name: "settings-terminal-ssh",
-            purpose:
-                "this iPhone's own key, in the `CCMonoBlock` whose text lands on the content column",
-            arguments: ["-CC_FIXTURE", "deck"],
-            reach: { app, driver in
-                try driver.openSettings(app)
-                let link = app.buttons.matching(
-                    NSPredicate(format: "label CONTAINS 'Terminal and SSH'")
-                ).firstMatch
-                try driver.require(link, "the Terminal and SSH row")
-                // `isHittable`, not `exists`: the row sits below the connection
-                // and transport sections and is in the tree long before it is
-                // under a thumb.
-                try driver.scrollUntil(app, "the Terminal and SSH row is reachable") {
-                    link.isHittable
-                }
-                link.tap()
-                try driver.require(
-                    app.navigationBars["Terminal and SSH"], "the SSH identity screen")
-
-                // **Mint the key.** Without this the screen renders its
-                // *not created yet* branch, and the `CCMonoBlock` this scenario
-                // exists to photograph — the public key, `.middle`-truncated,
-                // whose text lands on the content column and whose border
-                // hangs 12pt left of it — is never drawn. A render of the empty
-                // branch would have looked like a pass.
-                let create = app.buttons.matching(
-                    NSPredicate(format: "label CONTAINS 'Create this iPhone'")
-                ).firstMatch
-                if create.waitForExistence(timeout: 5) { create.tap() }
-                try driver.require(
-                    app.buttons.matching(
-                        NSPredicate(format: "label CONTAINS 'Copy public key'")
-                    ).firstMatch,
-                    "this iPhone's public key")
-            }),
 
         RenderScenario(
             name: "link-health",
@@ -702,9 +642,9 @@ enum RenderCatalog {
 
     /// The kit's own review surface, one render per page.
     ///
-    /// **This is the only reachable render several components have.** `CCKeyCap`
-    /// had none at all — no gallery page, and a screen that needs a live SSH
-    /// server — so "a control is 44pt" could be written about it and never
+    /// **This is the only reachable render several components have.**
+    /// `CCKeyCap`'s other one is a screen that needs a live terminal, so
+    /// without these pages "a control is 44pt" is written about it and never
     /// checked. A claim nobody can photograph is a claim nobody has tested.
     /// Each page, and one section heading that only that page draws.
     ///
@@ -714,7 +654,6 @@ enum RenderCatalog {
     /// instead of photographing an empty column.
     private static let galleryPages: [(page: String, marker: String)] = [
         ("foundations", "Foundations"),
-        ("identity", "CCFingerprint"),
         ("buttons", "CCButton"),
         ("rows", "CCRow"),
         ("indicators", "CCBadge"),

@@ -6,7 +6,7 @@
 
 use sha2::{Digest, Sha256};
 
-/// Raw digest. OpenSSH fingerprints are base64 of these bytes, not of the hex.
+/// Raw digest, for callers that need the bytes rather than the hex text.
 pub fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }

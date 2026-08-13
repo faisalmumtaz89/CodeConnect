@@ -44,6 +44,41 @@ jobs:
         working-directory: mac
         run: cargo test --workspace
 
+  msrv:
+    name: Rust MSRV floor
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # A declared floor that nothing compiles against is a wish, not a
+      # guarantee, so CI builds the workspace on exactly the version
+      # `mac/Cargo.toml` names. `rustls` pulls `zeroize`, which is published
+      # with `edition2024`, so anything older cannot even parse the lockfile's
+      # manifests. `--locked` so the lockfile, not a fresh resolve, is tested.
+      - name: Pin the floor toolchain
+        run: |
+          floor="$(awk -F'"' '/^rust-version = /{print $2; exit}' mac/Cargo.toml)"
+          rustup toolchain install "$floor" --profile minimal --no-self-update
+          # A directory override at the repo root, which `rustup` finds by
+          # walking up from `mac/` in the build step below. That is what pins
+          # the floor for the rest of the job — no environment is carried
+          # between steps, because nothing later needs the version as a value.
+          rustup override set "$floor"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mac/target
+          key: ${{ runner.os }}-msrv-${{ hashFiles('mac/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-
+
+      - name: Build on the floor
+        working-directory: mac
+        run: cargo build --workspace --locked
+
   ios:
     name: Swift (app + unit tests)
     runs-on: macos-15

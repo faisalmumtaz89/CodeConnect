@@ -26,6 +26,9 @@ http = { workspace = true }
 ring = { workspace = true }
 rustls-native-certs = { workspace = true }
 notify = { workspace = true }
+# The terminal wire carries raw pane bytes as base64 inside the existing JSON
+# frames. See `terminal.rs` for the carrier itself.
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }

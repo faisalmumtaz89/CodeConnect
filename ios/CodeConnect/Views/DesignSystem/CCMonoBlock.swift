@@ -5,21 +5,17 @@ import UIKit
 //  CCMonoBlock — verbatim text with a copy affordance.
 //
 //  **This component may not hide a character.** It is the surface the product's
-//  whole premise rests on — "you see the exact text before you answer" — and it
-//  shipped a version that faded `…Feature.swi[ft]` into an alpha gradient, ran
-//  `ssh-keygen -lf …key.pub` underneath the copy button, and did both under a
-//  label reading EXACT COMMAND. A fade mid-token is precisely where a hostile
-//  suffix hides, and it was the only alpha gradient in an app whose every other
-//  edge is a 1pt hairline: the one place the language softened was the one
-//  place it had to be hardest.
+//  whole premise rests on — "you see the exact text before you answer" — so
+//  there is no horizontal scroll, no alpha gradient, and nothing runs under the
+//  copy button. A fade mid-token (`…Feature.swi[ft]`) is precisely where a
+//  hostile suffix hides, and softening the language here, under a label reading
+//  EXACT COMMAND, would soften it in the one place it has to be hardest.
 //
-//  So the horizontal scroll and its fade are gone. What replaces them is the
-//  diff grid's own treatment, which the same review called the best-executed
-//  surface in the app: wrap at the measured column and mark the break with a
-//  `↳`. The wrap is arithmetic, not a guess — a monospaced font has one advance,
-//  so `columns = width / advance` lands on the glyph every time — and it is the
-//  same `DiffLineWrap` the grid uses, so a command and a diff line break the
-//  same way.
+//  Long text takes the diff grid's treatment instead: wrap at the measured
+//  column and mark the break with a `↳`. The wrap is arithmetic, not a guess —
+//  a monospaced font has one advance, so `columns = width / advance` lands on
+//  the glyph every time — and it is the same `DiffLineWrap` the grid uses, so a
+//  command and a diff line break the same way.
 // =============================================================================
 
 /// The one thing `CCMonoBlock` is allowed to shorten, and the two ways it may.
@@ -36,9 +32,9 @@ import UIKit
 enum CCMonoTruncation: Hashable {
     /// `…/Net/Sender.swift`. The tail identifies.
     case head
-    /// `ssh-ed25519 AAAA…codeconnect-iphone`. Both ends identify: an SSH public
-    /// key's trailing comment is the only thing that says which line in
-    /// `authorized_keys` belongs to *this* phone.
+    /// `ccsoak-tail-54568…1785466205`. Both ends identify: a generated name's
+    /// prefix says what made it and its suffix says which run, so cutting
+    /// either end leaves two of them indistinguishable.
     case middle
 }
 
@@ -333,11 +329,10 @@ struct CCMonoBlock: View {
     /// call site being asked:
     ///
     ///  * **Inside a container that declares its column** (`CCCard`, `CCStepRow`,
-    ///    `CCFactRow`'s detail slot, the host-key alarm) — the block is already
-    ///    standing on the column, so it hangs back the 12 its own padding will
-    ///    add. Measured before this on the host-key card at AX5: every string at
-    ///    32.00 and the mono block's at **44.00**, the last extra text edge on
-    ///    the app's most serious screen.
+    ///    `CCFactRow`'s detail slot) — the block is already standing on the
+    ///    column, so it hangs back the 12 its own padding will add. Measured at
+    ///    AX5: without this, every string sits at 32.00 and the mono block's at
+    ///    **44.00** — an extra text edge on the card.
     ///  * **Free-standing on a page** (`columnInset == 0` — the decision card,
     ///    the comment sheet) — nothing has stepped out yet, so the block finds
     ///    the content column itself, exactly as `CCSectionHeader` does, and hangs

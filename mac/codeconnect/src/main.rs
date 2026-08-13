@@ -33,6 +33,16 @@ fn main() -> Result<()> {
         .map(|(head, tail)| (head.as_str(), tail))
         .unwrap_or(("help", &[]));
 
+    // A phone whose app predates the retirement of SSH still tells its owner to
+    // run one of two commands here. That instruction ships inside an app already
+    // installed on phones, so it cannot be corrected where it is written — it is
+    // corrected here, at the moment it is followed. Consulted ahead of the match
+    // so both spellings are answered by one explanation rather than by whichever
+    // "unknown" refusal they happen to land on.
+    if let Some(retired) = retired_command(command, rest) {
+        explain_retired(retired);
+    }
+
     match command {
         "claude" => start_claude(rest),
         "attach" => attach(rest),
@@ -41,8 +51,7 @@ fn main() -> Result<()> {
         "token" => token(),
         "pair" => pair::pair(rest),
         "devices" => pair::devices(rest),
-        "revoke" => pair::revoke(rest, false),
-        "ssh-revoke" => pair::revoke(rest, true),
+        "revoke" => pair::revoke(rest),
         "daemon" => launchd::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
@@ -78,8 +87,19 @@ fn main() -> Result<()> {
 }
 
 fn usage() {
-    eprintln!(
-        "\
+    eprintln!("{}", usage_text());
+}
+
+/// The banner, as text rather than as a side effect.
+///
+/// Split out so it can be held to the same bar as the retirement notice. This
+/// is the other place a claim about SSH could plausibly be written — it is the
+/// list of what this CLI does, so a line reinstating `pair --ssh`, or
+/// reassuring the reader that keys were dealt with, belongs here if it belongs
+/// anywhere. A banner is also the text nobody rereads, which is exactly why the
+/// guard has to reach it rather than the author having to remember.
+fn usage_text() -> &'static str {
+    "\
 cc — CodeConnect shim
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
@@ -95,16 +115,221 @@ cc — CodeConnect shim
   codeconnect daemon restart      restart the managed daemon
   codeconnect daemon uninstall    stop it and remove the LaunchAgent
 
-  codeconnect pair [--ssh]        show a QR code that pairs a phone (single use, 5 min)
+  codeconnect pair                show a QR code that pairs a phone (single use, 5 min)
   codeconnect devices             list paired devices
-  codeconnect revoke <device>     revoke a device's token and its SSH key
-  codeconnect ssh-revoke <device> remove only that device's SSH key
+  codeconnect revoke <device>     revoke a device's token
   codeconnect token               print the static fallback token
-
-`codeconnect pair --ssh` also lets that one pairing install the app's ed25519 public
-key into ~/.ssh/authorized_keys. Without the flag an offered key is refused.
 "
+}
+
+// ------------------------------------------------------- retired commands
+
+/// A command this CLI no longer has, still named on a phone screen.
+///
+/// CodeConnect's terminal rides the paired connection, so nothing here manages
+/// SSH keys. An app from before that change asks its owner to authorise a key
+/// with `codeconnect pair --ssh`, and to withdraw one with
+/// `codeconnect ssh-revoke`. Both are answered rather than refused: the person
+/// typing them is doing exactly what their screen told them to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetiredCommand {
+    /// A pairing that also files a key in `~/.ssh/authorized_keys`.
+    SshPairing,
+    /// The withdrawal of such a key.
+    SshRevocation,
+}
+
+/// The status a retired command leaves with.
+///
+/// Non-zero, and deliberately the same `1` an unrecognised command leaves
+/// with: a retired command performed no part of what it was asked, so a script
+/// that runs `codeconnect pair --ssh` and reads success would be reading a
+/// pairing that never happened. One code rather than a second one invented
+/// here, because "this did not work" is the whole of what a caller needs and
+/// nothing consumes a finer distinction.
+const RETIRED_EXIT_CODE: i32 = 1;
+
+/// Which retired command this argv names, or `None` for one that still exists.
+///
+/// Pure, so the routing and the wording it selects are both pinned by tests
+/// with no process to spawn.
+///
+/// Three spellings reach the same two answers, because all three were reachable
+/// when the commands existed and any of them may be typed from memory: the
+/// `ssh-revoke` command word, with or without the device it once took; `--ssh`
+/// on `pair`, wherever it sits among the arguments; and `--ssh` on `revoke`,
+/// which is the half-remembered form of `ssh-revoke`. That last one earns its
+/// place by what it does otherwise — `revoke` reads only its first argument, so
+/// `codeconnect revoke iPhone --ssh` would revoke the device's token outright
+/// while its author believed they were removing a key.
+///
+/// The flag is looked for only under those two commands. `codeconnect claude`'s
+/// arguments belong to `claude` and `codeconnect supervise`'s to the
+/// supervisor; a scan that reached either would let this dispatch swallow an
+/// argument meant for another program.
+fn retired_command(command: &str, args: &[String]) -> Option<RetiredCommand> {
+    let ssh_flag = || args.iter().any(|arg| arg == "--ssh");
+    match command {
+        "ssh-revoke" => Some(RetiredCommand::SshRevocation),
+        "pair" if ssh_flag() => Some(RetiredCommand::SshPairing),
+        "revoke" if ssh_flag() => Some(RetiredCommand::SshRevocation),
+        _ => None,
+    }
+}
+
+/// What a retired command says for itself. Pure, so the facts it has to carry
+/// are pinned by tests rather than by reading it.
+///
+/// The shared advisory grammar: a heading, the explanation, a remedy with its
+/// commands isolated on their own lines, the check that settles the rest, and a
+/// closing. Bold rather than the impairment colour this file paints an
+/// unreachable phone with: nothing here is a fault report. The command was real
+/// once, the reader typed what their screen told them to type, and what is out
+/// of date is the app that told them.
+///
+/// **Why this describes the sweep instead of declaring it done.** `ccd`'s
+/// `purge_authorized_keys` is best-effort by contract: an unresolvable `$HOME`
+/// skips `~/.ssh/authorized_keys` outright, and an `~/.ssh` that cannot be
+/// rewritten leaves every entry where it is — both a warning in the daemon log
+/// rather than a daemon that refuses to start or a revocation that reports
+/// failure. Two callers reach it now, startup and `Daemon::revoke`, and a
+/// second best effort is still a best effort: what the notice may say about
+/// either is that it runs. This CLI also answers on a Mac whose upgraded daemon
+/// has never run, and, being pure, reads neither that file nor that log — nor
+/// the count a revocation deliberately does not carry back over IPC. So the
+/// notice states what the daemon does and hands over the one-line check, which
+/// is worth more to a reader worried about a stale grant than a reassurance
+/// nothing here can see.
+fn retirement_notice(retired: RetiredCommand, style: update_check::Style) -> String {
+    let heading = match retired {
+        RetiredCommand::SshPairing => "codeconnect pair --ssh is retired",
+        RetiredCommand::SshRevocation => "codeconnect ssh-revoke is retired",
+    };
+
+    // Both answers rest on the same facts, so they are stated once. The last of
+    // them is the daemon's behaviour, not this Mac's state: the sweep is
+    // allowed to fail, so where it reports failure is part of the fact.
+    //
+    // **Only the install half is denied, because only the install half is
+    // true.** This used to read "CodeConnect neither installs an SSH key nor
+    // revokes one" — immediately above two sentences describing the daemon
+    // removing keys, which is what revoking one is. `ccd`'s
+    // `legacy_credentials::purge_authorized_keys` runs at startup and again
+    // from `Daemon::revoke`, and takes out every marker-and-key pair an earlier
+    // release wrote. That the IPC reply carries `ssh_key_removed: AlwaysFalse`
+    // is a fact about what a revocation reports back, not about what it does to
+    // the file, and reading it as the latter is how the denial got written.
+    //
+    // What survives is the claim this CLI can still answer for: `pair.rs` sends
+    // `allow_ssh: false`, so nothing in this project installs a key. What
+    // replaces the rest is the sweep itself and the hedge it needs — a grant
+    // survives silently whenever the key sits outside the single hardcoded
+    // `$HOME/.ssh/authorized_keys` or on any line outside the marker-and-key
+    // pair, which is what "best-effort" and the check below are carrying.
+    let explanation = "CodeConnect does not use SSH. The Terminal tab rides the same paired\n\
+                       connection as the rest of the app, so CodeConnect never installs an SSH\n\
+                       key — and it does take one back. At startup the daemon removes the\n\
+                       entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n\
+                       sweeps that file again on every revocation. It is best-effort either\n\
+                       way, and warns in its log when it cannot.";
+    let out_of_date = "The phone that asked for this is running an older version of the app.";
+
+    // Where the two part company: one reader wanted to grant access, the other
+    // to take it back, and each needs the command that now serves that intent.
+    //
+    // The revocation answer says what that command does to the file as well,
+    // because this reader arrived meaning to remove a key and would otherwise
+    // read `codeconnect revoke` as touching only the token. It says the sweep
+    // runs and stops there: `Daemon::revoke` carries no count back, five of the
+    // sweep's outcomes remove nothing, and the check below is what settles
+    // which of them this Mac saw.
+    let remedy = match retired {
+        RetiredCommand::SshPairing => format!(
+            "{out_of_date}\n\
+             Update the app: its Terminal tab then connects over the paired link\n\
+             with nothing to authorise.\n\n\
+             Pairing a phone is unchanged:\n\n\
+             {}",
+            emphasized("codeconnect pair", style)
+        ),
+        RetiredCommand::SshRevocation => format!(
+            "{out_of_date}\n\
+             Update the app: its Terminal tab then rides the paired link, and\n\
+             nothing in CodeConnect has a use for the key it holds. The check\n\
+             below shows what is still in that file.\n\n\
+             To stop a phone reaching CodeConnect, revoke its device token:\n\n\
+             {}\n\
+             {}\n\n\
+             Revoking also asks the daemon to sweep ~/.ssh/authorized_keys\n\
+             again, on the same best effort it makes at startup.",
+            emphasized("codeconnect devices", style),
+            emphasized("codeconnect revoke <device>", style)
+        ),
+    };
+
+    // The reader who arrived worried about a stale grant is served by a check
+    // they can run over a reassurance this function is in no position to give.
+    // `codeconnect:` is the tag `ccd` matches on, carried by both lines of an
+    // installed entry, so the same tag is what finds one still in place.
+    //
+    // The pair is spelled out because the tag alone is a wider net than the
+    // daemon's own rule: `legacy_credentials` removes a key line only as the
+    // second half of its marker's pair, and leaves a lone key line alone
+    // however its comment field reads. Advice to delete whatever matches would
+    // aim the operator at somebody else's key with only their memory to stop
+    // them, so what is safe to remove is described by its shape instead.
+    let check = format!(
+        "To see what is still in that file on this Mac, search for the tag\n\
+         those entries carry:\n\n\
+         {}\n\n\
+         Nothing printed means nothing there carries the tag; grep saying\n\
+         there is no such file means the same thing. What it prints is one of\n\
+         ours where two adjacent lines carry the same tag: a marker comment\n\
+         beginning # codeconnect:<id>, and directly beneath it an ssh-ed25519\n\
+         line whose last field is that same tag. Delete that pair by hand.\n\
+         A tagged key line with no such marker directly above it is one this\n\
+         daemon leaves alone, because nothing in the file identifies whose it\n\
+         is — removing it is your call rather than its.",
+        emphasized("grep codeconnect: ~/.ssh/authorized_keys", style)
     );
+
+    // The reader's part is observable from here — the spelling they typed is
+    // one only an older app hands out. This Mac's part is not, so it is the
+    // check above that speaks to it and not this line.
+    let closing =
+        "Nothing you typed was wrong \u{2014} the app on the phone is what is out of date.";
+
+    let text = format!(
+        "{}\n{explanation}\n\n{remedy}\n\n{check}\n\n{closing}",
+        emphasized(heading, style)
+    );
+    match style {
+        update_check::Style::Ascii => asciify(&text),
+        _ => text,
+    }
+}
+
+/// Print `retired`'s explanation and leave.
+///
+/// **Why this leaves through `process::exit` rather than through the `Result`
+/// every other command returns.** anyhow prints a failure as `Error: {msg}`,
+/// which is the right frame for a mistake — and this is not one. The reader
+/// typed what their phone told them to type, and a paragraph explaining that,
+/// prefixed `Error:`, reads as a crash they caused. The status must still be
+/// non-zero, so returning `Ok(())` is not available either. Writing the notice
+/// and choosing the code directly is what satisfies both.
+///
+/// Safe at this point specifically: nothing has been opened, spawned or
+/// written, so the destructors `exit` skips have nothing to release, and
+/// stderr is unbuffered — the notice is out before the call.
+fn explain_retired(retired: RetiredCommand) -> ! {
+    use std::io::IsTerminal;
+    // stderr, like every other advisory here: this is a refusal rather than the
+    // product of a command, and a reader who redirected stdout expecting a QR
+    // still sees why they did not get one.
+    let style = update_check::style_for_stream(std::io::stderr().is_terminal());
+    eprintln!("{}", retirement_notice(retired, style));
+    std::process::exit(RETIRED_EXIT_CODE);
 }
 
 fn start_claude(passthrough: &[String]) -> Result<()> {
@@ -347,13 +572,21 @@ fn tailnet_shaped_ip(host: &str) -> bool {
     }
 }
 
-/// The warning text, or `None` while the phone has a route to this daemon.
-/// Pure, so the wording and the rules are pinned by tests.
+/// The warning text, or `None` when nothing here can see anything wrong —
+/// which is silence rather than a clean bill. `unreachable_host` declines to
+/// judge a name it cannot resolve, and a probe that came back `Unknown` is not
+/// evidence of a tunnel, so a phone can be off the tailnet with every input
+/// this reads looking ordinary. Pure, so the wording and the rules are pinned
+/// by tests.
 ///
-/// `bind_ip` is the socket's real address; `endpoint_host` is the name the
-/// phone dials, which under TLS is a MagicDNS name regardless of the bind.
-/// The toggled-off advice keys on the *bind*: only a daemon genuinely bound
-/// to a tailnet address revives with the tunnel, and an older daemon that
+/// `bind_ip` is the socket's real address; `endpoint_host` is what the QR sends
+/// the phone to, which is a hostname when the daemon has one that reaches its
+/// own listener and the bind address as a literal otherwise — `ccd`'s
+/// `resolve_transport_with` decides which, and is the authority on the rule.
+/// What matters here is only that the two can differ, so neither substitutes
+/// for the other: a daemon on the tailnet may be advertised under a name, which
+/// is why the toggled-off advice keys on the *bind*. Only a daemon genuinely
+/// bound to a tailnet address revives with the tunnel, and an older daemon that
 /// does not report its bind gets silence, not a guess.
 ///
 /// The wording matches the app's own banner for the same state — the phone
@@ -402,11 +635,18 @@ fn phone_reachability_note(
             (explanation, remedy)
         } else if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
             let explanation = "Tailscale is off on this Mac.".to_string();
+            // Scoped to what has been watched happen. The daemon does keep its
+            // bind across the toggle — that is a property of the socket, not a
+            // guess — but "nothing needs restarting" is a promise about every
+            // Mac and every toggle, and the evidence behind it is one machine
+            // once. Saying what is known, and naming the fallback, costs the
+            // reader one sentence and claims only what was seen.
             let remedy = format!(
                 "Connect Tailscale (menu bar), or run:\n\n\
              {}\n\n\
-             The daemon keeps its tailnet address and is reachable again the\n\
-             moment the tunnel is back. Nothing needs restarting.",
+             The daemon holds its tailnet address across the toggle, so it is\n\
+             normally reachable again as soon as the tunnel is. If the phone\n\
+             still cannot reach it, restart the daemon.",
                 emphasized("tailscale up", style)
             );
             (explanation, remedy)
@@ -443,8 +683,8 @@ fn hold_permitted(stderr_tty: bool, stdin_tty: bool, term: Option<&str>) -> bool
     stderr_tty && stdin_tty && term != Some("dumb")
 }
 
-/// Bold when styling is on; bare otherwise. For an isolated command or URL
-/// line — the thing the reader is meant to act on.
+/// Bold when styling is on; bare otherwise. For an advisory's heading, and for
+/// an isolated command or URL line — the thing the reader is meant to act on.
 fn emphasized(line: &str, style: update_check::Style) -> String {
     match style {
         update_check::Style::Styled => format!("\u{1b}[1m{line}\u{1b}[0m"),
@@ -725,6 +965,232 @@ mod tests {
         ));
     }
 
+    /// An argv as the dispatch receives it, so a test reads like the command
+    /// a person typed.
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// The pairing flag an app from before the retirement still names. It has
+    /// to be recognised wherever it sits in the arguments, because the reader
+    /// is retyping a command from a phone screen and may add to it.
+    #[test]
+    fn the_retired_ssh_pairing_flag_explains_itself_instead_of_failing_as_an_unknown_option() {
+        for words in [
+            argv(&["--ssh"]),
+            argv(&["--ssh", "--qr"]),
+            argv(&["--qr", "--ssh"]),
+        ] {
+            assert_eq!(
+                retired_command("pair", &words),
+                Some(RetiredCommand::SshPairing),
+                "{words:?} must reach the explanation, not `unknown option`"
+            );
+        }
+    }
+
+    /// The revocation an app from before the retirement still names — bare, as
+    /// that app spells it, and with the device the usage block spelled it with.
+    ///
+    /// `revoke <device> --ssh` is the same intent typed from memory, and it is
+    /// the spelling with teeth: `revoke` reads only its first argument, so
+    /// without this it revokes the device's token outright while its author
+    /// believes they are removing a key.
+    #[test]
+    fn the_retired_ssh_revocation_explains_itself_instead_of_failing_as_an_unknown_command() {
+        for (command, words) in [
+            ("ssh-revoke", argv(&[])),
+            ("ssh-revoke", argv(&["iPhone"])),
+            ("revoke", argv(&["iPhone", "--ssh"])),
+            ("revoke", argv(&["--ssh", "iPhone"])),
+        ] {
+            assert_eq!(
+                retired_command(command, &words),
+                Some(RetiredCommand::SshRevocation),
+                "`codeconnect {command} {words:?}` must reach the explanation"
+            );
+        }
+    }
+
+    /// The diversion is surgical: every command that still exists runs, and a
+    /// passthrough command's arguments belong to the program they are passed
+    /// to — `claude` owns its own flags, whatever they are spelled.
+    #[test]
+    fn the_commands_that_still_exist_are_never_diverted() {
+        for (command, words) in [
+            ("pair", argv(&[])),
+            ("revoke", argv(&["iPhone"])),
+            ("devices", argv(&[])),
+            ("token", argv(&[])),
+            ("update", argv(&[])),
+            ("help", argv(&[])),
+            ("claude", argv(&["--ssh"])),
+            ("supervise", argv(&["--session", "cc1", "--ssh"])),
+        ] {
+            assert_eq!(
+                retired_command(command, &words),
+                None,
+                "`codeconnect {command} {words:?}` still has work to do"
+            );
+        }
+    }
+
+    /// The rule this diversion must not erode: a command nobody recognises is
+    /// not a command that succeeded. Nothing here is retired, so all of it
+    /// falls through to the refusals that were already there — including the
+    /// `cc file.c` shape that is the reason those refusals exit non-zero.
+    #[test]
+    fn a_command_nobody_recognises_is_still_nobodys_command() {
+        for (command, words) in [
+            ("frobnicate", argv(&[])),
+            ("ssh", argv(&[])),
+            ("ssh-install", argv(&[])),
+            ("sshrevoke", argv(&[])),
+            ("pair", argv(&["--sshh"])),
+            ("pair", argv(&["--nope"])),
+            ("file.c", argv(&["-o", "out"])),
+        ] {
+            assert_eq!(
+                retired_command(command, &words),
+                None,
+                "`codeconnect {command} {words:?}` is not retired, it is unknown"
+            );
+        }
+
+        // And the refusal it falls through to is intact: a mistyped option on
+        // `pair` is still an error naming the usage, never a QR code.
+        let err = pair::pair(&argv(&["--nope"])).expect_err("an unknown option must not pair");
+        assert!(
+            err.to_string().contains("unknown option"),
+            "the pre-existing refusal has to survive the diversion: {err}"
+        );
+    }
+
+    /// Every fact the reader needs, in both answers: that SSH is gone and the
+    /// terminal rides the paired connection instead, what the daemon does to
+    /// `authorized_keys` — at startup, and again on every revocation — and
+    /// where it says so when it cannot, the one-line check that settles what is
+    /// actually left there, that the app is what is out of date — and the
+    /// command that now serves the intent they arrived with.
+    #[test]
+    fn the_retirement_notice_names_the_facts_that_matter() {
+        use update_check::Style;
+        let pairing = retirement_notice(RetiredCommand::SshPairing, Style::Ascii);
+        let revocation = retirement_notice(RetiredCommand::SshRevocation, Style::Ascii);
+
+        for notice in [&pairing, &revocation] {
+            assert!(notice.contains("does not use SSH"), "{notice}");
+            assert!(notice.contains("rides the same paired"), "{notice}");
+            assert!(
+                notice.contains("At startup the daemon removes"),
+                "the sweep is what the daemon does, and it must be stated: {notice}"
+            );
+            assert!(notice.contains("~/.ssh/authorized_keys"), "{notice}");
+            assert!(
+                notice.contains("again on every revocation"),
+                "the startup sweep is not the only one, and a reader told only \
+                 about that one has no reason to run `codeconnect revoke` again \
+                 as the retry for a sweep that failed: {notice}"
+            );
+            assert!(
+                notice.contains("best-effort"),
+                "a sweep the daemon is allowed to fail at must be described as \
+                 one, or `the daemon removes the entries` reads as a \
+                 guarantee: {notice}"
+            );
+            assert!(
+                notice.contains("warns in its log"),
+                "a sweep that is allowed to fail has to name where it says so, \
+                 or the reader cannot tell a quiet success from a quiet one: {notice}"
+            );
+            assert!(
+                notice.contains("\ngrep codeconnect: ~/.ssh/authorized_keys\n"),
+                "a reader worried about a stale grant is owed a check they can \
+                 run, isolated on its own line: {notice}"
+            );
+            // A check whose hits the reader cannot classify is a check that
+            // aims them at somebody else's key: `legacy_credentials` keeps a
+            // lone key line however its comment field reads, so the notice
+            // has to describe the pair rather than the tag alone.
+            assert!(
+                notice.contains("two adjacent lines carry the same tag"),
+                "the reader needs the shape that is safe to remove, not just \
+                 the tag that finds candidates: {notice}"
+            );
+            // The hit the reader cannot classify from the file: a tagged key
+            // with no marker over it. `legacy_credentials` declines to touch it
+            // precisely because nothing there says whose it is, so the notice
+            // must hand that uncertainty over rather than resolve it. Calling
+            // it somebody else's is the one answer the file cannot support, and
+            // the answer that files a live grant as a colleague's.
+            assert!(
+                notice.contains("nothing in the file identifies whose it"),
+                "an unlabelled grant has to be described as unidentified: {notice}"
+            );
+            assert!(
+                !notice.contains("somebody else"),
+                "the notice must attribute an unlabelled key to nobody: {notice}"
+            );
+            assert!(
+                notice.contains("older version of the app"),
+                "the reader has to learn why their phone asked: {notice}"
+            );
+            assert!(notice.contains("Update the app"), "{notice}");
+        }
+
+        // Each names the command that serves the intent it was reached with,
+        // and neither offers the other's.
+        assert!(pairing.starts_with("codeconnect pair --ssh is retired\n"));
+        assert!(pairing.contains("\ncodeconnect pair\n"));
+        assert!(
+            !pairing.contains("codeconnect revoke"),
+            "a reader who came to grant access is not sent to revoke: {pairing}"
+        );
+
+        assert!(revocation.starts_with("codeconnect ssh-revoke is retired\n"));
+        assert!(revocation.contains("\ncodeconnect revoke <device>\n"));
+        assert!(revocation.contains("\ncodeconnect devices\n"));
+        // And the promise attached to that command is the one it can keep.
+        // `ccd` does sweep `~/.ssh/authorized_keys` on a revocation now, but it
+        // answers with `ssh_key_removed: AlwaysFalse` and carries no count
+        // back, because five of that sweep's outcomes remove nothing. So what
+        // the token buys back is CodeConnect's own grant, and what happened to
+        // the file is a matter for the daemon log and the check.
+        assert!(
+            revocation.contains("To stop a phone reaching CodeConnect, revoke its device token"),
+            "revoking a token takes back what CodeConnect granted, which is \
+             less than everything: {revocation}"
+        );
+    }
+
+    /// The notice obeys the same rendering contract as every other advisory
+    /// here: pure ASCII with no escapes when styling is off, inside 80 columns
+    /// so it survives a narrow terminal, and bold on the heading and on each
+    /// command the reader is meant to act on when styling is on.
+    #[test]
+    fn the_retirement_notice_renders_within_the_advisory_grammar() {
+        use update_check::Style;
+        for retired in [RetiredCommand::SshPairing, RetiredCommand::SshRevocation] {
+            let plain = retirement_notice(retired, Style::Ascii);
+            assert!(plain.is_ascii(), "non-ascii survived: {plain}");
+            assert!(!plain.contains('\u{1b}'), "an escape survived: {plain}");
+            for line in plain.lines() {
+                assert!(line.len() < 80, "over 80 cols: {line}");
+                assert_eq!(line, line.trim_end(), "trailing space: {line:?}");
+            }
+
+            let styled = retirement_notice(retired, Style::Styled);
+            assert!(styled.starts_with("\u{1b}[1m"), "{styled}");
+            // Every command line is emphasised, and every emphasis is closed —
+            // an unreset attribute bleeds across the rest of the terminal.
+            assert_eq!(
+                styled.matches("\u{1b}[1m").count(),
+                styled.matches("\u{1b}[0m").count(),
+                "{styled}"
+            );
+        }
+    }
+
     /// The pre-attach warning across its states, in the app's own vocabulary
     /// ("connect Tailscale" / "set up Tailscale") so the two screens the same
     /// person is looking at never disagree — and each state names *its* fix,
@@ -791,11 +1257,18 @@ mod tests {
         }
     }
 
-    /// The toggled-off state's exact ASCII grammar, top to bottom — the
-    /// heading, the explanation, the isolated command, the retained
-    /// "Nothing needs restarting", and the assurance pair.
+    /// The toggled-off state's ASCII grammar: a heading, the explanation, the
+    /// command isolated on its own line, what the daemon does about the toggle,
+    /// and the assurance pair.
+    ///
+    /// Asserted as the parts that have to be there, not as one frozen string.
+    /// The sentence this note carries about restarting rests on a single
+    /// observation of a single Mac, and a test that pinned it word for word
+    /// would make the claim harder to withdraw than to keep — which is how
+    /// prose outlives the evidence for it. The structure is what the reader
+    /// needs; the wording stays free to become more honest.
     #[test]
-    fn the_toggled_off_note_reads_exactly_as_designed() {
+    fn the_toggled_off_note_reads_as_the_advisory_grammar() {
         let note = phone_reachability_note(
             "mac.tailnet.ts.net",
             Some("100.64.0.7"),
@@ -803,20 +1276,84 @@ mod tests {
             update_check::Style::Ascii,
         )
         .unwrap();
+        let mut lines = note.lines();
+        assert_eq!(lines.next(), Some("Phone unreachable"));
+        assert_eq!(lines.next(), Some("Tailscale is off on this Mac."));
+        assert_eq!(lines.next(), Some(""));
+        assert_eq!(lines.next(), Some("Connect Tailscale (menu bar), or run:"));
+        assert_eq!(lines.next(), Some(""));
         assert_eq!(
-            note,
-            "Phone unreachable\n\
-             Tailscale is off on this Mac.\n\
-             \n\
-             Connect Tailscale (menu bar), or run:\n\
-             \n\
-             tailscale up\n\
-             \n\
-             The daemon keeps its tailnet address and is reachable again the\n\
-             moment the tunnel is back. Nothing needs restarting.\n\
-             \n\
-             This session is unaffected -- it is already running and recording.\n\
-             The phone catches up when the tailnet is back."
+            lines.next(),
+            Some("tailscale up"),
+            "the command has to stand on its own line to be copyable"
+        );
+        assert!(
+            note.contains("This session is unaffected"),
+            "the assurance pair closes the note: {note}"
+        );
+
+        // The claim itself, held to what has been watched happen. The daemon
+        // keeping its bind is a property of the socket; a phone reaching it
+        // again on every Mac and every toggle is not something one observation
+        // establishes, so the note must not put it as a certainty.
+        assert!(
+            note.contains("holds its tailnet address"),
+            "what the daemon does is the part that is known: {note}"
+        );
+        assert!(
+            !note.contains("Nothing needs restarting"),
+            "one measurement of one Mac does not settle every Mac: {note}"
+        );
+        assert!(
+            note.contains("restart the daemon"),
+            "the reader needs the way out when the standing bind does not \
+             revive: {note}"
+        );
+    }
+
+    /// The two inputs are not interchangeable, which is the whole reason both
+    /// are taken. A daemon is advertised under a name whenever it has one that
+    /// reaches its own listener, so the host settles nothing about where the
+    /// socket is bound — and the advice that only a tailnet bind can keep is
+    /// therefore read off the bind alone.
+    #[test]
+    fn the_toggled_off_advice_reads_the_bind_and_never_the_advertised_host() {
+        use update_check::Style;
+        use TailscaleSignal::Down;
+
+        // A tailnet bind behind a hostname: the advice is owed, and the host
+        // is no help in working that out.
+        assert!(
+            phone_reachability_note("mac.tailnet.ts.net", Some("100.64.0.7"), Down, Style::Ascii)
+                .is_some(),
+            "a daemon on a tailnet address revives with the tunnel however it \
+             happens to be advertised"
+        );
+        // The same name over a bind that is not the tailnet's. Nothing here
+        // comes back with `tailscale up`, so nothing is promised.
+        assert_eq!(
+            phone_reachability_note(
+                "mac.tailnet.ts.net",
+                Some("192.168.1.10"),
+                Down,
+                Style::Ascii
+            ),
+            None,
+            "advice that only a tailnet bind can keep must not follow a name"
+        );
+        // And a daemon too old to report its bind gets silence: an absent
+        // bind is not evidence of a tailnet one.
+        assert_eq!(
+            phone_reachability_note("mac.tailnet.ts.net", None, Down, Style::Ascii),
+            None,
+            "an unreported bind is not a tailnet bind"
+        );
+        // The host is still read for the one thing it does settle on its own:
+        // an advertised address no phone can reach is unreachable whatever the
+        // socket is bound to.
+        assert!(
+            phone_reachability_note("127.0.0.1", Some("100.64.0.7"), Down, Style::Ascii).is_some(),
+            "a loopback advertisement is unreachable on its own terms"
         );
     }
 
@@ -849,16 +1386,19 @@ mod tests {
         assert!(missing.contains("Set up Tailscale"));
         assert!(missing.contains("\nhttps://tailscale.com/download\n"));
 
-        // Bound to the tailnet, backend stopped afterwards: connect it back
-        // and nothing else — the standing bind revives with the tunnel.
+        // Bound to the tailnet, backend stopped afterwards: connecting it back
+        // is the first thing to try, because the daemon holds its bind across
+        // the toggle. That the phone then reaches it on every Mac is a stronger
+        // claim than the one observation behind it, so the note offers the
+        // restart as a fallback rather than ruling it out.
         let toggled_off =
             note("mac.tailnet.ts.net", Some("100.64.0.7"), Down).expect("dead tailnet warns");
         assert!(toggled_off.contains("Tailscale is off on this Mac"));
-        assert!(toggled_off.contains("Nothing needs restarting"));
+        assert!(toggled_off.contains("holds its tailnet address"));
         assert!(toggled_off.contains("\ntailscale up\n"));
         assert!(
-            !toggled_off.contains("codeconnect daemon restart"),
-            "no restart instruction when the bind is fine: {toggled_off}"
+            toggled_off.contains("restart the daemon"),
+            "the standing bind is the expectation, not a guarantee: {toggled_off}"
         );
 
         // Styled: the heading carries the impairment colour; the command is
@@ -952,5 +1492,434 @@ mod tests {
             !tailnet_shaped_ip("mac.tailnet.ts.net"),
             "names are not binds"
         );
+    }
+
+    // --------------------------------------------- adversarial: the diversion
+    //
+    // Written against the diversion rather than with it: each of these is an
+    // attempt to make it swallow something it has no business swallowing, or
+    // to make it let go of something it has to catch.
+
+    /// Every command word `main`'s dispatch still answers. Enumerated so the
+    /// scoping test below fails the moment an arm is added without a decision
+    /// about whether the flag scan reaches it.
+    const LIVE_COMMANDS: &[&str] = &[
+        "claude",
+        "attach",
+        "ls",
+        "list",
+        "sessions",
+        "token",
+        "pair",
+        "devices",
+        "revoke",
+        "daemon",
+        "supervise",
+        "__update-check",
+        "update",
+        "--version",
+        "version",
+        "help",
+        "--help",
+        "-h",
+    ];
+
+    /// The scan reaches exactly two command words and no others.
+    ///
+    /// `--ssh` under `claude` is `claude`'s, and under `supervise` is the
+    /// supervisor's. Widening the scan by a single arm would let this dispatch
+    /// eat an argument meant for another program — so the scoping is asserted
+    /// against the whole dispatch table, not against a sample of it.
+    #[test]
+    fn only_pair_and_revoke_are_scanned_for_the_flag() {
+        for command in LIVE_COMMANDS {
+            assert_eq!(
+                retired_command(command, &argv(&["--ssh"])).is_some(),
+                matches!(*command, "pair" | "revoke"),
+                "`codeconnect {command} --ssh` is scoped wrong"
+            );
+        }
+        // And with the flag buried in an argv shaped like real passthrough use,
+        // including one that names the flag inside a prompt.
+        assert_eq!(
+            retired_command(
+                "claude",
+                &argv(&[
+                    "--model",
+                    "opus",
+                    "--ssh",
+                    "-p",
+                    "why did --ssh stop working"
+                ]),
+            ),
+            None,
+            "claude owns every one of its own arguments"
+        );
+        assert_eq!(
+            retired_command("supervise", &argv(&["--session", "cc1", "--cwd", "--ssh"])),
+            None,
+            "the supervisor owns its own arguments"
+        );
+    }
+
+    /// The flag is matched whole and exactly. Everything that merely resembles
+    /// it is a mistyped option, and has to keep falling through to the refusal
+    /// that was already there rather than collecting an explanation it has not
+    /// earned.
+    #[test]
+    fn only_the_exact_flag_and_the_exact_command_word_divert() {
+        for near in [
+            "--sshh",
+            "-ssh",
+            "ssh",
+            "--SSH",
+            "--Ssh",
+            "--ssh=1",
+            "--ssh=true",
+            "--no-ssh",
+            "---ssh",
+            "--ssh ",
+            " --ssh",
+            // A Cyrillic dze where the first `s` belongs: identical on screen,
+            // a different string, and not this command.
+            "--\u{0455}sh",
+        ] {
+            assert_eq!(
+                retired_command("pair", &argv(&[near])),
+                None,
+                "`codeconnect pair {near}` is a mistyped option, not a retired one"
+            );
+            assert_eq!(
+                retired_command("revoke", &argv(&["iPhone", near])),
+                None,
+                "`codeconnect revoke iPhone {near}` is a mistyped option"
+            );
+        }
+
+        for near in [
+            "sshrevoke",
+            "ssh_revoke",
+            "ssh-revoke-all",
+            "SSH-REVOKE",
+            "Ssh-Revoke",
+            "ssh-revoke ",
+            "ssh",
+            "ssh-install",
+            "ssh-pair",
+            "revoke-ssh",
+        ] {
+            assert_eq!(
+                retired_command(near, &argv(&[])),
+                None,
+                "`codeconnect {near}` is unknown, not retired"
+            );
+        }
+    }
+
+    /// The flag on its own is not a command. `codeconnect --ssh` names nothing,
+    /// and must land on the refusal every unknown command word lands on —
+    /// which is the rule that exits non-zero.
+    #[test]
+    fn the_flag_alone_is_not_a_retired_command() {
+        assert_eq!(retired_command("--ssh", &argv(&[])), None);
+        assert_eq!(retired_command("--ssh", &argv(&["pair"])), None);
+        // What `main` substitutes for an empty argv.
+        assert_eq!(retired_command("help", &argv(&[])), None);
+    }
+
+    /// Position is irrelevant under the two commands that are scanned: the
+    /// reader is retyping from a phone screen and may put the flag anywhere,
+    /// and may add to the line. `ssh-revoke` is the command word itself, so it
+    /// diverts with whatever follows — including the device it once took.
+    #[test]
+    fn the_flag_is_found_at_every_position_under_the_scanned_commands() {
+        for slot in 0..5 {
+            let mut words: Vec<String> = (0..5).map(|i| format!("arg{i}")).collect();
+            words[slot] = "--ssh".to_string();
+            assert_eq!(
+                retired_command("pair", &words),
+                Some(RetiredCommand::SshPairing),
+                "position {slot}: {words:?}"
+            );
+            assert_eq!(
+                retired_command("revoke", &words),
+                Some(RetiredCommand::SshRevocation),
+                "position {slot}: {words:?}"
+            );
+        }
+
+        for words in [
+            argv(&[]),
+            argv(&["iPhone"]),
+            argv(&["--help"]),
+            argv(&["iPhone", "--ssh"]),
+        ] {
+            assert_eq!(
+                retired_command("ssh-revoke", &words),
+                Some(RetiredCommand::SshRevocation),
+                "`codeconnect ssh-revoke {words:?}`"
+            );
+        }
+    }
+
+    /// The judgement call, pinned so a later change to it is deliberate:
+    /// `codeconnect revoke --ssh` with no device is explained rather than
+    /// looked up. Without the diversion `--ssh` *is* the device argument —
+    /// `revoke` reads only the first — and the reader gets `no device matches
+    /// "--ssh"`, which explains nothing about why their phone asked. No device
+    /// is ever named `--ssh`, so nothing legitimate is taken from anyone.
+    #[test]
+    fn a_deviceless_ssh_revoke_is_explained_rather_than_looked_up() {
+        assert_eq!(
+            retired_command("revoke", &argv(&["--ssh"])),
+            Some(RetiredCommand::SshRevocation)
+        );
+    }
+
+    /// The status a retired command leaves with is the one an unperformed
+    /// command has to leave with: non-zero, and the same `1` the unknown-command
+    /// refusal gets from anyhow's `Termination`. A script that runs
+    /// `codeconnect pair --ssh` and reads success would be reading a pairing
+    /// that never happened.
+    #[test]
+    fn a_retired_command_never_reports_success() {
+        assert_ne!(RETIRED_EXIT_CODE, 0, "nothing was performed");
+        assert_eq!(RETIRED_EXIT_CODE, 1);
+    }
+
+    /// The third style, which the shipped tests left unpinned. `NO_COLOR` on a
+    /// real terminal disables SGR and says nothing about characters, so the
+    /// notice must carry no escape at all while keeping its typography.
+    #[test]
+    fn the_notice_under_no_color_drops_every_escape_and_keeps_its_typography() {
+        for retired in [RetiredCommand::SshPairing, RetiredCommand::SshRevocation] {
+            let plain = retirement_notice(retired, update_check::Style::PlainUnicode);
+            assert!(
+                !plain.contains('\u{1b}'),
+                "an escape survived NO_COLOR: {plain}"
+            );
+            assert!(
+                plain.contains('\u{2014}'),
+                "NO_COLOR disables colour, not characters: {plain}"
+            );
+            for line in plain.lines() {
+                assert_eq!(line, line.trim_end(), "trailing space: {line:?}");
+                assert!(line.chars().count() < 80, "over 80 cols: {line}");
+            }
+        }
+    }
+
+    /// **The invariant the notice tests exist to hold: the notice may say the
+    /// sweep runs, and may never say the file is now clean.**
+    ///
+    /// `ccd`'s `legacy_credentials::purge_authorized_keys` is best-effort by
+    /// contract. It removes nothing and warns when there is no absolute `$HOME`,
+    /// when the file cannot be read, when the replacement cannot be written, when
+    /// the file changed underneath the sweep, and when a tagged line is not the
+    /// marker-and-key pair earlier releases wrote.
+    /// Two callers reach it — startup and `Daemon::revoke` — and a second best
+    /// effort is still a best effort. This CLI also answers on a Mac whose
+    /// upgraded daemon has never run and, being pure, reads neither that file nor
+    /// that log. So the notice states what the daemon *does* and hands over the
+    /// `grep`; a reader who is told the removal already happened has been given a
+    /// reassurance nothing in this tree can support, and the one they are
+    /// likeliest to act on.
+    ///
+    /// This used to be defended by a few hundred lines that parsed the notice —
+    /// and `mac/README.md` — into sentences and swept them for a blocklist of
+    /// words. It did not catch the false "CodeConnect neither installs an SSH key
+    /// nor revokes one"; it whitelisted that exact sentence as a fix. What
+    /// replaces it is a golden snapshot per notice, so any rewording lands in a
+    /// diff a human has to look at, plus literal assertions for the facts a
+    /// reader is owed. Neither can be argued with, and neither certifies prose it
+    /// never understood.
+    #[test]
+    fn the_notice_never_reports_the_removal_as_done() {
+        // Each of these was, or is one keystroke from, a sentence claiming an
+        // outcome nothing here observed. Literal and short on purpose: this is
+        // an assertion about wording that shipped, not a theory of English.
+        const NEVER: &[&str] = &[
+            "already",
+            "no longer",
+            "nothing left",
+            "is clean",
+            "has been removed",
+            "was removed",
+            "were removed",
+            "removed it",
+            "nothing to revoke",
+            "no key",
+            "cannot log in",
+            "will refuse",
+        ];
+        for retired in [RetiredCommand::SshPairing, RetiredCommand::SshRevocation] {
+            for style in [
+                update_check::Style::Ascii,
+                update_check::Style::PlainUnicode,
+                update_check::Style::Styled,
+            ] {
+                let notice = retirement_notice(retired, style).to_lowercase();
+                for claim in NEVER {
+                    assert!(
+                        !notice.contains(claim),
+                        "{claim:?} reports an outcome nothing here observed; the \
+                         reader gets the check to run instead: {notice}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The golden each notice is held to, byte for byte.**
+    ///
+    /// A snapshot rather than a property. Any edit to this wording — a
+    /// tightening, a fact added, a hedge dropped — lands in this test's diff
+    /// beside the notice's, where a human has to read both and decide the new
+    /// sentence is true. That is the whole mechanism, and it is the one thing
+    /// the parser this replaced could not be: prose is checked by a reader, and
+    /// what a test can do is guarantee a reader is asked.
+    ///
+    /// `PlainUnicode` because it is the style with neither escapes nor
+    /// transliteration, so what is pinned is the wording itself. The other two
+    /// styles are pinned as renderings of it by
+    /// [`the_notice_under_no_color_drops_every_escape_and_keeps_its_typography`]
+    /// and [`the_notice_only_ever_offers_commands_that_still_exist`].
+    #[test]
+    fn the_pairing_notice_reads_exactly_this() {
+        assert_eq!(
+            retirement_notice(
+                RetiredCommand::SshPairing,
+                update_check::Style::PlainUnicode
+            ),
+            concat!(
+                "codeconnect pair --ssh is retired\n",
+                "CodeConnect does not use SSH. The Terminal tab rides the same paired\n",
+                "connection as the rest of the app, so CodeConnect never installs an SSH\n",
+                "key — and it does take one back. At startup the daemon removes the\n",
+                "entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n",
+                "sweeps that file again on every revocation. It is best-effort either\n",
+                "way, and warns in its log when it cannot.\n",
+                "\n",
+                "The phone that asked for this is running an older version of the app.\n",
+                "Update the app: its Terminal tab then connects over the paired link\n",
+                "with nothing to authorise.\n",
+                "\n",
+                "Pairing a phone is unchanged:\n",
+                "\n",
+                "codeconnect pair\n",
+                "\n",
+                "To see what is still in that file on this Mac, search for the tag\n",
+                "those entries carry:\n",
+                "\n",
+                "grep codeconnect: ~/.ssh/authorized_keys\n",
+                "\n",
+                "Nothing printed means nothing there carries the tag; grep saying\n",
+                "there is no such file means the same thing. What it prints is one of\n",
+                "ours where two adjacent lines carry the same tag: a marker comment\n",
+                "beginning # codeconnect:<id>, and directly beneath it an ssh-ed25519\n",
+                "line whose last field is that same tag. Delete that pair by hand.\n",
+                "A tagged key line with no such marker directly above it is one this\n",
+                "daemon leaves alone, because nothing in the file identifies whose it\n",
+                "is — removing it is your call rather than its.\n",
+                "\n",
+                "Nothing you typed was wrong — the app on the phone is what is out of date.",
+            )
+        );
+    }
+
+    /// The golden for the other answer. See
+    /// [`the_pairing_notice_reads_exactly_this`] for why this is a snapshot.
+    #[test]
+    fn the_revocation_notice_reads_exactly_this() {
+        assert_eq!(
+            retirement_notice(
+                RetiredCommand::SshRevocation,
+                update_check::Style::PlainUnicode
+            ),
+            concat!(
+                "codeconnect ssh-revoke is retired\n",
+                "CodeConnect does not use SSH. The Terminal tab rides the same paired\n",
+                "connection as the rest of the app, so CodeConnect never installs an SSH\n",
+                "key — and it does take one back. At startup the daemon removes the\n",
+                "entries an earlier release wrote into ~/.ssh/authorized_keys, and it\n",
+                "sweeps that file again on every revocation. It is best-effort either\n",
+                "way, and warns in its log when it cannot.\n",
+                "\n",
+                "The phone that asked for this is running an older version of the app.\n",
+                "Update the app: its Terminal tab then rides the paired link, and\n",
+                "nothing in CodeConnect has a use for the key it holds. The check\n",
+                "below shows what is still in that file.\n",
+                "\n",
+                "To stop a phone reaching CodeConnect, revoke its device token:\n",
+                "\n",
+                "codeconnect devices\n",
+                "codeconnect revoke <device>\n",
+                "\n",
+                "Revoking also asks the daemon to sweep ~/.ssh/authorized_keys\n",
+                "again, on the same best effort it makes at startup.\n",
+                "\n",
+                "To see what is still in that file on this Mac, search for the tag\n",
+                "those entries carry:\n",
+                "\n",
+                "grep codeconnect: ~/.ssh/authorized_keys\n",
+                "\n",
+                "Nothing printed means nothing there carries the tag; grep saying\n",
+                "there is no such file means the same thing. What it prints is one of\n",
+                "ours where two adjacent lines carry the same tag: a marker comment\n",
+                "beginning # codeconnect:<id>, and directly beneath it an ssh-ed25519\n",
+                "line whose last field is that same tag. Delete that pair by hand.\n",
+                "A tagged key line with no such marker directly above it is one this\n",
+                "daemon leaves alone, because nothing in the file identifies whose it\n",
+                "is — removing it is your call rather than its.\n",
+                "\n",
+                "Nothing you typed was wrong — the app on the phone is what is out of date.",
+            )
+        );
+    }
+
+    /// SSH is retired, so the list of what this CLI does must not offer it.
+    ///
+    /// A banner is the text nobody rereads, which is how a line reinstating
+    /// `pair --ssh` would ship green.
+    #[test]
+    fn the_usage_banner_offers_no_ssh() {
+        assert!(
+            !usage_text().to_lowercase().contains("ssh"),
+            "SSH is retired, so the list of what this CLI does must not offer \
+             it: {}",
+            usage_text()
+        );
+    }
+
+    /// A notice that sent its reader to a command this binary does not have
+    /// would replace one dead end with another. Every `codeconnect …` line the
+    /// remedy isolates has to name a live dispatch arm, and none of them may be
+    /// a retired spelling — the heading is the only place a retired spelling
+    /// belongs, because there it is the thing being explained.
+    #[test]
+    fn the_notice_only_ever_offers_commands_that_still_exist() {
+        for retired in [RetiredCommand::SshPairing, RetiredCommand::SshRevocation] {
+            let notice = retirement_notice(retired, update_check::Style::Ascii);
+            let mut offered = 0;
+            for line in notice.lines().skip(1) {
+                let Some(rest) = line.strip_prefix("codeconnect ") else {
+                    continue;
+                };
+                offered += 1;
+                let word = rest.split_whitespace().next().unwrap_or_default();
+                assert!(
+                    LIVE_COMMANDS.contains(&word),
+                    "the notice offers `codeconnect {word}`, which this binary does not have"
+                );
+                assert!(
+                    !line.contains("--ssh") && !line.contains("ssh-revoke"),
+                    "a retired spelling must never be the remedy: {line}"
+                );
+            }
+            assert!(
+                offered > 0,
+                "a remedy with no command to run is not a remedy: {notice}"
+            );
+        }
     }
 }

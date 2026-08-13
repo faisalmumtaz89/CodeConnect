@@ -17,23 +17,18 @@ struct DaemonProfile: Sendable, Hashable {
     var capabilities: Capabilities?
     /// What `codeconnect devices` calls this phone, once the daemon has said.
     var deviceName: String?
-    /// Whether the daemon installed the SSH key this app offered. `nil` means it
-    /// never said — an older daemon, or a hello that carried no key.
-    var sshKeyInstalled: Bool?
 
     static let unknown = DaemonProfile(
-        protocolVersion: 0, protocolMinor: 0, capabilities: nil, deviceName: nil,
-        sshKeyInstalled: nil)
+        protocolVersion: 0, protocolMinor: 0, capabilities: nil, deviceName: nil)
 
     init(
         protocolVersion: UInt32, protocolMinor: UInt32, capabilities: Capabilities?,
-        deviceName: String? = nil, sshKeyInstalled: Bool? = nil
+        deviceName: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.protocolMinor = protocolMinor
         self.capabilities = capabilities
         self.deviceName = deviceName
-        self.sshKeyInstalled = sshKeyInstalled
     }
 
     var isConnected: Bool { capabilities != nil }
@@ -98,18 +93,5 @@ struct DaemonProfile: Sendable, Hashable {
         return servesDiff
             ? nil
             : "This daemon has not advertised diff support. Asking anyway; if it cannot answer, this will say so."
-    }
-
-    /// What to tell the user about the SSH key, if anything.
-    var sshKeyNote: String? {
-        switch sshKeyInstalled {
-        case .some(true):
-            return "This iPhone's SSH key is authorised on the Mac."
-        case .some(false):
-            return
-                "The Mac received this iPhone's SSH key but did not install it. Run `codeconnect pair --ssh` there and scan the code it prints, that is the only path that asks for consent at the terminal."
-        case .none:
-            return nil
-        }
     }
 }

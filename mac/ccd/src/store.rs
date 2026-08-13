@@ -132,8 +132,6 @@ pub struct DeviceRow {
     pub created_at: String,
     pub last_seen_at: Option<String>,
     pub revoked_at: Option<String>,
-    pub ssh_key_installed: bool,
-    pub ssh_fingerprint: Option<String>,
 }
 
 impl DeviceRow {
@@ -144,8 +142,6 @@ impl DeviceRow {
             created_at: self.created_at.clone(),
             last_seen_at: self.last_seen_at.clone(),
             revoked_at: self.revoked_at.clone(),
-            ssh_key_installed: self.ssh_key_installed,
-            ssh_fingerprint: self.ssh_fingerprint.clone(),
         }
     }
 }
@@ -157,7 +153,7 @@ impl DeviceRow {
 /// unauthenticated caller "that code existed but expired" is a free oracle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingConsume {
-    Consumed { allow_ssh: bool },
+    Consumed,
     NotFound,
     Expired,
     AlreadyUsed,
@@ -361,7 +357,21 @@ impl Store {
         // table that already exists, so a database written before push existed
         // keeps its old `devices` shape and every push statement fails on a
         // missing column.
-        add_missing_columns(&conn)?;
+        if needs_column_additions(&conn)? {
+            add_missing_columns(&mut conn)?;
+        }
+        // Ordered after `create_schema` so a database that never had these
+        // tables gets them in the current shape and finds nothing to do here.
+        // Never fatal: a daemon that refuses to open its own database is
+        // strictly worse than one carrying a column it does not write, and
+        // launchd would restart it into the same refusal for ever.
+        if let Err(err) = drop_retired_columns(&mut conn) {
+            crate::log_error!(
+                "schema: the retired SSH columns are still on this database ({err:#}); every \
+                 statement this build writes works around them, so the daemon serves normally \
+                 and the next start tries the removal again"
+            );
+        }
         // A normalizer, not a versioned migration — there is no version gate to
         // hang one on (`user_version` below is write-only), and an idempotent
         // UPDATE costs nothing to repeat. Adopted rows (`claude:*`, the prefix
@@ -1127,33 +1137,76 @@ impl Store {
     // --------------------------------------------------------------- pairing
 
     /// Record a freshly minted code. Expired codes are swept in the same
-    /// statement batch so the table cannot grow without bound on a machine
-    /// where the operator repeatedly runs `codeconnect pair` and never scans.
+    /// transaction so the table cannot grow without bound on a machine where the
+    /// operator repeatedly runs `codeconnect pair` and never scans.
+    ///
+    /// The statement is chosen against the table's actual columns because of one
+    /// of them: `allow_ssh` is retired (see [`RETIRED_COLUMNS`]) but is `NOT
+    /// NULL` with no default, so on the one database where SQLite refused to drop
+    /// it an `INSERT` that does not name it fails and no phone can pair. Named
+    /// with a literal `0` while it is there, that refusal costs a column of dead
+    /// weight and nothing else. `0` is the value the build that declared the
+    /// column wrote for "this code grants no SSH access", which is the truth
+    /// about every code this build mints.
+    ///
+    /// Asked per mint rather than remembered from startup: mints are human-paced
+    /// — one `codeconnect pair` — so a `PRAGMA` costs nothing measurable, and an
+    /// operator who clears the obstacle and restarts a *second* daemon takes the
+    /// column out from under a remembered answer.
+    ///
+    /// The sweep, that probe and the `INSERT` are one immediate transaction, for
+    /// the same reason [`drop_retired_columns`] is: `BEGIN IMMEDIATE` takes the
+    /// write lock up front, so the second daemon that clears the obstacle cannot
+    /// land its `ALTER TABLE … DROP COLUMN` *between* the probe and the statement
+    /// the probe chose. Without it the answer is stale by the width of two
+    /// statements, and a mint that read the column as present names one that is
+    /// gone by the time it inserts — a `codeconnect pair` failing on "no such
+    /// column: allow_ssh". Serialised this way the probe is not merely fresh at
+    /// the moment it is asked, it is still true at the moment it is acted on:
+    /// either the drop lands before this transaction begins and the mint sees a
+    /// table without the column, or it waits until after the commit and the mint
+    /// fills the column it saw.
     pub fn create_pairing_code(
         &self,
         code_hash: &str,
-        allow_ssh: bool,
         expires_at: &str,
         expires_at_ms: i64,
         now_ms: i64,
     ) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "DELETE FROM pairing_codes WHERE expires_at_ms < ?1",
             params![now_ms],
         )?;
-        conn.execute(
-            "INSERT INTO pairing_codes(code_hash, allow_ssh, created_at, expires_at,
+        // Matched the way SQLite matches a column name, on the same terms as
+        // `retired_columns_present`: `ALLOW_SSH` is the same `NOT NULL` column.
+        let leftover_allow_ssh = table_columns(&tx, "pairing_codes")?
+            .iter()
+            .any(|actual| actual.eq_ignore_ascii_case("allow_ssh"));
+        // The instant the paragraph above is about, and the only place a test
+        // can stand a second daemon in. Compiled out of the daemon entirely.
+        #[cfg(test)]
+        test_second_daemon_drops_allow_ssh(&tx);
+        let insert = if leftover_allow_ssh {
+            "INSERT INTO pairing_codes(code_hash, created_at, expires_at,
+                                       expires_at_ms, consumed_at, allow_ssh)
+             VALUES(?1, ?2, ?3, ?4, NULL, 0)"
+        } else {
+            "INSERT INTO pairing_codes(code_hash, created_at, expires_at,
                                        expires_at_ms, consumed_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, NULL)",
+             VALUES(?1, ?2, ?3, ?4, NULL)"
+        };
+        tx.execute(
+            insert,
             params![
                 code_hash,
-                allow_ssh as i64,
                 protocol::time::rfc3339_from_unix_ms(now_ms),
                 expires_at,
                 expires_at_ms,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1166,29 +1219,26 @@ impl Store {
     pub fn consume_pairing_code(&self, code_hash: &str, now_ms: i64) -> Result<PairingConsume> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let row: Option<(i64, i64, Option<String>)> = tx
+        let row: Option<(i64, Option<String>)> = tx
             .query_row(
-                "SELECT allow_ssh, expires_at_ms, consumed_at
-                   FROM pairing_codes WHERE code_hash = ?1",
+                "SELECT expires_at_ms, consumed_at FROM pairing_codes WHERE code_hash = ?1",
                 params![code_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
 
         let outcome = match row {
             None => PairingConsume::NotFound,
-            Some((_, _, Some(_))) => PairingConsume::AlreadyUsed,
-            Some((_, expires_at_ms, None)) if expires_at_ms < now_ms => PairingConsume::Expired,
-            Some((allow_ssh, _, None)) => {
+            Some((_, Some(_))) => PairingConsume::AlreadyUsed,
+            Some((expires_at_ms, None)) if expires_at_ms < now_ms => PairingConsume::Expired,
+            Some((_, None)) => {
                 let changed = tx.execute(
                     "UPDATE pairing_codes SET consumed_at = ?2
                       WHERE code_hash = ?1 AND consumed_at IS NULL",
                     params![code_hash, protocol::time::rfc3339_from_unix_ms(now_ms)],
                 )?;
                 if changed == 1 {
-                    PairingConsume::Consumed {
-                        allow_ssh: allow_ssh != 0,
-                    }
+                    PairingConsume::Consumed
                 } else {
                     PairingConsume::AlreadyUsed
                 }
@@ -1243,8 +1293,8 @@ impl Store {
         let conn = self.write();
         conn.execute(
             "INSERT INTO devices(device_id, name, token_hash, created_at,
-                                 last_seen_at, revoked_at, ssh_key_installed, ssh_fingerprint)
-             VALUES(?1, ?2, ?3, ?4, NULL, NULL, 0, NULL)",
+                                 last_seen_at, revoked_at)
+             VALUES(?1, ?2, ?3, ?4, NULL, NULL)",
             params![device_id, name, token_hash, created_at],
         )?;
         Ok(())
@@ -1256,9 +1306,9 @@ impl Store {
         let conn = self.read();
         let row = conn
             .query_row(
-                "SELECT device_id, name, created_at, last_seen_at, revoked_at,
-                        ssh_key_installed, ssh_fingerprint
-                   FROM devices WHERE token_hash = ?1 AND revoked_at IS NULL",
+                "SELECT device_id, name, created_at, last_seen_at, revoked_at
+                   FROM devices
+                  WHERE token_hash = ?1 AND revoked_at IS NULL",
                 params![token_hash],
                 device_row_from,
             )
@@ -1399,8 +1449,7 @@ impl Store {
     pub fn list_devices(&self) -> Result<Vec<DeviceRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
-            "SELECT device_id, name, created_at, last_seen_at, revoked_at,
-                    ssh_key_installed, ssh_fingerprint
+            "SELECT device_id, name, created_at, last_seen_at, revoked_at
                FROM devices ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], device_row_from)?;
@@ -1468,21 +1517,6 @@ impl Store {
             params![device_id, at],
         )?;
         Ok(changed == 1)
-    }
-
-    pub fn set_ssh_installed(
-        &self,
-        device_id: &str,
-        installed: bool,
-        fingerprint: Option<&str>,
-    ) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE devices SET ssh_key_installed = ?2, ssh_fingerprint = ?3
-              WHERE device_id = ?1",
-            params![device_id, installed as i64, fingerprint],
-        )?;
-        Ok(())
     }
 
     // ----------------------------------------------------- pending approvals
@@ -1770,6 +1804,68 @@ impl Store {
 // Removing the entry point makes the invariant structural rather than a rule
 // somebody has to remember.
 
+/// The database a second daemon takes `pairing_codes.allow_ssh` off at the
+/// instant [`Store::create_pairing_code`] has probed for that column and has not
+/// yet inserted. `None` (the default) means no second daemon, which is every
+/// mint outside the one test that arms this.
+///
+/// The interleaving has no other seam: the two processes are real processes in
+/// production, and a test that raced a thread against the mint would be asking
+/// the scheduler for the one nanosecond that matters.
+#[cfg(test)]
+static TEST_MIGRATION_MID_MINT: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Arms that migration for the duration of one test and disarms on drop, so a
+/// test that panics part-way cannot leave every mint after it racing a drop —
+/// the value is process-wide, on the same terms as `terminal`'s test hooks.
+///
+/// Disarming is not the only thing keeping tests apart: the hook below acts only
+/// on the database named here, so a mint in a test running beside this one — on
+/// its own temporary file — is not touched even while this is armed.
+#[cfg(test)]
+struct MigrationMidMint;
+
+#[cfg(test)]
+impl MigrationMidMint {
+    fn armed_on(path: &Path) -> MigrationMidMint {
+        *TEST_MIGRATION_MID_MINT.lock().unwrap() = Some(path.to_path_buf());
+        MigrationMidMint
+    }
+}
+
+#[cfg(test)]
+impl Drop for MigrationMidMint {
+    fn drop(&mut self) {
+        *TEST_MIGRATION_MID_MINT.lock().unwrap() = None;
+    }
+}
+
+/// Stand in for the second daemon reaching `ALTER TABLE … DROP COLUMN` between
+/// the mint's probe and the `INSERT` the probe chose.
+///
+/// A fresh connection, because that is what a second process is, and with the
+/// busy timeout at zero so the refusal is instant rather than five seconds of
+/// waiting on a lock the caller itself holds. What SQLite said is deliberately
+/// discarded: whether the drop lands is the property under test, not a fact this
+/// hook is entitled to assert.
+#[cfg(test)]
+fn test_second_daemon_drops_allow_ssh(conn: &Connection) {
+    let Some(armed) = TEST_MIGRATION_MID_MINT.lock().unwrap().clone() else {
+        return;
+    };
+    // Through `canonicalize`, because SQLite reports the name it resolved the
+    // file to and a test hands over the name it opened: on macOS those are
+    // `/private/var/folders/…` and `/var/folders/…`, one file spelled two ways.
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if conn.path().map(|open| real(Path::new(open))) != Some(real(&armed)) {
+        return;
+    }
+    let second = Connection::open(&armed).unwrap();
+    second.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let _ = second.execute_batch("ALTER TABLE pairing_codes DROP COLUMN allow_ssh;");
+}
+
 /// Open one connection with the pragmas every connection needs.
 ///
 /// The pragmas are per-*connection*, not per-database: `busy_timeout` in
@@ -2008,7 +2104,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- nothing because the lookup is by exact hash anyway.
         CREATE TABLE IF NOT EXISTS pairing_codes(
             code_hash     TEXT PRIMARY KEY,
-            allow_ssh     INTEGER NOT NULL,
             created_at    TEXT    NOT NULL,
             expires_at    TEXT    NOT NULL,
             expires_at_ms INTEGER NOT NULL,
@@ -2024,8 +2119,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at        TEXT NOT NULL,
             last_seen_at      TEXT,
             revoked_at        TEXT,
-            ssh_key_installed INTEGER NOT NULL DEFAULT 0,
-            ssh_fingerprint   TEXT,
             -- APNs. Null until the phone has been granted notification
             -- permission *and* Apple has issued a token; "registered for push"
             -- and "asked and refused" are both absent here, deliberately, so
@@ -2058,41 +2151,248 @@ fn needs_session_uid_migration(conn: &Connection) -> Result<bool> {
 /// Every entry must be nullable or carry a default: SQLite cannot add a `NOT
 /// NULL` column without one, and a migration that fails leaves a daemon that
 /// cannot open its own database.
-fn add_missing_columns(conn: &Connection) -> Result<()> {
-    const ADDITIONS: &[(&str, &str, &str)] = &[
-        ("devices", "push_token", "TEXT"),
-        ("devices", "push_environment", "TEXT"),
-    ];
-    for (table, column, kind) in ADDITIONS {
+const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
+    ("devices", "push_token", "TEXT"),
+    ("devices", "push_environment", "TEXT"),
+];
+
+/// The entries of [`COLUMN_ADDITIONS`] this database is still missing.
+///
+/// A table that does not exist contributes nothing: `create_schema` builds it
+/// at the current shape, so there is no column to add afterwards.
+fn missing_columns(conn: &Connection) -> Result<Vec<(&'static str, &'static str, &'static str)>> {
+    let mut out = Vec::new();
+    for (table, column, kind) in COLUMN_ADDITIONS {
         if table_exists(conn, table)? && !column_exists(conn, table, column)? {
-            conn.execute(
-                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
-                [],
-            )?;
-            crate::log_info!("schema: added {table}.{column}");
+            out.push((*table, *column, *kind));
         }
     }
+    Ok(out)
+}
+
+fn needs_column_additions(conn: &Connection) -> Result<bool> {
+    Ok(!missing_columns(conn)?.is_empty())
+}
+
+/// Widen the tables that predate a column, in one immediate transaction.
+///
+/// `ALTER TABLE … ADD COLUMN` has no `IF NOT EXISTS`, so a second attempt at a
+/// column that is already there fails with a duplicate-column error — which,
+/// raised from here, is a daemon that will not open its own database.
+fn add_missing_columns(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // Asked again under the write lock, for the reason spelled out in
+    // `migrate_to_session_uids`: two daemons starting at once can both pass the
+    // unlocked check, and the one that arrives second must find nothing left to
+    // do rather than repeat an `ALTER` the first one already committed.
+    let additions = missing_columns(&tx)?;
+    if additions.is_empty() {
+        crate::log_debug!("another process widened these tables first; nothing to do");
+        return Ok(());
+    }
+
+    for (table, column, kind) in additions {
+        tx.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+            [],
+        )?;
+        crate::log_info!("schema: added {table}.{column}");
+    }
+
+    tx.commit()?;
     Ok(())
 }
 
+/// Is there a table by this name?
+///
+/// Matched without regard to case, like every other name this file reads back
+/// out of `sqlite_master`, because `CREATE TABLE IF NOT EXISTS devices` already
+/// finds a table called `Devices` and no-ops against it. A binary match would
+/// answer "no table" about one SQLite will not create, which is how a table ends
+/// up never being widened by [`missing_columns`] and never repaired.
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
         params![name],
         |row| row.get(0),
     )?;
     Ok(count > 0)
 }
 
+/// Is this name already taken on this table, by a column of any kind?
+///
+/// Read through [`table_columns_including_generated`], because every caller is
+/// asking whether the name is free rather than whether it can be written.
+/// `ALTER TABLE … ADD COLUMN` fails with a bare `duplicate column name` against
+/// a generated column of that name, and `PRAGMA table_info` cannot see one, so a
+/// reader that skipped generated columns would answer "free" about a name that
+/// is taken and turn a daemon's startup into an error naming a column the
+/// operator can plainly see in the schema.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(table_columns_including_generated(conn, table)?
+        .iter()
+        .any(|name| name == column))
+}
+
+/// The columns of a table an `INSERT` can name, in declaration order.
+///
+/// For an ordinary table those are exactly the columns `PRAGMA table_info`
+/// reports: a generated column is an expression over the others and cannot be
+/// written, and the pragma leaves it out.
+/// [`table_columns_including_generated`] is the reader for the other question,
+/// "what does this table hold".
+///
+/// A table that does not exist has no columns rather than being an error, which
+/// is what lets the callers below ask about a legacy database without knowing
+/// its shape.
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(true);
+        out.push(row.get::<_, String>(1)?);
+    }
+    Ok(out)
+}
+
+/// Every column a table has, in declaration order, generated columns included.
+///
+/// `PRAGMA table_xinfo` is the pragma that reports them and `table_info` is not,
+/// which is the whole reason this reader exists: [`column_exists`] is asking
+/// whether a name is free, and a name standing over a generated column is taken
+/// however invisible it is to `table_info`.
+///
+/// A table that does not exist has no columns rather than being an error, on the
+/// same terms as [`table_columns`].
+fn table_columns_including_generated(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({table})"))?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get::<_, String>(1)?);
+    }
+    Ok(out)
+}
+
+/// Columns earlier releases of this project declared and this one does not.
+///
+/// All three are dead weight rather than an obstacle, and a build that never
+/// manages to drop one still pairs phones and authenticates them.
+/// `devices.ssh_key_installed` carries a default and `devices.ssh_fingerprint`
+/// is nullable, so every statement here writes around them.
+/// `pairing_codes.allow_ssh` is `NOT NULL` with no default and would break the
+/// mint, which is why [`Store::create_pairing_code`] names it explicitly while
+/// it is present — a column that cannot be dropped is a cosmetic problem, never
+/// a pairing outage.
+///
+/// Named one by one, never "every column this build does not declare". Someone
+/// who runs a newer build and comes back to this one arrives carrying columns
+/// this build has never heard of, and reading those as legacy would destroy the
+/// newer build's data on the way down and hand back an empty column on the way
+/// up. A retired name is a fact this project owns; an unrecognised one is a fact
+/// about this build's age.
+const RETIRED_COLUMNS: &[(&str, &str)] = &[
+    ("devices", "ssh_key_installed"),
+    ("devices", "ssh_fingerprint"),
+    ("pairing_codes", "allow_ssh"),
+];
+
+/// The entries of [`RETIRED_COLUMNS`] this database still carries.
+///
+/// Matched without regard to ASCII case, the way SQLite matches a column name:
+/// `ALLOW_SSH` and `allow_ssh` are one column to every statement that reads the
+/// table, so a binary match would leave a column this project retired in place.
+/// A table that does not exist reports no columns and contributes nothing.
+fn retired_columns_present(conn: &Connection) -> Result<Vec<(&'static str, &'static str)>> {
+    let mut present = Vec::new();
+    for (table, column) in RETIRED_COLUMNS {
+        if table_columns(conn, table)?
+            .iter()
+            .any(|actual| actual.eq_ignore_ascii_case(column))
+        {
+            present.push((*table, *column));
         }
     }
-    Ok(false)
+    Ok(present)
+}
+
+/// One `ALTER TABLE … DROP COLUMN`, answered by the table rather than by the
+/// error text.
+///
+/// Both identifiers are literals from [`RETIRED_COLUMNS`], so there is nothing
+/// in the formatted statement for a name to escape out of. What the statement
+/// says when it fails cannot be read, though: a drop an index blocks reports
+/// `error in index … after drop column: no such column: allow_ssh`, in the same
+/// words a drop of an already-absent column reports, and reading one as the
+/// other either leaves a `NOT NULL` column in place or takes a table apart that
+/// did not need it. Asking the table afterwards is the reading that cannot be
+/// confused: gone is done, however it went.
+fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
+    if let Err(err) = conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};")) {
+        if table_columns(conn, table)?
+            .iter()
+            .any(|actual| actual.eq_ignore_ascii_case(column))
+        {
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
+/// Take the retired columns off the tables that still carry them.
+///
+/// `ALTER TABLE … DROP COLUMN` is the whole mechanism. It removes one column and
+/// reproduces nothing else, so every other column keeps the type and the
+/// constraints it was declared with, every row keeps its values, every index,
+/// trigger and view that does not depend on the column stays, and a column a
+/// newer build added is never so much as looked at. Nothing is written when
+/// nothing is retired — the common case, which is every boot after the first.
+///
+/// SQLite refuses the drop when the column is a `PRIMARY KEY`, is `UNIQUE`, is
+/// indexed, or is named by a generated column, a `CHECK`, a trigger or a view.
+/// Every one of those is a fact about the schema, never about the rows, so there
+/// is no second attempt worth making: the column is left where it is and a
+/// warning names the table, the column and what SQLite said. That is survivable
+/// on all three — the two on `devices` because they are nullable or defaulted,
+/// `pairing_codes.allow_ssh` because [`Store::create_pairing_code`] fills it
+/// while it is there. Nothing is deleted and no table is rebuilt to force a
+/// removal through: a column left behind costs an operator one `DROP INDEX` and
+/// a restart, and there is no cost that a build is entitled to pay with somebody
+/// else's rows or with a newer build's columns.
+///
+/// One immediate transaction, so two daemons starting at once serialize and the
+/// second finds nothing left to do, and a `kill -9` in the middle leaves the old
+/// schema intact for the next start to try again. Returns one message per column
+/// that survived, already logged, so a caller can assert on what an operator was
+/// told.
+fn drop_retired_columns(conn: &mut Connection) -> Result<Vec<String>> {
+    if retired_columns_present(conn)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut warnings = Vec::new();
+    // Asked again under the write lock, so the daemon that lost a startup race
+    // reports the work as done rather than reporting it twice. What makes that
+    // race *safe* is [`drop_column`], which reads a column that is already gone
+    // as gone whoever took it.
+    for (table, column) in retired_columns_present(&tx)? {
+        let Err(err) = drop_column(&tx, table, column) else {
+            crate::log_info!("schema: dropped the retired column {table}.{column}");
+            continue;
+        };
+        let warning = format!(
+            "schema: SQLite will not drop the retired column {table}.{column} ({err}), so it \
+             stays. The daemon serves normally with it in place — nothing this build reads names \
+             it, and minting a pairing code fills it explicitly while it is there. To be rid of \
+             it, drop whatever depends on {table}.{column} (an index, a view, a trigger, a CHECK \
+             or a generated column — the error above names it) and restart."
+        );
+        crate::log_warn!("{warning}");
+        warnings.push(warning);
+    }
+    tx.commit()?;
+    Ok(warnings)
 }
 
 /// Give every pre-existing session a synthetic identity and re-key the log.
@@ -2368,8 +2668,6 @@ fn device_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
         created_at: row.get(2)?,
         last_seen_at: row.get(3)?,
         revoked_at: row.get(4)?,
-        ssh_key_installed: row.get::<_, i64>(5)? != 0,
-        ssh_fingerprint: row.get(6)?,
     })
 }
 
@@ -3475,13 +3773,12 @@ mod tests {
         assert!(rows.iter().all(|r| r.session_id == "cc-1"));
     }
 
-    fn mint(store: &Store, code_hash: &str, allow_ssh: bool, ttl_ms: i64) -> i64 {
+    fn mint(store: &Store, code_hash: &str, ttl_ms: i64) -> i64 {
         let now = protocol::time::now_unix_ms();
         let expires = now + ttl_ms;
         store
             .create_pairing_code(
                 code_hash,
-                allow_ssh,
                 &protocol::time::rfc3339_from_unix_ms(expires),
                 expires,
                 now,
@@ -3493,14 +3790,23 @@ mod tests {
     #[test]
     fn a_pairing_code_works_exactly_once() {
         let (store, _path) = temp_store();
-        let now = mint(&store, "hash-a", false, 300_000);
+        let now = mint(&store, "hash-a", 300_000);
         assert_eq!(
             store.consume_pairing_code("hash-a", now).unwrap(),
-            PairingConsume::Consumed { allow_ssh: false }
+            PairingConsume::Consumed
         );
         // The second scan of the same screen must not pair a second device.
         assert_eq!(
             store.consume_pairing_code("hash-a", now).unwrap(),
+            PairingConsume::AlreadyUsed
+        );
+        // And once the same code is also past its expiry, it is still
+        // "already used". The two answers are ordered on purpose: having been
+        // used is the fact that changed something, and it does not stop being
+        // true when the clock passes. Answering "expired" here would report a
+        // code that quietly expired over one that paired a device.
+        assert_eq!(
+            store.consume_pairing_code("hash-a", now + 600_000).unwrap(),
             PairingConsume::AlreadyUsed
         );
     }
@@ -3508,10 +3814,19 @@ mod tests {
     #[test]
     fn an_expired_code_is_refused_even_though_it_exists() {
         let (store, _path) = temp_store();
-        let now = mint(&store, "hash-b", false, 300_000);
+        let now = mint(&store, "hash-b", 300_000);
         assert_eq!(
             store.consume_pairing_code("hash-b", now + 300_001).unwrap(),
             PairingConsume::Expired
+        );
+        // The boundary itself, which is the whole of what the comparison
+        // decides: a code is live through the millisecond it expires on, and
+        // one millisecond later it is not. Asked in this order because only the
+        // living one changes anything.
+        assert_eq!(
+            store.consume_pairing_code("hash-b", now + 300_000).unwrap(),
+            PairingConsume::Consumed,
+            "the millisecond a code expires on is still inside its life"
         );
     }
 
@@ -3525,30 +3840,14 @@ mod tests {
     }
 
     #[test]
-    fn ssh_consent_rides_the_code_not_the_daemon() {
-        let (store, _path) = temp_store();
-        let now = mint(&store, "hash-ssh", true, 300_000);
-        assert_eq!(
-            store.consume_pairing_code("hash-ssh", now).unwrap(),
-            PairingConsume::Consumed { allow_ssh: true }
-        );
-        // A second code minted without --ssh must not inherit the consent.
-        let now = mint(&store, "hash-plain", false, 300_000);
-        assert_eq!(
-            store.consume_pairing_code("hash-plain", now).unwrap(),
-            PairingConsume::Consumed { allow_ssh: false }
-        );
-    }
-
-    #[test]
     fn minting_sweeps_codes_that_can_never_be_used_again() {
         let (store, _path) = temp_store();
         let now = protocol::time::now_unix_ms();
         store
-            .create_pairing_code("old", false, "t", now - 10_000, now)
+            .create_pairing_code("old", "t", now - 10_000, now)
             .unwrap();
         // A later mint sweeps anything already past its expiry.
-        mint(&store, "fresh", false, 300_000);
+        mint(&store, "fresh", 300_000);
         assert_eq!(
             store.consume_pairing_code("old", now).unwrap(),
             PairingConsume::NotFound
@@ -3648,9 +3947,6 @@ mod tests {
         let (store, _path) = temp_store();
         add_device(&store, "d1", "iPhone", "t1");
         store
-            .set_ssh_installed("d1", true, Some("SHA256:abc"))
-            .unwrap();
-        store
             .revoke_device("d1", "2026-07-31T10:00:00.000Z")
             .unwrap();
 
@@ -3659,8 +3955,6 @@ mod tests {
             listed.revoked_at.as_deref(),
             Some("2026-07-31T10:00:00.000Z")
         );
-        assert!(listed.ssh_key_installed);
-        assert_eq!(listed.ssh_fingerprint.as_deref(), Some("SHA256:abc"));
         assert!(!listed.to_summary().is_active());
     }
 
@@ -3668,14 +3962,14 @@ mod tests {
     fn devices_and_pairing_survive_a_restart() {
         let (store, path) = temp_store();
         add_device(&store, "d1", "iPhone", "t1");
-        let now = mint(&store, "hash-r", true, 300_000);
+        let now = mint(&store, "hash-r", 300_000);
         drop(store);
 
         let store = Store::open(&path).unwrap();
         assert!(store.device_by_token_hash("t1").unwrap().is_some());
         assert_eq!(
             store.consume_pairing_code("hash-r", now).unwrap(),
-            PairingConsume::Consumed { allow_ssh: true }
+            PairingConsume::Consumed
         );
     }
 
@@ -3738,8 +4032,15 @@ mod tests {
     // ------------------------------------------------------- schema migration
 
     /// Build a database in the exact pre-`session_uid` shape, including its
-    /// index names — a copy of the old `migrate()`, frozen here because reading
-    /// that shape is the migration's whole job.
+    /// index names, frozen here because reading that shape is the migration's
+    /// whole job.
+    ///
+    /// `devices` and `pairing_codes` carry the real SSH columns an earlier
+    /// schema declares and this one does not, so these tests exercise the
+    /// migration a user's own database gets rather than a generic one.
+    /// `pairing_codes.allow_ssh` is `NOT NULL` with no default, so an `INSERT`
+    /// that neither drops it nor names it fails — the constraint the mint has to
+    /// cope with, reproduced here exactly.
     fn legacy_database(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
@@ -4047,6 +4348,343 @@ mod tests {
         assert_eq!(store.count_events(&uid).unwrap(), 1);
     }
 
+    /// The retired list names nothing this schema declares.
+    ///
+    /// [`RETIRED_COLUMNS`] is a list of names to destroy, held apart from the
+    /// DDL that builds the tables. A name on both lists would take a live column
+    /// off every database this build opens, and nobody would find out until a
+    /// phone could not authenticate.
+    ///
+    /// Held against `create_schema`'s own output rather than against a database
+    /// `Store::open` produced: opening runs the removal, so a live name on the
+    /// list would already be gone by the time such a database was asked, and the
+    /// assertion would agree with any answer.
+    #[test]
+    fn the_retired_list_names_nothing_this_schema_declares() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        for (table, column) in RETIRED_COLUMNS {
+            assert!(
+                !table_columns(&conn, table)
+                    .unwrap()
+                    .iter()
+                    .any(|actual| actual.eq_ignore_ascii_case(column)),
+                "{table}.{column} is both declared and retired"
+            );
+        }
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_legacy_credential_table_gives_up_its_retired_columns_without_losing_a_device() {
+        // A device row *is* a phone's pairing: the token hash is the only copy
+        // of that credential the Mac holds, and dropping it un-pairs a phone
+        // that has no way to find out until it next tries to connect.
+        let path = legacy_path();
+        {
+            let conn = legacy_database(&path);
+            conn.execute(
+                "INSERT INTO devices(device_id, name, token_hash, created_at, last_seen_at,
+                                     revoked_at, ssh_key_installed, ssh_fingerprint)
+                 VALUES('d1','iPhone','hash-a','2026-08-01T00:00:00.000Z',
+                        '2026-08-02T00:00:00.000Z', NULL, 1, 'SHA256:abc')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash, allow_ssh, created_at, expires_at,
+                                           expires_at_ms, consumed_at)
+                 VALUES('hash-c', 1, 'c', 'e', 9_000_000_000_000, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+
+        let device = store
+            .device_by_token_hash("hash-a")
+            .unwrap()
+            .expect("the device token must still authenticate");
+        assert_eq!(device.device_id, "d1");
+        assert_eq!(device.name, "iPhone");
+        assert_eq!(device.created_at, "2026-08-01T00:00:00.000Z");
+        assert_eq!(
+            device.last_seen_at.as_deref(),
+            Some("2026-08-02T00:00:00.000Z")
+        );
+        assert!(device.revoked_at.is_none());
+
+        // The in-flight code came across and is still redeemable exactly once.
+        assert_eq!(
+            store.consume_pairing_code("hash-c", 0).unwrap(),
+            PairingConsume::Consumed
+        );
+
+        // And the migrated tables take this build's own writes, which name
+        // neither retired column.
+        mint(&store, "hash-new", 300_000);
+        store
+            .insert_device("d2", "iPad", "hash-b", "2026-08-03T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(store.list_devices().unwrap().len(), 2);
+
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+        // The declared index is on the table afterwards. `DROP COLUMN` touches
+        // nothing but the column it names, and nothing here keys on one that is
+        // going, so the index is never disturbed.
+        assert!(index_names(&conn, "devices").contains(&"devices_name".to_string()));
+    }
+
+    #[test]
+    fn widening_a_legacy_table_twice_is_a_no_op() {
+        let path = legacy_path();
+        {
+            let conn = legacy_database(&path);
+            conn.execute(
+                "INSERT INTO devices(device_id, name, token_hash, created_at, last_seen_at,
+                                     revoked_at, ssh_key_installed, ssh_fingerprint)
+                 VALUES('d1','iPhone','hash-a','2026-08-01T00:00:00.000Z', NULL, NULL, 0, NULL)",
+                [],
+            )
+            .unwrap();
+            assert!(
+                needs_column_additions(&conn).unwrap(),
+                "a database written before push has neither push column"
+            );
+        }
+        drop(Store::open(&path).unwrap());
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(!needs_column_additions(&conn).unwrap());
+        // The state a second `ccd` sees when it passes the unlocked check and
+        // then reaches the transaction after the first one committed. `ALTER
+        // TABLE … ADD COLUMN` has no `IF NOT EXISTS`, so the recheck taken
+        // under the write lock is the whole difference between this and a
+        // duplicate-column error that stops the daemon from opening.
+        add_missing_columns(&mut conn).expect("a redundant widening must not error");
+        assert!(column_exists(&conn, "devices", "push_token").unwrap());
+        assert!(column_exists(&conn, "devices", "push_environment").unwrap());
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.list_devices().unwrap().len(), 1);
+    }
+
+    /// The second start finds nothing retired, and does not open a transaction
+    /// to establish it.
+    ///
+    /// Another connection holds the write lock throughout, so a pass that
+    /// reached `BEGIN IMMEDIATE` would come back `database is locked` rather
+    /// than come back empty. Being invisible when there is nothing to do is the
+    /// point: the common case is every boot after the first.
+    #[test]
+    fn a_second_pass_over_a_clean_database_writes_nothing() {
+        let path = legacy_path();
+        {
+            let conn = legacy_database(&path);
+            conn.execute(
+                "INSERT INTO devices(device_id, name, token_hash, created_at, last_seen_at,
+                                     revoked_at, ssh_key_installed, ssh_fingerprint)
+                 VALUES('d1','iPhone','hash-a','2026-08-01T00:00:00.000Z', NULL, NULL, 0, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        drop(Store::open(&path).unwrap());
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        assert_eq!(
+            drop_retired_columns(&mut conn)
+                .expect("a pass with nothing to do must not reach for the write lock"),
+            Vec::<String>::new()
+        );
+        holder.execute_batch("ROLLBACK;").unwrap();
+        drop(holder);
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.list_devices().unwrap().len(), 1);
+        assert!(store.device_by_token_hash("hash-a").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_column_a_future_build_added_survives_a_rollback() {
+        // The reason the removal is driven by a named retired list instead of
+        // by "a column I do not declare". A user who runs a newer build and
+        // comes back to this one arrives with a column this build has never
+        // heard of. Reading it as legacy would destroy the newer build's data
+        // on the way down and hand back an empty column on the way up, with
+        // nothing but a cheerful log line to show for it.
+        let (store, path) = temp_store();
+        store
+            .insert_device("d1", "iPhone", "hash-a", "2026-08-01T00:00:00.000Z")
+            .unwrap();
+        drop(store);
+
+        {
+            // What a newer build's own `add_missing_columns` does: widen each
+            // credential table in place, then write through it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN attested_at TEXT;
+                 ALTER TABLE pairing_codes ADD COLUMN issued_by TEXT;",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE devices SET attested_at = '2026-09-01T00:00:00.000Z'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash, created_at, expires_at, expires_at_ms,
+                                           consumed_at, issued_by)
+                 VALUES('hash-c','c','e', 9_000_000_000_000, NULL, 'the newer build')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // The rollback itself.
+        let store = Store::open(&path).unwrap();
+
+        let device = store
+            .device_by_token_hash("hash-a")
+            .unwrap()
+            .expect("the device token must still authenticate");
+        assert_eq!(device.device_id, "d1");
+        assert_eq!(device.name, "iPhone");
+        // This build writes through the wider tables without knowing they are
+        // wider, because every column it does not name is nullable to it.
+        let now = mint(&store, "hash-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("hash-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            column_exists(&conn, "devices", "attested_at").unwrap(),
+            "a column this build does not know must not be dropped"
+        );
+        assert!(
+            column_exists(&conn, "pairing_codes", "issued_by").unwrap(),
+            "a column this build does not know must not be dropped"
+        );
+        // Present is not enough: a removal that recreated the table and then
+        // let the newer build widen it again would leave both names behind with
+        // the values gone, which a user only notices on the way up.
+        let attested: Option<String> = conn
+            .query_row(
+                "SELECT attested_at FROM devices WHERE device_id = 'd1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attested.as_deref(), Some("2026-09-01T00:00:00.000Z"));
+        let issued_by: Option<String> = conn
+            .query_row(
+                "SELECT issued_by FROM pairing_codes WHERE code_hash = 'hash-c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(issued_by.as_deref(), Some("the newer build"));
+        // Untouched tables keep the index they already carry.
+        assert!(index_names(&conn, "devices").contains(&"devices_name".to_string()));
+    }
+
+    #[test]
+    fn a_table_carrying_a_retired_column_gives_it_up_and_keeps_the_unknown_one() {
+        // The mixed case: one retired column and one a newer build added, on the
+        // same table. The retired one goes on its own, leaving the column beside
+        // it, its type and its value where they were. `devices` shows the other
+        // half of the rule: it carries no retired column, so nothing is done to
+        // it on its sibling's account.
+        let (store, path) = temp_store();
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN attested_at TEXT;
+                 DROP TABLE pairing_codes;
+                 CREATE TABLE pairing_codes(
+                     code_hash     TEXT PRIMARY KEY,
+                     allow_ssh     INTEGER NOT NULL,
+                     created_at    TEXT    NOT NULL,
+                     expires_at    TEXT    NOT NULL,
+                     expires_at_ms INTEGER NOT NULL,
+                     consumed_at   TEXT,
+                     issued_by     TEXT
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO devices(device_id, name, token_hash, created_at, attested_at)
+                 VALUES('d1','iPhone','hash-a','2026-08-01T00:00:00.000Z',
+                        '2026-09-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash, allow_ssh, created_at, expires_at,
+                                           expires_at_ms, consumed_at, issued_by)
+                 VALUES('hash-c', 1, 'c', 'e', 9_000_000_000_000, NULL, 'the newer build')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        // Pairing works again, which is what removing the column is for.
+        let now = mint(&store, "hash-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("hash-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        // Every row came across, including the one that outlived the column it
+        // was inserted beside.
+        assert_eq!(
+            store.consume_pairing_code("hash-c", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        assert!(store.device_by_token_hash("hash-a").unwrap().is_some());
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(!column_exists(&conn, "pairing_codes", "allow_ssh").unwrap());
+        assert!(
+            column_exists(&conn, "pairing_codes", "issued_by").unwrap(),
+            "the column a newer build wrote stays when the retired one leaves"
+        );
+        let issued_by: Option<String> = conn
+            .query_row(
+                "SELECT issued_by FROM pairing_codes WHERE code_hash = 'hash-c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(issued_by.as_deref(), Some("the newer build"));
+        let attested: Option<String> = conn
+            .query_row(
+                "SELECT attested_at FROM devices WHERE device_id = 'd1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            attested.as_deref(),
+            Some("2026-09-01T00:00:00.000Z"),
+            "a table with no retired column is not touched on a sibling's account"
+        );
+    }
+
     #[test]
     fn a_fresh_database_is_created_at_the_current_schema() {
         let (store, path) = temp_store();
@@ -4055,9 +4693,16 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
+        // Written out rather than compared against the constant that produced
+        // it: a version on disk is a fact other builds read, and a test that
+        // asks the schema what the schema said would agree with any answer.
+        assert_eq!(version, 2, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());
+        // No retired column is ever built, so a first start has nothing to
+        // remove and every start after it has nothing either.
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
     }
 
     /// The measured twin-notification defect: one phone re-paired, its token
@@ -4226,5 +4871,775 @@ mod tests {
             "a revoked device cannot claim a token"
         );
         assert_eq!(store.push_targets().unwrap()[0].0, "dev-live");
+    }
+
+    // --------------------------------------- adversarial: the retired columns
+    //
+    // Independent cover for `drop_retired_columns`, written against the claims
+    // it makes rather than against how it makes them, and not reusing the
+    // fixture that came with the session-uid migration: `legacy_database` above
+    // brings that migration along with it, and the builder here changes nothing
+    // but the two credential tables.
+
+    /// A database at this build's schema everywhere except `devices` and
+    /// `pairing_codes`, which carry the exact shape the last shipped build
+    /// declares: the SSH columns, `allow_ssh INTEGER NOT NULL` with no default,
+    /// the push columns, and the unique name index.
+    fn retired_credential_database(path: &Path) -> Connection {
+        drop(Store::open(path).unwrap());
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            DROP TABLE devices;
+            DROP TABLE pairing_codes;
+            CREATE TABLE devices(
+                device_id         TEXT PRIMARY KEY,
+                name              TEXT NOT NULL,
+                token_hash        TEXT NOT NULL UNIQUE,
+                created_at        TEXT NOT NULL,
+                last_seen_at      TEXT,
+                revoked_at        TEXT,
+                ssh_key_installed INTEGER NOT NULL DEFAULT 0,
+                ssh_fingerprint   TEXT,
+                push_token        TEXT,
+                push_environment  TEXT
+            );
+            CREATE UNIQUE INDEX devices_name ON devices(name);
+            CREATE TABLE pairing_codes(
+                code_hash     TEXT PRIMARY KEY,
+                allow_ssh     INTEGER NOT NULL,
+                created_at    TEXT    NOT NULL,
+                expires_at    TEXT    NOT NULL,
+                expires_at_ms INTEGER NOT NULL,
+                consumed_at   TEXT
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    /// `(device_id, name, token_hash, last_seen_at, revoked_at, push_token)`.
+    /// One row per value the removal could plausibly mangle: a quote in a name
+    /// that a string-built statement would break on, non-ASCII, an empty name, a
+    /// revoked row that must survive as a row while refusing to authenticate,
+    /// and a live push registration.
+    #[allow(clippy::type_complexity)]
+    const HOSTILE_DEVICES: &[(&str, &str, &str, Option<&str>, Option<&str>, Option<&str>)] = &[
+        (
+            "d-plain",
+            "iPhone",
+            "hash-plain",
+            Some("2026-08-02T00:00:00.000Z"),
+            None,
+            None,
+        ),
+        ("d-quote", "O'Brien's iPad", "hash-quote", None, None, None),
+        (
+            "d-unicode",
+            "Ünïcodé 📱",
+            "hash-ünïcodé-🔑",
+            None,
+            None,
+            None,
+        ),
+        ("d-empty-name", "", "", None, None, None),
+        (
+            "d-revoked",
+            "retired iPhone",
+            "hash-revoked",
+            Some("2026-08-02T00:00:00.000Z"),
+            Some("2026-08-03T00:00:00.000Z"),
+            None,
+        ),
+        (
+            "d-push",
+            "iPad Pro",
+            "hash-push",
+            None,
+            None,
+            Some("apns-token-1"),
+        ),
+    ];
+
+    /// Seed the retired-shape `devices` table the way the build that declared
+    /// that shape would have.
+    #[allow(clippy::type_complexity)]
+    fn seed_retired_device(
+        conn: &Connection,
+        row: &(&str, &str, &str, Option<&str>, Option<&str>, Option<&str>),
+    ) {
+        conn.execute(
+            "INSERT INTO devices(device_id, name, token_hash, created_at, last_seen_at,
+                                 revoked_at, ssh_key_installed, ssh_fingerprint,
+                                 push_token, push_environment)
+             VALUES(?1, ?2, ?3, '2026-08-01T00:00:00.000Z', ?4, ?5, 1, 'SHA256:abc', ?6, ?7)",
+            params![
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                row.5,
+                row.5.map(|_| "production")
+            ],
+        )
+        .unwrap();
+    }
+
+    /// Every value of every row a query returns, typed as SQLite stores it, so a
+    /// blob that came back as text or a NULL that became an empty string fails
+    /// here instead of being formatted away.
+    fn rows_of(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let width = stmt.column_count();
+        let rows = stmt
+            .query_map([], |row| {
+                (0..width)
+                    .map(|i| row.get::<usize, rusqlite::types::Value>(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    /// The schema as SQLite itself records it, minus the root pages a rebuild is
+    /// entitled to move. Byte equality across an open is the difference between
+    /// "left alone" and "rebuilt to something that merely looks the same".
+    fn schema_dump(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        conn.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    /// One named object, and everything named after it, as SQLite records it.
+    fn schema_dump_of(conn: &Connection, prefix: &str) -> Vec<(String, String, Option<String>)> {
+        schema_dump(conn)
+            .into_iter()
+            .filter(|(_, name, _)| name.starts_with(prefix))
+            .collect()
+    }
+
+    /// The names of the indexes on a table that have a `CREATE INDEX` of their
+    /// own. The implicit `sqlite_autoindex_*` behind a `PRIMARY KEY` or a
+    /// `UNIQUE` declaration has no `sql` and is left out.
+    fn index_names(conn: &Connection, table: &str) -> Vec<String> {
+        conn.prepare(
+            "SELECT name FROM sqlite_master
+              WHERE type = 'index' AND tbl_name = ?1 COLLATE NOCASE AND sql IS NOT NULL
+              ORDER BY name",
+        )
+        .unwrap()
+        .query_map(params![table], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    }
+
+    /// Everything `devices` holds that outlives the removal, including the two
+    /// columns no accessor exposes. Named columns rather than `*` so the same
+    /// query reads both the retired shape and the current one.
+    fn devices_dump(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+        rows_of(
+            conn,
+            "SELECT device_id, name, token_hash, created_at, last_seen_at,
+                    revoked_at, push_token, push_environment
+               FROM devices ORDER BY device_id",
+        )
+    }
+
+    fn codes_dump(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+        rows_of(
+            conn,
+            "SELECT code_hash, created_at, expires_at, expires_at_ms, consumed_at
+               FROM pairing_codes ORDER BY code_hash",
+        )
+    }
+
+    /// Every row is still there afterwards, value for value.
+    ///
+    /// `DROP COLUMN` preserves rows by construction, which is exactly why it is
+    /// worth pinning: a device row *is* a phone's pairing, and losing one
+    /// silently un-pairs a phone that has no way to find out until it next tries
+    /// to connect. The values are the hostile ones — a quote, non-ASCII, an
+    /// empty string, a NULL, a revoked row — read back as SQLite stores them.
+    #[test]
+    fn every_row_survives_the_removal() {
+        let path = legacy_path();
+        let (devices_before, codes_before) = {
+            let conn = retired_credential_database(&path);
+            for row in HOSTILE_DEVICES {
+                seed_retired_device(&conn, row);
+            }
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash, allow_ssh, created_at, expires_at,
+                                           expires_at_ms, consumed_at)
+                 VALUES('code-inflight', 1, 'c', 'e', 9000000000000, NULL)",
+                [],
+            )
+            .unwrap();
+            (devices_dump(&conn), codes_dump(&conn))
+        };
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.list_devices().unwrap().len(), HOSTILE_DEVICES.len());
+        // The revoked row is still a row and still refuses to authenticate.
+        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+        assert!(!store.device_is_active("d-revoked").unwrap());
+        // The code that was in flight when the column went is still redeemable.
+        assert_eq!(
+            store.consume_pairing_code("code-inflight", 0).unwrap(),
+            PairingConsume::Consumed
+        );
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(devices_dump(&conn), devices_before, "a device row changed");
+        assert_eq!(
+            codes_dump(&conn)
+                .into_iter()
+                .map(|row| row[0].clone())
+                .collect::<Vec<_>>(),
+            codes_before
+                .into_iter()
+                .map(|row| row[0].clone())
+                .collect::<Vec<_>>(),
+            "a pairing code was lost"
+        );
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+    }
+
+    /// The tables the removal has no business touching come through it
+    /// byte-identical, rows and schema.
+    ///
+    /// A regression test with a history: the engine this replaced reached the
+    /// same three columns through `ALTER TABLE … RENAME`, which rewrites every
+    /// other object in the schema that names the renamed table, and one wrong
+    /// step there silently emptied a neighbour. `DROP COLUMN` names one column
+    /// on one table and cannot reach past it — this is the assertion that says
+    /// so out loud.
+    #[test]
+    fn the_neighbour_tables_come_through_the_removal_untouched() {
+        let path = legacy_path();
+        let (schema_before, sessions_before, events_before) = {
+            let conn = retired_credential_database(&path);
+            for row in HOSTILE_DEVICES {
+                seed_retired_device(&conn, row);
+            }
+            conn.execute_batch(
+                "INSERT INTO sessions VALUES('uid-1','cc-1','codeconnect','/tmp/sock','/tmp/one',
+                                             'claude-uuid','/tmp/one.jsonl','live',
+                                             '2026-07-30T10:00:00.000Z','2026-07-30T11:00:00.000Z');
+                 INSERT INTO events VALUES('uid-1','cc-1',1,'2026-07-30T10:00:01.000Z','output',
+                                           '{\"text\":\"hello\"}','hook','ev-1',NULL,NULL);",
+            )
+            .unwrap();
+            (
+                [
+                    schema_dump_of(&conn, "sessions"),
+                    schema_dump_of(&conn, "events"),
+                ],
+                rows_of(&conn, "SELECT * FROM sessions ORDER BY session_uid"),
+                rows_of(&conn, "SELECT * FROM events ORDER BY session_uid, seq"),
+            )
+        };
+
+        drop(Store::open(&path).unwrap());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+        assert_eq!(
+            [
+                schema_dump_of(&conn, "sessions"),
+                schema_dump_of(&conn, "events"),
+            ],
+            schema_before,
+            "a neighbour table was redefined"
+        );
+        assert_eq!(
+            rows_of(&conn, "SELECT * FROM sessions ORDER BY session_uid"),
+            sessions_before,
+            "a neighbour table lost or changed a row"
+        );
+        assert_eq!(
+            rows_of(&conn, "SELECT * FROM events ORDER BY session_uid, seq"),
+            events_before,
+            "a neighbour table lost or changed a row"
+        );
+    }
+
+    /// A `devices` column SQLite will not drop is left where it is, and the
+    /// daemon serves normally around it.
+    ///
+    /// Both columns on that table are nullable or defaulted, so every statement
+    /// this build writes keeps working with one of them still present — which is
+    /// why leaving it is the right answer and stopping the daemon is not. An
+    /// index on the column is what SQLite refuses the drop for.
+    #[test]
+    fn a_devices_column_that_cannot_be_dropped_is_left_and_the_daemon_carries_on() {
+        let path = legacy_path();
+        let before = {
+            let conn = retired_credential_database(&path);
+            for row in HOSTILE_DEVICES {
+                seed_retired_device(&conn, row);
+            }
+            conn.execute_batch("CREATE INDEX devices_ssh ON devices(ssh_fingerprint);")
+                .unwrap();
+            devices_dump(&conn)
+        };
+
+        let store = Store::open(&path).unwrap();
+        // Pairing a phone and authenticating one both still work.
+        let now = mint(&store, "code-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("code-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+        drop(store);
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(
+            column_exists(&conn, "devices", "ssh_fingerprint").unwrap(),
+            "the column its index blocks stays, rather than taking the daemon down with it"
+        );
+        assert!(
+            index_names(&conn, "devices").contains(&"devices_ssh".to_string()),
+            "and so does the index that blocked it"
+        );
+        // The column beside it has no such obstacle and is gone, and so is the
+        // one on the other table: a refusal is about one column.
+        assert!(!column_exists(&conn, "devices", "ssh_key_installed").unwrap());
+        assert!(!column_exists(&conn, "pairing_codes", "allow_ssh").unwrap());
+        assert_eq!(devices_dump(&conn), before, "the refusal cost a row");
+
+        // What an operator is told, in the message that names the column.
+        let warnings = drop_retired_columns(&mut conn).unwrap();
+        assert_eq!(warnings.len(), 1, "one refusal, one message: {warnings:?}");
+        assert!(
+            warnings[0].contains("devices.ssh_fingerprint"),
+            "the message must name the column: {}",
+            warnings[0]
+        );
+        drop(conn);
+
+        // And a phone that pairs afterwards is written to the table the column
+        // is still on.
+        let store = Store::open(&path).unwrap();
+        store
+            .insert_device("d-new", "iPad mini", "hash-new", "2026-08-04T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(
+            store.list_devices().unwrap().len(),
+            HOSTILE_DEVICES.len() + 1
+        );
+    }
+
+    /// A `pairing_codes.allow_ssh` SQLite will not drop is left where it is, and
+    /// costs nothing but its own presence.
+    ///
+    /// The scenario the removal exists to be safe in: a newer build added
+    /// `issued_by` and an index that names `allow_ssh`, and an operator came back
+    /// down to this one. A rebuild of the table would take `issued_by`, the value
+    /// under it and the index with it — so there is no rebuild. The column stays,
+    /// every row and every newer column stays, and pairing keeps working because
+    /// the mint names the leftover `NOT NULL` column itself.
+    #[test]
+    fn a_pairing_codes_column_that_cannot_be_dropped_costs_nothing_but_its_own_presence() {
+        let path = legacy_path();
+        let devices_before = {
+            let conn = retired_credential_database(&path);
+            for row in HOSTILE_DEVICES {
+                seed_retired_device(&conn, row);
+            }
+            conn.execute_batch(
+                "ALTER TABLE pairing_codes ADD COLUMN issued_by TEXT;
+                 CREATE INDEX codes_ssh ON pairing_codes(allow_ssh);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pairing_codes(code_hash, allow_ssh, created_at, expires_at,
+                                           expires_at_ms, consumed_at, issued_by)
+                 VALUES('code-inflight', 1, 'c', 'e', 9000000000000, NULL, 'the newer build')",
+                [],
+            )
+            .unwrap();
+            devices_dump(&conn)
+        };
+
+        let store = Store::open(&path).unwrap();
+        // Minting still works with the column in place, which is what makes
+        // leaving it an option at all.
+        let now = mint(&store, "code-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("code-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        // And the row that was in flight when the drop was refused is still
+        // redeemable exactly once.
+        assert_eq!(
+            store.consume_pairing_code("code-inflight", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        drop(store);
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(
+            column_exists(&conn, "pairing_codes", "allow_ssh").unwrap(),
+            "the column its index blocks stays, rather than taking the table down with it"
+        );
+        assert!(
+            index_names(&conn, "pairing_codes").contains(&"codes_ssh".to_string()),
+            "and so does the index that blocked it"
+        );
+        assert!(
+            column_exists(&conn, "pairing_codes", "issued_by").unwrap(),
+            "a column a newer build added must survive a drop this build could not make"
+        );
+        // Present is not enough: a rebuild that let the newer build widen the
+        // table again would leave the name behind with the value gone.
+        let issued_by: Option<String> = conn
+            .query_row(
+                "SELECT issued_by FROM pairing_codes WHERE code_hash = 'code-inflight'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(issued_by.as_deref(), Some("the newer build"));
+        // The value the mint wrote into the leftover column: 0, "no SSH", which
+        // is the truth about every code this build issues.
+        let minted: i64 = conn
+            .query_row(
+                "SELECT allow_ssh FROM pairing_codes WHERE code_hash = 'code-new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(minted, 0);
+
+        // What an operator is told, in the message that names the column.
+        let warnings = drop_retired_columns(&mut conn).unwrap();
+        assert_eq!(warnings.len(), 1, "one refusal, one message: {warnings:?}");
+        assert!(
+            warnings[0].contains("pairing_codes.allow_ssh"),
+            "the message must name the column: {}",
+            warnings[0]
+        );
+        assert_eq!(
+            retired_columns_present(&conn).unwrap(),
+            vec![("pairing_codes", "allow_ssh")],
+            "the refusal is about one column and leaves the others gone"
+        );
+        // `devices` has no such obstacle and is not held back by its sibling.
+        assert_eq!(devices_dump(&conn), devices_before, "a device row changed");
+        assert!(!column_exists(&conn, "devices", "ssh_fingerprint").unwrap());
+        assert!(!column_exists(&conn, "devices", "ssh_key_installed").unwrap());
+    }
+
+    /// The mint fills a leftover `allow_ssh` however the column is spelled.
+    ///
+    /// `ALLOW_SSH` and `allow_ssh` are one `NOT NULL` column to the `INSERT`, so
+    /// a mint that compared the name byte for byte would pick the statement that
+    /// omits it and fail every `codeconnect pair` on a database where the drop
+    /// was refused. The index is what SQLite refuses the drop for.
+    #[test]
+    fn a_mint_fills_a_leftover_allow_ssh_however_it_is_spelled() {
+        let path = legacy_path();
+        {
+            let conn = retired_credential_database(&path);
+            conn.execute_batch(
+                "DROP TABLE pairing_codes;
+                 CREATE TABLE pairing_codes(
+                     code_hash     TEXT PRIMARY KEY,
+                     ALLOW_SSH     INTEGER NOT NULL,
+                     created_at    TEXT    NOT NULL,
+                     expires_at    TEXT    NOT NULL,
+                     expires_at_ms INTEGER NOT NULL,
+                     consumed_at   TEXT
+                 );
+                 CREATE INDEX codes_ssh ON pairing_codes(ALLOW_SSH);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let now = mint(&store, "code-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("code-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            column_exists(&conn, "pairing_codes", "ALLOW_SSH").unwrap(),
+            "the drop its index blocks leaves the column, whatever its spelling"
+        );
+        let minted: i64 = conn
+            .query_row(
+                "SELECT ALLOW_SSH FROM pairing_codes WHERE code_hash = 'code-new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(minted, 0);
+    }
+
+    /// A second daemon dropping `allow_ssh` cannot land between the mint's probe
+    /// and the mint's `INSERT`.
+    ///
+    /// The probe exists because the answer can change between daemon starts, and
+    /// it was asked per mint precisely so a remembered answer could not go stale.
+    /// It was still stale by two statements: the drop below, fired at the one
+    /// instant that matters, used to succeed and leave the `INSERT` naming a
+    /// column that no longer existed — a `codeconnect pair` failing with "no such
+    /// column: allow_ssh". Under one immediate transaction the write lock is
+    /// already taken, so the drop is refused and the mint fills the column it
+    /// saw. The property asserted is not *which* of the two schemas the mint
+    /// works against, but that it works against the one it looked at.
+    #[test]
+    fn a_migration_cannot_land_between_the_mints_probe_and_its_insert() {
+        let (store, path) = temp_store();
+        // The column back as the one database SQLite refused it on carries it:
+        // `NOT NULL` with no default. No index over it, so the only thing that
+        // can refuse the drop below is the lock — an index would refuse it on a
+        // database with the bug too, and prove nothing.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE pairing_codes;
+                 CREATE TABLE pairing_codes(
+                     code_hash     TEXT PRIMARY KEY,
+                     allow_ssh     INTEGER NOT NULL,
+                     created_at    TEXT    NOT NULL,
+                     expires_at    TEXT    NOT NULL,
+                     expires_at_ms INTEGER NOT NULL,
+                     consumed_at   TEXT
+                 );",
+            )
+            .unwrap();
+        }
+
+        let now = protocol::time::now_unix_ms();
+        let expires = now + 300_000;
+        {
+            let _second_daemon = MigrationMidMint::armed_on(&path);
+            store
+                .create_pairing_code(
+                    "code-raced",
+                    &protocol::time::rfc3339_from_unix_ms(expires),
+                    expires,
+                    now,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("a migration landing mid-mint failed the mint: {err:#}")
+                });
+        }
+
+        // And the code it minted is a real one: redeemable exactly once.
+        assert_eq!(
+            store.consume_pairing_code("code-raced", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        assert_eq!(
+            store.consume_pairing_code("code-raced", now).unwrap(),
+            PairingConsume::AlreadyUsed
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            column_exists(&conn, "pairing_codes", "allow_ssh").unwrap(),
+            "the drop was taken while the mint held the write lock"
+        );
+        let minted: i64 = conn
+            .query_row(
+                "SELECT allow_ssh FROM pairing_codes WHERE code_hash = 'code-raced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(minted, 0);
+    }
+
+    /// A retired column spelled in another case is the same column to SQLite,
+    /// and is retired here too. A binary comparison would leave `ALLOW_SSH` on
+    /// the table for ever, dead weight no start would ever look at again.
+    #[test]
+    fn a_retired_column_spelled_in_another_case_is_still_retired() {
+        let path = legacy_path();
+        {
+            drop(Store::open(&path).unwrap());
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE pairing_codes;
+                 CREATE TABLE pairing_codes(
+                     code_hash     TEXT PRIMARY KEY,
+                     ALLOW_SSH     INTEGER NOT NULL,
+                     created_at    TEXT    NOT NULL,
+                     expires_at    TEXT    NOT NULL,
+                     expires_at_ms INTEGER NOT NULL,
+                     consumed_at   TEXT
+                 );
+                 ALTER TABLE devices ADD COLUMN SSH_Fingerprint TEXT;",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let now = mint(&store, "code-new", 300_000);
+        assert_eq!(
+            store.consume_pairing_code("code-new", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+        assert!(!column_exists(&conn, "pairing_codes", "ALLOW_SSH").unwrap());
+        assert!(!column_exists(&conn, "devices", "SSH_Fingerprint").unwrap());
+    }
+
+    /// Four daemons opening the same retired database at once all start, and the
+    /// database they leave behind has lost nothing.
+    ///
+    /// `ALTER TABLE … DROP COLUMN` has no `IF NOT EXISTS`, so the recheck taken
+    /// under the write lock is the whole difference between this and three
+    /// daemons failing on a column the first one already removed.
+    #[test]
+    fn four_daemons_opening_the_same_retired_database_at_once_all_start() {
+        let path = legacy_path();
+        let before = {
+            let conn = retired_credential_database(&path);
+            for row in HOSTILE_DEVICES {
+                seed_retired_device(&conn, row);
+            }
+            devices_dump(&conn)
+        };
+
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let opened: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    Store::open(&path).map(|store| store.list_devices().unwrap().len())
+                })
+            })
+            .collect();
+        for (i, handle) in opened.into_iter().enumerate() {
+            let count = handle
+                .join()
+                .unwrap()
+                .unwrap_or_else(|err| panic!("racing open {i} failed: {err:#}"));
+            assert_eq!(
+                count,
+                HOSTILE_DEVICES.len(),
+                "racing open {i} lost a device"
+            );
+        }
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            devices_dump(&conn),
+            before,
+            "the race lost or changed a row"
+        );
+        assert!(retired_columns_present(&conn).unwrap().is_empty());
+        assert!(index_names(&conn, "devices").contains(&"devices_name".to_string()));
+    }
+
+    /// Pairing works end to end afterwards: mint a code, redeem it once, refuse
+    /// it the second time, refuse an expired one, and hand the phone a device
+    /// row whose token authenticates.
+    #[test]
+    fn pairing_works_end_to_end_after_the_retired_columns_go() {
+        let path = legacy_path();
+        {
+            let conn = retired_credential_database(&path);
+            seed_retired_device(&conn, &HOSTILE_DEVICES[0]);
+        }
+
+        let store = Store::open(&path).unwrap();
+        let now = mint(&store, "code-live", 300_000);
+        // A minute in the past, not a millisecond: `mint` stamps each code from
+        // its own clock reading, and the redemptions below are judged against
+        // the *first* one. A code stamped one millisecond before the second
+        // reading is not expired against the first unless both landed in the
+        // same millisecond, which is a coin toss rather than an assertion.
+        mint(&store, "code-stale", -60_000);
+
+        assert_eq!(
+            store.consume_pairing_code("code-live", now).unwrap(),
+            PairingConsume::Consumed
+        );
+        assert_eq!(
+            store.consume_pairing_code("code-live", now).unwrap(),
+            PairingConsume::AlreadyUsed
+        );
+        assert_eq!(
+            store.consume_pairing_code("code-stale", now).unwrap(),
+            PairingConsume::Expired
+        );
+
+        store
+            .insert_device("d-new", "iPad mini", "hash-new", "2026-08-04T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(
+            store
+                .device_by_token_hash("hash-new")
+                .unwrap()
+                .expect("the phone that just paired must authenticate")
+                .device_id,
+            "d-new"
+        );
+        assert!(store.device_by_token_hash("hash-plain").unwrap().is_some());
+    }
+
+    /// The refusal reaches an operator at startup, and the daemon starts anyway.
+    ///
+    /// A child process, because the log goes to stderr and there is nothing in
+    /// front of it a test could stand in. The child goes through `Store::open`
+    /// rather than calling the removal, so the wiring is under test too: a
+    /// `migrate()` that stopped calling it would fail here and nowhere else.
+    #[test]
+    fn a_refusal_reaches_an_operator_at_startup_without_stopping_the_daemon() {
+        const CHILD: &str = "CCD_STARTUP_LOG_CHILD";
+        if let Ok(database) = std::env::var(CHILD) {
+            drop(Store::open(std::path::Path::new(&database)).unwrap());
+            return;
+        }
+
+        let path = legacy_path();
+        {
+            let conn = retired_credential_database(&path);
+            seed_retired_device(&conn, &HOSTILE_DEVICES[0]);
+            conn.execute_batch("CREATE INDEX devices_ssh ON devices(ssh_fingerprint);")
+                .unwrap();
+        }
+
+        let started = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "store::tests::a_refusal_reaches_an_operator_at_startup_without_stopping_the_daemon",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, &path)
+            .output()
+            .unwrap();
+        let told = String::from_utf8_lossy(&started.stderr);
+        assert!(
+            started.status.success(),
+            "the child daemon did not open: {told}"
+        );
+        assert!(
+            told.contains(
+                "WARN  schema: SQLite will not drop the retired column devices.ssh_fingerprint"
+            ),
+            "nothing an operator can read named the column: {told}"
+        );
     }
 }
