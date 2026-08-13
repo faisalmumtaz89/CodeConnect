@@ -47,7 +47,7 @@ One third-party dependency, pinned, only for the live terminal:
 
 | Package | Pin | Why |
 |---|---|---|
-| [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | exact `1.15.0` | terminal emulator (`TerminalView`) |
+| [SwiftTerm](https://github.com/faisalmumtaz89/SwiftTerm) | revision `5429006` | terminal emulator (`TerminalView`); a fork of upstream `1.15.0` carrying a one-line DECRQSS crash fix no upstream release has |
 
 The terminal needs no network library of its own: it rides the paired
 `URLSessionWebSocketTask` the rest of the app already holds. Everything else
