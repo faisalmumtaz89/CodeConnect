@@ -175,7 +175,11 @@ jobs:
       # failed this very check. The Releases API form of the same repository
       # is the second allowance: the update checker has to name the
       # repository it updates from, and the API spells it
-      # api.github.com/repos/<owner>/<repo>. The allowance *strips* the URL
+      # api.github.com/repos/<owner>/<repo>. The pinned SwiftTerm dependency is
+      # the third allowance: it resolves from a fork under this account that
+      # carries a one-line crash fix the upstream releases do not, and
+      # Package.resolved and the pbxproj must name where it resolves from. The
+      # allowance *strips* the URL
       # from a matching line and re-tests what remains, rather than excusing
       # the line — an identifier sharing a line with the allowed URL still
       # fails.
@@ -193,7 +197,7 @@ jobs:
           if grep -rIn --exclude-dir=.git --exclude-dir=internal --exclude-dir=site \
               --exclude=LICENSE --exclude=ci.yml \
               -iE "faisal|mumtaz|tailca[0-9]+|/Users/[a-z]+/(Documents|Desktop)|[0-9]+@gmail\.com" . \
-              | sed -E 's#github\.com/(repos/)?faisalmumtaz89/CodeConnect##g' \
+              | sed -E 's#github\.com/(repos/)?faisalmumtaz89/(CodeConnect|SwiftTerm)##g' \
               | grep -iE "faisal|mumtaz|tailca[0-9]+|/Users/[a-z]+/(Documents|Desktop)|[0-9]+@gmail\.com"; then
             echo "::error::personal identifier found — scrub before merging"
             exit 1
