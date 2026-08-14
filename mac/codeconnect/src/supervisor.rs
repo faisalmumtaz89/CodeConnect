@@ -388,11 +388,11 @@ struct Target<'a> {
     is_composer: bool,
 }
 
-/// The pane and whether its cursor is visible, read together.
-fn look_at_pane(session: &str) -> Result<(String, bool)> {
+/// The pane and who has its keyboard, read together.
+fn look_at_pane(session: &str) -> Result<(String, tmux::Keyboard)> {
     Ok((
         tmux::capture_visible_pane(session)?,
-        tmux::cursor_is_visible(session)?,
+        tmux::who_has_the_keyboard(session)?,
     ))
 }
 
@@ -701,7 +701,7 @@ struct RecoveryPass {
 
 fn recover_composer_with(
     pass: RecoveryPass,
-    look: &dyn Fn() -> Result<(String, bool)>,
+    look: &dyn Fn() -> Result<(String, tmux::Keyboard)>,
     // Takes the key because the choice is made *here*, after the guards: a
     // confirmation that cannot be established downgrades to the ordinary
     // rescue rather than stranding the view.
@@ -724,7 +724,16 @@ fn recover_composer_with(
     // a live-looking composer is the measured lockout this postcondition
     // exists to clear, and it must not read as recovery already having
     // happened. See the note above `recover_composer`.
-    let ready = |pane: &str, cursor: bool| composer.find_match(pane, None).is_some() && cursor;
+    //
+    // A pane in tmux's scrollback is not ready either, and the response to
+    // that is the same `Escape` this pass already sends: Escape is what leaves
+    // copy-mode, so the pane comes back and the next look finds the composer.
+    // It is barely reachable — the send that precedes recovery is itself
+    // refused in scrollback — and the way in is somebody scrolling in the
+    // window between the keys going out and the first check.
+    let ready = |pane: &str, keyboard: tmux::Keyboard| {
+        composer.find_match(pane, None).is_some() && keyboard.reaches_the_program()
+    };
     // Nothing was observed yet, so nothing may be claimed. Every early exit
     // below says which look failed, and the daemon turns that into the
     // "typed, outcome unknown" result rather than a claim about a composer
@@ -769,7 +778,9 @@ fn recover_composer_with(
     }
     std::thread::sleep(RECOVERY_FIRST_CHECK);
     let first_absent = match look() {
-        Ok((pane, cursor)) if ready(&pane, cursor) => return SupervisorResult::Sent { matched },
+        Ok((pane, keyboard)) if ready(&pane, keyboard) => {
+            return SupervisorResult::Sent { matched }
+        }
         Ok((pane, _)) => pane,
         Err(err) => return unconfirmed_because("after the command was typed", &err),
     };
@@ -784,7 +795,9 @@ fn recover_composer_with(
     }
     std::thread::sleep(RECOVERY_SECOND_CHECK - RECOVERY_FIRST_CHECK);
     let absent_pane = match look() {
-        Ok((pane, cursor)) if ready(&pane, cursor) => return SupervisorResult::Sent { matched },
+        Ok((pane, keyboard)) if ready(&pane, keyboard) => {
+            return SupervisorResult::Sent { matched }
+        }
         Ok((pane, _)) => pane,
         Err(err) => return unconfirmed_because("while checking whether a view had opened", &err),
     };
@@ -815,12 +828,12 @@ fn recover_composer_with(
     // is about to land on is the pane as it is *now*. Checking the older frame
     // would leave exactly the window this guard exists to close.
     //
-    // **One look, pane and cursor together.** Apart they describe two moments,
-    // and the whole question is what this key will land on.
+    // **One look, pane and keyboard together.** Apart they describe two
+    // moments, and the whole question is what this key will land on.
     if !budget_allows(LOOK_WORST) {
         return out_of_budget(LOOK_WORST);
     }
-    let (before_key, cursor_before_key) = match look() {
+    let (before_key, keyboard_before_key) = match look() {
         Ok(look) => look,
         Err(err) => return unconfirmed_because("just before the key was sent", &err),
     };
@@ -856,8 +869,11 @@ fn recover_composer_with(
                 // Raw, not normalised: normalising folds whitespace and case,
                 // and a difference there is still a different screen.
                 && same_screen
-                // A composer with the keyboard means the view is already gone.
-                && !cursor_before_key;
+                // The view itself has to be the thing holding the keyboard.
+                // A composer with it means the view is already gone, and a
+                // pane in scrollback means tmux takes this `Enter` and the
+                // dialog never sees it.
+                && keyboard_before_key == tmux::Keyboard::View;
             authorised
         }
     };
@@ -898,10 +914,10 @@ fn recover_composer_with(
     let mut last_failed_look: Option<anyhow::Error>;
     loop {
         match look() {
-            Ok((pane, cursor)) => {
+            Ok((pane, keyboard)) => {
                 saw_the_pane = true;
                 last_failed_look = None;
-                if ready(&pane, cursor) {
+                if ready(&pane, keyboard) {
                     if confirming {
                         return SupervisorResult::ViewConfirmed { matched };
                     }
@@ -942,15 +958,15 @@ fn recover_composer_with(
     }
 }
 
-// Why the composer's readiness is asked of the cursor and not of the pane.
+// Why the composer's readiness is asked of tmux and not of the pane.
 //
 // **Measured, and the reason this note exists.** Submitting `/status` while a
 // turn is running opens the Settings view *inline*: when the turn finishes
 // Claude redraws the transcript, the view, and — below it — the composer box
-// and its footer. The composer-presence needle matches. The composer takes no
+// and its footer. The composer-presence check matches. The composer takes no
 // keys: typed text never appears and Enter does nothing. A send authorised on
 // that pane types into the void and reports success, and a recovery check that
-// believed the needle would see a healthy composer and decline the Escape that
+// believed the box would see a healthy composer and decline the Escape that
 // fixes it. That is the lockout this feature exists to prevent, wearing the
 // disguise of a working screen.
 //
@@ -961,7 +977,14 @@ fn recover_composer_with(
 // pane, Claude's composer keeps it visible while idle, while a turn streams
 // and after it ends (327 consecutive samples through a live turn, none
 // hidden), and every view it opens hides it — including the disguised one.
-// See [`tmux::cursor_is_visible`].
+//
+// A visible cursor is not the whole answer either. A pane in one of tmux's own
+// modes routes every keystroke to that mode instead of to Claude, and does it
+// with the cursor still showing — so the wheel over the inline transcript,
+// which is what `render_server_conf`'s `mouse on` is for, produces a screen
+// where the composer is drawn, the cursor is up, `send-keys` exits 0 and the
+// text is never delivered. Both facts come back from one `display`; see
+// [`tmux::who_has_the_keyboard`].
 
 /// The interlock as a decision over one pane. Returns the needle that
 /// authorised the send, or the reason nothing may be typed.
@@ -978,24 +1001,40 @@ fn authorise(
     // "this is the composer" off the variant silently disabled the keyboard
     // check for exactly the operator who had already had to fix something.
     targets_composer: bool,
-    cursor_visible: bool,
+    keyboard: tmux::Keyboard,
 ) -> std::result::Result<String, String> {
     let Some(matched) = require.find_match(pane, None) else {
         return Err(format!(
-            "expected prompt not on screen (looked for {:?}); nothing was typed",
-            require.default_needles()
+            "expected prompt not on screen (looked for {}); nothing was typed",
+            require.requirement()
         ));
     };
     // Only the composer. A permission prompt is a view too — it hides the
     // cursor exactly as the others do — and answering one is the whole point
     // of this path, so the keyboard question is asked only where a *drawn*
     // target can turn out to be a dead one.
-    if targets_composer && !cursor_visible {
-        return Err(
-            "a view on the Mac has the keyboard; the composer is drawn but takes \
-             no keys, so nothing was typed"
-                .into(),
-        );
+    //
+    // The two ways of losing it are told apart because they need different
+    // things from the person at the Mac: a view is dismissed, and scrollback
+    // is left.
+    if targets_composer {
+        match keyboard {
+            tmux::Keyboard::Program => {}
+            tmux::Keyboard::View => {
+                return Err(
+                    "a view on the Mac has the keyboard; the composer is drawn but takes \
+                     no keys, so nothing was typed"
+                        .into(),
+                );
+            }
+            tmux::Keyboard::Scrollback => {
+                return Err(
+                    "the pane on the Mac is scrolled back, so tmux has the keyboard and the \
+                     composer takes none — press q there to leave it — and nothing was typed"
+                        .into(),
+                );
+            }
+        }
     }
     if let Some(expect) = expect {
         if !expect.still_on_screen(pane) {
@@ -1120,6 +1159,7 @@ fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tmux::Keyboard;
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;
     use std::process::Command;
@@ -1230,7 +1270,7 @@ mod tests {
             },
             &|| {
                 looked.set(true);
-                Ok((String::new(), true))
+                Ok((String::new(), Keyboard::Program))
             },
             &|_| {
                 keyed.set(true);
@@ -1264,7 +1304,7 @@ mod tests {
                 capture: false,
                 confirm: None,
             },
-            &|| Ok(("composer > for shortcuts".into(), true)),
+            &|| Ok(("composer > for shortcuts".into(), Keyboard::Program)),
             &|_| Ok(()),
             &PromptPresence::AnyOf {
                 needles: vec!["for shortcuts".into()],
@@ -1463,52 +1503,60 @@ mod tests {
         assert!(!entered.get());
     }
 
-    /// Verbatim from `tmux -L codeconnect capture-pane -p -J` against a live
-    /// permission prompt on claude 2.1.220.
+    /// The shape `tmux capture-pane -p -J` returns for a live permission
+    /// prompt on claude 2.1.232, modelled on
+    /// `fixtures/panes/no-composer/permission-prompt.txt` and parameterised by
+    /// the command, because the prompt interlock has to tell two of them
+    /// apart.
     fn permission_pane(command: &str) -> String {
         format!(
-            " Bash command\n   {command}\n   Create empty file\n\n Do you want to proceed?\n \
-             ❯ 1. Yes\n   2. Yes, and always allow access to tmp/ from this project\n   3. No\n \
+            "─────────────────────────────────────────\n \
+             Bash command\n\n   {command}\n   Create empty file\n\n \
+             Permission rule Bash requires confirmation for this command.\n \
+             /permissions to update rules\n\n \
+             Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n \
              Esc to cancel · Tab to amend · ctrl+e to explain"
         )
     }
 
-    const IDLE_PANE: &str = "\
-❯
-────────────────────────────────────────
-  ⏸ manual mode on · ? for shortcuts · ← for agents                    ● high · /effort";
+    /// A composer with nothing typed into it, manual mode, one subagent.
+    const IDLE_PANE: &str = include_str!("../../../fixtures/panes/composer/manual-shortcuts.txt");
 
     /// The measured lockout in disguise: `/status` submitted during a turn,
     /// captured after the turn finished. Claude redraws the transcript, the
-    /// Settings view, and — below it — a composer box and footer that match
-    /// the presence needle and accept no keys.
+    /// Settings view, and — below it — a composer box and footer that stand
+    /// there taking no keys.
+    ///
+    /// Hand-modelled rather than captured: the state lasts exactly as long as
+    /// the view is up, and the pane was read after it closed. Its composer is
+    /// drawn the way Claude draws one, so presence says yes and only the
+    /// cursor says what is true.
     const VIEW_ABOVE_COMPOSER_PANE: &str = "\
 ⏺ line 1
 ✻ Sautéed for 6s
 ────────────────────────────────────────
   Settings  Status   Config   Usage   Stats
-  Version:          2.1.222
+  Version:          2.1.232
   Session kind:     interactive
   Esc to cancel
 ────────────────────────────────────────
 ❯
 ────────────────────────────────────────
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent";
 
     /// A live composer during a turn — the state the rule must NOT catch.
     /// Its footer offers `esc to interrupt`, which is a different offer:
     /// the composer is taking keys and queues them for the next turn.
-    const MID_TURN_PANE: &str = "\
-⏺ working…
-────────────────────────────────────────
-❯
-────────────────────────────────────────
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents";
+    const MID_TURN_PANE: &str = include_str!("../../../fixtures/panes/composer/mid-turn.txt");
+
+    /// A transcript line in [`MID_TURN_PANE`], for the tests that rewrite what
+    /// the agent wrote.
+    const MID_TURN_TRANSCRIPT_LINE: &str = "⏺ Bash(touch /private/tmp/ccprobe_x.txt)";
 
     // ------------------------------------------------- live tmux recovery
 
-    /// A fake TUI with the two behaviours that matter: it shows the
-    /// composer needle, and a line beginning `/dialog` hides the needle
+    /// A fake TUI with the two behaviours that matter: it draws the
+    /// composer's box, and a line beginning `/dialog` takes the box away
     /// until Escape arrives (`/stuck` never releases it). Real tmux, real
     /// keys, real captures — the supervisor's own code path — on a server
     /// this test creates and destroys itself.
@@ -1618,15 +1666,65 @@ mod tests {
             let _ = self.tmux(&["send-keys", "-t", &self.session, "Enter"]);
         }
 
-        /// The same `#{cursor_flag}` the supervisor reads on the real server.
-        fn cursor_is_visible(&self) -> bool {
-            self.tmux(&["display", "-p", "-t", &self.session, "#{cursor_flag}"])
-                .map(|out| out.trim() == "1")
-                .unwrap_or(true)
+        /// The same two fields, read the same way, as
+        /// [`tmux::who_has_the_keyboard`] reads on the shared server — which
+        /// this cannot call, because it addresses `-L codeconnect` and this
+        /// server is the test's own socket.
+        fn keyboard(&self) -> tmux::Keyboard {
+            // An unreadable answer means this test's own tmux has gone, which
+            // fails the test through whatever it does next; guessing `View`
+            // here would fail it as a refusal and hide that.
+            let Some(out) = self.tmux(&[
+                "display",
+                "-p",
+                "-t",
+                &self.session,
+                "#{cursor_flag} #{pane_in_mode}",
+            ]) else {
+                return tmux::Keyboard::Program;
+            };
+            match out.trim().split_once(' ') {
+                Some((_, modes)) if modes != "0" => tmux::Keyboard::Scrollback,
+                Some(("1", _)) => tmux::Keyboard::Program,
+                _ => tmux::Keyboard::View,
+            }
+        }
+
+        /// tmux's own count of the modes stacked on this pane.
+        fn modes(&self) -> String {
+            self.tmux(&["display", "-p", "-t", &self.session, "#{pane_in_mode}"])
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+
+        fn enter_scrollback(&self) {
+            let _ = self.tmux(&["copy-mode", "-t", &self.session]);
+        }
+
+        /// `copy-mode -q` rather than `send-keys -X cancel`: it needs no
+        /// attached client, it is idempotent, and it pops the mode stack —
+        /// where `send-keys` against a pane already in a mode can answer
+        /// `no current client` on a server nobody is looking at.
+        fn leave_scrollback(&self) {
+            let _ = self.tmux(&["copy-mode", "-q", "-t", &self.session]);
         }
 
         fn send_escape(&self) {
             let _ = self.tmux(&["send-keys", "-t", &self.session, "Escape"]);
+        }
+
+        /// Wait for the harness to finish drawing. Its redraw is a shell
+        /// script's round trip, so it is not on the caller's thread.
+        fn wait_for(&self, needle: &str) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if self.pane().contains(needle) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            false
         }
     }
 
@@ -1694,16 +1792,23 @@ mod tests {
 
     const FAKE_TUI: &str = r#"#!/bin/sh
 # A composer that a "/dialog" line replaces with a view, restored by Escape.
+# The composer is drawn in the box Claude draws one in — rule, prompt row,
+# rule, footer — because that box is what the presence check reads.
 # `stty raw` so Escape arrives as a byte we can read.
 stty raw -echo 2>/dev/null
+# Every ordinary line it has received, drawn above the box. A test that has to
+# prove a keystroke did NOT arrive needs the pane itself to say so.
+log=""
 # `\033[?25l` / `\033[?25h` are DECTCEM — the same hide/show every TUI uses,
 # and what tmux reports as `#{cursor_flag}`.
-show_composer() { printf '\033[?25h\033[2J\033[H> \r\n  ? for shortcuts\r\n'; }
+show_composer() {
+  printf '\033[?25h\033[2J\033[H%s\r\n────────────────────────\r\n❯ \r\n────────────────────────\r\n  ? for shortcuts\r\n' "$log"
+}
 show_view()     { printf '\033[?25l\033[2J\033[HTHE VIEW IS UP\r\n'; }
-# The measured lockout in disguise: the view drawn ABOVE a composer whose
-# needle matches and which takes no keys. Only Escape clears it.
+# The measured lockout in disguise: the view drawn ABOVE a composer that is
+# present by every readable sign and takes no keys. Only Escape clears it.
 show_view_over_composer() {
-  printf '\033[?25l\033[2J\033[HTHE VIEW IS UP\r\nEsc to cancel\r\n> \r\n  ? for shortcuts\r\n'
+  printf '\033[?25l\033[2J\033[HTHE VIEW IS UP\r\nEsc to cancel\r\n────────────────────────\r\n❯ \r\n────────────────────────\r\n  ? for shortcuts\r\n'
 }
 show_prompt() {
   printf '\033[?25l\033[2J\033[HBash command\r\nDo you want to proceed?\r\n 1. Yes\r\n 2. No\r\nEsc to cancel\r\n'
@@ -1724,7 +1829,7 @@ while :; do
       # The measured `/context` shape: a big render hides the footer and
       # brings it back with nobody's help.
       /transient*) show_view; ( sleep 2; show_composer ) & state=composer ;;
-      *)        show_composer; state=composer ;;
+      *)        log="$log[$line]"; show_composer; state=composer ;;
     esac
     line=""
   elif [ "$c" = "1b" ]; then
@@ -1746,11 +1851,11 @@ done
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture,
                 confirm: None,
             },
-            &|| Ok((tui.pane(), tui.cursor_is_visible())),
+            &|| Ok((tui.pane(), tui.keyboard())),
             &|key| {
                 assert_eq!(
                     key, "Escape",
@@ -1787,7 +1892,7 @@ means the full history gets re-read on your next message.
     /// Drives the confirm path over a scripted sequence of looks and records
     /// every key sent. `looks` supplies one `(pane, cursor_visible)` per call,
     /// repeating its last entry once exhausted.
-    fn confirm_probe(looks: Vec<(String, bool)>) -> (SupervisorResult, Vec<String>) {
+    fn confirm_probe(looks: Vec<(String, Keyboard)>) -> (SupervisorResult, Vec<String>) {
         use std::sync::Mutex;
         let index = Mutex::new(0usize);
         let sent: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -1795,7 +1900,7 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: Some(SONNET_NEEDLE.to_string()),
             },
@@ -1821,7 +1926,7 @@ means the full history gets re-read on your next message.
     #[test]
     fn a_confirming_key_is_withheld_when_the_dialog_does_not_name_the_requested_model() {
         let other = CONFIRM_PANE.replace("Sonnet 5", "Haiku 4.5");
-        let (outcome, keys) = confirm_probe(vec![(other, false)]);
+        let (outcome, keys) = confirm_probe(vec![(other, Keyboard::View)]);
         assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
         assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
     }
@@ -1833,9 +1938,9 @@ means the full history gets re-read on your next message.
     fn a_confirming_key_is_withheld_when_the_first_absent_frame_changed() {
         let moved = CONFIRM_PANE.replace("❯ 1.", "❯  1.");
         let (outcome, keys) = confirm_probe(vec![
-            (moved, false),
-            (CONFIRM_PANE.to_string(), false),
-            (CONFIRM_PANE.to_string(), false),
+            (moved, Keyboard::View),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
         ]);
         assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
         assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
@@ -1847,10 +1952,10 @@ means the full history gets re-read on your next message.
     #[test]
     fn a_confirming_key_is_withheld_when_the_composer_returns_before_the_key() {
         let (outcome, keys) = confirm_probe(vec![
-            (CONFIRM_PANE.to_string(), false),
-            (CONFIRM_PANE.to_string(), false),
-            // Same frame, but the cursor is back.
-            (CONFIRM_PANE.to_string(), true),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            // Same frame, but the composer has the keyboard back.
+            (CONFIRM_PANE.to_string(), Keyboard::Program),
         ]);
         assert_eq!(keys, ["Escape"], "dismissed, never committed: {outcome:?}");
         assert!(!matches!(outcome, SupervisorResult::ViewConfirmed { .. }));
@@ -1863,10 +1968,10 @@ means the full history gets re-read on your next message.
     #[test]
     fn recovery_uses_escape_without_confirmation_and_enter_with_confirmation() {
         let (_, confirmed) = confirm_probe(vec![
-            (CONFIRM_PANE.to_string(), false),
-            (CONFIRM_PANE.to_string(), false),
-            (CONFIRM_PANE.to_string(), false),
-            ("? for shortcuts".to_string(), true),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            (CONFIRM_PANE.to_string(), Keyboard::View),
+            (IDLE_PANE.to_string(), Keyboard::Program),
         ]);
         assert_eq!(confirmed, ["Enter"], "a established confirmation commits");
 
@@ -1876,11 +1981,11 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
             },
-            &|| Ok(("some view".to_string(), false)),
+            &|| Ok(("some view".to_string(), Keyboard::View)),
             &|key| {
                 sent.lock().unwrap().push(key.to_string());
                 Ok(())
@@ -1914,7 +2019,7 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: Some("❯1.yes,switchtosonnet5".to_string()),
             },
@@ -1935,7 +2040,7 @@ means the full history gets re-read on your next message.
                ❯ 1. Yes, switch to Sonnet 5\n\
                  2. No, go back"
                             .to_string(),
-                        false,
+                        Keyboard::View,
                     )),
                     // The same dialog with one character moved: the needle
                     // still matches, so this exercises the sameness guard and
@@ -1953,7 +2058,7 @@ means the full history gets re-read on your next message.
                ❯ 1. Yes, switch to Sonnet 5\n\
                  2. No, go back"
                             .replace("❯ 1.", "❯  1."),
-                        false,
+                        Keyboard::View,
                     )),
                 }
             },
@@ -1989,7 +2094,7 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: Some("❯1.yes,switchtosonnet5".to_string()),
             },
@@ -1997,7 +2102,7 @@ means the full history gets re-read on your next message.
                 // The same dialog, unmoved, at every look; the composer is back
                 // once the key has been sent.
                 if !sent.lock().unwrap().is_empty() {
-                    return Ok(("? for shortcuts".to_string(), true));
+                    return Ok((IDLE_PANE.to_string(), Keyboard::Program));
                 }
                 LOOKS.fetch_add(1, Ordering::SeqCst);
                 Ok((
@@ -2013,7 +2118,7 @@ means the full history gets re-read on your next message.
                ❯ 1. Yes, switch to Sonnet 5\n\
                  2. No, go back"
                         .to_string(),
-                    false,
+                    Keyboard::View,
                 ))
             },
             &|key| {
@@ -2053,7 +2158,7 @@ means the full history gets re-read on your next message.
                 matched,
                 ..
             } => {
-                assert_eq!(matched, "forshortcuts");
+                assert_eq!(matched, "composer");
                 assert!(
                     pane_snapshot.unwrap_or_default().contains("THE VIEW IS UP"),
                     "the snapshot is the screen while the view was up"
@@ -2108,7 +2213,7 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
             },
@@ -2121,7 +2226,7 @@ means the full history gets re-read on your next message.
                 // Three successful looks — the two scheduled checks and the
                 // re-read taken immediately before the key — then blind.
                 match LOOKS.fetch_add(1, Ordering::SeqCst) {
-                    0..=2 => Ok(("a view".to_string(), false)),
+                    0..=2 => Ok(("a view".to_string(), Keyboard::View)),
                     _ => Err(anyhow::anyhow!("the pane could not be read")),
                 }
             },
@@ -2192,15 +2297,18 @@ means the full history gets re-read on your next message.
             RecoveryPass {
                 answer_by: std::time::Instant::now() + Duration::from_secs(60),
                 asking: None,
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
             },
             &|| match LOOKS.fetch_add(1, Ordering::SeqCst) {
                 // The two checks see a view and no question…
-                0 | 1 => Ok(("THE VIEW IS UP".to_string(), false)),
+                0 | 1 => Ok(("THE VIEW IS UP".to_string(), Keyboard::View)),
                 // …and by the re-look the tool has asked for permission.
-                _ => Ok(("Bash\nDo you want to proceed?\n 1. Yes".to_string(), false)),
+                _ => Ok((
+                    "Bash\nDo you want to proceed?\n 1. Yes".to_string(),
+                    Keyboard::View,
+                )),
             },
             &|_| {
                 ESCAPES.fetch_add(1, Ordering::SeqCst);
@@ -2236,11 +2344,11 @@ means the full history gets re-read on your next message.
                 asking: Some(PromptPresence::AnyOf {
                     needles: vec!["shall i go ahead".to_string()],
                 }),
-                matched: "forshortcuts".to_string(),
+                matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
             },
-            &|| Ok(("Shall I go ahead with this?".to_string(), false)),
+            &|| Ok(("Shall I go ahead with this?".to_string(), Keyboard::View)),
             &|_| {
                 ESCAPES.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -2299,6 +2407,64 @@ means the full history gets re-read on your next message.
         }
     }
 
+    /// **A pane in tmux's scrollback takes no keys, and the refusal says so.**
+    ///
+    /// Measured on claude 2.1.232: copy-mode leaves `#{cursor_flag}` at 1 while
+    /// every keystroke goes to tmux's own mode table, `send-keys` still exits
+    /// 0, and the text never reaches the composer — nor afterwards, when the
+    /// mode is left. The mouse wheel over the inline transcript is what puts a
+    /// pane there, and [`tmux::render_server_conf`] turns the mouse on, so this
+    /// is the ordinary state of somebody reading their own session at the Mac.
+    ///
+    /// Real tmux and real copy-mode, because the whole claim is about what tmux
+    /// does with a keystroke. The same send is authorised, refused, and
+    /// authorised again, and the harness's own record of what it received is
+    /// what proves the refusal saved a keystroke rather than merely returning
+    /// an `Err`.
+    #[test]
+    fn a_pane_in_scrollback_refuses_the_send_until_it_is_left() {
+        let Some(tui) = FakeTui::start("scrollback", FAKE_TUI) else {
+            eprintln!("tmux unavailable; skipping");
+            return;
+        };
+        // The send as the supervisor performs it: authorise, and type only if
+        // authorised. Typing regardless would test nothing.
+        let send = |text: &str| -> std::result::Result<String, String> {
+            let matched = authorise(
+                &tui.pane(),
+                &PromptPresence::InputBox,
+                None,
+                true,
+                tui.keyboard(),
+            )?;
+            tui.type_line(text);
+            Ok(matched)
+        };
+
+        assert_eq!(tui.keyboard(), Keyboard::Program);
+        assert_eq!(send("BEFORE").as_deref(), Ok("composer"));
+        assert!(tui.wait_for("[BEFORE]"), "the pane took it: {}", tui.pane());
+
+        tui.enter_scrollback();
+        assert_eq!(tui.keyboard(), Keyboard::Scrollback);
+        let refused = send("SWALLOWED").expect_err("a scrolled-back pane must refuse");
+        assert!(refused.contains("scrolled back"), "{refused}");
+        assert!(refused.contains("nothing was typed"), "{refused}");
+        let during = tui.pane();
+        assert!(
+            during.contains("[BEFORE]") && !during.contains("SWALLOWED"),
+            "the refusal has to have saved the keystroke, not merely reported one: {during}"
+        );
+
+        // `#{pane_in_mode}` back at zero before the accept half, so a stack
+        // that only partly popped reads as a failure rather than as a flake.
+        tui.leave_scrollback();
+        assert_eq!(tui.modes(), "0", "the mode stack has to be empty again");
+        assert_eq!(tui.keyboard(), Keyboard::Program);
+        assert_eq!(send("AFTER").as_deref(), Ok("composer"));
+        assert!(tui.wait_for("[AFTER]"), "the pane took it: {}", tui.pane());
+    }
+
     /// An ordinary line never leaves the composer, so recovery reports the
     /// plain send — no false "recovered" on the common path.
     #[test]
@@ -2307,7 +2473,7 @@ means the full history gets re-read on your next message.
             return;
         };
         match recovery_probe(&tui, "hello there", false) {
-            SupervisorResult::Sent { matched } => assert_eq!(matched, "forshortcuts"),
+            SupervisorResult::Sent { matched } => assert_eq!(matched, "composer"),
             other => panic!("expected sent, got {other:?}"),
         }
     }
@@ -2329,7 +2495,7 @@ means the full history gets re-read on your next message.
                 &PromptPresence::PermissionPrompt,
                 Some(&expect),
                 false,
-                false
+                Keyboard::View
             )
             .unwrap(),
             "doyouwanttoproceed"
@@ -2348,7 +2514,7 @@ means the full history gets re-read on your next message.
             &PromptPresence::PermissionPrompt,
             Some(&expect),
             false,
-            false,
+            Keyboard::View,
         )
         .expect_err("a different prompt must not be typed into");
         assert!(refused.contains("not the one"), "{refused}");
@@ -2364,12 +2530,17 @@ means the full history gets re-read on your next message.
                 &PromptPresence::PermissionPrompt,
                 Some(&expect),
                 false,
-                false
+                Keyboard::View
             )
             .is_err());
-            assert!(
-                authorise(pane, &PromptPresence::PermissionPrompt, None, false, false).is_err()
-            );
+            assert!(authorise(
+                pane,
+                &PromptPresence::PermissionPrompt,
+                None,
+                false,
+                Keyboard::View
+            )
+            .is_err());
         }
     }
 
@@ -2378,20 +2549,27 @@ means the full history gets re-read on your next message.
         // A takeover is not an answer to a prompt, so it carries no fingerprint
         // — but it must still be refused while a prompt is up, or "yes please
         // continue" gets typed at a permission prompt as the literal answer.
-        assert!(authorise(IDLE_PANE, &PromptPresence::InputBox, None, true, true).is_ok());
+        assert!(authorise(
+            IDLE_PANE,
+            &PromptPresence::InputBox,
+            None,
+            true,
+            Keyboard::Program
+        )
+        .is_ok());
         assert!(authorise(
             &permission_pane("touch /private/tmp/a.txt"),
             &PromptPresence::InputBox,
             None,
             true,
-            false
+            Keyboard::View
         )
         .is_err());
     }
 
     /// **The lockout in disguise.** Measured: `/status` submitted during a
-    /// turn leaves the Settings view drawn *above* a composer box whose
-    /// presence needle matches and which accepts no keys. The needle says
+    /// turn leaves the Settings view drawn *above* a composer box that is
+    /// present by every readable sign and accepts no keys. The screen says
     /// yes; only the hidden cursor says what is true.
     #[test]
     fn a_view_holding_the_keyboard_refuses_the_send_even_with_a_drawn_composer() {
@@ -2399,14 +2577,14 @@ means the full history gets re-read on your next message.
             PromptPresence::InputBox
                 .find_match(VIEW_ABOVE_COMPOSER_PANE, None)
                 .is_some(),
-            "the fixture must match the presence needle, or it proves nothing"
+            "the fixture must read as a composer, or it proves nothing"
         );
         let refused = authorise(
             VIEW_ABOVE_COMPOSER_PANE,
             &PromptPresence::InputBox,
             None,
             true,
-            false,
+            Keyboard::View,
         )
         .expect_err("a view holding the keyboard must refuse");
         assert!(refused.contains("takes no keys"), "{refused}");
@@ -2420,13 +2598,31 @@ means the full history gets re-read on your next message.
     /// scrolled away, and would Escape a running turn to "rescue" it.
     #[test]
     fn a_live_composer_is_authorised_even_when_the_pane_says_esc_to_cancel() {
-        assert!(authorise(MID_TURN_PANE, &PromptPresence::InputBox, None, true, true).is_ok());
+        assert!(authorise(
+            MID_TURN_PANE,
+            &PromptPresence::InputBox,
+            None,
+            true,
+            Keyboard::Program
+        )
+        .is_ok());
         let agent_wrote_it = MID_TURN_PANE.replace(
-            "⏺ working…",
+            MID_TURN_TRANSCRIPT_LINE,
             "⏺ The view offers Esc to cancel, so pressing it closes the dialog.",
         );
+        assert_ne!(
+            agent_wrote_it, MID_TURN_PANE,
+            "the transcript line has to be there for this test to say anything"
+        );
         assert!(
-            authorise(&agent_wrote_it, &PromptPresence::InputBox, None, true, true).is_ok(),
+            authorise(
+                &agent_wrote_it,
+                &PromptPresence::InputBox,
+                None,
+                true,
+                Keyboard::Program
+            )
+            .is_ok(),
             "an agent quoting a view's dismissal hint must not lock its own session"
         );
     }
@@ -2442,7 +2638,7 @@ means the full history gets re-read on your next message.
             &PromptPresence::PermissionPrompt,
             None,
             false,
-            false
+            Keyboard::View
         )
         .is_ok());
     }

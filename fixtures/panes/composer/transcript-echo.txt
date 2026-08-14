@@ -1,0 +1,30 @@
+╭─── Claude Code v2.1.232 ─────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                    │
+│           Welcome back Operator Example!           │ Run /init to create a CLAUDE.md file with … │
+│                                                    │ ─────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                  │
+│                      ▝▜█████▛▘                     │ Subagent forking is now on by default: a `… │
+│                        ▘▘ ▝▝                       │ Type `@` in the prompt to mention another … │
+│      Fable 5 with high effort · Claude Max ·       │ `SendMessage` now delivers to a bare name … │
+│      operator99@example.com's Organization         │ /release-notes for more                     │
+│              /…/scratchpad/ccfix-proj              │                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Run exactly this bash command and nothing else: echo "❯ marker line"                              
+
+⏺ Bash(echo "❯ marker line")                                                                        
+  ⎿  ❯ marker line                                                                                
+
+⏺ The command printed ❯ marker line as expected.
+
+✻ Churned for 5s                                                                                    
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+
+
+

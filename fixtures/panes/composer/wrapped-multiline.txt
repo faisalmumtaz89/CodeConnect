@@ -1,0 +1,24 @@
+╰──────────────────────────────────────╯
+
+
+❯ Run exactly this bash command and     
+  nothing else: echo "❯ marker line"    
+
+⏺ Bash(echo "❯ marker line")
+  ⎿  ❯ marker line
+
+⏺ The command printed ❯ marker line as
+  expected.
+
+✻ Churned for 5s
+
+❯ /model 
+  ⎿  Kept model as Fable 5
+
+────────────────────────────────────────
+❯ this is a fairly long line of text
+  that will certainly wrap at forty     
+  columns wide                        
+────────────────────────────────────────
+  ⏸ manual mode on                    
+

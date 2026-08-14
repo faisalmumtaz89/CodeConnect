@@ -1,0 +1,29 @@
+│                                                    │ Tips for getting started                    │
+│           Welcome back Operator Example!           │ Run /init to create a CLAUDE.md file with … │
+│                                                    │ ─────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                  │
+│                      ▝▜█████▛▘                     │ Subagent forking is now on by default: a `… │
+│                        ▘▘ ▝▝                       │ Type `@` in the prompt to mention another … │
+│      Fable 5 with high effort · Claude Max ·       │ `SendMessage` now delivers to a bare name … │
+│      operator99@example.com's Organization         │ /release-notes for more                     │
+│              /…/scratchpad/ccfix-proj              │                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Run the bash command: touch /private/tmp/ccprobe_x.txt                                            
+
+⏺ Bash(touch /private/tmp/ccprobe_x.txt)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Sautéed for 34s
+
+❯ hi                                                                                                
+
+✶ Concocting…                                                                                       
+  ⎿  Tip: Ask Claude to create a todo list when working on complex tasks to track progress and    
+     remain on track
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt · ← 1 agent

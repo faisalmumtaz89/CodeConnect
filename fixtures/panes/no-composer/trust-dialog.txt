@@ -1,0 +1,30 @@
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /private/tmp/claude-501/-Users-operatoruser-Documents-GitHub-CodeConnect/7d97536d-0b0a-4c43-93e8-4
+ 0ead0ab499f/scratchpad/ccfix-proj
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a
+ well-known open source project, or work from your team). If not, take a moment to review what's in
+ this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+

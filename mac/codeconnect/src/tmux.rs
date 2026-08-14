@@ -354,20 +354,96 @@ pub fn capture_visible_pane(name: &str) -> Result<String> {
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
 }
 
-/// Whether the pane's cursor is visible — tmux's own record of the terminal's
-/// DECTCEM state, which is the structural answer to "who has the keyboard".
+/// Who a pane's keystrokes reach.
 ///
-/// **Measured, and better than any string.** Claude's composer keeps a visible
-/// cursor while idle, while a turn streams, and after it ends (327 consecutive
-/// samples through a live turn, not one of them hidden). Every view it opens
-/// hides it — including the one that leaves the composer *drawn* underneath and
-/// takes no keys, where the composer-presence needle matches and lies. Reading
-/// the pane's text for a view's dismissal hint would work too, until an agent
-/// wrote that hint into its own output; the cursor cannot be spelled.
-pub fn cursor_is_visible(name: &str) -> Result<bool> {
-    let out = run(&["display", "-p", "-t", &target_pane(name), "#{cursor_flag}"])?
-        .ok_or_else(|| anyhow::anyhow!("tmux display cursor_flag failed for {name}"))?;
-    Ok(out.trim() == "1")
+/// Three states rather than a bool, because the two ways of losing the
+/// keyboard need different things from the person at the Mac and the reason
+/// travels to the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyboard {
+    /// The program in the pane is receiving keys.
+    Program,
+    /// A view Claude opened has them, and the pane's cursor is hidden.
+    View,
+    /// tmux itself has them: the pane is in one of tmux's own modes, which is
+    /// where the mouse wheel over the transcript puts it.
+    Scrollback,
+}
+
+impl Keyboard {
+    /// Is the program in the pane the thing that will receive these keys?
+    pub fn reaches_the_program(self) -> bool {
+        matches!(self, Keyboard::Program)
+    }
+}
+
+/// Who has the pane's keyboard: the two facts that settle it, read together in
+/// one question so they describe one moment.
+///
+/// **The cursor.** tmux's own record of the terminal's DECTCEM state. Claude's
+/// composer keeps a visible cursor while idle, while a turn streams, and after
+/// it ends (327 consecutive samples through a live turn, not one of them
+/// hidden). Every view it opens hides it — including the one that leaves the
+/// composer *drawn* underneath and takes no keys, where the composer-presence
+/// check matches and lies. Reading the pane's text for a view's dismissal hint
+/// would work too, until an agent wrote that hint into its own output; the
+/// cursor cannot be spelled.
+///
+/// **The mode stack.** A visible cursor is not enough on its own. A pane in
+/// one of tmux's modes routes every key to that mode's table instead of to the
+/// program, and it does so with `cursor_flag` still at 1: measured on claude
+/// 2.1.232 in copy-mode, `send-keys -l` exits 0, the text never reaches the
+/// composer, and it is still absent after leaving the mode. This is the
+/// ordinary state of somebody reading their own session — [`render_server_conf`]
+/// turns the mouse on, and the wheel over the inline transcript enters
+/// copy-mode.
+///
+/// `#{pane_in_mode}` **counts** the modes stacked on the pane rather than
+/// flagging one, and several can be on at once (measured on tmux 3.7b: a pane
+/// under `choose-tree` answers 2, and 3 with copy-mode above it). Zero is the
+/// only value that means the program is receiving keys, so any non-zero count
+/// is scrollback — which is the right answer for all of them, since copy-mode,
+/// clock-mode and tree-mode each swallow keystrokes. The two fields are read
+/// with a separator and split, never concatenated: `1` and `10` cannot be told
+/// from `11` and `0` once they are one string.
+pub fn who_has_the_keyboard(name: &str) -> Result<Keyboard> {
+    let out = run(&[
+        "display",
+        "-p",
+        "-t",
+        &target_pane(name),
+        "#{cursor_flag} #{pane_in_mode}",
+    ])?
+    .ok_or_else(|| anyhow::anyhow!("tmux display of the keyboard state failed for {name}"))?;
+    read_keyboard(&out).with_context(|| format!("reading {name}'s keyboard state"))
+}
+
+/// The reply, read. Split out from the spawn so every shape tmux can answer
+/// with is exercisable without one.
+///
+/// **A reply that is not exactly two fields is a look that failed, and a look
+/// that failed is a refusal** — never a guess about who is holding the
+/// keyboard. That is not hypothetical: `display -p` against a pane that does
+/// not exist answers a single space and exits 0, so nothing upstream catches
+/// it and the parse is the only thing standing there.
+fn read_keyboard(reply: &str) -> Result<Keyboard> {
+    let reply = reply.trim();
+    let mut fields = reply.split(' ');
+    let (Some(cursor), Some(modes), None) = (fields.next(), fields.next(), fields.next()) else {
+        return Err(anyhow::anyhow!(
+            "tmux answered {reply:?}, which is not the two fields that were asked for"
+        ));
+    };
+    let modes: u32 = modes
+        .parse()
+        .map_err(|_| anyhow::anyhow!("tmux answered {modes:?} as the mode count"))?;
+    Ok(match (cursor, modes) {
+        // A mode intercepts keys whatever the cursor is doing, and leaving one
+        // is a different act from dismissing a view, so it answers first.
+        (_, 1..) => Keyboard::Scrollback,
+        ("1", 0) => Keyboard::Program,
+        (_, 0) => Keyboard::View,
+    })
 }
 
 /// Type text literally. `-l` stops tmux from interpreting the text as key names,
@@ -478,6 +554,56 @@ mod tests {
         // not tell". Callers get an error instead of a confident `false`.
         let unknown = SessionPresence::Unknown("permission denied".into());
         assert!(matches!(unknown, SessionPresence::Unknown(ref why) if why.contains("denied")));
+    }
+
+    /// Every reply tmux really gives, and what each one means. Measured on
+    /// tmux 3.7b against a live pane: no mode answers `0`, copy-mode and
+    /// clock-mode each answer `1`, and `choose-tree` answers `2` — the field
+    /// is a count of the modes stacked on the pane, not a flag, and it keeps
+    /// climbing as they stack. Every non-zero count is scrollback, which is
+    /// the right answer for all of them: copy-mode, clock-mode and tree-mode
+    /// each swallow keystrokes.
+    #[test]
+    fn the_keyboard_reply_is_read_by_what_tmux_actually_answers() {
+        for (reply, expected) in [
+            ("1 0", Keyboard::Program),
+            // A trailing newline is what a real reply carries.
+            ("1 0\n", Keyboard::Program),
+            ("0 0", Keyboard::View),
+            // copy-mode, and clock-mode, which answer alike.
+            ("1 1", Keyboard::Scrollback),
+            // choose-tree over copy-mode: the stacked case, and the one a
+            // concatenated `#{cursor_flag}#{pane_in_mode}` could not tell from
+            // a hidden cursor over a single mode.
+            ("1 2", Keyboard::Scrollback),
+            ("1 42", Keyboard::Scrollback),
+            ("1 4294967295", Keyboard::Scrollback),
+        ] {
+            assert_eq!(
+                read_keyboard(reply).unwrap(),
+                expected,
+                "tmux answering {reply:?}"
+            );
+        }
+    }
+
+    /// A malformed reply is an error, and never a guess. The first of these is
+    /// the one that matters: `display -p` against a pane that does not exist
+    /// answers a single space and **exits 0**, so this parse is the only thing
+    /// between a vanished session and a confident answer about its keyboard.
+    #[test]
+    fn a_reply_that_is_not_two_fields_is_an_error_and_never_a_guess() {
+        for reply in [
+            " ", "", "1", " 0",
+            // Two spaces are three fields, and which two of them were asked
+            // for is not something to assume.
+            "1  0", "1 0 7", "1 x", "1 -1",
+        ] {
+            assert!(
+                read_keyboard(reply).is_err(),
+                "tmux answering {reply:?} says nothing about who has the keyboard"
+            );
+        }
     }
 
     #[test]

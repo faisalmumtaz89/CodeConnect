@@ -2537,9 +2537,12 @@ impl Daemon {
                 SupervisorRequest::SendText {
                     text,
                     require,
-                    // An answer goes to the prompt, not the composer — and a
-                    // prompt legitimately has no cursor of its own.
-                    targets_composer: false,
+                    // Which target this is aimed at, and it decides whether the
+                    // keyboard is asked about. An answer goes to the prompt,
+                    // which legitimately has no cursor of its own. Free text
+                    // goes to the composer, and a composer without the cursor is
+                    // drawn and dead — see `authorise` in the supervisor.
+                    targets_composer: !answers_the_prompt,
                     // No recovery on this path, so nothing to guard.
                     asking: None,
                     // The moment this daemon stops waiting for the answer,
@@ -5436,15 +5439,15 @@ mod tests {
         )
     }
 
-    const COMPOSER_PANE: &str = "\
-❯
-────────────────────────────────────────
-  ⏸ manual mode on · ? for shortcuts · ← for agents                    ● high · /effort";
+    /// A live composer with nothing typed into it, captured with
+    /// `tmux capture-pane -p -J` on claude 2.1.232.
+    const COMPOSER_PANE: &str =
+        include_str!("../../../fixtures/panes/composer/manual-shortcuts.txt");
 
     /// A supervisor that actually answers, over a screen the test controls.
     ///
     /// It makes its decisions with the same `protocol::ipc` functions the real
-    /// supervisor calls — presence needle, then prompt fingerprint — because a
+    /// supervisor calls — prompt presence, then prompt fingerprint — because a
     /// harness that re-implements the interlock would be testing its own copy of
     /// it. What it adds is a *split screen*: `scrollback` is only ever returned
     /// for a capture that did not ask for the visible pane, which is how these
@@ -5453,6 +5456,11 @@ mod tests {
         visible: Arc<std::sync::Mutex<String>>,
         typed: Arc<std::sync::Mutex<Vec<String>>>,
         captures: Arc<std::sync::Mutex<Vec<bool>>>,
+        /// `targets_composer` for every injection the daemon asked for, in
+        /// order. Recorded rather than acted on: the flag decides whether the
+        /// *supervisor* asks tmux for the cursor, which is a question no fake
+        /// screen can answer, so what the daemon owes is the right value.
+        aimed_at_composer: Arc<std::sync::Mutex<Vec<bool>>>,
         /// When set, injections are swallowed without a reply — a supervisor
         /// that typed and then stopped answering, which is indistinguishable
         /// from one that never typed at all.
@@ -5489,6 +5497,12 @@ mod tests {
         fn captures(&self) -> Vec<bool> {
             self.captures.lock().unwrap().clone()
         }
+
+        /// `targets_composer` for every injection the daemon asked for, in
+        /// order.
+        fn aimed_at_composer(&self) -> Vec<bool> {
+            self.aimed_at_composer.lock().unwrap().clone()
+        }
     }
 
     async fn attach(
@@ -5524,6 +5538,7 @@ mod tests {
         let visible_cell = Arc::new(std::sync::Mutex::new(visible.to_string()));
         let typed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captures = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let aimed_at_composer = Arc::new(std::sync::Mutex::new(Vec::new()));
         let silent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let history = scrollback.to_string();
 
@@ -5532,6 +5547,7 @@ mod tests {
             let visible_cell = Arc::clone(&visible_cell);
             let typed = Arc::clone(&typed);
             let captures = Arc::clone(&captures);
+            let aimed_at_composer = Arc::clone(&aimed_at_composer);
             let silent = Arc::clone(&silent);
             tokio::spawn(async move {
                 while let Some(frame) = rx.recv().await {
@@ -5564,27 +5580,31 @@ mod tests {
                             text,
                             require,
                             expect,
+                            targets_composer,
                             ..
-                        } => match require.find_match(&on_screen, None) {
-                            None => SupervisorResult::Refused {
-                                reason: "expected prompt not on screen".into(),
-                            },
-                            Some(matched) => {
-                                if expect
-                                    .as_ref()
-                                    .is_some_and(|expect| !expect.still_on_screen(&on_screen))
-                                {
-                                    SupervisorResult::Refused {
-                                        reason: "the prompt on screen is not the one this answer \
-                                                 was created for"
-                                            .into(),
+                        } => {
+                            aimed_at_composer.lock().unwrap().push(targets_composer);
+                            match require.find_match(&on_screen, None) {
+                                None => SupervisorResult::Refused {
+                                    reason: "expected prompt not on screen".into(),
+                                },
+                                Some(matched) => {
+                                    if expect
+                                        .as_ref()
+                                        .is_some_and(|expect| !expect.still_on_screen(&on_screen))
+                                    {
+                                        SupervisorResult::Refused {
+                                            reason: "the prompt on screen is not the one this \
+                                                     answer was created for"
+                                                .into(),
+                                        }
+                                    } else {
+                                        typed.lock().unwrap().push(text);
+                                        SupervisorResult::Sent { matched }
                                     }
-                                } else {
-                                    typed.lock().unwrap().push(text);
-                                    SupervisorResult::Sent { matched }
                                 }
                             }
-                        },
+                        }
                     };
                     if let Some(responder) = inflight.lock().unwrap().remove(&id) {
                         let _ = responder.send(result);
@@ -5616,6 +5636,7 @@ mod tests {
             visible: visible_cell,
             typed,
             captures,
+            aimed_at_composer,
             silent,
             inflight,
             _registration: registration,
@@ -8693,6 +8714,64 @@ mod tests {
         assert!(daemon.store.list_pending_approvals().unwrap().is_empty());
     }
 
+    /// **The keyboard question follows the target.** `targets_composer` is
+    /// what turns on the supervisor's cursor check, and only the composer may
+    /// be asked: a permission prompt is a view and hides the cursor exactly as
+    /// every view does, so asking it there would refuse every answer ever
+    /// tapped. Free text goes to the composer, and a composer under a view
+    /// that holds the keyboard is drawn and dead — see the supervisor's
+    /// `authorise`, which is where the flag is spent, and
+    /// `a_view_holding_the_keyboard_refuses_the_send_even_with_a_drawn_composer`,
+    /// which is where the refusal it buys is pinned.
+    #[tokio::test]
+    async fn free_text_is_aimed_at_the_composer_and_an_answer_is_not() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+
+        // A takeover. It carries no fingerprint — it answers no prompt — so an
+        // unbound card is exactly the shape it arrives in.
+        let takeover = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/a"}));
+        assert!(
+            matches!(
+                daemon
+                    .answer(
+                        &takeover,
+                        &hash,
+                        AnswerDecision::Text {
+                            text: "carry on".into()
+                        },
+                        Some(uid),
+                    )
+                    .await,
+                AnswerResult::Applied { .. }
+            ),
+            "the composer is on screen, so the text lands"
+        );
+
+        // An answer to the prompt itself.
+        pane.show(&permission_pane("touch /tmp/b"));
+        let answered = raise_prompt(&daemon, uid, "p2", "touch /tmp/b").await;
+        assert!(wait_bound(&daemon, uid, &answered).await);
+        let hash =
+            protocol::hash::approval_payload_hash("Bash", &json!({"command": "touch /tmp/b"}));
+        assert!(matches!(
+            daemon
+                .answer(&answered, &hash, AnswerDecision::Allow, Some(uid))
+                .await,
+            AnswerResult::Applied { .. }
+        ));
+
+        assert_eq!(
+            pane.aimed_at_composer(),
+            vec![true, false],
+            "free text aims at the composer; an answer aims at the prompt"
+        );
+        assert_eq!(pane.typed(), vec!["carry on".to_string(), "1".to_string()]);
+    }
+
     #[tokio::test]
     async fn a_duplicate_permission_hook_never_resurrects_a_resolved_card() {
         // `ingest`'s duplicate result was computed and thrown away, then a
@@ -8940,7 +9019,7 @@ mod tests {
         // own keystrokes.
         assert!(matches!(
             daemon.send_text(uid, "hello".into(), None, None, true, false).await,
-            SendTextResult::Sent { matched } if matched == "foragents" || matched == "forshortcuts"
+            SendTextResult::Sent { matched } if matched == "composer"
         ));
 
         // And with a permission prompt up, the composer is not ready, so free

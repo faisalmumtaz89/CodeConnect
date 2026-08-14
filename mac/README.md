@@ -114,14 +114,36 @@ is refused with a reason rather than typed on a guess. A free-text takeover is
 exempt: it is not an answer to a prompt at all, and its interlock is the
 composer being ready — which a permission prompt on screen already fails.
 
+**The composer is recognised by its box, not by its footer.** Claude draws it as
+a rule of box-drawing horizontals, a `❯` prompt row, a closing rule and a
+footer, and the presence check looks for the prompt row directly under a rule.
+The footer copy cannot carry it: `? for shortcuts` is dropped as soon as the
+shift+tab mode hint needs the room, and `← for agents` becomes `← 1 agent` once
+a subagent exists, so a session that types perfectly well shows neither string.
+A bare `❯` cannot carry it either — it opens the transcript echo of every
+submitted prompt and marks the selected row of every menu — and only under a
+rule does it mean "type here". The captures both halves are measured against
+are in `fixtures/panes/`.
+
 **A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
-check has a second half: the composer counts as ready only if the input-box
-needle matches *and* the pane's cursor is visible (`#{cursor_flag}`, tmux's
-record of the terminal's DECTCEM state). Measured: submitting `/status` while a
-turn is running leaves Claude's Settings view drawn **above** the composer box
-when the turn ends — the needle matches, typed text never appears, and Enter
-does nothing. Without the second half the interlock authorises keys into a pane
-that cannot receive them and reports them sent.
+check has a second half: the composer counts as ready only if its box is on
+screen *and* tmux says the keyboard reaches the program. That is two fields off
+one `display` — `#{cursor_flag}`, tmux's record of the terminal's DECTCEM
+state, and `#{pane_in_mode}`, the number of tmux modes stacked on the pane —
+and it has to be a visible cursor with a mode count of exactly zero.
+
+Both halves are measured, and each catches a different way of losing the
+keyboard. Submitting `/status` while a turn is running leaves Claude's Settings
+view drawn **above** the composer box when the turn ends: the box is there, the
+cursor is hidden, typed text never appears and Enter does nothing. And a pane
+in tmux's copy-mode — where the mouse wheel over the inline transcript puts it,
+since the daemon's tmux config turns the mouse on — keeps `cursor_flag` at 1
+while routing every key to tmux's own mode table: `send-keys` exits 0 and the
+text is never delivered. Without the second half the interlock authorises keys
+into a pane that cannot receive them and reports them sent.
+
+The refusals name their cause, because the remedies differ: a view is
+dismissed, and scrollback is left with `q`.
 
 The signal is the cursor rather than the view's `Esc to cancel` hint because a
 string is something an agent can write into its own output: a text rule would
@@ -838,7 +860,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
 | `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. |
 | `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
-| `input_box_needles` | built-in | Whitespace-insensitive needles proving the composer is ready. |
+| `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Show tmux's status bar inside the session. |
@@ -985,7 +1007,7 @@ soak/run.sh                       # the live gauntlet, against a real session
 
 The daemon's own tests drive a **fake supervisor** over a screen the test
 controls: it makes its decisions with the same `protocol::ipc` functions the real
-supervisor calls (presence needle, then prompt fingerprint), so the interlock is
+supervisor calls (prompt presence, then prompt fingerprint), so the interlock is
 exercised rather than re-implemented. Its one addition is a split screen —
 scrollback is returned only for a capture that did not ask for the visible pane,
 which is how a test can tell "read the screen" from "read the history".
