@@ -64,6 +64,56 @@ final class FixtureTests: XCTestCase {
         XCTAssertFalse(capabilities.tlsActive)
     }
 
+    /// The sample fleet's ack, held to the opposite rule: it advertises
+    /// exactly what the sample serves. A capability advertised here whose
+    /// request rides the connection is a control that dead-ends in front of
+    /// a reviewer, because the sample has no connection.
+    func testTheSampleAckWithholdsWhatTheSampleCannotServe() {
+        guard case .helloAck(let ack) = Fixtures.sampleFrames()[0] else {
+            return XCTFail("no hello_ack")
+        }
+        let capabilities = ack.capabilities
+
+        XCTAssertFalse(
+            capabilities.servesTerminal,
+            "the terminal rides the connection; offered in the sample it asks the reviewer to pair")
+        XCTAssertFalse(capabilities.capture)
+        XCTAssertFalse(capabilities.deletesSessions)
+        XCTAssertFalse(capabilities.servesCommandCatalog)
+
+        XCTAssertTrue(
+            capabilities.sendText,
+            "typing is answered in sample vocabulary, not hidden")
+        XCTAssertTrue(
+            capabilities.servesDiff,
+            "the sample preloads its own diff")
+        XCTAssertTrue(capabilities.canApproveReliably)
+        XCTAssertTrue(capabilities.classifiesRisk)
+    }
+
+    /// Everything but the ack is the same fleet the harness photographs —
+    /// the sample must never drift into a second, unphotographed deck.
+    ///
+    /// Compared by `Equatable`, not by rendered description: the frames are
+    /// decoded from JSON twice, and a dictionary's key order is not a fact
+    /// about its contents.
+    func testSampleFramesAreTheDeckUnderADifferentAck() {
+        let now = Date(timeIntervalSince1970: 1_753_950_000)
+        let deck = Fixtures.frames(now: now, variant: .deck)
+        let sample = Fixtures.sampleFrames(now: now)
+        XCTAssertEqual(deck.count, sample.count)
+        for (index, (a, b)) in zip(deck, sample).enumerated() where index > 0 {
+            switch (a, b) {
+            case (.sessions(let deckSessions), .sessions(let sampleSessions)):
+                XCTAssertEqual(deckSessions, sampleSessions, "frame \(index)")
+            case (.event(let deckEvent), .event(let sampleEvent)):
+                XCTAssertEqual(deckEvent, sampleEvent, "frame \(index)")
+            default:
+                XCTFail("frame \(index) changed shape between the deck and the sample")
+            }
+        }
+    }
+
     /// A fixture card whose hash did not verify would exercise the *blocked*
     /// path, not the Deck — the buttons would be disabled and the test would be
     /// measuring nothing.
@@ -157,5 +207,93 @@ final class DeepLinkRoutingTests: XCTestCase {
         XCTAssertEqual(model.consumeDeepLink(), .diff(sessionID: "cc-1"))
         XCTAssertNil(model.consumeDeepLink(), "two surfaces must not both act on one link")
         XCTAssertNil(model.pendingDeepLink)
+    }
+}
+
+/// The sample fleet, at the model, where its two safety rules live: it claims no
+/// link, and it never shares the app with a real one.
+///
+/// The screens are covered by `SampleModeUITests`, which drives the shipping
+/// build with no launch arguments at all. These are the invariants underneath
+/// them, which a screenshot cannot see.
+@MainActor
+final class SampleFleetTests: XCTestCase {
+    private func makeModel() -> AppModel {
+        AppModel(
+            pairing: PairingStore(),
+            cache: EventCache(
+                root: URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent(UUID().uuidString)),
+            settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
+    }
+
+    /// A fleet with agents on it, and a link that is still reported as absent —
+    /// the whole claim the banner makes, in the state the app is actually in.
+    func testTheSampleFleetLoadsWithoutClaimingALink() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        // The timeline rebuild is scheduled on the main actor; await the fact
+        // rather than sleeping a guess at it.
+        for state in model.states.values { await state.settleForTesting() }
+
+        XCTAssertTrue(model.showsFleet, "the sample fleet is a fleet, or it shows nothing")
+        XCTAssertEqual(model.summaries.count, 4)
+        XCTAssertEqual(model.deckCount, 3, "three agents blocked")
+        XCTAssertFalse(model.pairing.isPaired, "nothing here may create a pairing")
+
+        XCTAssertFalse(
+            model.connection.phase.isConnected,
+            "a replayed `hello_ack` must not promote the app to connected")
+        XCTAssertNil(model.connection.lastContactAt, "no daemon has spoken, ever")
+        XCTAssertNotEqual(
+            model.linkHealth.level, .live,
+            "the one claim this feature could mislead somebody with")
+        XCTAssertNil(
+            model.actionsBlockedReason,
+            "the cards still answer — inline, and only in the sample fleet")
+    }
+
+    /// Entry is refused from a paired app, which is what keeps the two kinds of
+    /// state from ever being on screen together.
+    func testAPairedAppCannotEnterTheSampleFleet() {
+        let model = makeModel()
+        model.pairing.saveEphemeral(
+            DaemonEndpoint(host: "mac.example", port: 8787, credential: .token("t"), useTLS: false))
+        model.startSampleFleet()
+
+        XCTAssertFalse(model.sampleFleetActive)
+        XCTAssertTrue(model.summaries.isEmpty)
+    }
+
+    /// Pairing from inside the sample fleet — its Settings sheet reaches the
+    /// pairing form — takes the sample state down first, entirely.
+    func testPairingTearsTheSampleFleetDown() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        for state in model.states.values { await state.settleForTesting() }
+        XCTAssertEqual(model.deckCount, 3)
+
+        model.pair(
+            with: DaemonEndpoint(
+                host: "mac.example", port: 8787, credential: .token("t"), useTLS: false))
+        defer { model.connection.stop() }
+
+        XCTAssertFalse(model.sampleFleetActive)
+        XCTAssertFalse(model.fixturesActive, "the network side effects come back with the pairing")
+        XCTAssertTrue(model.summaries.isEmpty)
+        XCTAssertEqual(model.deckCount, 0, "a sample card must never be counted beside a real one")
+    }
+
+    /// Leaving returns the app to onboarding rather than to an empty fleet.
+    func testLeavingTheSampleFleetReturnsToOnboarding() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        for state in model.states.values { await state.settleForTesting() }
+        model.stopSampleFleet()
+
+        XCTAssertFalse(model.showsFleet)
+        XCTAssertTrue(model.summaries.isEmpty)
+        XCTAssertEqual(model.deckCount, 0)
+        XCTAssertNil(model.connection.capabilities, "the sample daemon's claims go with it")
     }
 }

@@ -76,6 +76,8 @@ struct DecisionCardView: View {
     @State private var composeResult: ComposeAttempt?
     /// Why the biometric check did not pass. Shown, never swallowed.
     @State private var authNotice: String?
+    /// What a tap in the sample fleet would have done. See `submit`.
+    @State private var sampleNotice: String?
     /// When the answer left, so an unconfirmed one can say how long it has been
     /// unconfirmed rather than spinning forever.
     @State private var sentAt: Date?
@@ -547,6 +549,7 @@ struct DecisionCardView: View {
         if let attempt { return .resolution(attempt) }
         if let outcome = approval.outcome { return .alreadyResolved(outcome) }
         if let authNotice { return .authRefused(authNotice) }
+        if let sampleNotice { return .sample(sampleNotice) }
         return nil
     }
 
@@ -557,6 +560,8 @@ struct DecisionCardView: View {
         case alreadyResolved(AnswerOutcome)
         /// Why the biometric check did not pass, in the gate's own words.
         case authRefused(String)
+        /// What this tap would have done, had there been a Mac to send it to.
+        case sample(String)
     }
 
     @ViewBuilder
@@ -581,6 +586,10 @@ struct DecisionCardView: View {
             // swallowed: a biometric check that failed silently is
             // indistinguishable from a tap that did nothing.
             CCBanner("Face ID", message: notice, tone: .warning, icon: "faceid")
+        case .sample(let notice):
+            // The fleet banner's own title and glyph: this is the same fact,
+            // arriving where the reader is looking.
+            CCBanner("Sample fleet", message: notice, tone: .info, icon: "eye")
         }
     }
 
@@ -871,7 +880,7 @@ struct DecisionCardView: View {
         // A second tap while the first is in flight would be a silent no-op;
         // saying "waiting" is the honest version of the same refusal.
         if inFlight != nil { return "Waiting for the daemon to confirm…" }
-        if let reason = model.linkHealth.disabledReason { return reason }
+        if let reason = model.actionsBlockedReason { return reason }
         if let summary = model.summary(for: approval.sessionKey) {
             let badge = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)
@@ -892,8 +901,31 @@ struct DecisionCardView: View {
         return true
     }
 
+    /// What a decision would have been called on the wire, in the words the
+    /// control the reader just pressed uses.
+    private static func sampleNotice(for decision: AnswerDecision) -> String {
+        let sent: String
+        switch decision {
+        case .allow: sent = "Approve"
+        case .deny: sent = "Deny"
+        case .option(let index): sent = "option \(index)"
+        case .text, .unrecognised: sent = "this answer"
+        }
+        return "In a live session this would send \(sent) to your Mac."
+    }
+
     private func submit(_ decision: AnswerDecision, key: String) {
         guard inFlight == nil else { return }
+        // **Before the biometric gate and before the model**, because in the
+        // sample fleet there is nothing on the other end of either: no Mac to
+        // send to, so the card says what the tap would have done rather than
+        // resolving an answer no daemon ever asked for. Asking for Face ID first
+        // would be theatre in front of a send that never happens.
+        if model.sampleFleetActive {
+            withAnimation(CC.motion.small) { sampleNotice = Self.sampleNotice(for: decision) }
+            CCHaptic.warning.fire()
+            return
+        }
         spinningControl = key
         sentAt = Date()
         Task {
@@ -918,6 +950,13 @@ struct DecisionCardView: View {
 
     private func submitDenyWithReason() {
         guard inFlight == nil else { return }
+        // A denial with a reason is two sends, and in the sample fleet neither
+        // has anywhere to go.
+        if model.sampleFleetActive {
+            withAnimation(CC.motion.small) { sampleNotice = Self.sampleNotice(for: .deny) }
+            CCHaptic.warning.fire()
+            return
+        }
         spinningControl = "deny-reason"
         sentAt = Date()
         Task {

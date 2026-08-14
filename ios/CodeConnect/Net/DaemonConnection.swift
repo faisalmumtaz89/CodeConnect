@@ -208,6 +208,14 @@ final class DaemonConnection {
     /// once. False from the moment a pairing exchange has upgraded it to the
     /// durable token, which is the invariant `PairingUpgradeTests` pins.
     var holdsPairingCode: Bool { endpoint?.isPairingCode ?? false }
+    /// True while this dial serves a pairing exchange someone is watching —
+    /// set at `start` from the credential (a pairing code always is) or the
+    /// caller (a token typed at the pairing screen), and cleared by the
+    /// `hello_ack`, which is the exchange's verdict. Bounds the retry run so
+    /// the pairing screen gets an answer instead of an endless ring, without
+    /// outliving the exchange: once the daemon has answered, this is a paired
+    /// link and its reconnects get the durable token's endless patience.
+    private var dialIsForPairing = false
     /// True while the ladder is trying the scheme the pairing does *not* prefer.
     private var schemeAlternate = false
     private var supervisor: Task<Void, Never>?
@@ -251,14 +259,31 @@ final class DaemonConnection {
 
     // MARK: - Lifecycle
 
-    func start(endpoint: DaemonEndpoint) {
-        if self.endpoint == endpoint, supervisor != nil,
-            !isFailed
+    func start(endpoint: DaemonEndpoint, forPairing: Bool = false) {
+        // A repeated start on the current endpoint is a no-op — except when it
+        // comes from the pairing screen while the dial is struggling. A pairing
+        // may defer to a link that is proven, never to one mid-retry: absorbed
+        // there, the patient saved-profile dial keeps running and the pairing
+        // screen never gets its verdict. Re-pairing is what people do when the
+        // link is already broken, so that collision is the common case.
+        if self.endpoint == endpoint, supervisor != nil, !isFailed,
+            !forPairing || phase.isConnected
         {
             return
         }
         stop()
         self.endpoint = endpoint
+        // A pairing-code dial is a pairing dial no matter who started it: the
+        // code is single-use and five-minute-lived, so the bounded verdict below
+        // is intrinsic to the credential. A token dial is a pairing dial only
+        // when the caller says so — the same token that deserves a bounded
+        // answer while someone watches the pairing screen deserves endless
+        // patience once it is saved and the Mac is merely asleep.
+        if case .pairingCode = endpoint.credential {
+            dialIsForPairing = true
+        } else {
+            dialIsForPairing = forPairing
+        }
         schemeAlternate = false
         lastErrorMessage = nil
         lastErrorAt = nil
@@ -292,7 +317,9 @@ final class DaemonConnection {
         guard endpoint != nil else { return }
         if isFailed {
             lastErrorMessage = nil
-            if let endpoint { start(endpoint: endpoint) }
+            // A restarted dial keeps its context: a failed pairing dial that the
+            // user retries is still a pairing dial, and must stay bounded.
+            if let endpoint { start(endpoint: endpoint, forPairing: dialIsForPairing) }
             return
         }
         wakeTask?.cancel()
@@ -354,20 +381,21 @@ final class DaemonConnection {
             }
             isRedial = true
 
-            // **A pairing code is not worth retrying forever.**
+            // **A pairing dial is not worth retrying forever.**
             //
-            // A device token is durable: the Mac may be asleep, the tunnel may be
-            // down, and backing off until either changes is exactly right. A
-            // pairing code is single-use and dies after five minutes, so the same
-            // patience becomes a lie — the app sat on `.waiting`, `pairingError`
-            // reads only `.failed`, and the pairing screen therefore showed a
-            // progress ring and "Exchanging the code for a device token…"
-            // indefinitely, for a code that had already expired. No error, ever.
+            // A *saved* device token is durable: the Mac may be asleep, the
+            // tunnel may be down, and backing off until either changes is
+            // exactly right. A pairing dial is different — someone is at the
+            // pairing screen waiting for a verdict, and `pairingError` reads
+            // only `.failed`. Endless `.waiting` therefore showed a progress
+            // ring forever: for a code, one that had already expired after five
+            // minutes; for a typed token, one that will never reach a daemon
+            // that isn't at that address. No error, ever.
             //
             // Both schemes are still tried, because the ws/wss alternation above
             // is how a TLS mismatch corrects itself and giving up before it has
             // swapped once would turn a recoverable setup into a dead end.
-            if case .pairingCode = endpoint.credential, ledger.attempts >= Self.pairingAttemptLimit {
+            if dialIsForPairing, ledger.attempts >= Self.pairingAttemptLimit {
                 phase = .failed(
                     reason: lastErrorMessage ?? ConnectionError.timedOut.localizedDescription)
                 return
@@ -995,6 +1023,11 @@ final class DaemonConnection {
             dialFailure = nil
             isRedial = false
             ledger.reset()
+            // The ack is also the pairing's verdict, so this dial stops being a
+            // pairing dial. Left set, the retry cap below would outlive the
+            // exchange it exists for and give a *paired* link four attempts to
+            // survive a sleeping Mac before declaring it dead.
+            dialIsForPairing = false
             // A mismatched major never reaches this handler — the receive
             // loop refuses it as incompatible before dispatch — so arriving
             // here clears any standing complaint.
@@ -1087,6 +1120,27 @@ final class DaemonConnection {
         return lastDaemonErrorMessage
     }
 
+    /// Feed a decoded frame through the real inbound path, as though it had
+    /// arrived on the socket.
+    ///
+    /// **Ships**, because the sample fleet is replayed through it: what a reader
+    /// without a Mac sees is then what the wire produces, rather than a second,
+    /// simpler mock that nobody tests and everybody trusts.
+    ///
+    /// It deliberately does **not** stamp contact, and it puts `phase` back
+    /// where it found it: a `hello_ack` is how a real socket becomes an
+    /// established link, so `handle` promotes the phase on one — correctly, for
+    /// a frame that arrived. Replayed, that promotion is the app telling itself
+    /// it is connected to a Mac it never dialled, and link health is derived
+    /// from exactly these two values. The ack is still ingested for everything
+    /// else it carries, because what a daemon can do is what decides which
+    /// surfaces are real.
+    func ingest(_ message: ServerMessage) {
+        let phaseBeforeIngest = phase
+        handle(message)
+        phase = phaseBeforeIngest
+    }
+
     #if DEBUG
         /// Test seam: resolve answers locally instead of over the socket.
         ///
@@ -1100,11 +1154,13 @@ final class DaemonConnection {
         /// `-CC_FIXTURE` launch argument.
         var fixtureAnswers = false
 
-        /// Test seam: feed a frame through the real inbound path.
+        /// Test seam: feed a frame through the real inbound path *and* let it
+        /// read as a link being spoken to — the contact stamp, and whatever
+        /// phase the frame implies.
         ///
-        /// Debug builds only. It is the *decoded* message that is injected, so
-        /// everything downstream — ingest, the timeline builder, the fleet
-        /// ordering — runs exactly as it does on the wire.
+        /// Debug builds only, and that is the whole difference from `ingest`: a
+        /// test drives screens whose every action link health gates, and the
+        /// sample fleet must never claim the link this one hands it.
         func injectForTesting(_ message: ServerMessage) {
             lastContactAt = Date()
             handle(message)

@@ -298,7 +298,12 @@ struct SessionDetailView: View {
             // items into an overflow menu on a phone — the diff button
             // disappeared behind a "…" — and it clips outright at large Dynamic
             // Type sizes. Below the bar it has the whole width and grows.
-            if !composerFocused {
+            // Absent in the sample fleet, like the link pill: the terminal is
+            // the same connection as everything else, and the sample has none.
+            // With the picker gone the timeline default is the only surface,
+            // so the tab that would answer in pairing vocabulary cannot be
+            // reached at all — offered nothing, not offered a dead end.
+            if !composerFocused && !model.sampleFleetActive {
                 CCSegmented(
                     selection: surfaceBinding,
                     options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
@@ -1102,7 +1107,10 @@ private struct SessionLinkPill: View {
     let action: () -> Void
 
     var body: some View {
-        CCFreshnessPill(health: model.linkHealth, action: action)
+        // Absent in the sample fleet, for the reason `LinkPill` states.
+        if !model.sampleFleetActive {
+            CCFreshnessPill(health: model.linkHealth, action: action)
+        }
     }
 }
 
@@ -1121,13 +1129,19 @@ private struct SessionBanner: View {
     let onSettings: () -> Void
 
     var body: some View {
-        let candidates: [CCBannerItem?] = [
-            model.linkHealth.ccBannerItem(
-                onRetry: { model.connection.retryNow() },
-                onSettings: onSettings,
-                onTailscale: { TailscaleAssist.open() }),
-            cachedBanner,
-        ]
+        // The sample fleet says so on every screen it reaches, not only on the
+        // one it was entered from: a reader who pushed into a session is the
+        // reader furthest from the sentence that explains it.
+        let candidates: [CCBannerItem?] =
+            model.sampleFleetActive
+            ? [.sampleFleet(onLeave: { model.stopSampleFleet() })]
+            : [
+                model.linkHealth.ccBannerItem(
+                    onRetry: { model.connection.retryNow() },
+                    onSettings: onSettings,
+                    onTailscale: { TailscaleAssist.open() }),
+                cachedBanner,
+            ]
         if candidates.contains(where: { $0 != nil }) {
             CCBannerSlot(candidates)
                 .padding(.top, CC.space.sm)
@@ -1508,6 +1522,12 @@ private struct SessionComposeBar: View {
     /// Text only lands if the composer is actually on screen at the Mac, so the
     /// reasons a send cannot work are the same reasons an answer cannot.
     private var sendBlockedReason: String? {
+        // The sample fleet's reason, not the link's: "Not paired with a daemon."
+        // beside a card that answers in sample vocabulary would be two different
+        // accounts of the same absence on one screen.
+        if model.sampleFleetActive {
+            return "These agents are not real. Pair with your Mac to talk to your own."
+        }
         if let reason = model.linkHealth.disabledReason { return reason }
         if model.connection.capabilities?.sendText == false {
             return "This daemon does not accept typed text."

@@ -1,0 +1,533 @@
+{
+  "runs": [
+    {
+      "name": "cc-1",
+      "cwd": "/Users/dev/app-1",
+      "opening": [
+        {
+          "after_ms": 0,
+          "kind": "session_start",
+          "source": "hook",
+          "payload": { "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]" }
+        },
+        {
+          "after_ms": 900,
+          "kind": "user_message",
+          "source": "transcript",
+          "payload": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "Rebase the router work onto main and get it pushed."
+            }
+          }
+        },
+        {
+          "after_ms": 2200,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Rebased `feature/router` onto `main` — three commits replayed, no conflicts. The remote still holds the pre-rebase history, so the push has to be forced."
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "approvals": [
+        {
+          "request_id": "toolu_demo_force_push",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git push --force origin main",
+            "description": "Force-push the rebased branch"
+          },
+          "tool_response": {
+            "interrupted": false,
+            "stdout": " + 9f4c1ab...2b7de90 main -> main (forced update)",
+            "stderr": ""
+          },
+          "duration_ms": 2400
+        },
+        {
+          "request_id": "toolu_demo_force_lease",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git push --force-with-lease origin main",
+            "description": "Push the fixup commits, refusing to clobber anyone else's work"
+          },
+          "tool_response": {
+            "interrupted": false,
+            "stdout": " + 2b7de90...c0a5513 main -> main (forced update)",
+            "stderr": ""
+          },
+          "duration_ms": 2100
+        },
+        {
+          "request_id": "toolu_demo_reset_hard",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git reset --hard origin/main",
+            "description": "Throw away the local squash and take the remote as it stands"
+          },
+          "tool_response": {
+            "interrupted": false,
+            "stdout": "HEAD is now at c0a5513 Route settings through the coordinator",
+            "stderr": ""
+          },
+          "duration_ms": 900
+        }
+      ],
+      "allowed": [
+        {
+          "after_ms": 1200,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Done. `origin/main` now matches the rebased history, and the branch is clean."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Done. `origin/main` now matches the rebased history, and the branch is clean."
+          }
+        }
+      ],
+      "denied": [
+        {
+          "after_ms": 1000,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Left the remote alone. The rebased commits are still on the local branch, so nothing is lost — push them from the Mac when you have looked at them."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Left the remote alone. The rebased commits are still on the local branch."
+          }
+        }
+      ],
+      "progress": []
+    },
+    {
+      "name": "cc-2",
+      "cwd": "/Users/dev/app-2",
+      "opening": [
+        {
+          "after_ms": 0,
+          "kind": "session_start",
+          "source": "hook",
+          "payload": { "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]" }
+        },
+        {
+          "after_ms": 900,
+          "kind": "user_message",
+          "source": "transcript",
+          "payload": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "Add a settings tab to the router."
+            }
+          }
+        },
+        {
+          "after_ms": 2000,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "`Router.swift` switches on a `Tab` enum in one place. Widening that case is the whole change."
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "approvals": [
+        {
+          "request_id": "toolu_demo_edit_router",
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "/Users/dev/app-2/Sources/Router.swift",
+            "old_string": "case .home",
+            "new_string": "case .home, .settings"
+          },
+          "tool_response": { "filePath": "/Users/dev/app-2/Sources/Router.swift", "replaceAll": false },
+          "duration_ms": 700
+        },
+        {
+          "request_id": "toolu_demo_write_settings",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "/Users/dev/app-2/Sources/SettingsTab.swift",
+            "content": "import SwiftUI\n\nstruct SettingsTab: View {\n    var body: some View { Text(\"Settings\") }\n}\n"
+          },
+          "tool_response": { "filePath": "/Users/dev/app-2/Sources/SettingsTab.swift", "type": "create" },
+          "duration_ms": 600
+        }
+      ],
+      "allowed": [
+        {
+          "after_ms": 1100,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                { "type": "text", "text": "Applied. The settings case is routed and the build still resolves." }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Applied. The settings case is routed and the build still resolves."
+          }
+        }
+      ],
+      "denied": [
+        {
+          "after_ms": 900,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                { "type": "text", "text": "Skipped that edit. `Router.swift` is untouched." }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Skipped that edit. `Router.swift` is untouched."
+          }
+        }
+      ],
+      "progress": []
+    },
+    {
+      "name": "cc-3",
+      "cwd": "/Users/dev/app-3",
+      "opening": [
+        {
+          "after_ms": 0,
+          "kind": "session_start",
+          "source": "hook",
+          "payload": { "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]" }
+        },
+        {
+          "after_ms": 900,
+          "kind": "user_message",
+          "source": "transcript",
+          "payload": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "What does this project's README say it is for?"
+            }
+          }
+        }
+      ],
+      "approvals": [
+        {
+          "request_id": "toolu_demo_read_readme",
+          "tool_name": "Read",
+          "tool_input": { "file_path": "/Users/dev/app-3/README.md" },
+          "tool_response": { "type": "text", "numLines": 84 },
+          "duration_ms": 400
+        },
+        {
+          "request_id": "toolu_demo_read_package",
+          "tool_name": "Read",
+          "tool_input": { "file_path": "/Users/dev/app-3/Package.swift" },
+          "tool_response": { "type": "text", "numLines": 31 },
+          "duration_ms": 350
+        }
+      ],
+      "allowed": [
+        {
+          "after_ms": 1300,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "It is a small SwiftUI reader: one library target, no dependencies, and a sample app under `Examples/`."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "It is a small SwiftUI reader: one library target, no dependencies, and a sample app under `Examples/`."
+          }
+        }
+      ],
+      "denied": [
+        {
+          "after_ms": 800,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                { "type": "text", "text": "Not reading it, then. Tell me what you want to know instead." }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 900,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Not reading it, then."
+          }
+        }
+      ],
+      "progress": []
+    },
+    {
+      "name": "cc-4",
+      "cwd": "/Users/dev/app-4",
+      "opening": [
+        {
+          "after_ms": 0,
+          "kind": "session_start",
+          "source": "hook",
+          "payload": { "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]" }
+        },
+        {
+          "after_ms": 900,
+          "kind": "user_message",
+          "source": "transcript",
+          "payload": {
+            "type": "user",
+            "message": { "role": "user", "content": "Tidy up the transcript parser." }
+          }
+        },
+        {
+          "after_ms": 1800,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Split the line reader out of the decoder and gave the unknown-entry branch a name. Behaviour is unchanged; there are 26 fewer lines."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 700,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Split the line reader out of the decoder and gave the unknown-entry branch a name."
+          }
+        }
+      ],
+      "approvals": [],
+      "allowed": [],
+      "denied": [],
+      "progress": []
+    },
+    {
+      "name": "cc-5",
+      "cwd": "/Users/dev/app-5",
+      "opening": [
+        {
+          "after_ms": 0,
+          "kind": "session_start",
+          "source": "hook",
+          "payload": { "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]" }
+        }
+      ],
+      "approvals": [],
+      "allowed": [],
+      "denied": [],
+      "progress": [
+        {
+          "after_ms": 3000,
+          "kind": "user_message",
+          "source": "transcript",
+          "payload": {
+            "type": "user",
+            "message": { "role": "user", "content": "Run the soak suite and tell me what breaks." }
+          }
+        },
+        {
+          "after_ms": 2500,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Starting the soak suite. Each pass kills the daemon at a different point and checks that the event log replays gap-free."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 2000,
+          "kind": "tool_call",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PreToolUse",
+            "tool_use_id": "toolu_demo_soak_1",
+            "tool_name": "Bash",
+            "tool_input": { "command": "./soak/run.sh --pass 1" }
+          }
+        },
+        {
+          "after_ms": 4000,
+          "kind": "tool_result",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": "toolu_demo_soak_1",
+            "tool_name": "Bash",
+            "tool_input": { "command": "./soak/run.sh --pass 1" },
+            "tool_response": {
+              "interrupted": false,
+              "stdout": "pass 1: daemon killed mid-turn; log replayed gap-free",
+              "stderr": ""
+            },
+            "duration_ms": 3841
+          }
+        },
+        {
+          "after_ms": 1500,
+          "kind": "tool_call",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PreToolUse",
+            "tool_use_id": "toolu_demo_soak_2",
+            "tool_name": "Bash",
+            "tool_input": { "command": "./soak/run.sh --pass 2" }
+          }
+        },
+        {
+          "after_ms": 4000,
+          "kind": "tool_result",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": "toolu_demo_soak_2",
+            "tool_name": "Bash",
+            "tool_input": { "command": "./soak/run.sh --pass 2" },
+            "tool_response": {
+              "interrupted": false,
+              "stdout": "pass 2: duplicate hook delivery; the second was refused as a replay",
+              "stderr": ""
+            },
+            "duration_ms": 3902
+          }
+        },
+        {
+          "after_ms": 1500,
+          "kind": "tool_call",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PreToolUse",
+            "tool_use_id": "toolu_demo_soak_read",
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/Users/dev/app-5/soak/README.md" }
+          }
+        },
+        {
+          "after_ms": 1200,
+          "kind": "tool_result",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": "toolu_demo_soak_read",
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/Users/dev/app-5/soak/README.md" },
+            "tool_response": { "type": "text", "numLines": 52 },
+            "duration_ms": 41
+          }
+        },
+        {
+          "after_ms": 2500,
+          "kind": "agent_message",
+          "source": "transcript",
+          "payload": {
+            "message": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Two passes, no holes and no duplicates. The README says pass 3 needs a second machine, so that is where this stops."
+                }
+              ]
+            }
+          }
+        },
+        {
+          "after_ms": 1500,
+          "kind": "turn_complete",
+          "source": "hook",
+          "payload": {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Two passes, no holes and no duplicates."
+          }
+        }
+      ]
+    }
+  ]
+}

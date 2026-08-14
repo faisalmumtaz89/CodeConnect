@@ -811,7 +811,12 @@ private struct LinkPill: View {
     let action: () -> Void
 
     var body: some View {
-        CCFreshnessPill(health: model.linkHealth, action: action)
+        // Nothing at all in the sample fleet. The pill's whole subject is how
+        // long ago a Mac last spoke, and a control reporting on a link that does
+        // not exist is worse than an empty slot however honestly it renders.
+        if !model.sampleFleetActive {
+            CCFreshnessPill(health: model.linkHealth, action: action)
+        }
     }
 }
 
@@ -862,6 +867,12 @@ private struct FleetBanner: View {
     /// untouched: the age of the card is still true, it was the age of the
     /// observation that was missing.
     private var bannerCandidates: [CCBannerItem?] {
+        // Permanently, and at the top: the sample fleet is the whole context for
+        // everything under it, and it is the only state here that a reader can
+        // leave rather than wait out.
+        if model.sampleFleetActive {
+            return [.sampleFleet(onLeave: { model.stopSampleFleet() })]
+        }
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
         let stamp = cachedStamp
         // The decision is a value (`FleetFreshness.bannerChoice`) so the rule is
@@ -967,7 +978,7 @@ private struct FleetDeckBar: View {
             // The link's own per-level sentence. A hard-coded "Link stale"
             // reported a *rejected token* as a stale link, which sends the
             // reader to the wrong screen.
-            blockedReason: model.linkHealth.disabledReason,
+            blockedReason: model.actionsBlockedReason,
             open: onOpen)
     }
 }

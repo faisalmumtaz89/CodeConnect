@@ -79,6 +79,12 @@ contributors use.
 
 The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same [Tailscale](https://tailscale.com) tailnet.
 
+Without a Mac there is nothing to pair with, so the app also opens a **sample fleet**
+from its pairing screen — recorded frames replayed through the real decoders, labelled
+wherever they are on screen, and connected to nothing. It takes an explicit tap, it
+creates no pairing and opens no socket, and nothing in it reports a link: a release
+build still has no way to be *paired* except by a person with a Mac.
+
 **Updating the Mac:** `codeconnect update` — it downloads the latest published release, checks that it is signed by CodeConnect, and replaces all three binaries in one step, restarting a running daemon itself; sessions survive the restart. It needs no toolchain: nothing is compiled, and the machine does not need a checkout. Contributors build their own with `cd mac && ./install.sh`, which is the same script it has always been. The app tolerates an older daemon indefinitely: newer features hide or say what to update, per surface. Every binary knows the exact commit it was built from — `codeconnect --version` shows it — and `codeconnect claude` says so at launch when a newer release exists.
 
 **Requests that leave the tailnet:** by default, after `codeconnect claude` starts a session, CodeConnect makes a background request to GitHub's public Releases API when its 24-hour update cache is stale. `codeconnect update`, when you run it, asks the same API and then downloads that release's files from GitHub. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable the background check; `codeconnect update` is only ever a thing you type.

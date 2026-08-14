@@ -1,0 +1,27 @@
+[package]
+name = "demo-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A Linux-deployable WebSocket server serving a fictional, scripted CodeConnect fleet for Apple App Review."
+
+[[bin]]
+name = "demo-daemon"
+path = "src/main.rs"
+
+# The wire types come from `protocol` so this server cannot drift from `ccd`;
+# everything else is the async/WebSocket stack `ccd` itself already uses. Nothing
+# here is macOS-only: no FSEvents, no tmux, no launchd, no TLS (Render terminates
+# that at its edge and speaks plain `ws` to this process).
+[dependencies]
+protocol = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

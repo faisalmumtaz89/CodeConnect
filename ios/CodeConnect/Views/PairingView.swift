@@ -18,6 +18,7 @@ struct PairingView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var address = ""
     @State private var token = ""
@@ -93,19 +94,46 @@ struct PairingView: View {
             .foregroundStyle(CC.text.primary)
             .fixedSize(horizontal: false, vertical: true)
 
-        Text("Control your coding agents from anywhere.")
+        Text("See what your coding agents are doing, and answer them.")
             .ccType(CC.type.body)
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
             // 50-75 characters is the readable measure.
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.rhythm.text)
-            .padding(.bottom, CC.rhythm.sections)
+            // Text spacing, not a section break: what follows the tagline is
+            // the sample-fleet line, and it belongs to the sentence above it.
+            .padding(.bottom, CC.rhythm.text)
+    }
+
+    /// The way in for somebody who has no Mac yet.
+    ///
+    /// **Above the fold, under the tagline, and before the steps**, because it
+    /// is the answer to the question the four steps raise — *do I have to do all
+    /// that before I can see anything?* — and an answer placed after them has
+    /// already been read past. It was last on the screen once, below a footnote
+    /// about pairing codes, where it read as a third way to pair rather than as
+    /// what you do when you cannot.
+    ///
+    /// `ghost`, so it never competes with the primary action of anybody who does
+    /// have a Mac, and it says "sample data" rather than "demo" or "try it": the
+    /// one conclusion a reader must not draw — that these are their agents — is
+    /// the one the label never invites. It enters on the tap and never on its
+    /// own.
+    @ViewBuilder
+    private var sampleFleetEntry: some View {
+        CCButton("New here? Look around with sample data", variant: .ghost, size: .md) {
+            model.startSampleFleet()
+        }
+        .accessibilityIdentifier("pairing-sample-mode")
+        .padding(.bottom, CC.rhythm.sections)
     }
 
     @ViewBuilder
     private var pairingInvitation: some View {
         identity
+
+        sampleFleetEntry
 
         CCSectionHeader("To get started")
 
@@ -134,9 +162,9 @@ struct PairingView: View {
                 CCHairline()
                 CCStepRow(
                     index: 2,
-                    title: "Put both devices on the same Tailscale network",
+                    title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "CodeConnect only ever talks to your Mac over your own private tailnet. It never goes through a server of ours.")
+                        "Your phone connects straight to the address `codeconnect pair` prints, over whatever private network links the two; many people use Tailscale. It never goes through a server of ours.")
                 CCHairline()
                 CCStepRow(index: 3, title: "Run this at the Mac", command: "codeconnect pair")
                 CCHairline()
@@ -328,6 +356,7 @@ struct PairingView: View {
 
             CCButton(
                 "Save and connect", variant: .primary, size: .lg, fullWidth: true,
+                isLoading: model.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
                 save()
@@ -357,7 +386,13 @@ struct PairingView: View {
                     macSection
                     transportSection
                     capabilitiesSection
-                    unpairSection
+                    aboutSection
+                    // Nothing is paired in the sample fleet, so there is
+                    // nothing to unpair — and the button's cache erase would
+                    // delete real history from inside a fake fleet.
+                    if !model.sampleFleetActive {
+                        unpairSection
+                    }
                 }
                 .padding(.horizontal, CC.space.md)
                 .padding(.vertical, CC.space.lg)
@@ -414,10 +449,14 @@ struct PairingView: View {
                     // a chevron, and it earns it because the row below it does
                     // not have one — a chevron only means anything when it
                     // distinguishes.
+                    //
+                    // No route to link health from the sample fleet: that screen
+                    // reports on a connection, and there is none to report on.
+                    // The row still states what is true — not paired, no link.
                     CCRow(
                         model.pairing.endpoint?.host ?? "Not paired",
                         meta: model.pairing.endpoint?.displayAddress,
-                        action: { showLinkHealth = true }
+                        action: model.sampleFleetActive ? nil : { showLinkHealth = true }
                     ) {
                         CCStatusDot(
                             color: model.linkHealth.level.ccTone.color,
@@ -589,6 +628,22 @@ struct PairingView: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The privacy policy has to be readable from inside the app, not only from
+    /// the store page — and these are the same two URLs the listing carries, so
+    /// there is exactly one copy of each claim to keep true.
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: CC.space.sm) {
+            CCSectionHeader("About")
+
+            CCButton("Privacy policy", variant: .ghost, size: .md, fullWidth: true) {
+                openURL(URL(string: "https://codeconnect.sh/privacy")!)
+            }
+            CCButton("Support", variant: .ghost, size: .md, fullWidth: true) {
+                openURL(URL(string: "https://codeconnect.sh/support")!)
+            }
         }
     }
 

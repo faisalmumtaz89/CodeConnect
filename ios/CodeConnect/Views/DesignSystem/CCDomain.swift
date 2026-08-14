@@ -247,6 +247,31 @@ extension CCFreshnessPill {
 
 // MARK: - Banner ladder inputs
 
+extension CCBannerItem {
+    /// What the sample fleet says about itself, wherever it is on screen.
+    ///
+    /// **It outranks every other banner**, because every other banner is a
+    /// statement about a Mac and here there is none: an `offline` notice would
+    /// be describing a link that does not exist. It is also the only banner in
+    /// the product that is not a problem, which is why it is `info` and why its
+    /// action is a way out rather than a retry.
+    ///
+    /// One written-down copy, because two screens carry it and a fleet and a
+    /// session that described this differently would be two different claims
+    /// about the same fact.
+    static func sampleFleet(onLeave: @escaping () -> Void) -> CCBannerItem {
+        CCBannerItem(
+            .rejected,
+            title: "Sample fleet",
+            message:
+                "These agents are not real and nothing here is connected to a Mac. Leave to pair with your own.",
+            tone: .info,
+            icon: "eye",
+            actionTitle: "Leave",
+            action: onLeave)
+    }
+}
+
 extension LinkHealth {
     /// The link's claim on the screen's single banner slot, or `nil` when the
     /// link has nothing to say.
