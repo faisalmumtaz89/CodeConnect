@@ -244,10 +244,44 @@ struct AgentMessageRow: View {
                     // target, and that top does not move when height is later
                     // removed from below it. The collapse then shrinks the row
                     // beneath the reader's eyes, which can strand nothing.
-                    // Unanimated on purpose — a second animation overlapping
-                    // the collapse is what made "before" ambiguous.
-                    if collapsing { onCollapse?() }
-                    withAnimation(CC.motion.small) {
+                    // Neither this anchor nor the toggle below it animates, so
+                    // "before" is a strict ordering rather than two easings
+                    // overlapping.
+                    // **A cut, not a slide** — the same call the "Latest" pill
+                    // makes, for the same reason, and here it is a liveness
+                    // property rather than a frame-budget one.
+                    //
+                    // Expanded, this row is taller than the screen, and it
+                    // sits in the timeline's `LazyVStack`, whose content
+                    // height is an *estimate* derived from the rows it has
+                    // realized. Animating the toggle makes that estimate an
+                    // input to the animation's own target: the in-flight
+                    // frame moves the estimate, the estimate re-derives the
+                    // target, and the interpolation is restarted against it —
+                    // so 0.18s of easing need never finish. Measured on
+                    // iPhone 17 Pro / iOS 26.3.1 under `sample`: the whole
+                    // main thread inside `GraphHost.flushTransactions` →
+                    // `RootGeometry` → `sizeThatFits`, `propagate_dirty` the
+                    // hottest leaf and `AnimatableAttributeHelper.checkReset`
+                    // in every sample, for as long as the process was left
+                    // alive. No view body is re-evaluated in that window,
+                    // which is what leaves the animation rather than an
+                    // invalidation loop. Winding up, it also drives the
+                    // scroll offset ~119pt past the content end and lets the
+                    // clamp pull it back, over and over; once it latches even
+                    // that stops and only the graph still turns. A height
+                    // change this large has to land in one step.
+                    //
+                    // The transaction, not a bare toggle, is what makes it
+                    // one: every tap on the timeline also clears composer
+                    // focus through a simultaneous gesture, and the screen's
+                    // chrome animation is keyed on that focus — with the
+                    // keyboard up, one tap changes both in one update and the
+                    // ancestor `.animation(value:)` would enrol this height
+                    // change in its own easing. `disablesAnimations` is the
+                    // documented override for exactly that inheritance.
+                    withTransaction(\.disablesAnimations, true) {
+                        if collapsing { onCollapse?() }
                         expanded.toggle()
                     }
                 }

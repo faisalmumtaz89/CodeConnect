@@ -79,6 +79,63 @@ final class SessionFollowUITests: XCTestCase {
         showMore.tap()
     }
 
+    /// Expanding under an open keyboard. The tap that expands also clears
+    /// composer focus through the timeline's simultaneous gesture, and the
+    /// screen's chrome animation is keyed on that focus — so this is the one
+    /// path where the height change could ride an ancestor easing instead of
+    /// landing as a cut. The stall's signature was every query timing out
+    /// after the first fling on the expanded row; a fling and a settled read
+    /// prove the main thread came back.
+    func testShowMoreUnderTheKeyboardExpandsInOneStep() {
+        let app = launchSession()
+        let timeline = app.scrollViews["session-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
+
+        // Position first, focus second: the keyboard halves the window, the
+        // lazy list realizes rows for the viewport it has, and a drag that
+        // crosses into the keyboard presses keys. So the control is brought
+        // on screen before the keyboard exists, and nudged only through the
+        // upper half after it is up.
+        let showMore = app.buttons["Show more"]
+        let window = app.windows.firstMatch.frame
+        var attempts = 0
+        while attempts < 8 {
+            if showMore.isHittable && showMore.frame.minY >= window.minY
+                && showMore.frame.maxY <= window.maxY
+            {
+                break
+            }
+            drag(timeline, fromY: 0.25, toY: 0.7)
+            attempts += 1
+        }
+        XCTAssertTrue(showMore.isHittable, "the collapsed message must be reachable")
+
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        attempts = 0
+        while attempts < 6 {
+            if showMore.isHittable && showMore.frame.maxY < keyboard.frame.minY {
+                break
+            }
+            drag(timeline, fromY: 0.35, toY: 0.15)
+            attempts += 1
+        }
+        XCTAssertTrue(
+            showMore.isHittable && showMore.frame.maxY < keyboard.frame.minY,
+            "the expander must sit clear of the keyboard")
+
+        showMore.tap()
+
+        let showLess = app.buttons["Show less"]
+        XCTAssertTrue(showLess.waitForExistence(timeout: 5))
+
+        drag(timeline, fromY: 0.35, toY: 0.15)
+        XCTAssertTrue(timeline.exists)
+    }
+
     func testScrollingBackToTheBottomClearsTheLatestPillWithoutATap() {
         let app = launchSession()
         let timeline = app.scrollViews["session-timeline"]
