@@ -1120,6 +1120,27 @@ final class DaemonConnection {
         return lastDaemonErrorMessage
     }
 
+    /// Feed a decoded frame through the real inbound path, as though it had
+    /// arrived on the socket.
+    ///
+    /// **Ships**, because the sample fleet is replayed through it: what a reader
+    /// without a Mac sees is then what the wire produces, rather than a second,
+    /// simpler mock that nobody tests and everybody trusts.
+    ///
+    /// It deliberately does **not** stamp contact, and it puts `phase` back
+    /// where it found it: a `hello_ack` is how a real socket becomes an
+    /// established link, so `handle` promotes the phase on one — correctly, for
+    /// a frame that arrived. Replayed, that promotion is the app telling itself
+    /// it is connected to a Mac it never dialled, and link health is derived
+    /// from exactly these two values. The ack is still ingested for everything
+    /// else it carries, because what a daemon can do is what decides which
+    /// surfaces are real.
+    func ingest(_ message: ServerMessage) {
+        let phaseBeforeIngest = phase
+        handle(message)
+        phase = phaseBeforeIngest
+    }
+
     #if DEBUG
         /// Test seam: resolve answers locally instead of over the socket.
         ///
@@ -1133,11 +1154,13 @@ final class DaemonConnection {
         /// `-CC_FIXTURE` launch argument.
         var fixtureAnswers = false
 
-        /// Test seam: feed a frame through the real inbound path.
+        /// Test seam: feed a frame through the real inbound path *and* let it
+        /// read as a link being spoken to — the contact stamp, and whatever
+        /// phase the frame implies.
         ///
-        /// Debug builds only. It is the *decoded* message that is injected, so
-        /// everything downstream — ingest, the timeline builder, the fleet
-        /// ordering — runs exactly as it does on the wire.
+        /// Debug builds only, and that is the whole difference from `ingest`: a
+        /// test drives screens whose every action link health gates, and the
+        /// sample fleet must never claim the link this one hands it.
         func injectForTesting(_ message: ServerMessage) {
             lastContactAt = Date()
             handle(message)

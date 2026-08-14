@@ -50,6 +50,10 @@ final class SessionState {
     /// one, its tmux name otherwise. Never the display name — see
     /// `SessionSummary.sessionKey`.
     let sessionKey: String
+    /// False for sample sessions: their review marks would persist in
+    /// UserDefaults after the fleet itself is gone, and nothing could ever
+    /// sweep them (the departed-session sweep only sees keys still in memory).
+    let recordsReviewMarks: Bool
 
     private(set) var events: [Event] = []
     private(set) var timeline: [TimelineItem] = []
@@ -198,8 +202,9 @@ final class SessionState {
     /// arrive inside it.
     static let coalesceWindow: Duration = .milliseconds(16)
 
-    init(sessionKey: String) {
+    init(sessionKey: String, recordsReviewMarks: Bool = true) {
         self.sessionKey = sessionKey
+        self.recordsReviewMarks = recordsReviewMarks
     }
 
     /// The highest `seq` held. Buffered events are by construction at or below
@@ -375,6 +380,11 @@ final class SessionState {
     }
 
     func markReviewed() {
+        // Sample sessions must not write marks: the store is UserDefaults, its
+        // eviction keeps the highest-sorting 200 keys, and `fx-*` sorts above
+        // every ULID — a sample browse would take permanent slots from real
+        // runs, announcing work the user already read as new.
+        guard recordsReviewMarks else { return }
         ReviewMarks.markReviewed(sessionKey: sessionKey, seq: lastSeq)
     }
 

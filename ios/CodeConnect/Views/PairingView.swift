@@ -101,12 +101,39 @@ struct PairingView: View {
             // 50-75 characters is the readable measure.
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.rhythm.text)
-            .padding(.bottom, CC.rhythm.sections)
+            // Text spacing, not a section break: what follows the tagline is
+            // the sample-fleet line, and it belongs to the sentence above it.
+            .padding(.bottom, CC.rhythm.text)
+    }
+
+    /// The way in for somebody who has no Mac yet.
+    ///
+    /// **Above the fold, under the tagline, and before the steps**, because it
+    /// is the answer to the question the four steps raise — *do I have to do all
+    /// that before I can see anything?* — and an answer placed after them has
+    /// already been read past. It was last on the screen once, below a footnote
+    /// about pairing codes, where it read as a third way to pair rather than as
+    /// what you do when you cannot.
+    ///
+    /// `ghost`, so it never competes with the primary action of anybody who does
+    /// have a Mac, and it says "sample data" rather than "demo" or "try it": the
+    /// one conclusion a reader must not draw — that these are their agents — is
+    /// the one the label never invites. It enters on the tap and never on its
+    /// own.
+    @ViewBuilder
+    private var sampleFleetEntry: some View {
+        CCButton("New here? Look around with sample data", variant: .ghost, size: .md) {
+            model.startSampleFleet()
+        }
+        .accessibilityIdentifier("pairing-sample-mode")
+        .padding(.bottom, CC.rhythm.sections)
     }
 
     @ViewBuilder
     private var pairingInvitation: some View {
         identity
+
+        sampleFleetEntry
 
         CCSectionHeader("To get started")
 
@@ -417,10 +444,14 @@ struct PairingView: View {
                     // a chevron, and it earns it because the row below it does
                     // not have one — a chevron only means anything when it
                     // distinguishes.
+                    //
+                    // No route to link health from the sample fleet: that screen
+                    // reports on a connection, and there is none to report on.
+                    // The row still states what is true — not paired, no link.
                     CCRow(
                         model.pairing.endpoint?.host ?? "Not paired",
                         meta: model.pairing.endpoint?.displayAddress,
-                        action: { showLinkHealth = true }
+                        action: model.sampleFleetActive ? nil : { showLinkHealth = true }
                     ) {
                         CCStatusDot(
                             color: model.linkHealth.level.ccTone.color,

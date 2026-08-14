@@ -181,13 +181,18 @@ final class AppModel {
 
         connection.onMessage = { [weak self] message in self?.handle(message) }
         connection.onConnected = { [weak self] in
-            self?.resubscribeAll()
+            // Never for a replayed ack: the sample fleet ingests one, and a
+            // replay must not register for push or resubscribe — today the
+            // fixture's values happen to stop both downstream, but a system
+            // permission prompt held back by a data file is not a guarantee.
+            guard let self, !self.fixturesActive else { return }
+            self.resubscribeAll()
             // After every handshake, not only after a pairing: a phone that
             // paired before push existed must start registering the first
             // time an upgraded daemon advertises it — and the capability is
             // only knowable here, once `hello_ack` has landed. Idempotent:
             // re-registration replaces, the daemon keys on the device.
-            self?.enablePush()
+            self.enablePush()
         }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
@@ -565,9 +570,70 @@ final class AppModel {
         private var fixtureCachedFleet = false
     #endif
 
-    /// True while the app is showing replayed fixture frames instead of a
-    /// daemon. Always false in a release build.
+    /// True while the app is showing replayed frames instead of a daemon: the
+    /// `-CC_FIXTURE` launch argument in a debug build, or the sample fleet in
+    /// any build.
+    ///
+    /// It is what keeps a replay hermetic — nothing subscribes, nothing
+    /// migrates, and nothing reaches the cache — so no part of it can be
+    /// mistaken for, or written over, a real Mac's.
     private(set) var fixturesActive = false
+
+    /// True while the sample fleet is on screen.
+    ///
+    /// Implies `fixturesActive`, and adds the two things only a shipping screen
+    /// needs: the banner that says what this is, and an answer path that says
+    /// what it would have done instead of reaching for a Mac. The launch
+    /// argument is a test seam and never sets it.
+    private(set) var sampleFleetActive = false
+
+    /// Show the sample fleet. The only way in, and it takes an explicit tap.
+    ///
+    /// **Why this ships.** Somebody arriving with no Mac — an App Store reviewer
+    /// most of all — can complete no pairing, and every screen in this product
+    /// sits behind one. Without this the app can only ever be read about.
+    ///
+    /// It creates no pairing and opens no socket, so the rule it sits beside
+    /// still holds: a release build has no way to be *paired* except by a person
+    /// with a Mac. Entry is refused from anywhere but the unpaired state, which
+    /// is what keeps sample and live state from ever being on screen together.
+    func startSampleFleet() {
+        // `pendingPairing == nil` is load-bearing: the replayed ack reaches
+        // `commitPendingPairing`, and a pending typed-token endpoint would be
+        // saved to the Keychain on the strength of a frame no daemon sent.
+        guard !fixturesActive, !pairing.isPaired, pendingPairing == nil else { return }
+        sampleFleetActive = true
+        fixturesActive = true
+        for message in Fixtures.frames(variant: .deck) {
+            connection.ingest(message)
+        }
+        // Every sample session, not just the diff's own: the replayed ack
+        // advertises diff support, so the ± control appears on all of them, and
+        // a tap that answers "Not paired with a daemon." inside the sample
+        // fleet would be a dead end in the link's vocabulary. One shared diff
+        // is what the fixture has; the banner has already said none of it is
+        // real.
+        if let diff = Fixtures.diff() {
+            let parsed = UnifiedDiff.parse(diff.unified)
+            for key in states.keys {
+                diffs[key] = .loaded(diff, parsed: parsed, fetchedAt: Date())
+            }
+        }
+    }
+
+    /// Leave the sample fleet and go back to pairing.
+    ///
+    /// Also called on the way *into* a pairing, from both entry points: the
+    /// sample fleet is reachable while its own Settings sheet is open, so
+    /// "sample and live never mix" has to be enforced where a live link begins,
+    /// not only where the sample one ends.
+    func stopSampleFleet() {
+        guard sampleFleetActive else { return }
+        sampleFleetActive = false
+        fixturesActive = false
+        connection.stop()
+        forgetFleet()
+    }
 
     /// Ask the Mac to forget a run, and forget it here too.
     ///
@@ -641,6 +707,7 @@ final class AppModel {
     /// back to the screen that could fix it. The endpoint is committed by
     /// `commitPendingPairing()` once a daemon has actually answered.
     func pair(with endpoint: DaemonEndpoint) {
+        stopSampleFleet()
         pendingPairing = endpoint
         subscribed.removeAll()
         forgetDaemonKeying()
@@ -678,6 +745,7 @@ final class AppModel {
     /// arrives in `hello_ack` and *that* is what gets saved.
     ///
     func pair(withQR payload: PairingQRPayload) {
+        stopSampleFleet()
         let endpoint = payload.endpoint
         pendingPairing = endpoint
         subscribed.removeAll()
@@ -700,18 +768,28 @@ final class AppModel {
     func unpair() {
         connection.stop()
         pairing.clear()
+        forgetFleet()
+        pendingPairing = nil
+        forgetDaemonKeying()
+        Task { await cache.clearAll() }
+    }
+
+    /// Drop every trace of the fleet on screen, including what feeds the Deck.
+    ///
+    /// Shared by `unpair` and by leaving the sample fleet, because "completely"
+    /// has to mean the same thing both times: a card left in `states` is a card
+    /// still counted by the Deck, and after a re-pair it would be counted beside
+    /// a real Mac's.
+    private func forgetFleet() {
         subscribed.removeAll()
         summaries = []
         states = [:]
         answerAttempts = [:]
         answersInFlight = []
         diffs = [:]
-        pendingPairing = nil
         hasLiveFleet = false
         fleetCachedAt = nil
         fleetCacheRestoredAt = nil
-        forgetDaemonKeying()
-        Task { await cache.clearAll() }
     }
 
     func scenePhaseChanged(to phase: ScenePhase) {
@@ -770,6 +848,16 @@ final class AppModel {
             dialFailure: connection.dialFailure, isRedial: connection.isRedial, now: now)
     }
 
+    /// Why a decision cannot be answered from here, or nil when it can.
+    ///
+    /// The link's own sentence, except in the sample fleet — which reports no
+    /// link precisely because it has none, and would therefore disable every
+    /// control on the one screen somebody came here to read. Those controls
+    /// answer inline instead; see `DecisionCardView.submit`.
+    var actionsBlockedReason: String? {
+        sampleFleetActive ? nil : linkHealth.disabledReason
+    }
+
     /// Which daemon build this is, and therefore which of the newer surfaces
     /// are real here.
     var daemonProfile: DaemonProfile { connection.profile }
@@ -826,7 +914,7 @@ final class AppModel {
     /// `states[key]`, which is always populated for a session in `summaries`.
     private func state(for key: String) -> SessionState {
         if let existing = states[key] { return existing }
-        let fresh = SessionState(sessionKey: key)
+        let fresh = SessionState(sessionKey: key, recordsReviewMarks: !fixturesActive)
         states[key] = fresh
         return fresh
     }
@@ -1214,6 +1302,11 @@ final class AppModel {
     /// only order that is ever right here. Nothing is dropped or coalesced: a
     /// stale `saveFleet` still runs, it just cannot run *last*.
     private func enqueueCacheWork(_ work: @escaping @Sendable (EventCache) async -> Void) {
+        // A replayed fleet never reaches the disk. The cache is this app's
+        // memory of a real Mac, and sample rows restored into a later paired
+        // launch would be exactly the mixing the sample fleet is not allowed to
+        // do — the one place it could outlive itself.
+        guard !fixturesActive else { return }
         let previous = cacheWork
         let cache = self.cache
         cacheWork = Task {
@@ -1248,7 +1341,11 @@ final class AppModel {
         // reused session *name* would collide a brand-new send with a dead
         // mutation's identity and the daemon would refuse it as a conflict.
         pendingSendIdentities = pendingSendIdentities.filter { $0.key.key != key }
-        ReviewMarks.forget(sessionKey: key)
+        // Gated exactly like the cache line below it: the sample fleet's
+        // `.sessions` frame lists only sample runs, so an ungated forget here
+        // would take one tap on "look around" as permission to destroy every
+        // real run's review marks — the cached fleet is loaded even unpaired.
+        if !fixturesActive { ReviewMarks.forget(sessionKey: key) }
         enqueueCacheWork { await $0.clearEvents(key: key) }
     }
 

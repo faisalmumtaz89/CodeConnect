@@ -159,3 +159,91 @@ final class DeepLinkRoutingTests: XCTestCase {
         XCTAssertNil(model.pendingDeepLink)
     }
 }
+
+/// The sample fleet, at the model, where its two safety rules live: it claims no
+/// link, and it never shares the app with a real one.
+///
+/// The screens are covered by `SampleModeUITests`, which drives the shipping
+/// build with no launch arguments at all. These are the invariants underneath
+/// them, which a screenshot cannot see.
+@MainActor
+final class SampleFleetTests: XCTestCase {
+    private func makeModel() -> AppModel {
+        AppModel(
+            pairing: PairingStore(),
+            cache: EventCache(
+                root: URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent(UUID().uuidString)),
+            settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
+    }
+
+    /// A fleet with agents on it, and a link that is still reported as absent —
+    /// the whole claim the banner makes, in the state the app is actually in.
+    func testTheSampleFleetLoadsWithoutClaimingALink() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        // The timeline rebuild is scheduled on the main actor; await the fact
+        // rather than sleeping a guess at it.
+        for state in model.states.values { await state.settleForTesting() }
+
+        XCTAssertTrue(model.showsFleet, "the sample fleet is a fleet, or it shows nothing")
+        XCTAssertEqual(model.summaries.count, 4)
+        XCTAssertEqual(model.deckCount, 3, "three agents blocked")
+        XCTAssertFalse(model.pairing.isPaired, "nothing here may create a pairing")
+
+        XCTAssertFalse(
+            model.connection.phase.isConnected,
+            "a replayed `hello_ack` must not promote the app to connected")
+        XCTAssertNil(model.connection.lastContactAt, "no daemon has spoken, ever")
+        XCTAssertNotEqual(
+            model.linkHealth.level, .live,
+            "the one claim this feature could mislead somebody with")
+        XCTAssertNil(
+            model.actionsBlockedReason,
+            "the cards still answer — inline, and only in the sample fleet")
+    }
+
+    /// Entry is refused from a paired app, which is what keeps the two kinds of
+    /// state from ever being on screen together.
+    func testAPairedAppCannotEnterTheSampleFleet() {
+        let model = makeModel()
+        model.pairing.saveEphemeral(
+            DaemonEndpoint(host: "mac.example", port: 8787, credential: .token("t"), useTLS: false))
+        model.startSampleFleet()
+
+        XCTAssertFalse(model.sampleFleetActive)
+        XCTAssertTrue(model.summaries.isEmpty)
+    }
+
+    /// Pairing from inside the sample fleet — its Settings sheet reaches the
+    /// pairing form — takes the sample state down first, entirely.
+    func testPairingTearsTheSampleFleetDown() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        for state in model.states.values { await state.settleForTesting() }
+        XCTAssertEqual(model.deckCount, 3)
+
+        model.pair(
+            with: DaemonEndpoint(
+                host: "mac.example", port: 8787, credential: .token("t"), useTLS: false))
+        defer { model.connection.stop() }
+
+        XCTAssertFalse(model.sampleFleetActive)
+        XCTAssertFalse(model.fixturesActive, "the network side effects come back with the pairing")
+        XCTAssertTrue(model.summaries.isEmpty)
+        XCTAssertEqual(model.deckCount, 0, "a sample card must never be counted beside a real one")
+    }
+
+    /// Leaving returns the app to onboarding rather than to an empty fleet.
+    func testLeavingTheSampleFleetReturnsToOnboarding() async {
+        let model = makeModel()
+        model.startSampleFleet()
+        for state in model.states.values { await state.settleForTesting() }
+        model.stopSampleFleet()
+
+        XCTAssertFalse(model.showsFleet)
+        XCTAssertTrue(model.summaries.isEmpty)
+        XCTAssertEqual(model.deckCount, 0)
+        XCTAssertNil(model.connection.capabilities, "the sample daemon's claims go with it")
+    }
+}
