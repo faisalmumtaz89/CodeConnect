@@ -62,13 +62,20 @@ Your **answer** travels one of two ways, and the daemon tells the app which one 
 ## Getting started
 
 ```sh
-cd mac && ./install.sh
+curl -fsSL https://codeconnect.sh | sh
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
 codeconnect daemon install     # run ccd under launchd (restarts on crash)
 codeconnect pair               # QR code to pair the phone
 codeconnect claude             # start a session in the current directory
 ```
+
+The installer downloads the latest release, verifies its Developer ID
+signature before installing anything, and never uses sudo, edits your shell
+configuration, or enables a service. Prefer to read it first? It is plain
+text at [codeconnect.sh](https://codeconnect.sh). Building from source
+instead is `cd mac && ./install.sh` from a clone — the same script
+contributors use.
 
 The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same [Tailscale](https://tailscale.com) tailnet.
 
