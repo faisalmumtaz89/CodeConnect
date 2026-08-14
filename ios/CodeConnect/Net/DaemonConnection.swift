@@ -208,6 +208,14 @@ final class DaemonConnection {
     /// once. False from the moment a pairing exchange has upgraded it to the
     /// durable token, which is the invariant `PairingUpgradeTests` pins.
     var holdsPairingCode: Bool { endpoint?.isPairingCode ?? false }
+    /// True while this dial serves a pairing exchange someone is watching —
+    /// set at `start` from the credential (a pairing code always is) or the
+    /// caller (a token typed at the pairing screen), and cleared by the
+    /// `hello_ack`, which is the exchange's verdict. Bounds the retry run so
+    /// the pairing screen gets an answer instead of an endless ring, without
+    /// outliving the exchange: once the daemon has answered, this is a paired
+    /// link and its reconnects get the durable token's endless patience.
+    private var dialIsForPairing = false
     /// True while the ladder is trying the scheme the pairing does *not* prefer.
     private var schemeAlternate = false
     private var supervisor: Task<Void, Never>?
@@ -251,7 +259,7 @@ final class DaemonConnection {
 
     // MARK: - Lifecycle
 
-    func start(endpoint: DaemonEndpoint) {
+    func start(endpoint: DaemonEndpoint, forPairing: Bool = false) {
         if self.endpoint == endpoint, supervisor != nil,
             !isFailed
         {
@@ -259,6 +267,17 @@ final class DaemonConnection {
         }
         stop()
         self.endpoint = endpoint
+        // A pairing-code dial is a pairing dial no matter who started it: the
+        // code is single-use and five-minute-lived, so the bounded verdict below
+        // is intrinsic to the credential. A token dial is a pairing dial only
+        // when the caller says so — the same token that deserves a bounded
+        // answer while someone watches the pairing screen deserves endless
+        // patience once it is saved and the Mac is merely asleep.
+        if case .pairingCode = endpoint.credential {
+            dialIsForPairing = true
+        } else {
+            dialIsForPairing = forPairing
+        }
         schemeAlternate = false
         lastErrorMessage = nil
         lastErrorAt = nil
@@ -292,7 +311,9 @@ final class DaemonConnection {
         guard endpoint != nil else { return }
         if isFailed {
             lastErrorMessage = nil
-            if let endpoint { start(endpoint: endpoint) }
+            // A restarted dial keeps its context: a failed pairing dial that the
+            // user retries is still a pairing dial, and must stay bounded.
+            if let endpoint { start(endpoint: endpoint, forPairing: dialIsForPairing) }
             return
         }
         wakeTask?.cancel()
@@ -354,20 +375,21 @@ final class DaemonConnection {
             }
             isRedial = true
 
-            // **A pairing code is not worth retrying forever.**
+            // **A pairing dial is not worth retrying forever.**
             //
-            // A device token is durable: the Mac may be asleep, the tunnel may be
-            // down, and backing off until either changes is exactly right. A
-            // pairing code is single-use and dies after five minutes, so the same
-            // patience becomes a lie — the app sat on `.waiting`, `pairingError`
-            // reads only `.failed`, and the pairing screen therefore showed a
-            // progress ring and "Exchanging the code for a device token…"
-            // indefinitely, for a code that had already expired. No error, ever.
+            // A *saved* device token is durable: the Mac may be asleep, the
+            // tunnel may be down, and backing off until either changes is
+            // exactly right. A pairing dial is different — someone is at the
+            // pairing screen waiting for a verdict, and `pairingError` reads
+            // only `.failed`. Endless `.waiting` therefore showed a progress
+            // ring forever: for a code, one that had already expired after five
+            // minutes; for a typed token, one that will never reach a daemon
+            // that isn't at that address. No error, ever.
             //
             // Both schemes are still tried, because the ws/wss alternation above
             // is how a TLS mismatch corrects itself and giving up before it has
             // swapped once would turn a recoverable setup into a dead end.
-            if case .pairingCode = endpoint.credential, ledger.attempts >= Self.pairingAttemptLimit {
+            if dialIsForPairing, ledger.attempts >= Self.pairingAttemptLimit {
                 phase = .failed(
                     reason: lastErrorMessage ?? ConnectionError.timedOut.localizedDescription)
                 return
@@ -995,6 +1017,11 @@ final class DaemonConnection {
             dialFailure = nil
             isRedial = false
             ledger.reset()
+            // The ack is also the pairing's verdict, so this dial stops being a
+            // pairing dial. Left set, the retry cap below would outlive the
+            // exchange it exists for and give a *paired* link four attempts to
+            // survive a sleeping Mac before declaring it dead.
+            dialIsForPairing = false
             // A mismatched major never reaches this handler — the receive
             // loop refuses it as incompatible before dispatch — so arriving
             // here clears any standing complaint.

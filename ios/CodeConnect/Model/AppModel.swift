@@ -644,7 +644,10 @@ final class AppModel {
         pendingPairing = endpoint
         subscribed.removeAll()
         forgetDaemonKeying()
-        connect(to: endpoint)
+        // A typed token is still a pairing: nothing is saved until the daemon's
+        // `hello_ack` proves the credential, and someone is watching the screen
+        // for that verdict — so the dial must be bounded, not endlessly patient.
+        connection.start(endpoint: endpoint, forPairing: true)
     }
 
     /// A daemon answered on a pending endpoint that carries its own token.
