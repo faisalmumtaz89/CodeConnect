@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "cc-hook", "ccd", "codeconnect", "soak"]
+members = ["protocol", "cc-hook", "ccd", "codeconnect", "demo-daemon", "soak"]
 
 [workspace.package]
 version = "0.5.0"

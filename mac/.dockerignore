@@ -1,0 +1,4 @@
+# The build context for `demo-daemon/Dockerfile` is this directory. Without
+# this, every image build would upload the local build tree — gigabytes of
+# artefacts the container rebuilds from source anyway.
+target/
