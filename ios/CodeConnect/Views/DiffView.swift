@@ -466,7 +466,11 @@ private struct DiffRefreshButton: View {
         .accessibilityHint(blockedReason ?? "")
     }
 
-    private var blockedReason: String? { model.linkHealth.disabledReason }
+    // `actionsBlockedReason`, not `linkHealth.disabledReason`: the sample
+    // fleet preloads this very diff so its controls are not dead ends, and
+    // the link's sentence beside a diff the sample itself served would be
+    // two accounts of the same absence on one screen.
+    private var blockedReason: String? { model.actionsBlockedReason }
 }
 
 /// **The provenance line, clocked by itself.**
@@ -1393,9 +1397,10 @@ private struct DiffCommentSheet: View {
     }
 
     /// Disabled with a stated reason on observe-only sessions and stale links.
-    /// Never a dead button.
+    /// Never a dead button. Reads `actionsBlockedReason` so the sample fleet's
+    /// controls stay live and answer in their own vocabulary at the send.
     private var blockedReason: CCDisabledReason? {
-        if let reason = model.linkHealth.disabledReason { return CCDisabledReason(reason) }
+        if let reason = model.actionsBlockedReason { return CCDisabledReason(reason) }
         if let summary = model.summary(for: key) {
             let capability = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)

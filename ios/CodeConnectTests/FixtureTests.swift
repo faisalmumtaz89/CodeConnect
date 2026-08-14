@@ -64,6 +64,56 @@ final class FixtureTests: XCTestCase {
         XCTAssertFalse(capabilities.tlsActive)
     }
 
+    /// The sample fleet's ack, held to the opposite rule: it advertises
+    /// exactly what the sample serves. A capability advertised here whose
+    /// request rides the connection is a control that dead-ends in front of
+    /// a reviewer, because the sample has no connection.
+    func testTheSampleAckWithholdsWhatTheSampleCannotServe() {
+        guard case .helloAck(let ack) = Fixtures.sampleFrames()[0] else {
+            return XCTFail("no hello_ack")
+        }
+        let capabilities = ack.capabilities
+
+        XCTAssertFalse(
+            capabilities.servesTerminal,
+            "the terminal rides the connection; offered in the sample it asks the reviewer to pair")
+        XCTAssertFalse(capabilities.capture)
+        XCTAssertFalse(capabilities.deletesSessions)
+        XCTAssertFalse(capabilities.servesCommandCatalog)
+
+        XCTAssertTrue(
+            capabilities.sendText,
+            "typing is answered in sample vocabulary, not hidden")
+        XCTAssertTrue(
+            capabilities.servesDiff,
+            "the sample preloads its own diff")
+        XCTAssertTrue(capabilities.canApproveReliably)
+        XCTAssertTrue(capabilities.classifiesRisk)
+    }
+
+    /// Everything but the ack is the same fleet the harness photographs —
+    /// the sample must never drift into a second, unphotographed deck.
+    ///
+    /// Compared by `Equatable`, not by rendered description: the frames are
+    /// decoded from JSON twice, and a dictionary's key order is not a fact
+    /// about its contents.
+    func testSampleFramesAreTheDeckUnderADifferentAck() {
+        let now = Date(timeIntervalSince1970: 1_753_950_000)
+        let deck = Fixtures.frames(now: now, variant: .deck)
+        let sample = Fixtures.sampleFrames(now: now)
+        XCTAssertEqual(deck.count, sample.count)
+        for (index, (a, b)) in zip(deck, sample).enumerated() where index > 0 {
+            switch (a, b) {
+            case (.sessions(let deckSessions), .sessions(let sampleSessions)):
+                XCTAssertEqual(deckSessions, sampleSessions, "frame \(index)")
+            case (.event(let deckEvent), .event(let sampleEvent)):
+                XCTAssertEqual(deckEvent, sampleEvent, "frame \(index)")
+            default:
+                XCTFail("frame \(index) changed shape between the deck and the sample")
+            }
+        }
+    }
+
     /// A fixture card whose hash did not verify would exercise the *blocked*
     /// path, not the Deck — the buttons would be disabled and the test would be
     /// measuring nothing.

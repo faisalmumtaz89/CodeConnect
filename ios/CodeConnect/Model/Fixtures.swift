@@ -178,6 +178,20 @@ enum Fixtures {
         return messages
     }
 
+    /// The frames `startSampleFleet` replays: the deck, under the sample ack.
+    ///
+    /// Same sessions, cards and events as the harness's deck — one fleet,
+    /// photographed and shipped alike — but the ack withholds what the sample
+    /// cannot serve, so the screens it cannot reach are omitted rather than
+    /// offered as dead ends.
+    static func sampleFrames(now: Date = Date()) -> [ServerMessage] {
+        var messages = frames(now: now, variant: .deck)
+        if case .helloAck = messages.first, let ack = decode(sampleHelloAckJSON) {
+            messages[0] = ack
+        }
+        return messages
+    }
+
     /// **The facts the command sheets report, in their worst shapes.**
     ///
     /// Numbered to *follow* the frames above rather than sitting at some
@@ -244,12 +258,14 @@ enum Fixtures {
 
     // MARK: JSON builders
 
-    /// A current daemon's ack, capability for capability, as a paired
-    /// device sees it. Anything the fixture withholds is UI the fixture
-    /// cannot reach — `terminal_pty` alone gates the whole Terminal tab —
-    /// so this stays level with `protocol::PROTOCOL_MINOR` and with
-    /// `ws_server::capabilities`. `push` is false because a fixture daemon
-    /// holds no APNs key, and `test_push` follows it for that reason.
+    /// A current daemon's ack, capability for capability, as a paired device
+    /// sees it. The render harness and the debug fixture flows photograph
+    /// every screen, and a capability withheld here is a screen they cannot
+    /// reach — so this ack advertises the full set and stays level with
+    /// `protocol::PROTOCOL_MINOR` and `ws_server::capabilities`. `push` is
+    /// false because a fixture daemon holds no APNs key, and `test_push`
+    /// follows it for that reason. The release sample fleet does not use
+    /// this ack; see `sampleHelloAckJSON`.
     private static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":13,\
         "server_time":"2026-07-31T09:14:00.000Z",\
@@ -259,6 +275,26 @@ enum Fixtures {
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,"slash_composer_recovery":true,\
         "prompt_identity":true,"command_catalog":true,"terminal_pty":true},\
+        "device_name":"iPhone"}
+        """
+
+    /// The sample fleet's ack: exactly what the sample serves and nothing
+    /// more — the demo daemon's own rule, "an action this server cannot
+    /// perform is not offered". `capture`, `delete_session`,
+    /// `command_catalog` and `terminal_pty` are false because each one's
+    /// request rides the connection, and the sample has none: advertising
+    /// them dresses a dead end as a control. `send_text` stays true — typing
+    /// is answered in sample vocabulary, not hidden — and `diff` is true
+    /// because the sample preloads its own.
+    private static let sampleHelloAckJSON = """
+        {"type":"hello_ack","protocol_version":1,"protocol_minor":13,\
+        "server_time":"2026-07-31T09:14:00.000Z",\
+        "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
+        "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":false,\
+        "delete_session":false,"test_push":false,"push":false,"tls":false,\
+        "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
+        "send_text_idempotent":true,"slash_composer_recovery":true,\
+        "prompt_identity":true,"command_catalog":false,"terminal_pty":false},\
         "device_name":"iPhone"}
         """
 

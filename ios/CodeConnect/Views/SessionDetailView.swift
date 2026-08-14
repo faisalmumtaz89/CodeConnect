@@ -298,7 +298,12 @@ struct SessionDetailView: View {
             // items into an overflow menu on a phone — the diff button
             // disappeared behind a "…" — and it clips outright at large Dynamic
             // Type sizes. Below the bar it has the whole width and grows.
-            if !composerFocused {
+            // Absent in the sample fleet, like the link pill: the terminal is
+            // the same connection as everything else, and the sample has none.
+            // With the picker gone the timeline default is the only surface,
+            // so the tab that would answer in pairing vocabulary cannot be
+            // reached at all — offered nothing, not offered a dead end.
+            if !composerFocused && !model.sampleFleetActive {
                 CCSegmented(
                     selection: surfaceBinding,
                     options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },

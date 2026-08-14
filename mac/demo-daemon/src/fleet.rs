@@ -41,6 +41,17 @@ use crate::script::{self, Script};
 /// a demo. The `session_end` that retires a run is the +1 that fits inside it.
 const MAX_EVENTS_PER_RUN: usize = 399;
 
+/// Where the exhaustion check actually fires, below the ceiling by a margin.
+///
+/// The check runs once per tick, but `answer` and `send_text` append events
+/// between ticks with no ceiling of their own, and retirement itself appends
+/// the `session_end`. Checked at the ceiling exactly, a log measured just
+/// under it can gain an answer's two events and a send's two more before the
+/// next check, and retire past 400 — resurrecting the truncated-head banner
+/// `MAX_EVENTS_PER_RUN` exists to rule out. Eight covers those worst-case
+/// inter-tick appends with room to spare.
+const RETIRE_AT: usize = MAX_EVENTS_PER_RUN - 8;
+
 /// How long a run rests after finishing an approval's aftermath before the next
 /// card is raised. The aftermath itself is a few seconds, so a reviewer who taps
 /// sees the next decision arrive about a minute later — long enough to watch the
@@ -492,10 +503,14 @@ impl Fleet {
         let live: Vec<usize> = (0..inner.runs.len())
             .filter(|&index| inner.runs[index].lifecycle == Lifecycle::Live)
             .collect();
+        // Exhausted runs are remembered by uid, never by index: `retire`
+        // mutates `inner.runs` (its retain removes a predecessor's corpse, its
+        // push appends the successor), so an index collected before the first
+        // retirement can name a different run by the second.
         let mut exhausted = Vec::new();
         for index in live {
-            if inner.runs[index].log.len() >= MAX_EVENTS_PER_RUN {
-                exhausted.push(index);
+            if inner.runs[index].log.len() >= RETIRE_AT {
+                exhausted.push(inner.runs[index].uid.clone());
                 continue;
             }
             if inner.runs[index].due.is_some_and(|due| due <= now) {
@@ -505,8 +520,10 @@ impl Fleet {
                 }
             }
         }
-        for index in exhausted {
-            self.retire(&mut inner, index, now);
+        for uid in exhausted {
+            if let Some(index) = inner.runs.iter().position(|run| run.uid == uid) {
+                self.retire(&mut inner, index, now);
+            }
         }
     }
 
@@ -1242,6 +1259,87 @@ mod tests {
             assert!(!summary.project_label.is_empty(), "{summary:?}");
             assert!(summary.cwd.starts_with("/Users/dev/app"), "{summary:?}");
             assert_eq!(summary.lifecycle, Lifecycle::Live);
+        }
+    }
+
+    /// Pad the named run's log to the retirement threshold, so the next tick
+    /// must end it. Goes through `append`, because that is the only place a
+    /// seq may be assigned.
+    fn exhaust(fleet: &Fleet, name: &str) {
+        let uid = uid_of(fleet, name);
+        let mut inner = fleet.lock();
+        let run = inner
+            .runs
+            .iter_mut()
+            .find(|run| run.uid == uid)
+            .expect("a resolved uid is in the fleet");
+        while run.log.len() < RETIRE_AT {
+            run.append(
+                EventKind::TurnComplete,
+                serde_json::json!({}),
+                Source::Daemon,
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn two_runs_retiring_in_one_tick_over_corpses_each_end_their_own_log() {
+        let mut clock = Clock::new();
+        let fleet = Fleet::new(clock.0).expect("the shipped script must load");
+
+        // Two prior retirement cycles leave one exited corpse per slot ahead
+        // of the live runs in the vec — the shape under which a retirement's
+        // corpse cleanup shifts every later index.
+        let first_generation = (uid_of(&fleet, "cc-1"), uid_of(&fleet, "cc-2"));
+        exhaust(&fleet, "cc-1");
+        fleet.tick(clock.step());
+        exhaust(&fleet, "cc-2");
+        fleet.tick(clock.step());
+
+        // Both successors exhaust in the same tick.
+        let second_generation = (uid_of(&fleet, "cc-1"), uid_of(&fleet, "cc-2"));
+        assert_ne!(first_generation, second_generation);
+        exhaust(&fleet, "cc-1");
+        exhaust(&fleet, "cc-2");
+        fleet.tick(clock.step());
+
+        let inner = fleet.lock();
+        for uid in [&second_generation.0, &second_generation.1] {
+            let run = inner
+                .runs
+                .iter()
+                .find(|run| run.uid == **uid)
+                .expect("a retired run stays until its slot retires again");
+            assert_eq!(run.lifecycle, Lifecycle::Exited, "{}", run.name);
+            assert_eq!(
+                run.log.last().map(|event| &event.kind),
+                Some(&EventKind::SessionEnd),
+                "{} must end with its own session_end",
+                run.name
+            );
+            assert!(
+                run.log.len() <= MAX_EVENTS_PER_RUN + 1,
+                "{} retired at {} events, past the backfill window",
+                run.name,
+                run.log.len()
+            );
+        }
+        // Every slot plays on: exactly one live run each, none of them ended.
+        for name in ["cc-1", "cc-2", "cc-3", "cc-4", "cc-5"] {
+            let live: Vec<_> = inner
+                .runs
+                .iter()
+                .filter(|run| run.name == name && run.lifecycle == Lifecycle::Live)
+                .collect();
+            assert_eq!(live.len(), 1, "{name} must have exactly one live run");
+            assert!(
+                live[0]
+                    .log
+                    .iter()
+                    .all(|event| event.kind != EventKind::SessionEnd),
+                "{name}'s live run carries a session_end that belongs to another run"
+            );
         }
     }
 }

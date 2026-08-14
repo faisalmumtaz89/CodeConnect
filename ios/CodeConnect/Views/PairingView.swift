@@ -164,7 +164,7 @@ struct PairingView: View {
                     index: 2,
                     title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "Your phone connects straight to the address `codeconnect pair` prints, over whatever private network links the two — many people use Tailscale. It never goes through a server of ours.")
+                        "Your phone connects straight to the address `codeconnect pair` prints, over whatever private network links the two; many people use Tailscale. It never goes through a server of ours.")
                 CCHairline()
                 CCStepRow(index: 3, title: "Run this at the Mac", command: "codeconnect pair")
                 CCHairline()
@@ -387,7 +387,12 @@ struct PairingView: View {
                     transportSection
                     capabilitiesSection
                     aboutSection
-                    unpairSection
+                    // Nothing is paired in the sample fleet, so there is
+                    // nothing to unpair — and the button's cache erase would
+                    // delete real history from inside a fake fleet.
+                    if !model.sampleFleetActive {
+                        unpairSection
+                    }
                 }
                 .padding(.horizontal, CC.space.md)
                 .padding(.vertical, CC.space.lg)

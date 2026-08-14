@@ -604,7 +604,7 @@ final class AppModel {
         guard !fixturesActive, !pairing.isPaired, pendingPairing == nil else { return }
         sampleFleetActive = true
         fixturesActive = true
-        for message in Fixtures.frames(variant: .deck) {
+        for message in Fixtures.sampleFrames() {
             connection.ingest(message)
         }
         // Every sample session, not just the diff's own: the replayed ack
@@ -766,6 +766,12 @@ final class AppModel {
     }
 
     func unpair() {
+        // Unpairing returns the app to the unpaired ground state, and being
+        // inside the sample fleet is not part of that state: left set, these
+        // flags strand an empty fleet under a Sample banner, and
+        // `startSampleFleet`'s own guard then refuses re-entry.
+        sampleFleetActive = false
+        fixturesActive = false
         connection.stop()
         pairing.clear()
         forgetFleet()
@@ -1534,6 +1540,16 @@ final class AppModel {
         text: String, to key: String, submit: Bool,
         completeNativeConfirmation: Bool = false
     ) async -> ComposeAttempt {
+        // Every typed-text route funnels through here — the compose bar, the
+        // Model/Effort/Compact sheets, `/clear` — so this is where the sample
+        // fleet is answered once, in its own vocabulary, rather than per
+        // surface. A surface the sample forgot to gate otherwise falls
+        // through to the link's sentence ("Not connected to the daemon"),
+        // which is a dead end in a fleet whose banner says nothing is
+        // connected.
+        if sampleFleetActive {
+            return .failed("These agents are not real. Pair with your Mac to talk to your own.")
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
         guard connection.capabilities?.sendText != false else {
@@ -1629,6 +1645,11 @@ final class AppModel {
     /// daemon's own `captured_at` so the view can say how old what you are
     /// reading is, rather than implying it is live.
     func loadDiff(key: String, force: Bool = false) {
+        // The sample fleet's diff is preloaded by `startSampleFleet` and is
+        // the only diff its sessions will ever have: a refresh has no daemon
+        // to ask, and falling through would overwrite the loaded diff with a
+        // failure written in the link's vocabulary.
+        if sampleFleetActive { return }
         if !force, diffs[key]?.isLoading == true { return }
         guard connection.phase.isConnected else {
             // The app's own sentence about its own link. Tagged `.app` so the
