@@ -98,6 +98,30 @@ final class PairingFailureTests: XCTestCase {
             """)
     }
 
+    /// Re-pairing is what people do when the link is already broken, so the
+    /// pairing screen's bounded verdict must survive meeting a dial that is
+    /// already mid-retry on the same endpoint. Absorbing the pairing into the
+    /// patient saved-profile dial shows the spinner this whole class exists to
+    /// forbid.
+    func testRepairingAnEndpointAlreadyRetryingGetsAVerdict() async {
+        let connection = DaemonConnection()
+        let endpoint = unreachable(credential: .token("device-token"))
+        connection.start(endpoint: endpoint)
+        defer { connection.stop() }
+
+        try? await Task.sleep(for: .milliseconds(600))
+        connection.start(endpoint: endpoint, forPairing: true)
+
+        let failed = await waitForFailure(connection, timeout: 30)
+        XCTAssertTrue(
+            failed,
+            """
+            Typing the same address and token at the pairing screen while the saved \
+            dial is struggling must still end in a verdict. Deduplicating the start \
+            keeps the unbounded dial and the pairing screen spins forever.
+            """)
+    }
+
     /// The other half of the rule, and the reason this is not simply "give up
     /// sooner". A device token is durable: the Mac may be asleep or off the
     /// tailnet, and backing off until that changes is exactly right. Making *this*

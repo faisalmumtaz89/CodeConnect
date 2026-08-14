@@ -260,8 +260,14 @@ final class DaemonConnection {
     // MARK: - Lifecycle
 
     func start(endpoint: DaemonEndpoint, forPairing: Bool = false) {
-        if self.endpoint == endpoint, supervisor != nil,
-            !isFailed
+        // A repeated start on the current endpoint is a no-op — except when it
+        // comes from the pairing screen while the dial is struggling. A pairing
+        // may defer to a link that is proven, never to one mid-retry: absorbed
+        // there, the patient saved-profile dial keeps running and the pairing
+        // screen never gets its verdict. Re-pairing is what people do when the
+        // link is already broken, so that collision is the common case.
+        if self.endpoint == endpoint, supervisor != nil, !isFailed,
+            !forPairing || phase.isConnected
         {
             return
         }

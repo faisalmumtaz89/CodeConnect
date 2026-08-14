@@ -328,6 +328,7 @@ struct PairingView: View {
 
             CCButton(
                 "Save and connect", variant: .primary, size: .lg, fullWidth: true,
+                isLoading: model.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
                 save()
