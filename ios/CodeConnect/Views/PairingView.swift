@@ -120,16 +120,17 @@ struct PairingView: View {
         // to draw.
         CCCard(padding: 0) {
             VStack(spacing: 0) {
-                // The address is the only thing on this screen a reader cannot
-                // get anywhere else, and as prose it was something to squint at
-                // and retype. Given as a command it is monospaced, unambiguous
-                // about where the slashes fall, and copyable — the same
-                // affordance step 3 gets, for the same reason.
+                // The command is the only thing on this screen a reader cannot
+                // get anywhere else, and it is given exactly as it must be
+                // typed — monospaced, complete, copyable — the same affordance
+                // step 3 gets, for the same reason. The endpoint installs the
+                // latest signed release; there is no repository to find first.
                 CCStepRow(
                     index: 1,
                     title: "Install CodeConnect on your Mac",
-                    message: "Clone it and run ./install.sh. You only do this once.",
-                    command: "github.com/faisalmumtaz89/CodeConnect")
+                    message:
+                        "Run this in Terminal. It installs the signed release and enables nothing for you. You only do this once.",
+                    command: "curl -fsSL https://codeconnect.sh | sh")
                 CCHairline()
                 CCStepRow(
                     index: 2,
