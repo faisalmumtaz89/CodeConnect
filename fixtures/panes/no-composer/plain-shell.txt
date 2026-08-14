@@ -1,0 +1,20 @@
+operatoruser@Mac scratchpad % printf "❯ not a composer\n"
+❯ not a composer
+operatoruser@Mac scratchpad % 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -447,10 +447,12 @@ pub enum SupervisorRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         respond_by_monotonic_ms: Option<u64>,
     },
-    /// Text snapshot of the pane. Presence checks and mirroring only — the
-    /// pane is matched against needles, never parsed into structure. The one
-    /// place a needle carries meaning rather than mere presence is recovery's
-    /// "is this screen asking something" guard; see `SendText::asking`.
+    /// Text snapshot of the pane. Presence checks and mirroring only. The
+    /// composer is read as a shape — the rows of its box, and nothing else
+    /// about them (see [`composer_is_drawn`]); everything else is matched
+    /// against needles. The one place a needle carries meaning rather than
+    /// mere presence is recovery's "is this screen asking something" guard;
+    /// see `SendText::asking`.
     Capture {
         #[serde(default = "default_capture_lines")]
         lines: u32,
@@ -556,7 +558,9 @@ impl PromptFingerprint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum PromptPresence {
-    /// The composer is accepting input.
+    /// The composer is accepting input. Judged on the box Claude draws it in
+    /// rather than on any needle — see [`composer_is_drawn`] — unless the
+    /// operator has configured needles, which arrive as `AnyOf`.
     InputBox,
     /// A permission prompt is on screen ("Do you want to proceed?").
     PermissionPrompt,
@@ -567,7 +571,8 @@ pub enum PromptPresence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SupervisorResult {
-    /// Keys were injected; `matched` is the needle that authorised it.
+    /// Keys were injected; `matched` is what authorised it — the needle that
+    /// matched, or `"composer"` where the composer was recognised by its shape.
     Sent {
         matched: String,
     },
@@ -641,15 +646,93 @@ pub fn normalize_for_match(s: &str) -> String {
         .collect()
 }
 
+/// The box-drawing horizontals a composer rule may be made of. Claude draws
+/// `─` (U+2500); the heavier weights are accepted so a restyle costs the
+/// composer one glyph rather than every send in the fleet.
+const RULE_GLYPHS: [char; 3] = ['─', '━', '═'];
+
+/// The composer's prompt marker — and the marker Claude puts on the selected
+/// row of every menu and permission prompt, which is why finding one settles
+/// nothing on its own.
+const PROMPT_GLYPH: char = '❯';
+
+/// What authorises a send when the composer is recognised by its shape: a
+/// stable token rather than a fragment of Claude's copy, because no text was
+/// matched to get here.
+const COMPOSER: &str = "composer";
+
+/// A row that is box-drawing horizontals from column zero, and nothing else.
+///
+/// Length is not part of it. A composer in a three-column pane is ruled with
+/// three glyphs and is as typable as one at two hundred, and at that width
+/// every footer hint is truncated away, so the rule is the only signal left.
+/// Column zero is: the rule Claude draws starts where the pane starts, and an
+/// indented one is somebody's output being quoted.
+fn is_rule_row(line: &str) -> bool {
+    let row = line.trim_end();
+    !row.is_empty() && row.chars().all(|c| RULE_GLYPHS.contains(&c))
+}
+
+/// A row that opens at column zero with the prompt marker standing alone:
+/// what follows it is the no-break space Claude pads the caret with, an
+/// ordinary space, or nothing at all.
+fn is_prompt_row(line: &str) -> bool {
+    let mut chars = line.chars();
+    chars.next() == Some(PROMPT_GLYPH) && chars.next().is_none_or(char::is_whitespace)
+}
+
+/// Is Claude's composer drawn on this pane?
+///
+/// **The shape is the signal and the footer copy is not.** `? for shortcuts`
+/// is dropped the moment the shift+tab mode hint needs the room, and
+/// `← for agents` is rewritten to `← 1 agent` as soon as one subagent exists,
+/// so a session that types perfectly well can show neither string. What it
+/// always shows is the box: a rule the width of the pane, the prompt row, a
+/// closing rule, the footer.
+///
+/// The rule has to be the row *immediately above*, and both rows have to open
+/// at column zero. A closing rule cannot stand in for the opening one —
+/// prompt text wraps, and every continuation row pushes the closing rule
+/// further away, so the row above is the only row the box is reliably at. The
+/// marker alone cannot be enough either: `❯` opens the transcript echo of
+/// every submitted prompt and marks the highlighted row of every menu. And an
+/// *indented* pair is a quotation — agents print captured panes into their own
+/// output, and Claude indents tool results — so a composer that has been
+/// written about is not a composer that is there.
+///
+/// A prompt row on the pane's first line therefore reads as no composer, which
+/// is the direction to fail in: that is also what a shell that just printed a
+/// `❯` looks like, and what a transcript scrolled to an echoed prompt looks
+/// like. A composer holding more text than the pane is tall loses its top rule
+/// off the screen and is refused with them.
+///
+/// What survives is a pane that puts a rule at column zero directly above a
+/// column-zero `❯` while the composer is not the thing with the keyboard — a
+/// textual collision no reading of the text can rule out. The cursor is what
+/// stands behind it: see `authorise` in the supervisor, which asks tmux who
+/// holds the keyboard before anything is typed.
+pub fn composer_is_drawn(pane_text: &str) -> bool {
+    let mut above = "";
+    for row in pane_text.lines() {
+        if is_prompt_row(row) && is_rule_row(above) {
+            return true;
+        }
+        above = row;
+    }
+    false
+}
+
 impl PromptPresence {
     /// Default needles per mode. Kept here (not in the daemon) so the shim and
     /// the daemon can never drift, and overridable from config because Claude's
     /// TUI copy is the single most churn-prone surface we depend on.
+    ///
+    /// The composer has none: it is recognised by [`composer_is_drawn`], and an
+    /// operator who configures `input_box_needles` gets an `AnyOf` carrying
+    /// theirs instead of this variant.
     pub fn default_needles(&self) -> Vec<String> {
         match self {
-            PromptPresence::InputBox => {
-                vec!["forshortcuts".to_string(), "foragents".to_string()]
-            }
+            PromptPresence::InputBox => Vec::new(),
             PromptPresence::PermissionPrompt => {
                 vec!["doyouwanttoproceed".to_string(), "esctocancel".to_string()]
             }
@@ -659,27 +742,35 @@ impl PromptPresence {
         }
     }
 
-    /// Returns the needle that matched, if any.
+    /// What this check looks for, in the words a refusal has to use to stay
+    /// true — the composer's shape is not a needle and cannot be printed as
+    /// one.
+    pub fn requirement(&self) -> String {
+        match self {
+            PromptPresence::InputBox => {
+                "the composer's ❯ prompt row under its box rule".to_string()
+            }
+            other => format!("{:?}", other.default_needles()),
+        }
+    }
+
+    /// What authorised the send: the needle that matched, or `"composer"` where
+    /// the composer was recognised by its shape and no text was matched at all.
     pub fn find_match(&self, pane_text: &str, overrides: Option<&[String]>) -> Option<String> {
-        let haystack = normalize_for_match(pane_text);
-        let owned;
-        let needles: &[String] = match overrides {
-            Some(list) if !list.is_empty() => {
-                owned = list
-                    .iter()
-                    .map(|n| normalize_for_match(n))
-                    .collect::<Vec<_>>();
-                &owned
+        let needles: Vec<String> = match overrides {
+            Some(list) if !list.is_empty() => list.iter().map(|n| normalize_for_match(n)).collect(),
+            // Nothing configured, so the composer is judged on its shape.
+            // An override is still honoured above: it is the one place an
+            // operator can teach this check a screen it cannot see.
+            _ if matches!(self, PromptPresence::InputBox) => {
+                return composer_is_drawn(pane_text).then(|| COMPOSER.to_string());
             }
-            _ => {
-                owned = self.default_needles();
-                &owned
-            }
+            _ => self.default_needles(),
         };
+        let haystack = normalize_for_match(pane_text);
         needles
-            .iter()
+            .into_iter()
             .find(|needle| !needle.is_empty() && haystack.contains(needle.as_str()))
-            .cloned()
     }
 }
 
@@ -687,23 +778,257 @@ impl PromptPresence {
 mod tests {
     use super::*;
 
-    /// Verbatim from `tmux -L codeconnect capture-pane -p -J` against a live
-    /// permission prompt on claude 2.1.220.
-    const PERMISSION_PANE: &str = "\
- Bash command
-   touch /private/tmp/ccprobe_c.txt
-   Create empty file
+    /// Every pane in `fixtures/panes/composer/`: real `capture-pane -p -J`
+    /// output from sessions that were taking keys, across every permission
+    /// mode, mid-turn, with prompt text typed, wrapped over three rows, and at
+    /// three columns wide. Named one by one so a deleted capture is a compile
+    /// error rather than a quietly smaller corpus.
+    const COMPOSER_PANES: [(&str, &str); 10] = [
+        (
+            "accept-edits",
+            include_str!("../../../fixtures/panes/composer/accept-edits.txt"),
+        ),
+        (
+            "auto-mode",
+            include_str!("../../../fixtures/panes/composer/auto-mode.txt"),
+        ),
+        (
+            "bypass-agent-count",
+            include_str!("../../../fixtures/panes/composer/bypass-agent-count.txt"),
+        ),
+        (
+            "bypass-placeholder",
+            include_str!("../../../fixtures/panes/composer/bypass-placeholder.txt"),
+        ),
+        (
+            "manual-shortcuts",
+            include_str!("../../../fixtures/panes/composer/manual-shortcuts.txt"),
+        ),
+        (
+            "mid-turn",
+            include_str!("../../../fixtures/panes/composer/mid-turn.txt"),
+        ),
+        (
+            "narrow-3col",
+            include_str!("../../../fixtures/panes/composer/narrow-3col.txt"),
+        ),
+        (
+            "transcript-echo",
+            include_str!("../../../fixtures/panes/composer/transcript-echo.txt"),
+        ),
+        (
+            "typed-prompt-glyph",
+            include_str!("../../../fixtures/panes/composer/typed-prompt-glyph.txt"),
+        ),
+        (
+            "wrapped-multiline",
+            include_str!("../../../fixtures/panes/composer/wrapped-multiline.txt"),
+        ),
+    ];
 
- Do you want to proceed?
- ❯ 1. Yes
-   2. Yes, and always allow access to tmp/ from this project
-   3. No
- Esc to cancel · Tab to amend · ctrl+e to explain";
+    /// Every pane in `fixtures/panes/no-composer/`: real captures of screens
+    /// with no composer to type into. Every one of them carries a `❯`
+    /// somewhere, and that is why they are here.
+    const NO_COMPOSER_PANES: [(&str, &str); 6] = [
+        (
+            "model-menu",
+            include_str!("../../../fixtures/panes/no-composer/model-menu.txt"),
+        ),
+        (
+            "permission-prompt",
+            include_str!("../../../fixtures/panes/no-composer/permission-prompt.txt"),
+        ),
+        (
+            "plain-shell",
+            include_str!("../../../fixtures/panes/no-composer/plain-shell.txt"),
+        ),
+        (
+            "rewind-menu",
+            include_str!("../../../fixtures/panes/no-composer/rewind-menu.txt"),
+        ),
+        (
+            "status-view",
+            include_str!("../../../fixtures/panes/no-composer/status-view.txt"),
+        ),
+        (
+            "trust-dialog",
+            include_str!("../../../fixtures/panes/no-composer/trust-dialog.txt"),
+        ),
+    ];
 
-    const IDLE_PANE: &str = "\
-❯
-────────────────────────────────────────
-  ⏸ manual mode on · ? for shortcuts · ← for agents                    ● high · /effort";
+    /// Verbatim from `tmux capture-pane -p -J` against a live permission
+    /// prompt on claude 2.1.232.
+    const PERMISSION_PANE: &str =
+        include_str!("../../../fixtures/panes/no-composer/permission-prompt.txt");
+
+    /// A composer with nothing typed into it, manual mode, one subagent.
+    const IDLE_PANE: &str = include_str!("../../../fixtures/panes/composer/manual-shortcuts.txt");
+
+    #[test]
+    fn every_captured_composer_authorises_a_send() {
+        for (name, pane) in COMPOSER_PANES {
+            assert_eq!(
+                PromptPresence::InputBox.find_match(pane, None).as_deref(),
+                Some("composer"),
+                "{name} is a live composer and must be typable"
+            );
+        }
+    }
+
+    #[test]
+    fn every_captured_pane_without_a_composer_is_refused() {
+        for (name, pane) in NO_COMPOSER_PANES {
+            assert!(
+                PromptPresence::InputBox.find_match(pane, None).is_none(),
+                "{name} has no composer to type into"
+            );
+        }
+    }
+
+    /// The footer a live session shows once a subagent exists: the shift+tab
+    /// cycle hint takes the room `? for shortcuts` had, and the agent list
+    /// counts instead of inviting. Neither hint string is anywhere on the pane
+    /// — asserted, because that is what makes it a composer no needle can find
+    /// — and it is a composer all the same.
+    #[test]
+    fn a_composer_whose_footer_offers_no_hint_text_is_still_a_composer() {
+        const PANE: &str = include_str!("../../../fixtures/panes/composer/bypass-agent-count.txt");
+        assert!(!PANE.contains("for shortcuts"), "no shortcuts hint here");
+        assert!(
+            !PANE.contains("for agents"),
+            "the agent list counts instead"
+        );
+        assert_eq!(
+            PromptPresence::InputBox.find_match(PANE, None).as_deref(),
+            Some("composer")
+        );
+    }
+
+    /// A marker on its own authorises nothing, on the screens that really
+    /// offer one.
+    ///
+    /// `❯` is Claude's selection marker as much as its prompt marker: it
+    /// stands on `1. Yes` in the permission prompt, on the highlighted row of
+    /// the model menu, on `(current)` in the rewind menu, on the answer the
+    /// trust dialog wants — and a shell prints one wherever it is told to.
+    /// Every no-composer capture carries one, asserted here so the refusals
+    /// below are about the marker being unaccompanied rather than about the
+    /// panes being empty.
+    #[test]
+    fn a_prompt_marker_without_a_rule_over_it_authorises_nothing() {
+        for (name, pane) in NO_COMPOSER_PANES {
+            assert!(
+                pane.contains(PROMPT_GLYPH),
+                "{name} must offer a marker, or it proves nothing here"
+            );
+            assert!(
+                PromptPresence::InputBox.find_match(pane, None).is_none(),
+                "{name} offers a marker and no composer"
+            );
+        }
+    }
+
+    /// A composer somebody wrote *about* is not a composer that is there.
+    ///
+    /// Agents print captured panes into their own output and Claude indents
+    /// tool results, so a quoted box arrives on screen indented — under, in
+    /// this frame, a model menu that owns the keyboard and a marker of its
+    /// own. Column zero is what tells the two apart.
+    #[test]
+    fn a_quoted_composer_in_an_agents_output_authorises_nothing() {
+        const QUOTED: &str = "\
+⏺ Bash(cat fixtures/panes/composer/narrow-3col.txt)
+  ⎿
+     ───
+     ❯
+     ───
+
+  Select model
+    1. Default (recommended)
+  ❯ 2. Opus";
+        assert!(
+            QUOTED.contains("───\n     ❯"),
+            "the quoted box has to be in there, or this proves nothing"
+        );
+        assert!(PromptPresence::InputBox.find_match(QUOTED, None).is_none());
+    }
+
+    /// A composer in a pane too short to hold its own box: the opening rule is
+    /// clipped away, the prompt row is at the top, and the closing rule sits
+    /// directly below it.
+    ///
+    /// This is the pane that separates "the rule above" from "a rule anywhere
+    /// next to it". A closing rule is not evidence — it is where the box ends,
+    /// and prompt text wraps, so on any composer holding more than one line it
+    /// is rows away from the marker. The row above is where the box opens, and
+    /// it is the only row that answers.
+    #[test]
+    fn a_closing_rule_below_the_prompt_row_is_not_a_composer() {
+        const PANE: &str =
+            include_str!("../../../fixtures/panes/bounds/short-pane-top-rule-clipped.txt");
+        let mut rows = PANE.lines();
+        assert!(
+            is_prompt_row(rows.next().unwrap_or_default()),
+            "the prompt row is the top row of the capture"
+        );
+        assert!(
+            is_rule_row(rows.next().unwrap_or_default()),
+            "and a rule sits directly below it"
+        );
+        assert!(PromptPresence::InputBox.find_match(PANE, None).is_none());
+    }
+
+    /// A composer holding more text than its pane is tall: the top rule has
+    /// scrolled off, so the prompt row is the first row on screen with nothing
+    /// above it to stand on, and the send is refused.
+    ///
+    /// Refusal is the direction to fail in, and this pane is the reason to
+    /// leave it that way. A first row beginning with the marker is also what a
+    /// shell that printed a `❯` looks like and what a transcript scrolled to
+    /// an echoed prompt looks like, so authorising row 0 on its own would type
+    /// into both. The footer offers no hint text at this size either, so there
+    /// is nothing else on the pane that says composer.
+    #[test]
+    fn a_composer_taller_than_its_pane_has_no_rule_to_stand_on() {
+        const PANE: &str =
+            include_str!("../../../fixtures/panes/bounds/tall-composer-top-rule-offscreen.txt");
+        assert!(
+            PANE.starts_with(PROMPT_GLYPH),
+            "the prompt row is the top row of the capture"
+        );
+        assert!(!PANE.contains("for shortcuts") && !PANE.contains("for agents"));
+        assert!(PromptPresence::InputBox.find_match(PANE, None).is_none());
+    }
+
+    /// The operator's escape hatch, on both routes it arrives by: handed to
+    /// `find_match` directly, and — the way the daemon does it — as the
+    /// `AnyOf` that replaces the variant outright.
+    #[test]
+    fn configured_needles_still_decide_the_composer() {
+        let literal = ["⏸ manual mode on".to_string()];
+        assert_eq!(
+            PromptPresence::InputBox
+                .find_match(IDLE_PANE, Some(&literal))
+                .as_deref(),
+            Some("⏸manualmodeon")
+        );
+        assert!(PromptPresence::InputBox
+            .find_match(IDLE_PANE, Some(&["not on this screen".to_string()]))
+            .is_none());
+        assert_eq!(
+            PromptPresence::AnyOf {
+                needles: vec!["⏸ manual mode on".to_string()]
+            }
+            .find_match(IDLE_PANE, None)
+            .as_deref(),
+            Some("⏸manualmodeon")
+        );
+        assert!(PromptPresence::AnyOf {
+            needles: vec!["not on this screen".to_string()]
+        }
+        .find_match(IDLE_PANE, None)
+        .is_none());
+    }
 
     #[test]
     fn permission_prompt_detected_on_real_pane() {
@@ -836,18 +1161,11 @@ mod tests {
 
     // -------------------------------------------------------- prompt identity
 
-    /// The same permission prompt, one command later. Verbatim shape from
-    /// claude 2.1.220; only the command and the path differ.
-    const SECOND_PERMISSION_PANE: &str = "\
- Bash command
-   touch /private/tmp/ccprobe_d.txt
-   Create empty file
-
- Do you want to proceed?
- ❯ 1. Yes
-   2. Yes, and always allow access to tmp/ from this project
-   3. No
- Esc to cancel · Tab to amend · ctrl+e to explain";
+    /// The same permission prompt, one command later: same wording, same
+    /// options, same footer, a different file.
+    fn second_permission_pane() -> String {
+        PERMISSION_PANE.replace("ccprobe_x", "ccprobe_d")
+    }
 
     #[test]
     fn a_fingerprint_matches_its_own_prompt_and_no_other() {
@@ -857,7 +1175,7 @@ mod tests {
         // The failure this guards against: a *different* prompt, same wording,
         // same options. Answering it with the previous card would type into it.
         assert!(
-            !taken.still_on_screen(SECOND_PERMISSION_PANE),
+            !taken.still_on_screen(&second_permission_pane()),
             "two different prompts must not share an identity"
         );
         // And a pane with no prompt at all proves nothing, so it never passes.
@@ -884,7 +1202,7 @@ mod tests {
         let taken = prompt_fingerprint(PERMISSION_PANE, "doyouwanttoproceed").unwrap();
         let moved = PERMISSION_PANE
             .replace(" ❯ 1. Yes", "   1. Yes")
-            .replace("   3. No", " ❯ 3. No");
+            .replace("   2. No", " ❯ 2. No");
         assert!(!taken.still_on_screen(&moved));
     }
 

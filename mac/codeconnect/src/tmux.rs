@@ -354,20 +354,206 @@ pub fn capture_visible_pane(name: &str) -> Result<String> {
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
 }
 
-/// Whether the pane's cursor is visible — tmux's own record of the terminal's
-/// DECTCEM state, which is the structural answer to "who has the keyboard".
+/// Who a pane's keystrokes reach.
 ///
-/// **Measured, and better than any string.** Claude's composer keeps a visible
-/// cursor while idle, while a turn streams, and after it ends (327 consecutive
-/// samples through a live turn, not one of them hidden). Every view it opens
-/// hides it — including the one that leaves the composer *drawn* underneath and
-/// takes no keys, where the composer-presence needle matches and lies. Reading
-/// the pane's text for a view's dismissal hint would work too, until an agent
-/// wrote that hint into its own output; the cursor cannot be spelled.
-pub fn cursor_is_visible(name: &str) -> Result<bool> {
-    let out = run(&["display", "-p", "-t", &target_pane(name), "#{cursor_flag}"])?
-        .ok_or_else(|| anyhow::anyhow!("tmux display cursor_flag failed for {name}"))?;
-    Ok(out.trim() == "1")
+/// Three states rather than a bool, because the two ways of losing the
+/// keyboard need different things from the person at the Mac and the reason
+/// travels to the phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyboard {
+    /// The program in the pane is receiving keys.
+    Program,
+    /// A view Claude opened has them, and the pane's cursor is hidden.
+    View,
+    /// tmux itself has them: the pane is in one of tmux's own modes, which is
+    /// where the mouse wheel over the transcript puts it.
+    Scrollback(TmuxMode),
+}
+
+/// Which of tmux's modes is holding the pane, to the only resolution any
+/// decision here needs: a bare scroll position, or something else.
+///
+/// The distinction exists because they are not the same kind of thing. A
+/// scroll position is where the wheel leaves a pane, it is nobody's question,
+/// and leaving it loses nothing. Every other mode is a thing the person at the
+/// Mac opened and is looking at — and typing into one answers a question they
+/// never saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmuxMode {
+    /// Exactly one mode is on the pane and it is `copy-mode`: a scroll
+    /// position, and nothing under it.
+    CopyMode,
+    /// Anything else — a mode that is not copy-mode, or a copy-mode with
+    /// another mode underneath it.
+    Other,
+}
+
+impl Keyboard {
+    /// Is the program in the pane the thing that will receive these keys?
+    pub fn reaches_the_program(self) -> bool {
+        matches!(self, Keyboard::Program)
+    }
+}
+
+/// Who has the pane's keyboard: the three facts that settle it, read together
+/// in one question so they describe one moment.
+///
+/// **The cursor.** tmux's own record of the terminal's DECTCEM state. Claude's
+/// composer keeps a visible cursor while idle, while a turn streams, and after
+/// it ends (327 consecutive samples through a live turn, not one of them
+/// hidden). Every view it opens hides it — including the one that leaves the
+/// composer *drawn* underneath and takes no keys, where the composer-presence
+/// check matches and lies. Reading the pane's text for a view's dismissal hint
+/// would work too, until an agent wrote that hint into its own output; the
+/// cursor cannot be spelled.
+///
+/// **The mode stack.** A visible cursor is not enough on its own. A pane in
+/// one of tmux's modes routes every key to that mode's table instead of to the
+/// program, and it does so with `cursor_flag` still at 1: measured on claude
+/// 2.1.232 in copy-mode, `send-keys -l` exits 0, the text never reaches the
+/// composer, and it is still absent after leaving the mode. This is the
+/// ordinary state of somebody reading their own session — [`render_server_conf`]
+/// turns the mouse on, and the wheel over the inline transcript enters
+/// copy-mode.
+///
+/// `#{pane_in_mode}` **counts** the modes stacked on the pane rather than
+/// flagging one, and several can be on at once (measured on tmux 3.7b: a pane
+/// under `choose-tree` answers 1, and 2 with copy-mode above it). Zero is the
+/// only value that means the program is receiving keys, so any non-zero count
+/// is scrollback: copy-mode, clock-mode and tree-mode each swallow keystrokes.
+///
+/// **The mode's name**, because a count cannot say *what* is holding the pane
+/// and only one of the answers may be left without asking. `#{pane_mode}`
+/// names the mode on **top** of the stack (measured on tmux 3.7b: `copy-mode`,
+/// `clock-mode`, `tree-mode` for `choose-tree`, `options-mode` for
+/// `customize-mode`, `buffer-mode` for `choose-buffer`, `view-mode` for output
+/// tmux prints into a pane — not an exhaustive list, and it does not need to
+/// be: one name is accepted and everything else is refused) — so the name
+/// alone would call a copy-mode stacked over a tree-mode a bare scroll
+/// position. The count is what rules that out, which is why both are read and
+/// only `1` with `copy-mode` is [`TmuxMode::CopyMode`].
+///
+/// The three fields are read with separators and split, never concatenated:
+/// `1` and `10` cannot be told from `11` and `0` once they are one string. The
+/// mode is asked for through `#{?pane_mode,…,none}` because tmux renders it
+/// **empty** when no mode is up, and an empty last field is a field that
+/// vanishes into the trim — `1 0 ` and `1 0` are the same string.
+///
+/// Older servers land safely, and it is the *count* that carries them rather
+/// than the name: `pane_mode` has existed since tmux 2.5, but `pane_in_mode`
+/// was a bool until 2.8 and became a stack count in 2.9. A 2.8 pane could hold
+/// only one mode, so its `1` genuinely is a lone mode and the pair still means
+/// here what it says.
+pub fn who_has_the_keyboard(name: &str) -> Result<Keyboard> {
+    let out = run(&["display", "-p", "-t", &target_pane(name), KEYBOARD_FORMAT])?
+        .ok_or_else(|| anyhow::anyhow!("tmux display of the keyboard state failed for {name}"))?;
+    read_keyboard(&out).with_context(|| format!("reading {name}'s keyboard state"))
+}
+
+/// The one question the keyboard state is read with. Shared so a test driving
+/// its own tmux server reads the pane the same way the daemon reads the shared
+/// one, rather than keeping a second, drifting copy of the format.
+pub(crate) const KEYBOARD_FORMAT: &str =
+    "#{cursor_flag} #{pane_in_mode} #{?pane_mode,#{pane_mode},none}";
+
+/// The reply, read. Split out from the spawn so every shape tmux can answer
+/// with is exercisable without one.
+///
+/// **A reply that is not exactly three fields is a look that failed, and a look
+/// that failed is a refusal** — never a guess about who is holding the
+/// keyboard. That is not hypothetical: `display -p` against a pane that does
+/// not exist answers the separators with nothing between them and exits 0
+/// (measured: `"  none"`), so nothing upstream catches it and the parse is the
+/// only thing standing there.
+pub(crate) fn read_keyboard(reply: &str) -> Result<Keyboard> {
+    let reply = reply.trim();
+    let mut fields = reply.split(' ');
+    let (Some(cursor), Some(modes), Some(mode), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(anyhow::anyhow!(
+            "tmux answered {reply:?}, which is not the three fields that were asked for"
+        ));
+    };
+    let modes: u32 = modes
+        .parse()
+        .map_err(|_| anyhow::anyhow!("tmux answered {modes:?} as the mode count"))?;
+    Ok(match (cursor, modes, mode) {
+        // A mode intercepts keys whatever the cursor is doing, and leaving one
+        // is a different act from dismissing a view, so it answers first. One
+        // mode named `copy-mode` is a scroll position; a deeper stack has
+        // something under it, and every other name is a view of its own.
+        (_, 1, "copy-mode") => Keyboard::Scrollback(TmuxMode::CopyMode),
+        (_, 1.., _) => Keyboard::Scrollback(TmuxMode::Other),
+        ("1", 0, _) => Keyboard::Program,
+        (_, 0, _) => Keyboard::View,
+    })
+}
+
+/// Leave the pane's copy-mode, so the next keystroke reaches the program again.
+///
+/// `send-keys -X cancel` rather than `copy-mode -q`, and the difference is the
+/// whole safety of doing this unasked. Measured on tmux 3.7b against a live
+/// pane:
+///
+///   * `-X cancel` pops **exactly one** mode — a copy-mode over a `choose-tree`
+///     goes from 2 to 1, leaving the tree the person at the Mac opened. The
+///     same pane under `copy-mode -q` goes to **0**: it flattens the stack.
+///   * `-X cancel` refuses the modes that are not copy-mode's own — clock-mode,
+///     tree-mode, options-mode and buffer-mode each answer `not in a mode` and
+///     exit 1, **untouched**. `copy-mode -q` clears a clock-mode as readily as
+///     a scroll position.
+///   * against a pane in no mode at all it exits 1 with `not in a mode` and
+///     types nothing: the literal word `cancel` never reaches the program.
+///     That is what makes it safe on the losing side of the race below —
+///     `copy-mode -q` would instead succeed silently.
+///   * it does not depend on `mode-keys`, which the `Escape` sent elsewhere in
+///     this program does: under `mode-keys vi` — which tmux picks by itself
+///     from `$EDITOR` — Escape is `clear-selection` and leaves the pane in the
+///     mode, where `-X cancel` names the operation instead of a key for it.
+///
+/// So the guard in front of this decides *whether* to leave a mode, and this
+/// command narrows that decision without replacing it — **with one exception**.
+/// `view-mode`, which is what tmux pushes to show output in a pane (the stock
+/// `prefix ?` binding does), shares copy-mode's command table, so `-X cancel`
+/// pops that too. Nothing ever points this at one: [`read_keyboard`] calls
+/// view-mode `Other` and the send refuses. What is left is the few
+/// milliseconds between that look and this call, and the most that can be
+/// taken in them is one view-mode pushed inside the window — after which the
+/// look that follows finds the copy-mode still there and refuses, so nothing
+/// is typed.
+///
+/// The result is reported but nothing is concluded from it: what matters is
+/// the state of the pane afterwards, which the caller re-reads. A tmux that
+/// exits 0 without leaving the mode and one that exits 1 having left it are
+/// both answered by looking.
+pub fn leave_copy_mode(name: &str) -> Result<(), TmuxError> {
+    let target = target_pane(name);
+    run_tmux(
+        base()
+            .map_err(|err| TmuxError::Spawn {
+                what: "send-keys -X cancel".into(),
+                source: std::io::Error::other(err.to_string()),
+            })?
+            .args(leave_copy_mode_args(&target)),
+        OPERATION_DEADLINE,
+        "send-keys -X cancel",
+    )
+    .map(|_| ())
+}
+
+/// That command as arguments, so a test driving its own tmux server runs the
+/// one that ships rather than one that resembles it.
+///
+/// The order is part of the command, not a style: `cancel` is where tmux stops
+/// reading flags, so a `-t` written after it is not the target. Measured on
+/// tmux 3.7b, `send-keys -X cancel -t <pane>` against a pane in copy-mode
+/// **exits 0 and leaves the mode standing**. Nothing unsafe follows from that
+/// — the look after the exit sees the mode and refuses — but it would switch
+/// this off for every send while reporting success, which is why the argv is
+/// written once, here, and run against a real pane by the tests.
+pub(crate) fn leave_copy_mode_args(target: &str) -> [&str; 5] {
+    ["send-keys", "-t", target, "-X", "cancel"]
 }
 
 /// Type text literally. `-l` stops tmux from interpreting the text as key names,
@@ -478,6 +664,90 @@ mod tests {
         // not tell". Callers get an error instead of a confident `false`.
         let unknown = SessionPresence::Unknown("permission denied".into());
         assert!(matches!(unknown, SessionPresence::Unknown(ref why) if why.contains("denied")));
+    }
+
+    /// Every reply tmux really gives, and what each one means. Measured on
+    /// tmux 3.7b against a live pane: no mode answers `0` with an empty name,
+    /// copy-mode, clock-mode, `choose-tree` and `customize-mode` each answer
+    /// `1` — named `copy-mode`, `clock-mode`, `tree-mode` and `options-mode` —
+    /// and stacking copy-mode on `choose-tree` answers `2`, still named
+    /// `copy-mode`. The count is a count and the name is the **top** of the
+    /// stack, so only the two together say "a scroll position and nothing
+    /// under it".
+    #[test]
+    fn the_keyboard_reply_is_read_by_what_tmux_actually_answers() {
+        for (reply, expected) in [
+            ("1 0 none", Keyboard::Program),
+            // A trailing newline is what a real reply carries.
+            ("1 0 none\n", Keyboard::Program),
+            ("0 0 none", Keyboard::View),
+            // The wheel's own state, and the only one that may be left unasked.
+            ("1 1 copy-mode", Keyboard::Scrollback(TmuxMode::CopyMode)),
+            // A hidden cursor changes nothing: a mode holds the keyboard
+            // whatever the program under it is drawing.
+            ("0 1 copy-mode", Keyboard::Scrollback(TmuxMode::CopyMode)),
+            // Modes the person at the Mac opened, which are never popped for
+            // them. `clock-mode` answers `1` exactly as copy-mode does — the
+            // name is the only thing that separates them.
+            ("1 1 clock-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            ("1 1 tree-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            ("1 1 options-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            ("1 1 buffer-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            // `view-mode` is the one that shares copy-mode's command table, so
+            // `send-keys -X cancel` would pop it. It is refused here instead:
+            // tmux pushes it to show output — the stock `prefix ?` does — and
+            // that is a thing on the screen to read, not a scroll position.
+            ("1 1 view-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            // copy-mode over choose-tree: the name says `copy-mode` and the
+            // count is what refuses it. This is the stack that a name-only
+            // reading would have flattened.
+            ("1 2 copy-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            ("1 42 copy-mode", Keyboard::Scrollback(TmuxMode::Other)),
+            (
+                "1 4294967295 copy-mode",
+                Keyboard::Scrollback(TmuxMode::Other),
+            ),
+            // A tmux too old to know `#{pane_mode}` renders it empty, so the
+            // format's substitution answers `none` and the mode is left to the
+            // person at the Mac, exactly as before this could be left at all.
+            ("1 1 none", Keyboard::Scrollback(TmuxMode::Other)),
+        ] {
+            assert_eq!(
+                read_keyboard(reply).unwrap(),
+                expected,
+                "tmux answering {reply:?}"
+            );
+        }
+    }
+
+    /// A malformed reply is an error, and never a guess. The first two are the
+    /// ones that matter: `display -p` against a pane that does not exist
+    /// answers the separators with nothing between them and **exits 0**
+    /// (measured on tmux 3.7b: `"  none"`, which trims to a bare `"none"`), so
+    /// this parse is the only thing between a vanished session and a confident
+    /// answer about its keyboard.
+    #[test]
+    fn a_reply_that_is_not_three_fields_is_an_error_and_never_a_guess() {
+        for reply in [
+            "  none",
+            "none",
+            " ",
+            "",
+            "1",
+            "1 0",
+            " 0 none",
+            // Two spaces are an empty field, and which of them was asked for
+            // is not something to assume.
+            "1  0 copy-mode",
+            "1 0 none extra",
+            "1 x none",
+            "1 -1 none",
+        ] {
+            assert!(
+                read_keyboard(reply).is_err(),
+                "tmux answering {reply:?} says nothing about who has the keyboard"
+            );
+        }
     }
 
     #[test]

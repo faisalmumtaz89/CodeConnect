@@ -61,6 +61,33 @@ fi
 
 session_ref="$existing"
 workdir=""
+
+# Is Claude's composer on this pane?
+#
+# The box, which is what the daemon's own presence check reads: a row of
+# box-drawing horizontals with the `❯` prompt row directly beneath it, both
+# starting at column 0. Barrier and daemon therefore agree on what a composer
+# is, and the gauntlet cannot start on a screen production would refuse.
+#
+# The footer hints cannot carry this. `? for shortcuts` is dropped the moment
+# the shift+tab mode hint needs the room, and `← for agents` becomes
+# `← 1 agent` once a subagent exists — so a barrier keyed on them spends its
+# whole budget on a perfectly live composer, and `case` matching nothing is a
+# success, so `set -e` never sees it: the gauntlet starts on a wall-clock guess
+# and the scenarios that check the composer report `skipped`.
+#
+# awk over literal byte sequences rather than a `grep` pipeline: this runs on
+# whatever grep and locale the operator has, and `[[:space:]]` against a
+# no-break space is not the same answer everywhere.
+composer_is_drawn() {
+    printf '%s\n' "$1" | awk '
+        /^(─|━|═)+[ \t]*$/ { rule = 1; next }
+        /^❯/ && rule       { found = 1; exit }
+                           { rule = 0 }
+        END                { exit found ? 0 : 1 }
+    '
+}
+
 # The trap exists BEFORE anything is spawned: a failure after a spawn but
 # before a later trap would leak the driver server, the session, and the
 # workdir. Everything it cleans is guarded on being set, so installing it
@@ -143,11 +170,11 @@ if [ -z "$session_ref" ]; then
                 sleep 0.3
                 "$tmux_bin" -L codeconnect send-keys -t "=$session_ref:" Enter
                 ;;
-            *"for agents"*|*"for shortcuts"*)
-                printf ' ready\n'
-                break
-                ;;
         esac
+        if composer_is_drawn "$pane"; then
+            printf ' ready\n'
+            break
+        fi
         printf '.'
         sleep 1
     done

@@ -114,14 +114,78 @@ is refused with a reason rather than typed on a guess. A free-text takeover is
 exempt: it is not an answer to a prompt at all, and its interlock is the
 composer being ready — which a permission prompt on screen already fails.
 
+**The composer is recognised by its box, not by its footer.** Claude draws it as
+a rule of box-drawing horizontals, a `❯` prompt row, a closing rule and a
+footer, and the presence check looks for the prompt row directly under a rule.
+The footer copy cannot carry it: `? for shortcuts` is dropped as soon as the
+shift+tab mode hint needs the room, and `← for agents` becomes `← 1 agent` once
+a subagent exists, so a session that types perfectly well shows neither string.
+A bare `❯` cannot carry it either — it opens the transcript echo of every
+submitted prompt and marks the selected row of every menu — and only under a
+rule does it mean "type here". The captures both halves are measured against
+are in `fixtures/panes/`.
+
 **A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
-check has a second half: the composer counts as ready only if the input-box
-needle matches *and* the pane's cursor is visible (`#{cursor_flag}`, tmux's
-record of the terminal's DECTCEM state). Measured: submitting `/status` while a
-turn is running leaves Claude's Settings view drawn **above** the composer box
-when the turn ends — the needle matches, typed text never appears, and Enter
-does nothing. Without the second half the interlock authorises keys into a pane
-that cannot receive them and reports them sent.
+check has a second half: the composer counts as ready only if its box is on
+screen *and* tmux says the keyboard reaches the program. That is three fields
+off one `display` — `#{cursor_flag}`, tmux's record of the terminal's DECTCEM
+state; `#{pane_in_mode}`, the number of tmux modes stacked on the pane; and
+`#{pane_mode}`, the name of the one on top — and it has to be a visible cursor
+with a mode count of exactly zero.
+
+Both halves are measured, and each catches a different way of losing the
+keyboard. Submitting `/status` while a turn is running leaves Claude's Settings
+view drawn **above** the composer box when the turn ends: the box is there, the
+cursor is hidden, typed text never appears and Enter does nothing. And a pane
+in tmux's copy-mode — where the mouse wheel over the inline transcript puts it,
+since the daemon's tmux config turns the mouse on — keeps `cursor_flag` at 1
+while routing every key to tmux's own mode table: `send-keys` exits 0 and the
+text is never delivered. Without the second half the interlock authorises keys
+into a pane that cannot receive them and reports them sent.
+
+**A scroll position is left by the send itself.** A prompt arriving from the
+phone is the intent to type, and where the pane happens to be scrolled to is a
+view of history rather than a question: so when the keyboard is held by exactly
+one mode, that mode is `copy-mode`, and the composer is already drawn on the
+capture just taken, the daemon leaves the mode and types, as if the Mac had
+never been scrolled. It happens inside the send that was already authorised —
+the same authority as the keystroke it clears the way for — and the full check
+then runs again on a fresh capture and a fresh keyboard read. If the composer
+is gone on *that* look, or the keyboard is still not the program's, the send is
+refused with nothing typed.
+
+The composer has to be on screen *before* the mode is touched because this is
+the one place the daemon changes what the Mac is showing without being asked
+to, and it should not do that for a send it was never going to complete. The
+check is free and it cannot cost a send: `capture-pane` reports the live screen
+whether or not the pane is scrolled back — measured at every scroll depth, and
+byte-identical either side of the exit — so it says the same thing before and
+after. The clock is checked the same way: with no room left for the exit, the
+second look *and* the keystrokes, nothing is touched.
+
+Only that one shape is left. `#{pane_mode}` names the mode on **top** of the
+stack, so it cannot on its own tell a bare scroll position from a `copy-mode`
+with somebody's `choose-tree` underneath; the count is what rules that out.
+Every other mode — `clock-mode`, `tree-mode`, `options-mode`, `view-mode`,
+`buffer-mode`, and any stack at all — is something the person at the Mac opened
+and is looking at, and popping one would take their screen away and answer a
+question they never saw. Those refuse exactly as they always have.
+
+The command is `send-keys -X cancel` rather than `copy-mode -q` for the same
+reason: measured on tmux 3.7b, it pops exactly one mode, refuses clock-, tree-,
+options- and buffer-mode with `not in a mode`, types nothing when the pane is
+in no mode at all, and does not depend on `mode-keys` — where `copy-mode -q`
+flattens the whole stack and clears a clock-mode just as readily. Its one
+uncovered edge is `view-mode`, which shares copy-mode's command table: nothing
+ever aims at one, but a `view-mode` pushed in the milliseconds between the look
+and the command would be popped by it, and then the look afterwards refuses.
+Older servers land on the safe side by construction — `#{pane_in_mode}` was a
+bool before tmux 2.9, and a pane that could hold only one mode makes its `1`
+mean exactly what this reads it as.
+
+The refusals name their cause, because the remedies differ: a view Claude
+opened is dismissed, and a mode tmux is holding is left with `q` — one press
+per mode, so a stack takes one each.
 
 The signal is the cursor rather than the view's `Esc to cancel` hint because a
 string is something an agent can write into its own output: a text rule would
@@ -838,7 +902,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
 | `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. |
 | `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
-| `input_box_needles` | built-in | Whitespace-insensitive needles proving the composer is ready. |
+| `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Show tmux's status bar inside the session. |
@@ -985,7 +1049,7 @@ soak/run.sh                       # the live gauntlet, against a real session
 
 The daemon's own tests drive a **fake supervisor** over a screen the test
 controls: it makes its decisions with the same `protocol::ipc` functions the real
-supervisor calls (presence needle, then prompt fingerprint), so the interlock is
+supervisor calls (prompt presence, then prompt fingerprint), so the interlock is
 exercised rather than re-implemented. Its one addition is a split screen —
 scrollback is returned only for a capture that did not ask for the visible pane,
 which is how a test can tell "read the screen" from "read the history".

@@ -1,0 +1,30 @@
+│                                                    │ ─────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                  │
+│                      ▝▜█████▛▘                     │ Subagent forking is now on by default: a `… │
+│                        ▘▘ ▝▝                       │ Type `@` in the prompt to mention another … │
+│      Fable 5 with high effort · Claude Max ·       │ `SendMessage` now delivers to a bare name … │
+│      operator99@example.com's Organization         │ /release-notes for more                     │
+│              /…/scratchpad/ccfix-proj              │                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Run the bash command: touch /private/tmp/ccprobe_x.txt                                            
+
+⏺ Bash(touch /private/tmp/ccprobe_x.txt)                                                            
+  ⎿  Waiting…                                                                                     
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command                                                                                       
+                                                 
+   touch /private/tmp/ccprobe_x.txt
+   Create empty file ccprobe_x.txt in /private/tmp
+
+ Permission rule Bash requires confirmation for this command.
+ /permissions to update rules
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain
+
