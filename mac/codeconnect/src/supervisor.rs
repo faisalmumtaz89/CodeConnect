@@ -474,7 +474,57 @@ fn send_text(
     // readiness has not been established, and "we could not tell" is not
     // establishment. A pane's text cannot say who has the keyboard; see the
     // note above `recover_composer`.
-    let (pane, keyboard) = match look_at_pane(&args.tmux_session) {
+    let (mut pane, mut keyboard) = match look_at_pane(&args.tmux_session) {
+        Ok(look) => look,
+        Err(err) => {
+            let reason = format!("could not read the pane: {err:#}");
+            log_line(args, &format!("refused: {reason}"));
+            return SupervisorResult::Refused { reason };
+        }
+    };
+
+    // The two keystrokes and the settle between them. Computed here because
+    // the exit below has to know what it is making room for, and checked
+    // again after the gates because time passes in between.
+    let actuation_worst = KEY_WORST
+        + if submit {
+            Duration::from_millis(config.send_keys_delay_ms) + KEY_WORST
+        } else {
+            Duration::ZERO
+        };
+
+    // A pane parked on a scroll position is left here, by us, and the send
+    // goes on as if it had never been scrolled.
+    //
+    // The clock is the other half of the condition, and it is not a detail.
+    // This is the one place the daemon changes what the Mac is showing
+    // without being asked to, so it may only do so for a send it can still
+    // finish: the exit, the second look and the keystrokes all have to fit in
+    // what is left. With no room for all three, nothing is touched and the
+    // refusal below is the one that was always given — which tells the person
+    // at the Mac what to press.
+    let affordable =
+        std::time::Instant::now() + KEY_WORST + LOOK_WORST + actuation_worst <= answer_by;
+    (pane, keyboard) = match look_the_gates_run_on(
+        &target,
+        (pane, keyboard),
+        affordable,
+        &|| {
+            // Reported, never concluded from: a tmux that exits 0 without
+            // leaving the mode and one that exits 1 having left it are both
+            // answered by the look that follows. The log records both — the
+            // one unasked-for act on the Mac's screen this program performs,
+            // and the reason a refusal that comes anyway had one.
+            match tmux::leave_copy_mode(&args.tmux_session) {
+                Ok(()) => log_line(args, "left the pane's copy-mode to type"),
+                Err(err) => log_line(
+                    args,
+                    &format!("could not leave the pane's copy-mode: {err}"),
+                ),
+            }
+        },
+        &|| look_at_pane(&args.tmux_session),
+    ) {
         Ok(look) => look,
         Err(err) => {
             let reason = format!("could not read the pane: {err:#}");
@@ -491,17 +541,10 @@ fn send_text(
         }
     };
 
-    // The two keystrokes and the settle between them, affordable *before*
-    // the first one goes out: there is deliberately no stop between typing
-    // and Enter — stopping there strands staged text — so the check that
-    // keeps this request inside the daemon's window lives here, where
-    // refusing is still a refusal.
-    let actuation_worst = KEY_WORST
-        + if submit {
-            Duration::from_millis(config.send_keys_delay_ms) + KEY_WORST
-        } else {
-            Duration::ZERO
-        };
+    // Affordable *before* the first keystroke goes out: there is deliberately
+    // no stop between typing and Enter — stopping there strands staged text —
+    // so the check that keeps this request inside the daemon's window lives
+    // here, where refusing is still a refusal.
     if std::time::Instant::now() + actuation_worst > answer_by {
         let reason = format!(
             "typing needs up to {}ms and the daemon stops listening in {}ms; nothing was typed",
@@ -514,6 +557,21 @@ fn send_text(
         return SupervisorResult::Refused { reason };
     }
 
+    // **What the keyboard read above is, and is not.** It is a look, and the
+    // keys go out a few milliseconds after it — so a wheel tick in between is
+    // delivered to a mode that was not there when this was decided. Measured
+    // on tmux 3.7b: `send-keys -l` into a copy-mode **exits 0** and the text
+    // reaches the program not at all, and an `Enter` arriving during the
+    // settle below is swallowed the same way, leaving the text staged and
+    // unsubmitted. Either way this reports `Sent`.
+    //
+    // The window sits between the look and the keystroke, and the one hand
+    // able to open it is on the wheel: a scrolled pane is left and typed
+    // into rather than refused, so a wheel that keeps moving can put the
+    // mode back inside the gap. Closing it means reading the keyboard once
+    // more *after* the keys, which is what would turn `Sent` back into an
+    // observation.
+    //
     // ESC has no literal-send story that survives every tmux version; the named
     // key does.
     let session = args.tmux_session.clone();
@@ -726,11 +784,19 @@ fn recover_composer_with(
     // happened. See the note above `recover_composer`.
     //
     // A pane in tmux's scrollback is not ready either, and the response to
-    // that is the same `Escape` this pass already sends: Escape is what leaves
-    // copy-mode, so the pane comes back and the next look finds the composer.
-    // It is barely reachable — the send that precedes recovery is itself
-    // refused in scrollback — and the way in is somebody scrolling in the
-    // window between the keys going out and the first check.
+    // that is the same `Escape` this pass already sends — but only under
+    // `mode-keys emacs`, where Escape is bound to `cancel`. Measured on tmux
+    // 3.7b: under `mode-keys vi` — which tmux picks by itself when `$EDITOR`
+    // or `$VISUAL` looks like vi, and which [`tmux::render_server_conf`] does
+    // not pin — Escape is `clear-selection`, the pane stays in the mode, and
+    // this pass runs out its window and reports the composer lost.
+    //
+    // The way in is somebody scrolling between the keys going out and the
+    // first check — and the send path invites that hand closer than any
+    // other, since a scrolled pane is left and typed into rather than
+    // refused. Left as it is because the postcondition holds either way,
+    // and an Escape is what the drawn-but-dead composer needs; the send
+    // path's narrower act is [`may_leave_copy_mode`].
     let ready = |pane: &str, keyboard: tmux::Keyboard| {
         composer.find_match(pane, None).is_some() && keyboard.reaches_the_program()
     };
@@ -986,6 +1052,86 @@ fn recover_composer_with(
 // text is never delivered. Both facts come back from one `display`; see
 // [`tmux::who_has_the_keyboard`].
 
+/// May this send leave the pane's copy-mode by itself, rather than asking the
+/// person at the Mac to?
+///
+/// **Yes, for a scroll position.** A prompt arriving from the phone *is* the
+/// intent to type, there is no second reader whose place in the transcript
+/// this would take, and a scroll position is a view of history rather than a
+/// question: leaving it loses nothing that was not still in the pane's
+/// history a moment later. Refusing it made the wheel — which
+/// [`tmux::render_server_conf`]'s `mouse on` puts under every scroll at the
+/// Mac — into something that silently disabled the phone until somebody
+/// walked back to the keyboard.
+///
+/// **No, for anything else tmux is holding.** A clock-mode, a `choose-tree`,
+/// a `customize-mode` — and a copy-mode with any of them underneath — are
+/// things the person at the Mac opened and is looking at. Popping one is
+/// taking their screen away, and typing into what is underneath answers a
+/// question they never saw: the same reason [`tmux::Keyboard::View`] is
+/// refused rather than dismissed. Those keep the refusal they have always had.
+///
+/// **No, unless these keys are for the composer.** This is the one place the
+/// keyboard is asked about at all — a permission prompt is answered through a
+/// view, where the question is which prompt is on screen, not who holds the
+/// keys.
+///
+/// **No, unless the composer is already on the screen.** The capture is one
+/// the caller has already paid for, and it says the same thing either side of
+/// the exit: measured on tmux 3.7b, at every scroll depth, and against a real
+/// claude pane, `capture-pane` reports the **live** screen while a pane is
+/// scrolled back — byte-identical to the capture taken afterwards. So this can
+/// never refuse a send that the look after the exit would have authorised, and
+/// it keeps the daemon from clearing somebody's scroll position for a send
+/// that was never going to be typed: a view drawn under the mode, or a pane
+/// that is not Claude's at all. That last one is not hypothetical — every tmux
+/// call here addresses the session's *current* pane, so a second window the
+/// person at the Mac is reading `git log` in is the pane the daemon reads, and
+/// the one it would otherwise scroll to the bottom for them.
+///
+/// **What it costs when the answer is yes.** The scroll position, and — since
+/// nothing tmux reports separates these from a parked pane — a selection being
+/// dragged, the copy-mode mark, and a search being typed. Measured: buffers
+/// already copied survive, the transcript survives, and `#{pane_in_mode}` and
+/// `#{pane_mode}` read identically for every one of them.
+fn may_leave_copy_mode(target: &Target<'_>, pane: &str, keyboard: tmux::Keyboard) -> bool {
+    target.is_composer
+        && matches!(
+            keyboard,
+            tmux::Keyboard::Scrollback(tmux::TmuxMode::CopyMode)
+        )
+        && target.presence.find_match(pane, None).is_some()
+}
+
+/// The look the gates are then run against: the first one, or — where a bare
+/// scroll position was left — the one taken afterwards.
+///
+/// Over injectable steps for the same reason [`actuate_with`] is: the
+/// *ordering* is the safety property here, and the real steps address the
+/// shared tmux server, so nothing could drive this end to end without one.
+/// What a test can pin instead is every claim the ordering makes.
+///
+///   * the exit runs only when [`may_leave_copy_mode`] and the clock both say
+///     so, and it runs at most once — this never fights the person at the Mac
+///     for the pane;
+///   * the second look replaces **both** halves, so no fact survives the exit
+///     that was read before it;
+///   * a second look that fails is a refusal, exactly as the first one is.
+fn look_the_gates_run_on(
+    target: &Target<'_>,
+    first: (String, tmux::Keyboard),
+    affordable: bool,
+    leave: &dyn Fn(),
+    look_again: &dyn Fn() -> Result<(String, tmux::Keyboard)>,
+) -> Result<(String, tmux::Keyboard)> {
+    let (pane, keyboard) = first;
+    if !affordable || !may_leave_copy_mode(target, &pane, keyboard) {
+        return Ok((pane, keyboard));
+    }
+    leave();
+    look_again()
+}
+
 /// The interlock as a decision over one pane. Returns the needle that
 /// authorised the send, or the reason nothing may be typed.
 ///
@@ -1015,8 +1161,7 @@ fn authorise(
     // target can turn out to be a dead one.
     //
     // The two ways of losing it are told apart because they need different
-    // things from the person at the Mac: a view is dismissed, and scrollback
-    // is left.
+    // things: a view is dismissed, and a mode is left.
     if targets_composer {
         match keyboard {
             tmux::Keyboard::Program => {}
@@ -1027,10 +1172,22 @@ fn authorise(
                         .into(),
                 );
             }
-            tmux::Keyboard::Scrollback => {
+            // Whatever tmux is still holding at this point is the person at
+            // the Mac's to let go of. A bare scroll position may already have
+            // been left by [`may_leave_copy_mode`] — but this is also where
+            // one arrives that was never eligible for that, that the clock
+            // left no room for, that did not clear, or that was re-entered
+            // while this was being decided.
+            //
+            // The wording names the mode and not the scroll, because most of
+            // what reaches here is a clock face, a `choose-tree` or a
+            // `customize-mode`, and none of those is scrolled anywhere; and
+            // `q` leaves one mode per press, so a stack takes one each.
+            tmux::Keyboard::Scrollback(_) => {
                 return Err(
-                    "the pane on the Mac is scrolled back, so tmux has the keyboard and the \
-                     composer takes none — press q there to leave it — and nothing was typed"
+                    "tmux has the keyboard on the Mac: the pane is in one of tmux's own \
+                     modes, so the composer takes none — press q there until it clears — \
+                     and nothing was typed"
                         .into(),
                 );
             }
@@ -1159,7 +1316,7 @@ fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmux::Keyboard;
+    use crate::tmux::{Keyboard, TmuxMode};
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;
     use std::process::Command;
@@ -1544,6 +1701,12 @@ mod tests {
 ────────────────────────────────────────
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent";
 
+    /// A real capture with no composer drawn on it at all — the state where
+    /// leaving a scroll position would buy nothing, because there would be
+    /// nothing underneath to type into.
+    const NO_COMPOSER_PANE: &str =
+        include_str!("../../../fixtures/panes/no-composer/status-view.txt");
+
     /// A live composer during a turn — the state the rule must NOT catch.
     /// Its footer offers `esc to interrupt`, which is a different offer:
     /// the composer is taking keys and queues them for the next turn.
@@ -1656,8 +1819,12 @@ mod tests {
             }
         }
 
+        /// `-J` as well as `-p`, because that is what
+        /// [`tmux::capture_visible_pane`] asks for: without it a wrapped
+        /// composer row arrives split and these tests would be authorising
+        /// text the daemon never sees.
         fn pane(&self) -> String {
-            self.tmux(&["capture-pane", "-p", "-t", &self.session])
+            self.tmux(&["capture-pane", "-p", "-J", "-t", &self.session])
                 .unwrap_or_default()
         }
 
@@ -1666,28 +1833,40 @@ mod tests {
             let _ = self.tmux(&["send-keys", "-t", &self.session, "Enter"]);
         }
 
-        /// The same two fields, read the same way, as
-        /// [`tmux::who_has_the_keyboard`] reads on the shared server — which
+        /// The same question, and the same parse, as
+        /// [`tmux::who_has_the_keyboard`] puts to the shared server — which
         /// this cannot call, because it addresses `-L codeconnect` and this
-        /// server is the test's own socket.
+        /// server is the test's own socket. Only the *addressing* differs, so
+        /// only the addressing is written twice: a second reading of the reply
+        /// here would be a copy free to drift away from the one that ships.
+        /// An unreadable answer fails the test here rather than being turned
+        /// into a state. The daemon's own answer to one is a refusal, so the
+        /// tempting fallbacks are both wrong: `Program` is the most permissive
+        /// state there is and would let a broken format read as a healthy
+        /// keyboard, and `View` would pass a refusal off as the thing under
+        /// test. This is a test harness, and a tmux that cannot answer is a
+        /// test that cannot make its claim.
         fn keyboard(&self) -> tmux::Keyboard {
-            // An unreadable answer means this test's own tmux has gone, which
-            // fails the test through whatever it does next; guessing `View`
-            // here would fail it as a refusal and hide that.
-            let Some(out) = self.tmux(&[
-                "display",
-                "-p",
-                "-t",
-                &self.session,
-                "#{cursor_flag} #{pane_in_mode}",
-            ]) else {
-                return tmux::Keyboard::Program;
-            };
-            match out.trim().split_once(' ') {
-                Some((_, modes)) if modes != "0" => tmux::Keyboard::Scrollback,
-                Some(("1", _)) => tmux::Keyboard::Program,
-                _ => tmux::Keyboard::View,
-            }
+            let out = self
+                .tmux(&["display", "-p", "-t", &self.session, tmux::KEYBOARD_FORMAT])
+                .expect("this test's own tmux answered nothing about the keyboard");
+            tmux::read_keyboard(&out)
+                .unwrap_or_else(|err| panic!("tmux answered {out:?}, which is not readable: {err}"))
+        }
+
+        /// tmux's own name for the mode on top of this pane's stack.
+        fn mode(&self) -> String {
+            self.tmux(&["display", "-p", "-t", &self.session, "#{pane_mode}"])
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+
+        /// Put the pane into one of tmux's modes that is *not* copy-mode, the
+        /// way the person at the Mac would: a real tmux command against a real
+        /// pane, so what the daemon reads back is what tmux really says.
+        fn enter_mode(&self, command: &str) {
+            let _ = self.tmux(&[command, "-t", &self.session]);
         }
 
         /// tmux's own count of the modes stacked on this pane.
@@ -1702,12 +1881,20 @@ mod tests {
             let _ = self.tmux(&["copy-mode", "-t", &self.session]);
         }
 
-        /// `copy-mode -q` rather than `send-keys -X cancel`: it needs no
-        /// attached client, it is idempotent, and it pops the mode stack —
-        /// where `send-keys` against a pane already in a mode can answer
-        /// `no current client` on a server nobody is looking at.
+        /// Put the pane back in *no* mode, whatever depth it is at: the reset
+        /// a test wants between arrangements, not the act under test.
+        /// `copy-mode -q` because it is idempotent and flattens the whole
+        /// stack in one call — which is exactly why the daemon does not use
+        /// it, and why [`leave_copy_mode`] below exists beside it.
         fn leave_scrollback(&self) {
             let _ = self.tmux(&["copy-mode", "-q", "-t", &self.session]);
+        }
+
+        /// Leave one copy-mode by running the command the daemon runs. The
+        /// argv comes from [`tmux::leave_copy_mode_args`] rather than being
+        /// written out again, so what these tests measure is what ships.
+        fn leave_copy_mode(&self) {
+            let _ = self.tmux(&tmux::leave_copy_mode_args(&self.session));
         }
 
         fn send_escape(&self) {
@@ -2407,62 +2594,451 @@ means the full history gets re-read on your next message.
         }
     }
 
-    /// **A pane in tmux's scrollback takes no keys, and the refusal says so.**
+    /// Free text aimed at the composer: the target every test below sends with.
+    fn composer_target() -> Target<'static> {
+        Target {
+            presence: &PromptPresence::InputBox,
+            is_composer: true,
+        }
+    }
+
+    /// The send as `send_text` sequences it, over a pane a test owns: look,
+    /// leave a bare scroll position, look again, authorise on what is true
+    /// *now*, and type only if authorised. Typing regardless would test
+    /// nothing.
+    ///
+    /// The two decisions are the daemon's own — [`may_leave_copy_mode`] and
+    /// [`authorise`], called here, not restated — so a copy cannot agree with
+    /// the prose and disagree with the daemon. What is **not** here is the
+    /// clock: `send_text`'s budget arithmetic decides whether there is room to
+    /// do any of this, and these tests are about what happens when there is.
+    fn send_through_the_interlock(
+        tui: &FakeTui,
+        text: &str,
+    ) -> std::result::Result<String, String> {
+        let target = composer_target();
+        let (mut pane, mut keyboard) = (tui.pane(), tui.keyboard());
+        if may_leave_copy_mode(&target, &pane, keyboard) {
+            tui.leave_copy_mode();
+            (pane, keyboard) = (tui.pane(), tui.keyboard());
+        }
+        let matched = authorise(&pane, target.presence, None, target.is_composer, keyboard)?;
+        tui.type_line(text);
+        Ok(matched)
+    }
+
+    /// **A pane parked on a scroll position is left by the send itself.**
     ///
     /// Measured on claude 2.1.232: copy-mode leaves `#{cursor_flag}` at 1 while
     /// every keystroke goes to tmux's own mode table, `send-keys` still exits
-    /// 0, and the text never reaches the composer — nor afterwards, when the
-    /// mode is left. The mouse wheel over the inline transcript is what puts a
-    /// pane there, and [`tmux::render_server_conf`] turns the mouse on, so this
-    /// is the ordinary state of somebody reading their own session at the Mac.
+    /// 0, and the text never reaches the composer. The mouse wheel over the
+    /// inline transcript is what puts a pane there, and
+    /// [`tmux::render_server_conf`] turns the mouse on, so this is the ordinary
+    /// state of somebody reading their own session at the Mac — and a prompt
+    /// from the phone is the intent to type into it.
     ///
     /// Real tmux and real copy-mode, because the whole claim is about what tmux
-    /// does with a keystroke. The same send is authorised, refused, and
-    /// authorised again, and the harness's own record of what it received is
-    /// what proves the refusal saved a keystroke rather than merely returning
-    /// an `Err`.
+    /// does with a keystroke. The harness's own record of what it received is
+    /// what proves the text *arrived*, rather than that a function returned
+    /// `Ok`; `#{pane_in_mode}` at zero afterwards is what proves the mode was
+    /// left rather than typed around.
     #[test]
-    fn a_pane_in_scrollback_refuses_the_send_until_it_is_left() {
+    fn a_pane_in_copy_mode_is_left_by_the_send_that_needs_it() {
         let Some(tui) = FakeTui::start("scrollback", FAKE_TUI) else {
             eprintln!("tmux unavailable; skipping");
             return;
         };
-        // The send as the supervisor performs it: authorise, and type only if
-        // authorised. Typing regardless would test nothing.
-        let send = |text: &str| -> std::result::Result<String, String> {
-            let matched = authorise(
-                &tui.pane(),
-                &PromptPresence::InputBox,
-                None,
-                true,
-                tui.keyboard(),
-            )?;
-            tui.type_line(text);
-            Ok(matched)
-        };
 
         assert_eq!(tui.keyboard(), Keyboard::Program);
-        assert_eq!(send("BEFORE").as_deref(), Ok("composer"));
+        assert_eq!(
+            send_through_the_interlock(&tui, "BEFORE").as_deref(),
+            Ok("composer")
+        );
         assert!(tui.wait_for("[BEFORE]"), "the pane took it: {}", tui.pane());
 
         tui.enter_scrollback();
-        assert_eq!(tui.keyboard(), Keyboard::Scrollback);
-        let refused = send("SWALLOWED").expect_err("a scrolled-back pane must refuse");
-        assert!(refused.contains("scrolled back"), "{refused}");
-        assert!(refused.contains("nothing was typed"), "{refused}");
-        let during = tui.pane();
+        assert_eq!(tui.mode(), "copy-mode");
+        assert_eq!(tui.modes(), "1", "one mode, and it is the wheel's own");
+        assert_eq!(tui.keyboard(), Keyboard::Scrollback(TmuxMode::CopyMode));
+
+        assert_eq!(
+            send_through_the_interlock(&tui, "AFTER").as_deref(),
+            Ok("composer"),
+            "a scroll position is not a reason to refuse a prompt"
+        );
         assert!(
-            during.contains("[BEFORE]") && !during.contains("SWALLOWED"),
-            "the refusal has to have saved the keystroke, not merely reported one: {during}"
+            tui.wait_for("[AFTER]"),
+            "the text has to have ARRIVED, not merely been authorised: {}",
+            tui.pane()
+        );
+        assert_eq!(
+            tui.modes(),
+            "0",
+            "the mode has to be gone, not stepped around"
+        );
+        assert_eq!(tui.keyboard(), Keyboard::Program);
+        // What the exit costs is the position. The transcript above it — the
+        // thing somebody scrolls back to read — is still there.
+        assert!(
+            tui.pane().contains("[BEFORE]"),
+            "the transcript survived the exit: {}",
+            tui.pane()
+        );
+    }
+
+    /// **A mode the person at the Mac opened is never popped for a send.**
+    ///
+    /// `#{pane_mode}` names the mode on *top* of the stack, so a name alone
+    /// cannot tell a bare scroll position from a copy-mode with somebody's
+    /// `choose-tree` underneath it — and `send-keys -X cancel` would pop the
+    /// copy-mode off that stack quite happily. The count is what refuses it.
+    ///
+    /// Measured on tmux 3.7b, and the reason each of these is here: clock-mode
+    /// answers the same `1` copy-mode does and only the name separates them;
+    /// `choose-tree` is a question on the screen, and typing into what is
+    /// underneath answers one nobody saw. `customize-mode` belongs in this
+    /// list and is not driven here: it arrived in tmux 3.2, and a test that
+    /// silently does nothing on an older server is worse than one mode fewer.
+    /// Its name is covered where no tmux is needed to cover it — see
+    /// [`crate::tmux`]'s reply table.
+    #[test]
+    fn a_mode_the_mac_opened_is_refused_and_left_standing() {
+        let Some(tui) = FakeTui::start("foreignmode", FAKE_TUI) else {
+            eprintln!("tmux unavailable; skipping");
+            return;
+        };
+        assert_eq!(
+            send_through_the_interlock(&tui, "BEFORE").as_deref(),
+            Ok("composer")
+        );
+        assert!(tui.wait_for("[BEFORE]"), "the pane took it: {}", tui.pane());
+
+        for (command, name) in [("clock-mode", "clock-mode"), ("choose-tree", "tree-mode")] {
+            tui.enter_mode(command);
+            assert_eq!(tui.mode(), name, "tmux's own name for {command}");
+            assert_eq!(tui.keyboard(), Keyboard::Scrollback(TmuxMode::Other));
+            assert!(
+                !may_leave_copy_mode(&composer_target(), &tui.pane(), tui.keyboard()),
+                "{command} is not a scroll position"
+            );
+
+            let refused = send_through_the_interlock(&tui, "SWALLOWED")
+                .expect_err("a mode that is not a scroll position must refuse");
+            assert!(refused.contains("tmux has the keyboard"), "{refused}");
+            assert!(refused.contains("nothing was typed"), "{refused}");
+            assert_eq!(tui.mode(), name, "{command} must still be up");
+            assert_eq!(tui.modes(), "1", "{command} must still be up");
+            let during = tui.pane();
+            assert!(
+                during.contains("[BEFORE]") && !during.contains("SWALLOWED"),
+                "the refusal has to have saved the keystroke, not merely reported one: {during}"
+            );
+            tui.leave_scrollback();
+        }
+
+        // The stack, which is the case a name-only reading gets wrong: the
+        // top mode really is `copy-mode`, and popping it would take away a
+        // `choose-tree` that was never anybody's scroll position.
+        tui.enter_mode("choose-tree");
+        tui.enter_scrollback();
+        assert_eq!(tui.mode(), "copy-mode", "the top of the stack");
+        assert_eq!(tui.modes(), "2");
+        assert_eq!(tui.keyboard(), Keyboard::Scrollback(TmuxMode::Other));
+        let refused = send_through_the_interlock(&tui, "SWALLOWED")
+            .expect_err("a copy-mode with something under it must refuse");
+        assert!(refused.contains("nothing was typed"), "{refused}");
+        assert_eq!(
+            tui.modes(),
+            "2",
+            "neither mode may be popped: the tree is still the Mac's"
+        );
+        assert!(!tui.pane().contains("SWALLOWED"), "{}", tui.pane());
+    }
+
+    /// **A scroll position over a view is not taken, because the send was
+    /// never going to be typed.**
+    ///
+    /// The composer is read off the capture the look already paid for, and
+    /// that capture is the live screen whether the pane is scrolled or not —
+    /// so it says the same thing before the exit as after it. Checking it
+    /// first therefore costs nothing and refuses nothing that would otherwise
+    /// have succeeded, and it keeps the daemon from clearing somebody's scroll
+    /// position for a send with no composer to type into. The pane a mode is
+    /// popped in is not always Claude's: every call here addresses the
+    /// session's *current* pane, which follows the window the person at the
+    /// Mac is looking at.
+    ///
+    /// Both things are left standing: the mode, and the view under it —
+    /// dismissing that would answer a question nobody asked.
+    #[test]
+    fn a_view_under_the_scroll_position_keeps_the_mode_and_the_view() {
+        let Some(tui) = FakeTui::start("underview", FAKE_TUI) else {
+            eprintln!("tmux unavailable; skipping");
+            return;
+        };
+        tui.type_line("/dialog");
+        assert!(tui.wait_for("THE VIEW IS UP"), "{}", tui.pane());
+        assert_eq!(tui.keyboard(), Keyboard::View);
+
+        tui.enter_scrollback();
+        assert_eq!(
+            tui.keyboard(),
+            Keyboard::Scrollback(TmuxMode::CopyMode),
+            "a mode holds the keyboard whatever is drawn under it"
+        );
+        assert!(
+            !may_leave_copy_mode(&composer_target(), &tui.pane(), tui.keyboard()),
+            "no composer on the screen, so nothing is worth taking the scroll for"
         );
 
-        // `#{pane_in_mode}` back at zero before the accept half, so a stack
-        // that only partly popped reads as a failure rather than as a flake.
+        let refused =
+            send_through_the_interlock(&tui, "SWALLOWED").expect_err("no composer, no keystroke");
+        assert!(
+            refused.contains("expected prompt not on screen"),
+            "the composer's own refusal, reached without touching the pane: {refused}"
+        );
+        assert!(refused.contains("nothing was typed"), "{refused}");
+        assert_eq!(tui.modes(), "1", "the scroll position was not taken");
+        let after = tui.pane();
+        assert!(
+            after.contains("THE VIEW IS UP"),
+            "the view under it is not ours to dismiss: {after}"
+        );
+        assert!(!after.contains("SWALLOWED"), "{after}");
+    }
+
+    /// **The exit command itself, against the pane it is used on.**
+    ///
+    /// [`may_leave_copy_mode`] only ever points this at a lone copy-mode, and
+    /// on a lone copy-mode `copy-mode -q` does the same thing — so no test
+    /// above this one can tell the two commands apart. They are not the same
+    /// command, and the difference is the whole of why doing this unasked is
+    /// safe: between the look that decided and the command that acts, the
+    /// person at the Mac can open anything. This pins what tmux 3.7b really
+    /// does with each of the panes that window can produce — **including the
+    /// one it does not protect**, which is worth a failing test the day it
+    /// changes: `view-mode` shares copy-mode's command table, so a `-X cancel`
+    /// that lands on one pops it.
+    #[test]
+    fn the_exit_command_pops_one_mode_of_copy_modes_family_and_no_other() {
+        let Some(tui) = FakeTui::start("exitcmd", FAKE_TUI) else {
+            eprintln!("tmux unavailable; skipping");
+            return;
+        };
+
+        // A lone scroll position: gone, which is the whole job.
+        tui.enter_scrollback();
+        assert_eq!(tui.modes(), "1");
+        tui.leave_copy_mode();
+        assert_eq!(tui.modes(), "0", "a lone copy-mode is left");
+
+        // A copy-mode with something under it: exactly one pops, and what was
+        // underneath is still the Mac's. `copy-mode -q` answers "0" here — it
+        // flattens the stack — which is why it is not what the daemon runs.
+        tui.enter_mode("choose-tree");
+        tui.enter_scrollback();
+        assert_eq!(tui.modes(), "2");
+        tui.leave_copy_mode();
+        assert_eq!(tui.modes(), "1", "one mode pops, not the stack");
+        assert_eq!(tui.mode(), "tree-mode", "the Mac's own view survives");
         tui.leave_scrollback();
-        assert_eq!(tui.modes(), "0", "the mode stack has to be empty again");
-        assert_eq!(tui.keyboard(), Keyboard::Program);
-        assert_eq!(send("AFTER").as_deref(), Ok("composer"));
-        assert!(tui.wait_for("[AFTER]"), "the pane took it: {}", tui.pane());
+
+        // A mode that is not copy-mode's own: tmux answers `not in a mode` and
+        // changes nothing. `copy-mode -q` clears a clock-mode as readily as a
+        // scroll position, so the guard would be the only thing standing there.
+        // `clock-mode` stands for all of them here because it is as old as
+        // tmux; `options-mode` needs 3.2 to exist at all, and a step that
+        // quietly does nothing on an older server is worse than one mode
+        // fewer. Their names are covered where no tmux is needed to cover
+        // them — see [`crate::tmux`]'s reply table.
+        tui.enter_mode("clock-mode");
+        tui.leave_copy_mode();
+        assert_eq!(tui.modes(), "1", "clock-mode is untouched by the exit");
+        assert_eq!(tui.mode(), "clock-mode", "clock-mode is untouched");
+        tui.leave_scrollback();
+
+        // The exception, pinned rather than papered over. tmux pushes
+        // `view-mode` to show output — the stock `prefix ?` does — and it
+        // shares copy-mode's command table, so this pops it. Nothing points
+        // the command at one: `read_keyboard` calls view-mode `Other` and the
+        // send refuses. What is left is the few milliseconds between that look
+        // and this command, and this is the size of what can be lost in them.
+        tui.enter_mode("clock-mode");
+        assert_eq!(tui.modes(), "1");
+        tui.leave_scrollback();
+        tui.enter_scrollback();
+        let _ = tui.tmux(&["run-shell", "-t", &tui.session, "echo pushed-by-tmux"]);
+        if tui.mode() == "view-mode" {
+            assert_eq!(tui.modes(), "2", "view-mode stacks on the scroll position");
+            tui.leave_copy_mode();
+            assert_eq!(tui.modes(), "1", "one pops");
+            assert_eq!(
+                tui.mode(),
+                "copy-mode",
+                "and it is the view-mode that went, not the scroll position"
+            );
+        }
+        tui.leave_scrollback();
+
+        // And against a pane in no mode at all — the losing side of the race,
+        // where the mode cleared between the look and the command. tmux exits
+        // non-zero and types nothing: the word `cancel` never reaches the
+        // program, which the next line proves by arriving alone.
+        assert_eq!(tui.modes(), "0");
+        tui.leave_copy_mode();
+        tui.type_line("MARKER");
+        assert!(tui.wait_for("[MARKER]"), "{}", tui.pane());
+        let pane = tui.pane();
+        assert!(
+            !pane.contains("cancel"),
+            "the exit command must never be typed as text: {pane}"
+        );
+    }
+
+    /// **The ordering, which is the safety property.**
+    ///
+    /// [`look_the_gates_run_on`] decides whether the Mac's screen is touched
+    /// and which look the gates then judge. Every row states what the send
+    /// path claims: the exit happens only where it is allowed and affordable,
+    /// it happens once, the second look replaces *both* facts, and a look that
+    /// fails refuses rather than falling back on the one before it.
+    #[test]
+    fn the_gates_run_on_the_look_taken_after_the_exit_and_the_exit_runs_once() {
+        let second = || (IDLE_PANE.to_string(), Keyboard::Program);
+        // Every arrangement, and what it is entitled to do.
+        for (what, pane, keyboard, affordable, leaves) in [
+            (
+                "nothing is holding it",
+                IDLE_PANE,
+                Keyboard::Program,
+                true,
+                false,
+            ),
+            (
+                "a view is holding it",
+                IDLE_PANE,
+                Keyboard::View,
+                true,
+                false,
+            ),
+            (
+                "a mode the Mac opened",
+                IDLE_PANE,
+                Keyboard::Scrollback(TmuxMode::Other),
+                true,
+                false,
+            ),
+            (
+                "no composer to type into",
+                NO_COMPOSER_PANE,
+                Keyboard::Scrollback(TmuxMode::CopyMode),
+                true,
+                false,
+            ),
+            (
+                "no time to finish the send",
+                IDLE_PANE,
+                Keyboard::Scrollback(TmuxMode::CopyMode),
+                false,
+                false,
+            ),
+            (
+                "a bare scroll position under a drawn composer",
+                IDLE_PANE,
+                Keyboard::Scrollback(TmuxMode::CopyMode),
+                true,
+                true,
+            ),
+        ] {
+            let exits = std::cell::Cell::new(0);
+            let looks = std::cell::Cell::new(0);
+            let got = look_the_gates_run_on(
+                &composer_target(),
+                (pane.to_string(), keyboard),
+                affordable,
+                &|| exits.set(exits.get() + 1),
+                &|| {
+                    looks.set(looks.get() + 1);
+                    Ok(second())
+                },
+            )
+            .expect("a look that answered is never a refusal");
+            assert_eq!(exits.get(), usize::from(leaves), "exits for {what}");
+            assert_eq!(looks.get(), usize::from(leaves), "second looks for {what}");
+            if leaves {
+                // Both halves come from the second look, not one of each.
+                assert_eq!(got, second(), "the gates judge the pane after the exit");
+            } else {
+                assert_eq!(
+                    got,
+                    (pane.to_string(), keyboard),
+                    "nothing was touched, so nothing was re-read: {what}"
+                );
+            }
+        }
+    }
+
+    /// A second look that fails is a refusal, and never the look before it.
+    /// The pane was changed a moment ago; carrying the stale read forward
+    /// would authorise a send against a screen that no longer exists.
+    #[test]
+    fn a_second_look_that_fails_refuses_rather_than_reusing_the_first() {
+        let exits = std::cell::Cell::new(0);
+        let failed = look_the_gates_run_on(
+            &composer_target(),
+            (
+                IDLE_PANE.to_string(),
+                Keyboard::Scrollback(TmuxMode::CopyMode),
+            ),
+            true,
+            &|| exits.set(exits.get() + 1),
+            &|| Err(anyhow::anyhow!("the pane went away")),
+        );
+        assert_eq!(exits.get(), 1, "the exit still ran");
+        assert!(
+            failed.is_err(),
+            "a look that failed cannot become the look the gates use"
+        );
+    }
+
+    /// Every state the keyboard can be in, crossed with both kinds of target
+    /// and with whether the composer is on the screen at all. The table is the
+    /// point: one cell out of twelve authorises the only act in this program
+    /// that changes the Mac's screen without being asked to.
+    #[test]
+    fn only_a_bare_scroll_position_under_a_drawn_composer_may_be_left_unasked() {
+        let prompt_target = Target {
+            presence: &PromptPresence::PermissionPrompt,
+            is_composer: false,
+        };
+        for (keyboard, may) in [
+            (Keyboard::Program, false),
+            (Keyboard::View, false),
+            (Keyboard::Scrollback(TmuxMode::CopyMode), true),
+            (Keyboard::Scrollback(TmuxMode::Other), false),
+        ] {
+            assert_eq!(
+                may_leave_copy_mode(&composer_target(), IDLE_PANE, keyboard),
+                may,
+                "composer drawn, keys for the composer, with {keyboard:?}"
+            );
+            // No composer on the screen: nothing here is worth taking a scroll
+            // position for, because nothing could be typed if it were taken.
+            assert!(
+                !may_leave_copy_mode(&composer_target(), NO_COMPOSER_PANE, keyboard),
+                "no composer drawn, with {keyboard:?}"
+            );
+            // A permission prompt is answered through a view, where the
+            // question is which prompt is on screen. Nothing is left for it.
+            assert!(
+                !may_leave_copy_mode(
+                    &prompt_target,
+                    &permission_pane("touch /private/tmp/a"),
+                    keyboard
+                ),
+                "keys for a prompt with {keyboard:?}"
+            );
+        }
     }
 
     /// An ordinary line never leaves the composer, so recovery reports the
@@ -2588,6 +3164,42 @@ means the full history gets re-read on your next message.
         )
         .expect_err("a view holding the keyboard must refuse");
         assert!(refused.contains("takes no keys"), "{refused}");
+    }
+
+    /// **And tmux holding it refuses too — every kind of holding, including
+    /// the one the send path knows how to leave.**
+    ///
+    /// This is asked of [`authorise`] directly and on purpose. By the time it
+    /// runs, a bare scroll position has usually been left already, so the
+    /// tests that drive a real pane cannot reach this arm with
+    /// [`tmux::TmuxMode::CopyMode`] in hand — and that is exactly the state it
+    /// still has to refuse: an exit that exited non-zero, a mode re-entered
+    /// while the second look was being taken, a send the clock left no room
+    /// to clear. Typing into any of them is a keystroke tmux swallows and this
+    /// program reports as sent.
+    #[test]
+    fn tmux_holding_the_keyboard_refuses_the_send_whichever_mode_it_is() {
+        assert!(
+            PromptPresence::InputBox
+                .find_match(IDLE_PANE, None)
+                .is_some(),
+            "the fixture must read as a composer, or the keyboard is never asked about"
+        );
+        for mode in [TmuxMode::CopyMode, TmuxMode::Other] {
+            let refused = authorise(
+                IDLE_PANE,
+                &PromptPresence::InputBox,
+                None,
+                true,
+                Keyboard::Scrollback(mode),
+            )
+            .expect_err("a pane tmux is holding must refuse");
+            assert!(
+                refused.contains("tmux has the keyboard"),
+                "{mode:?}: {refused}"
+            );
+            assert!(refused.contains("nothing was typed"), "{mode:?}: {refused}");
+        }
     }
 
     /// The counterpart: a live composer mid-turn keeps its cursor, queues

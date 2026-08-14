@@ -127,10 +127,11 @@ are in `fixtures/panes/`.
 
 **A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
 check has a second half: the composer counts as ready only if its box is on
-screen *and* tmux says the keyboard reaches the program. That is two fields off
-one `display` — `#{cursor_flag}`, tmux's record of the terminal's DECTCEM
-state, and `#{pane_in_mode}`, the number of tmux modes stacked on the pane —
-and it has to be a visible cursor with a mode count of exactly zero.
+screen *and* tmux says the keyboard reaches the program. That is three fields
+off one `display` — `#{cursor_flag}`, tmux's record of the terminal's DECTCEM
+state; `#{pane_in_mode}`, the number of tmux modes stacked on the pane; and
+`#{pane_mode}`, the name of the one on top — and it has to be a visible cursor
+with a mode count of exactly zero.
 
 Both halves are measured, and each catches a different way of losing the
 keyboard. Submitting `/status` while a turn is running leaves Claude's Settings
@@ -142,8 +143,49 @@ while routing every key to tmux's own mode table: `send-keys` exits 0 and the
 text is never delivered. Without the second half the interlock authorises keys
 into a pane that cannot receive them and reports them sent.
 
-The refusals name their cause, because the remedies differ: a view is
-dismissed, and scrollback is left with `q`.
+**A scroll position is left by the send itself.** A prompt arriving from the
+phone is the intent to type, and where the pane happens to be scrolled to is a
+view of history rather than a question: so when the keyboard is held by exactly
+one mode, that mode is `copy-mode`, and the composer is already drawn on the
+capture just taken, the daemon leaves the mode and types, as if the Mac had
+never been scrolled. It happens inside the send that was already authorised —
+the same authority as the keystroke it clears the way for — and the full check
+then runs again on a fresh capture and a fresh keyboard read. If the composer
+is gone on *that* look, or the keyboard is still not the program's, the send is
+refused with nothing typed.
+
+The composer has to be on screen *before* the mode is touched because this is
+the one place the daemon changes what the Mac is showing without being asked
+to, and it should not do that for a send it was never going to complete. The
+check is free and it cannot cost a send: `capture-pane` reports the live screen
+whether or not the pane is scrolled back — measured at every scroll depth, and
+byte-identical either side of the exit — so it says the same thing before and
+after. The clock is checked the same way: with no room left for the exit, the
+second look *and* the keystrokes, nothing is touched.
+
+Only that one shape is left. `#{pane_mode}` names the mode on **top** of the
+stack, so it cannot on its own tell a bare scroll position from a `copy-mode`
+with somebody's `choose-tree` underneath; the count is what rules that out.
+Every other mode — `clock-mode`, `tree-mode`, `options-mode`, `view-mode`,
+`buffer-mode`, and any stack at all — is something the person at the Mac opened
+and is looking at, and popping one would take their screen away and answer a
+question they never saw. Those refuse exactly as they always have.
+
+The command is `send-keys -X cancel` rather than `copy-mode -q` for the same
+reason: measured on tmux 3.7b, it pops exactly one mode, refuses clock-, tree-,
+options- and buffer-mode with `not in a mode`, types nothing when the pane is
+in no mode at all, and does not depend on `mode-keys` — where `copy-mode -q`
+flattens the whole stack and clears a clock-mode just as readily. Its one
+uncovered edge is `view-mode`, which shares copy-mode's command table: nothing
+ever aims at one, but a `view-mode` pushed in the milliseconds between the look
+and the command would be popped by it, and then the look afterwards refuses.
+Older servers land on the safe side by construction — `#{pane_in_mode}` was a
+bool before tmux 2.9, and a pane that could hold only one mode makes its `1`
+mean exactly what this reads it as.
+
+The refusals name their cause, because the remedies differ: a view Claude
+opened is dismissed, and a mode tmux is holding is left with `q` — one press
+per mode, so a stack takes one each.
 
 The signal is the cursor rather than the view's `Esc to cancel` hint because a
 string is something an agent can write into its own output: a text rule would
