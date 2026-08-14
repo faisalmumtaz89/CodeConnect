@@ -93,7 +93,7 @@ struct PairingView: View {
             .foregroundStyle(CC.text.primary)
             .fixedSize(horizontal: false, vertical: true)
 
-        Text("Control your coding agents from anywhere.")
+        Text("See what your coding agents are doing, and answer them.")
             .ccType(CC.type.body)
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -134,9 +134,9 @@ struct PairingView: View {
                 CCHairline()
                 CCStepRow(
                     index: 2,
-                    title: "Put both devices on the same Tailscale network",
+                    title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "CodeConnect only ever talks to your Mac over your own private tailnet. It never goes through a server of ours.")
+                        "Your phone connects straight to the address `codeconnect pair` prints, over whatever private network links the two — many people use Tailscale. It never goes through a server of ours.")
                 CCHairline()
                 CCStepRow(index: 3, title: "Run this at the Mac", command: "codeconnect pair")
                 CCHairline()

@@ -92,7 +92,7 @@
 		<string>tailscale</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>CodeConnect talks to your own Mac's CodeConnect daemon over your Tailscale network.</string>
+	<string>CodeConnect uses the local network to reach the CodeConnect daemon on your own Mac.</string>
 	<!-- Dictation in the compose bar. Recognition is Apple's own: fully
 	     on-device on iOS 26 (SpeechAnalyzer); on earlier versions
 	     SFSpeechRecognizer, pinned to on-device wherever the locale supports
