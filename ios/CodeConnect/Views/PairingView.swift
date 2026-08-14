@@ -18,6 +18,7 @@ struct PairingView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var address = ""
     @State private var token = ""
@@ -358,6 +359,7 @@ struct PairingView: View {
                     macSection
                     transportSection
                     capabilitiesSection
+                    aboutSection
                     unpairSection
                 }
                 .padding(.horizontal, CC.space.md)
@@ -590,6 +592,22 @@ struct PairingView: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The privacy policy has to be readable from inside the app, not only from
+    /// the store page — and these are the same two URLs the listing carries, so
+    /// there is exactly one copy of each claim to keep true.
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: CC.space.sm) {
+            CCSectionHeader("About")
+
+            CCButton("Privacy policy", variant: .ghost, size: .md, fullWidth: true) {
+                openURL(URL(string: "https://codeconnect.sh/privacy")!)
+            }
+            CCButton("Support", variant: .ghost, size: .md, fullWidth: true) {
+                openURL(URL(string: "https://codeconnect.sh/support")!)
+            }
         }
     }
 
