@@ -1479,7 +1479,7 @@ impl Store {
     /// The token can be rotated by a reinstall and the credential by a relay
     /// reissue, and either happening between the attempt and its answer makes
     /// this answer stale — so both are compared and neither is written.
-    /// `push_credential IS ?4` rather than `= ?4`: `IS` is SQLite's null-safe
+    /// `push_credential IS ?3` rather than `= ?3`: `IS` is SQLite's null-safe
     /// equality, so a direct-mode row (credential `NULL`) is matched by a
     /// correction that carries `None`, and a relay row only by the exact bearer
     /// — with no separate branch for the two.
