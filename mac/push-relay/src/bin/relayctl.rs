@@ -26,10 +26,14 @@
 //!   variable is cheaper than opening a database, but the database is what
 //!   decides.
 //!
-//! Neither is the environment word `sandbox` on the binding it writes a
-//! mitigation on its own: `push::correction` moves a sandbox binding to
-//! production the first time Apple answers `BadDeviceToken`, so a seeded row is
-//! one refusal away from being a production one.
+//! The environment word `sandbox` on the binding it writes is a mitigation, and
+//! it is one because `enroll::permits` makes it one: a development-attested row
+//! — which is the only kind this tool writes — may not address the production
+//! host, and `push::correction` refuses to move it there whatever Apple answers.
+//! Without that rule the word would be worth nothing on its own, since a single
+//! `BadDeviceToken` used to be all it took to turn a seeded row into a
+//! production one. It is still not sufficient by itself: the two refusals above
+//! are what keep the tool away from a database real phones are enrolled in.
 //!
 //! The credential it writes is an ordinary one — same table, same generation
 //! floor, same rate bucket, same revocation path — so nothing downstream has a

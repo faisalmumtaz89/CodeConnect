@@ -407,6 +407,36 @@ const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
 /// sized by what a relay could plausibly hold rather than by a protocol.
 const MAX_OBJECT_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// How long one exchange with the object store may take, from the first packet
+/// of the connection to the last byte of the answer.
+///
+/// **A bound is the difference between a failed backup and a stopped one.** A
+/// store that accepts a connection and then says nothing — a half-open NAT, a
+/// vendor incident, a security appliance holding the flow — leaves a blocking
+/// read that no byte will ever complete, and the run behind it never returns:
+/// nothing marks the state failed, `/readyz` keeps reporting backups on, and the
+/// daily ticker never comes round again. Two minutes is far longer than a
+/// working store needs for a database this size, and a store that has not
+/// answered in two minutes is not about to.
+const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long the one exchange that carries a whole database may take.
+///
+/// **The restore is the one place where waiting beats giving up.** Every other
+/// request is a few kilobytes of listing or the nightly upload, and a store that
+/// is slow on those is a store to hear about; a `GET` of the sealed database is
+/// bounded by [`MAX_OBJECT_BYTES`] rather than by anything about the protocol,
+/// and it is run by a person restoring an instance who would far rather wait
+/// than start again. This is that person's bound, not the job's.
+const RESTORE_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// How long the TCP connection alone may take. [`EXCHANGE_DEADLINE`] already
+/// covers it; this is the shorter bound for the one failure that is only ever a
+/// dead address, so a store whose port is not answering is reported in ten
+/// seconds rather than in two minutes. Name resolution is outside it — that one
+/// is the exchange deadline's.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+
 /// A bucket at an S3-compatible store.
 ///
 /// **Written against S3's API rather than one vendor's.** It is the interface
@@ -428,6 +458,9 @@ struct ObjectStore {
     /// The key prefix, empty or ending in `/`.
     prefix: String,
     signer: Signer,
+    /// A field rather than the constant so a test can prove the bound in
+    /// milliseconds instead of waiting the two minutes a real one allows.
+    deadline: Duration,
 }
 
 /// Where one bucket is addressed, and in which of S3's two URL styles.
@@ -512,7 +545,14 @@ impl ObjectStore {
                 region: config.backup_s3_region.clone(),
                 service: S3_SERVICE.to_string(),
             },
+            deadline: EXCHANGE_DEADLINE,
         })
+    }
+
+    #[cfg(test)]
+    fn with_deadline(mut self, deadline: Duration) -> ObjectStore {
+        self.deadline = deadline;
+        self
     }
 
     /// The full object key one backup name lands under.
@@ -537,6 +577,7 @@ impl ObjectStore {
         query: &[(&str, &str)],
         body: Vec<u8>,
         limit: usize,
+        deadline: Duration,
     ) -> Result<Vec<u8>> {
         let path = if key.is_empty() {
             if self.address.root.is_empty() {
@@ -606,19 +647,44 @@ impl ObjectStore {
                         .enable_all()
                         .build()
                         .context("the object store's runtime")?;
-                    runtime.block_on(async move {
-                        let response = client(tls)
-                            .request(request)
-                            .await
-                            .with_context(|| format!("{method} {request_path}"))?;
-                        let status = response.status();
-                        let body = Limited::new(response.into_body(), limit)
-                            .collect()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("reading the object store's answer: {e}"))?
-                            .to_bytes();
-                        Ok((status, body.to_vec()))
-                    })
+                    let answered = runtime.block_on(async move {
+                        let exchange = async {
+                            let response = client(tls)
+                                .request(request)
+                                .await
+                                .with_context(|| format!("{method} {request_path}"))?;
+                            let status = response.status();
+                            let body = Limited::new(response.into_body(), limit)
+                                .collect()
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("reading the object store's answer: {e}")
+                                })?
+                                .to_bytes();
+                            Ok((status, body.to_vec()))
+                        };
+                        // **Inside the runtime, so the thread ends.** A deadline
+                        // waited on outside this `block_on` would be a second
+                        // thread learning that the first one is stuck, and the
+                        // stuck one would still be holding the scope open.
+                        match tokio::time::timeout(deadline, exchange).await {
+                            Ok(answer) => answer,
+                            Err(_) => bail!(
+                                "the object store did not answer {method} {request_path} \
+                                 within {deadline:?}"
+                            ),
+                        }
+                    });
+                    // **Abandoned rather than dropped**, because dropping a
+                    // runtime waits for its blocking pool and name resolution
+                    // runs there: a `getaddrinfo` that never returns would hold
+                    // this thread open long after the deadline had given up on
+                    // it, which is the hang the deadline was for. The resolver
+                    // thread itself is not cancellable and lives on in a
+                    // detached pool until the OS gives up on it — one per timed
+                    // out request on a daily job — but nothing waits for it.
+                    runtime.shutdown_timeout(Duration::ZERO);
+                    answered
                 })
                 .join()
         })
@@ -653,6 +719,7 @@ impl BackupSink for ObjectStore {
             &[],
             sealed.to_vec(),
             MAX_LISTING_BYTES,
+            self.deadline,
         )?;
         Ok(())
     }
@@ -665,7 +732,14 @@ impl BackupSink for ObjectStore {
             if let Some(token) = resume.as_deref() {
                 query.push(("continuation-token", token));
             }
-            let body = self.send("GET", "", &query, Vec::new(), MAX_LISTING_BYTES)?;
+            let body = self.send(
+                "GET",
+                "",
+                &query,
+                Vec::new(),
+                MAX_LISTING_BYTES,
+                self.deadline,
+            )?;
             let listing = String::from_utf8_lossy(&body).into_owned();
             names.extend(
                 elements(&listing, "Key")
@@ -697,7 +771,14 @@ impl BackupSink for ObjectStore {
     }
 
     fn get(&self, name: &str) -> Result<Vec<u8>> {
-        self.send("GET", &self.key(name), &[], Vec::new(), MAX_OBJECT_BYTES)
+        self.send(
+            "GET",
+            &self.key(name),
+            &[],
+            Vec::new(),
+            MAX_OBJECT_BYTES,
+            RESTORE_DEADLINE,
+        )
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -707,6 +788,7 @@ impl BackupSink for ObjectStore {
             &[],
             Vec::new(),
             MAX_LISTING_BYTES,
+            self.deadline,
         )?;
         Ok(())
     }
@@ -840,6 +922,7 @@ fn client(
 ) -> Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>> {
     let mut http = HttpConnector::new();
     http.enforce_http(false);
+    http.set_connect_timeout(Some(CONNECT_DEADLINE));
     Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(0)
         .build(hyper_rustls::HttpsConnector::from((http, tls)))
@@ -903,15 +986,27 @@ impl Job {
     /// connection to a WAL database sees a consistent snapshot too, but it
     /// would be a second writer for SQLite to arbitrate and the relay's whole
     /// design is that there is one.
+    ///
+    /// **The two halves are separate functions because the daily job has to
+    /// hold the database for one of them and must not hold it for the other** —
+    /// see `run_once`, which is the only caller in the service. This
+    /// composition is the one-shot form, for a caller that already owns the
+    /// connection and has nobody waiting behind it.
+    pub fn run(&self, live: &Connection, now_ms: i64) -> Result<Completed> {
+        self.store(self.snapshot(live)?, now_ms)
+    }
+
+    /// Seal the copy, put it, and prune what the window has expired — none of
+    /// which reads the database.
+    ///
     /// **The prune runs whether or not the store worked.** The failure this job
     /// most has to survive is a full disk, and the store is what fails on one
     /// while the prune is what frees the space — so a `?` between them would
     /// make the job disable its own recovery on the night it is needed, and
     /// every night after. The store's error is still what the run reports,
     /// because it is the one an operator has to act on.
-    pub fn run(&self, live: &Connection, now_ms: i64) -> Result<Completed> {
+    fn store(&self, plain: Vec<u8>, now_ms: i64) -> Result<Completed> {
         let name = format!("{NAME_PREFIX}{now_ms:0NAME_DIGITS$}{NAME_SUFFIX}");
-        let plain = self.snapshot(live)?;
         let sealed = seal(&self.key, plain)?;
         let stored = self.sink.put(&name, &sealed);
         let pruned = self.prune(now_ms);
@@ -1010,26 +1105,49 @@ pub fn spawn_daily(relay: &Relay) {
         let mut ticker = tokio::time::interval(INTERVAL);
         loop {
             ticker.tick().await;
-            let job = Arc::clone(&job);
-            let db = Arc::clone(&db);
             let now = crate::enroll::now_ms();
-            // **`spawn_blocking`, because the copy is disk work.** Run on a
-            // runtime worker it would stall every request the process is
-            // serving for as long as the database takes to read.
-            let done = tokio::task::spawn_blocking(move || {
-                let live = db.lock().unwrap_or_else(|e| e.into_inner());
-                job.run(&live, now)
-            })
-            .await;
-            match done {
-                Ok(outcome) => record(&state, now, outcome),
-                Err(e) => {
-                    state.failed();
-                    tracing::error!(error = %e, "the backup task did not finish");
-                }
-            }
+            let outcome = run_once(Arc::clone(&job), Arc::clone(&db), now).await;
+            record(&state, now, outcome);
         }
     });
+}
+
+/// One run, with the one database lock this process has held for the copy and
+/// for nothing else.
+///
+/// **The lock ends where the network begins.** The relay has a single
+/// `Connection` behind a single mutex, so whoever holds it holds every push,
+/// every enrollment and every status request in the process. The copy needs it;
+/// sealing a `Vec<u8>`, uploading it, listing a bucket and deleting last month's
+/// objects do not — and those are the steps that talk to somebody else's
+/// service. Held across them, one stalled store is a total outage of the push
+/// path for as long as the stall lasts, which is a backup taking down the thing
+/// it exists to protect.
+///
+/// So the copy is one `spawn_blocking` whose guard dies with it, and the rest is
+/// another that never sees the connection at all.
+async fn run_once(
+    job: Arc<Job>,
+    db: Arc<std::sync::Mutex<Connection>>,
+    now_ms: i64,
+) -> Result<Completed> {
+    // **`spawn_blocking`, because the copy is disk work.** Run on a runtime
+    // worker it would stall every request the process is serving for as long as
+    // the database takes to read.
+    let copied = {
+        let job = Arc::clone(&job);
+        tokio::task::spawn_blocking(move || {
+            let live = db.lock().unwrap_or_else(|e| e.into_inner());
+            job.snapshot(&live)
+        })
+        .await
+        .context("the backup copy did not finish")??
+    };
+    // Blocking again rather than inline: the upload is a synchronous sink, and
+    // the point of the whole arrangement is that no reactor worker waits on it.
+    tokio::task::spawn_blocking(move || job.store(copied, now_ms))
+        .await
+        .context("the backup upload did not finish")?
 }
 
 /// Say what one run did, and leave it on the shared state.
@@ -1231,12 +1349,16 @@ mod tests {
         .unwrap()
     }
 
-    async fn credential_status(relay: Relay, bearer: &Secret) -> serde_json::Value {
+    fn authorization(bearer: &Secret) -> String {
+        format!("Bearer {}", bearer.expose())
+    }
+
+    async fn credential_status(relay: Relay, authorization: String) -> serde_json::Value {
         let response = router(relay)
             .oneshot(
                 Request::builder()
                     .uri("/v1/credential/status")
-                    .header("authorization", format!("Bearer {}", bearer.expose()))
+                    .header("authorization", authorization)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1521,7 +1643,7 @@ mod tests {
         // the database records that it was revoked.
         let relay = Relay::new(config, restored);
         assert_eq!(
-            credential_status(relay.clone(), &bearer).await["status"],
+            credential_status(relay.clone(), authorization(&bearer)).await["status"],
             "active"
         );
         assert_eq!(
@@ -1543,7 +1665,7 @@ mod tests {
         // cannot bring it back.
         std::fs::write(&floor_file, "1\n").unwrap();
         assert_eq!(
-            credential_status(relay.clone(), &bearer).await["status"],
+            credential_status(relay.clone(), authorization(&bearer)).await["status"],
             "reenroll",
             "the phone has to be told to attest again"
         );
@@ -1822,5 +1944,578 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|window| window == needle)
+    }
+
+    // -----------------------------------------------------------------------
+    // The database lock, and what a stalled store may not take with it.
+    // -----------------------------------------------------------------------
+
+    /// **A store that stops answering must not stop the relay.** The process has
+    /// one SQLite connection behind one mutex, so anything holding it holds
+    /// every push and every enrollment; the upload is a request to somebody
+    /// else's service and can hang for as long as that service is unwell. Held
+    /// across the upload, the nightly backup would be a scheduled outage of the
+    /// push path whenever the store had a bad night.
+    ///
+    /// Two worker threads because the failure this proves is a *blocked* one: if
+    /// the lock were still held, the request below would block the thread it is
+    /// polled on, and a deadline sharing that thread would never fire — the test
+    /// would hang instead of failing. The deadline gets a thread of its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_store_does_not_hold_the_database_lock() {
+        let dir = scratch("stalled-store");
+        let config = config(&dir, &[]);
+        let (live, bearer) = seeded(&config.db_path);
+        let sink = Arc::new(Stalling::default());
+        let job = Arc::new(Job {
+            key: read_key(&config.backup_key_file).unwrap(),
+            sink: Box::new(Arc::clone(&sink)),
+            db_path: config.db_path.clone(),
+            retention_days: 30,
+        });
+        let relay = Relay::new(config, live);
+
+        let running = tokio::spawn(run_once(job, Arc::clone(&relay.db), NOW));
+        // The upload has been entered, which is only true once the copy has
+        // finished — and the copy is the only step that holds the connection.
+        sink.entered().await;
+
+        // So the relay is still serving, on the very connection the copy read.
+        let answering = tokio::spawn(credential_status(relay.clone(), authorization(&bearer)));
+        let answered = tokio::time::timeout(Duration::from_secs(10), answering).await;
+        // Let go before asserting: a runtime is dropped only once its blocking
+        // tasks return, so a failure that left the sink stalled would wedge the
+        // teardown and hide itself behind a hung test.
+        sink.release();
+        let answered = answered
+            .expect("the stalled store was still holding the database lock")
+            .unwrap();
+        assert_eq!(answered["status"], "active");
+
+        let completed = running.await.unwrap().expect("the run finished");
+        assert_eq!(completed.name, format!("relay-{NOW}.sqlite.enc"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sink whose `put` arrives and does not come back until it is let go.
+    #[derive(Default)]
+    struct Stalling {
+        arrived: tokio::sync::Notify,
+        released: std::sync::Mutex<bool>,
+        wake: std::sync::Condvar,
+        stored: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Stalling {
+        async fn entered(&self) {
+            self.arrived.notified().await;
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.wake.notify_all();
+        }
+    }
+
+    impl BackupSink for Arc<Stalling> {
+        fn put(&self, name: &str, _sealed: &[u8]) -> Result<()> {
+            self.stored.lock().unwrap().push(name.to_string());
+            self.arrived.notify_one();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+            Ok(())
+        }
+
+        fn list(&self) -> Result<Vec<String>> {
+            Ok(self.stored.lock().unwrap().clone())
+        }
+
+        fn get(&self, _name: &str) -> Result<Vec<u8>> {
+            bail!("a stalling sink is never read")
+        }
+
+        fn delete(&self, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn describe(&self) -> String {
+            "stalling".into()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The wire, against a store on localhost.
+    // -----------------------------------------------------------------------
+
+    /// The credentials AWS publishes its signing test suite under. They are
+    /// examples, they authorize nothing, and they are here so the arithmetic is
+    /// checked against somebody else's answer.
+    const EXAMPLE_KEY_ID: &str = "AKIDEXAMPLE";
+    const EXAMPLE_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// **A signing mistake is silent.** A wrong signature is a `403`, and a
+    /// `403` every night is backups that never happened — discovered on the one
+    /// morning a restore is needed. So the signer is checked against the
+    /// signature AWS publishes for its own `get-vanilla` example rather than
+    /// against itself, and the clock that produces the credential scope is
+    /// checked with it: a signature scoped to the wrong day is refused exactly
+    /// like a signature computed wrongly.
+    #[test]
+    fn the_signer_reproduces_the_signature_aws_publishes_for_its_own_example() {
+        let stamp = Stamp::at(1_440_938_160);
+        assert_eq!(stamp.date, "20150830");
+        assert_eq!(stamp.instant, "20150830T123600Z");
+
+        let signer = Signer {
+            access_key_id: EXAMPLE_KEY_ID.to_string(),
+            secret_access_key: EXAMPLE_SECRET.to_string(),
+            region: "us-east-1".to_string(),
+            // The suite signs for a service literally named `service`, which is
+            // the whole reason this field is not the `s3` constant.
+            service: "service".to_string(),
+        };
+        let headers = [
+            ("host".to_string(), "example.amazonaws.com".to_string()),
+            ("x-amz-date".to_string(), stamp.instant.clone()),
+        ];
+
+        assert_eq!(
+            signer.authorization("GET", "/", "", &headers, EMPTY_SHA256, &stamp),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, \
+             SignedHeaders=host;x-amz-date, \
+             Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+        );
+    }
+
+    /// **What is signed has to be what is sent.** The vector above proves the
+    /// arithmetic; this proves the inputs, by rebuilding the canonical request
+    /// out of the bytes the store actually received and re-deriving the
+    /// signature from them. A key signed under one path and sent to another, a
+    /// body swapped after signing, a header left out of the signed set — each of
+    /// them is a `403` from a real store and a failure here.
+    #[tokio::test]
+    async fn the_store_receives_a_signed_put_for_the_key_the_backup_names() {
+        let dir = scratch("s3-put");
+        let (endpoint, ledger) = store(vec![Answer::Ok(String::new())]).await;
+        let store = object_store(&dir, &endpoint);
+        let sealed = b"sealed backup bytes".to_vec();
+
+        blocking(move || store.put("relay-1700000000000.sqlite.enc", &sealed))
+            .await
+            .expect("the store accepted the object");
+
+        let seen = ledger.taken();
+        let [request] = &seen[..] else {
+            panic!("one request, not {}", seen.len())
+        };
+        assert_eq!(request.method, "PUT");
+        assert_eq!(
+            request.target,
+            "/codeconnect-relay-backups/relay/relay-1700000000000.sqlite.enc"
+        );
+        assert_eq!(request.body, b"sealed backup bytes");
+        assert_eq!(
+            request.header("x-amz-content-sha256"),
+            hex(sha256(b"sealed backup bytes").as_ref()),
+            "the body hash is what stops the bytes being swapped under the signature"
+        );
+        verify(request);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The prune reads every page or the window is a lie.** A store that
+    /// answers the first page only would leave everything past it undeleted, and
+    /// thirty-day retention would quietly become "the thirty days that fit in
+    /// one page". The token is carried in the query, so it is also inside the
+    /// signature — a token appended after signing is a `403`.
+    #[tokio::test]
+    async fn a_truncated_listing_is_followed_to_its_last_page() {
+        let dir = scratch("s3-pages");
+        // A token with the three characters S3 actually puts in one and SigV4
+        // requires encoded, so the encoding is exercised rather than assumed.
+        let token = "1/abc+def=";
+        let (endpoint, ledger) = store(vec![
+            Answer::Ok(listing(&["relay-1700000000000.sqlite.enc"], Some(token))),
+            Answer::Ok(listing(&["relay-1700086400000.sqlite.enc"], None)),
+        ])
+        .await;
+        let store = object_store(&dir, &endpoint);
+
+        let names = blocking(move || store.list()).await.expect("the listing");
+        assert_eq!(
+            names,
+            [
+                "relay-1700000000000.sqlite.enc",
+                "relay-1700086400000.sqlite.enc"
+            ],
+            "the second page was dropped"
+        );
+
+        let seen = ledger.taken();
+        assert_eq!(seen.len(), 2, "one request per page");
+        assert!(
+            seen[0].target.starts_with("/codeconnect-relay-backups?"),
+            "{}",
+            seen[0].target
+        );
+        assert!(
+            !seen[0].target.contains("continuation-token"),
+            "the first page asks for no continuation: {}",
+            seen[0].target
+        );
+        assert!(
+            seen[1]
+                .target
+                .contains("continuation-token=1%2Fabc%2Bdef%3D"),
+            "the second page must resume from the token, encoded: {}",
+            seen[1].target
+        );
+        for request in &seen {
+            assert!(request.target.contains("list-type=2"), "{}", request.target);
+            assert!(
+                request.target.contains("prefix=relay%2F"),
+                "{}",
+                request.target
+            );
+            verify(request);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Retention deletes what the window expired and nothing else.** The
+    /// listing here carries one object from inside the window, two from outside
+    /// it, and one name this relay never wrote — and the store must be asked to
+    /// delete exactly the two.
+    #[tokio::test]
+    async fn retention_deletes_only_the_objects_past_the_window() {
+        let dir = scratch("s3-retention");
+        let kept = format!("relay-{}.sqlite.enc", NOW - 29 * DAY_MS);
+        let expired = [
+            format!("relay-{}.sqlite.enc", NOW - 31 * DAY_MS),
+            format!("relay-{}.sqlite.enc", NOW - 400 * DAY_MS),
+        ];
+        let names = [
+            expired[1].as_str(),
+            expired[0].as_str(),
+            kept.as_str(),
+            "notes.txt",
+        ];
+        let (endpoint, ledger) = store(vec![
+            Answer::Ok(listing(&names, None)),
+            Answer::Ok(String::new()),
+            Answer::Ok(String::new()),
+        ])
+        .await;
+        let config = config(&dir, &[]);
+        let job = Job {
+            key: read_key(&config.backup_key_file).unwrap(),
+            sink: Box::new(object_store(&dir, &endpoint)),
+            db_path: config.db_path.clone(),
+            retention_days: 30,
+        };
+
+        let pruned = blocking(move || job.prune(NOW)).await.expect("the prune");
+        assert_eq!(pruned, 2);
+
+        let deleted: Vec<String> = ledger
+            .taken()
+            .iter()
+            .filter(|request| request.method == "DELETE")
+            .map(|request| request.target.clone())
+            .collect();
+        assert_eq!(
+            deleted,
+            [
+                format!("/codeconnect-relay-backups/relay/{}", expired[1]),
+                format!("/codeconnect-relay-backups/relay/{}", expired[0]),
+            ],
+            "only the objects the window expired, and the one it kept is not here"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A store that never answers is a failed backup, not a stopped relay.**
+    /// Unbounded, this is the worst failure the job has: the run never returns,
+    /// so nothing marks the state failed, `/readyz` goes on reporting backups
+    /// enabled, and the daily ticker behind it never comes round again. Bounded,
+    /// it is one bad night that says so.
+    #[tokio::test]
+    async fn a_store_that_never_answers_is_a_failed_backup_and_not_a_hang() {
+        let dir = scratch("s3-silent");
+        let (endpoint, _ledger) = store(vec![Answer::Silence]).await;
+        let store = object_store(&dir, &endpoint).with_deadline(Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        let failed = blocking(move || store.put("relay-1700000000000.sqlite.enc", b"sealed"))
+            .await
+            .expect_err("a store that says nothing cannot have stored anything");
+        let elapsed = started.elapsed();
+
+        assert!(
+            format!("{failed:#}").contains("did not answer"),
+            "{failed:#}"
+        );
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+
+        // And that failure is what `/readyz` and the metric are reading.
+        let relay = Relay::new(config(&dir, &[]), crate::db::open_in_memory().unwrap());
+        record(&relay.backup, NOW, Err(failed));
+        assert_eq!(readyz(relay.clone()).await["backups_enabled"], false);
+        assert!(metrics_text(relay)
+            .await
+            .contains("codeconnect_relay_backups_enabled 0"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The synchronous sink, called where the job calls it: off the reactor, so
+    /// the store answering on this runtime is not waiting behind it.
+    async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        tokio::task::spawn_blocking(work).await.unwrap()
+    }
+
+    /// A store pointed at a fake, under the example credentials.
+    fn object_store(dir: &Path, endpoint: &str) -> ObjectStore {
+        let secret_file = dir.join("backup-s3-secret-key");
+        std::fs::write(&secret_file, format!("{EXAMPLE_SECRET}\n")).unwrap();
+        let config = config(
+            dir,
+            &[
+                (
+                    "RELAY_BACKUP_TARGET",
+                    "s3://codeconnect-relay-backups/relay",
+                ),
+                ("RELAY_BACKUP_S3_ENDPOINT", endpoint),
+                ("RELAY_BACKUP_S3_ACCESS_KEY_ID", EXAMPLE_KEY_ID),
+                (
+                    "RELAY_BACKUP_S3_SECRET_KEY_FILE",
+                    &secret_file.to_string_lossy(),
+                ),
+            ],
+        );
+        ObjectStore::new(&config, "codeconnect-relay-backups/relay").unwrap()
+    }
+
+    /// One `ListObjectsV2` answer, in the shape S3 sends it.
+    fn listing(names: &[&str], next: Option<&str>) -> String {
+        let contents: String = names
+            .iter()
+            .map(|name| format!("<Contents><Key>relay/{name}</Key></Contents>"))
+            .collect();
+        let (truncated, token) = match next {
+            Some(token) => (
+                "true",
+                format!("<NextContinuationToken>{token}</NextContinuationToken>"),
+            ),
+            None => ("false", String::new()),
+        };
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult>\
+             <Name>codeconnect-relay-backups</Name><Prefix>relay/</Prefix>\
+             <IsTruncated>{truncated}</IsTruncated>{contents}{token}</ListBucketResult>"
+        )
+    }
+
+    /// **The signature, re-derived here from the request as it arrived.**
+    ///
+    /// Written out rather than handed to [`Signer`], which would only prove that
+    /// the signer agrees with itself. What it checks is that the canonical
+    /// request the store would build from these bytes — this method, this path,
+    /// this query, these headers, this body — is the one that was signed.
+    fn verify(request: &Seen) {
+        let authorization = request.header("authorization");
+        let date = &request.header("x-amz-date")[..8];
+        let scope = format!("{date}/us-east-1/s3/aws4_request");
+        let signed = "host;x-amz-content-sha256;x-amz-date";
+        let prefix = format!(
+            "AWS4-HMAC-SHA256 Credential={EXAMPLE_KEY_ID}/{scope}, \
+             SignedHeaders={signed}, Signature="
+        );
+        let signature = authorization
+            .strip_prefix(&prefix)
+            .unwrap_or_else(|| panic!("{authorization:?} does not begin {prefix:?}"));
+        assert_eq!(signature.len(), 64, "{signature}");
+        assert!(
+            signature
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{signature}"
+        );
+
+        let (path, query) = request
+            .target
+            .split_once('?')
+            .unwrap_or((request.target.as_str(), ""));
+        let canonical = format!(
+            "{}\n{path}\n{query}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n\n{signed}\n{}",
+            request.method,
+            request.header("host"),
+            request.header("x-amz-content-sha256"),
+            request.header("x-amz-date"),
+            hex(sha256(&request.body).as_ref()),
+        );
+        let to_sign = format!(
+            "AWS4-HMAC-SHA256\n{}\n{scope}\n{}",
+            request.header("x-amz-date"),
+            hex(sha256(canonical.as_bytes()).as_ref())
+        );
+        let mut key = hmac_sha256(format!("AWS4{EXAMPLE_SECRET}").as_bytes(), date.as_bytes());
+        for part in ["us-east-1", "s3", "aws4_request"] {
+            key = hmac_sha256(key.as_ref(), part.as_bytes());
+        }
+        assert_eq!(
+            hex(hmac_sha256(key.as_ref(), to_sign.as_bytes()).as_ref()),
+            signature,
+            "the signature does not cover the request that was sent:\n{canonical}"
+        );
+    }
+
+    /// One request, exactly as it arrived.
+    struct Seen {
+        method: String,
+        /// Path and query as written on the request line.
+        target: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl Seen {
+        fn header(&self, name: &str) -> &str {
+            self.headers
+                .iter()
+                .find(|(found, _)| found == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_else(|| panic!("no {name} header in {:?}", self.headers))
+        }
+    }
+
+    /// What the fake store answers, one per request in order.
+    enum Answer {
+        Ok(String),
+        /// Nothing, ever — the failure a deadline is for.
+        Silence,
+    }
+
+    #[derive(Default)]
+    struct Ledger {
+        requests: std::sync::Mutex<Vec<Seen>>,
+    }
+
+    impl Ledger {
+        fn taken(&self) -> Vec<Seen> {
+            std::mem::take(&mut *self.requests.lock().unwrap())
+        }
+    }
+
+    /// **A plaintext S3 on localhost, written to the socket rather than to a
+    /// server crate.** This workspace has no HTTP/1.1 server in it — the APNs
+    /// fake is `h2` — and what these tests have to read is the exact request
+    /// line, the exact headers and the exact body, because that is precisely
+    /// what the signature covers. A framework that normalized any of them would
+    /// be checking the framework.
+    ///
+    /// The answers are handed out in the order connections arrive, which is the
+    /// order the requests were made only because every caller here is
+    /// sequential. A test that issued two at once would have to match them on
+    /// something in the request instead.
+    async fn store(answers: Vec<Answer>) -> (String, Arc<Ledger>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let ledger = Arc::new(Ledger::default());
+        let seen = Arc::clone(&ledger);
+        let answers = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            answers,
+        )));
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let seen = Arc::clone(&seen);
+                let answers = Arc::clone(&answers);
+                tokio::spawn(async move {
+                    serve(socket, &seen, &answers).await;
+                });
+            }
+        });
+        (format!("http://{address}"), ledger)
+    }
+
+    async fn serve(
+        mut socket: tokio::net::TcpStream,
+        ledger: &Ledger,
+        answers: &std::sync::Mutex<std::collections::VecDeque<Answer>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The head, then exactly the body the sender declared. One request per
+        // connection: the client under test pools nothing.
+        let mut buffer = Vec::new();
+        let head = loop {
+            let mut chunk = [0u8; 4096];
+            let read = socket.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(end) = buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|at| at + 4)
+            {
+                break end;
+            }
+        };
+        let text = String::from_utf8_lossy(&buffer[..head]).into_owned();
+        let mut lines = text.lines();
+        let mut request_line = lines.next().unwrap_or_default().split(' ');
+        let method = request_line.next().unwrap_or_default().to_string();
+        let target = request_line.next().unwrap_or_default().to_string();
+        let headers: Vec<(String, String)> = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        let length: usize = headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(0);
+        let mut body = buffer[head..].to_vec();
+        while body.len() < length {
+            let mut chunk = [0u8; 4096];
+            let read = socket.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..read]);
+        }
+        ledger.requests.lock().unwrap().push(Seen {
+            method,
+            target,
+            headers,
+            body,
+        });
+
+        let answer = answers.lock().unwrap().pop_front();
+        let payload = match answer {
+            Some(Answer::Silence) => {
+                // Accepted, read, and then nothing at all — the connection stays
+                // open and no byte ever comes back.
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+            Some(Answer::Ok(body)) => body,
+            None => String::new(),
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
     }
 }

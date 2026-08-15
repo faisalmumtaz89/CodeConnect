@@ -148,6 +148,40 @@ fn bindable_environment(environment: AttestEnvironment) -> ApnsEnvironment {
     }
 }
 
+/// Whether a binding proved in this App Attest namespace may address this APNs
+/// host at all — on a push's first attempt, on its correction, and in the row.
+///
+/// **The two namespaces are not a strict one and a lenient one, they are a
+/// privileged one and an open one.** [`bindable_environment`] is the pairing
+/// Apple makes and enrollment writes; what makes that pairing a boundary rather
+/// than a convention is who can enter each namespace. A development key is
+/// minted by anybody with Xcode and a free account, so it must never reach the
+/// production host — Decision 4's opposite-host attempt included, because an
+/// acceptance there is written back to the binding and kept. A production key
+/// took a build Apple distributed, and the host it reaches the other way is the
+/// sandbox: developers' own devices.
+///
+/// So the one retry is available in one direction and not in the other, and the
+/// direction is not arbitrary.
+///
+/// **This is therefore the invariant on a stored row, and it is weaker than the
+/// pairing.** Enrollment writes [`bindable_environment`] and nothing else, but
+/// an accepted correction writes the host that answered — so a production-
+/// namespace row may legitimately come to name the sandbox. What no row may
+/// ever name is a host this function refuses; that is the one an operator, a
+/// restore, or a later change has to be unable to produce.
+pub(crate) fn permits(attest: AttestEnvironment, environment: ApnsEnvironment) -> bool {
+    match (attest, environment) {
+        // Each namespace's own pairing, which is what enrollment wrote.
+        (AttestEnvironment::Development, ApnsEnvironment::Sandbox)
+        | (AttestEnvironment::Production, ApnsEnvironment::Production) => true,
+        // Decision 4's opposite host, for a build Apple distributed.
+        (AttestEnvironment::Production, ApnsEnvironment::Sandbox) => true,
+        // The one direction that is never allowed.
+        (AttestEnvironment::Development, ApnsEnvironment::Production) => false,
+    }
+}
+
 /// The routes this module owns, mounted by [`crate::api::router`].
 pub fn routes() -> Router<Relay> {
     Router::new()
@@ -1227,8 +1261,17 @@ fn credential_status(
     // A binding from the other App Attest namespace is not this relay's to
     // answer for, and is not found rather than answered about: the phone is told
     // to attest again, which is the only thing that can make it real here.
-    let found = found
-        .filter(|binding| binding.attest_environment == relay.config.attest_environment.as_str());
+    //
+    // **And neither is one naming a host its namespace may not address**
+    // ([`permits`]). `POST /v1/push` will not honour that row, so a status of
+    // `active` here would tell a phone its credential is good while every
+    // notification it sent was refused — and the phone would never learn that
+    // attesting again is what fixes it.
+    let found = found.filter(|binding| {
+        binding.attest_environment == relay.config.attest_environment.as_str()
+            && strict_environment(&binding.environment)
+                .is_some_and(|environment| permits(relay.config.attest_environment, environment))
+    });
 
     // A bearer nobody minted is guessing, and it is counted against the strict
     // rotating-address rule rather than against a binding it does not have.
@@ -2862,6 +2905,45 @@ mod tests {
             // the relay back at its own namespace restores it.
             assert_eq!(active_count(&relay, TOKEN), 1);
         }
+    }
+
+    /// **The status route and the push route refuse the same rows.** A binding
+    /// naming a host its namespace may not address is one `POST /v1/push`
+    /// answers `credential_invalid`, and `credential_invalid` is what sends a
+    /// phone to attest again (Decision 5). A status of `active` alongside it
+    /// would stop the phone doing the one thing that repairs the row: it would
+    /// ask whether its credential was good, be told yes, and go on sending
+    /// notifications that are all refused.
+    ///
+    /// Enrollment cannot write such a row — only a database restored from a
+    /// build that corrected a binding across the namespaces carries one.
+    #[test]
+    fn a_binding_naming_a_host_its_namespace_cannot_address_is_told_to_attest_again() {
+        let relay = development_relay(&[]);
+        let phone = Phone::new();
+        let bearer = enrolled_in(&relay, &phone, TOKEN, NOW, AttestEnvironment::Development);
+        assert_eq!(status_of(&relay, &bearer, NOW).1["status"], "active");
+
+        // The row a restore carries in: development attested, production bound.
+        relay
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE bindings SET environment = 'production' WHERE bearer_hash = ?1",
+                [bearer_hash(&crate::secret::Secret::new(bearer.clone()))],
+            )
+            .unwrap();
+
+        assert_eq!(
+            status_of(&relay, &bearer, NOW).1["status"],
+            "reenroll",
+            "the phone has to be told the only thing that repairs this"
+        );
+
+        // The row is untouched: this relay refuses the authority, it does not
+        // retire a phone whose token is perfectly real.
+        assert_eq!(active_count(&relay, TOKEN), 1);
     }
 
     /// **The pairing Apple makes twice.** A development profile is given the

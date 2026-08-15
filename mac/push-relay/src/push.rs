@@ -9,11 +9,14 @@
 //! `202`, because the daemon's `test_push` means "a notification reached Apple"
 //! and a relay that answered before it knew would make that report a guess.
 //!
-//! **One attempt, plus exactly one more.** `BadDeviceToken` buys a single
-//! attempt against the opposite APNs host, because a development token posted
-//! at production fails exactly that way and the alternative is deleting a
-//! working registration. Nothing else here retries anything, ever: a doorbell
-//! delivered twice shows a phone an old state as if it were news.
+//! **One attempt, plus exactly one more, and never onto a host this binding's
+//! namespace may not address.** `BadDeviceToken` buys a single attempt against
+//! the opposite APNs host, because a token posted at the wrong one fails exactly
+//! that way and the alternative is deleting a working registration. What the
+//! namespace decides is which bindings may buy it: a development attestation is
+//! minted by anybody with Xcode and reaches the sandbox host only. Nothing else
+//! here retries anything, ever: a doorbell delivered twice shows a phone an old
+//! state as if it were news.
 //!
 //! **A refused credential is never an unregistered phone** (§4, Decision 4).
 //! The two answers send the daemon in opposite directions — one recovers a
@@ -34,7 +37,7 @@ use crate::api::Relay;
 use crate::dto::{self, Invalid, Notification, PushRequest};
 use crate::enroll::{
     answer, bearer_from, binding_for_bearer, check_limits, client_address, generation_floor,
-    internal, now_ms, refuse, Refusal, Reply,
+    internal, now_ms, permits, refuse, Refusal, Reply,
 };
 use crate::logging::RequestLog;
 use crate::payload;
@@ -332,6 +335,11 @@ fn authorize(
         Ok(floor) => floor,
         Err(e) => return Err(internal(relay, ROUTE, Some(&id), format!("{e:#}"))),
     };
+    // Read here and answered for further down: a word this relay does not know
+    // is a fault in its own state rather than a credential fault, and it keeps
+    // the five hundred it has always had — after the limits, so a corrupt row
+    // cannot be replayed for an unbounded number of them.
+    let environment = binding_environment(&row.environment);
     // **The namespace is part of being honoured, not a separate answer.** Apple
     // issues a different App Attest namespace to a development build than to a
     // distributed one, and a relay serves exactly one of them. A binding proved
@@ -339,10 +347,22 @@ fn authorize(
     // an operator who moves a deployment from one to the other must not leave
     // every credential minted before the move still able to push, when the same
     // credential can no longer rotate, rebind, delete, or ask for its status.
+    //
+    // **And so is the host that namespace may reach** ([`permits`]). The first
+    // attempt is addressed by the row's own environment, so a row that names a
+    // host its attestation cannot authorise would reach that host before any
+    // correction had a say. Enrollment cannot write one; a database restored
+    // from a build that corrected a binding across the namespaces carries them.
+    //
+    // A word this relay cannot read is left honoured here on purpose, so that it
+    // meets its own answer below rather than being reported as a dead
+    // credential — it is the relay's state that is wrong, not the caller's.
     let honoured = row.status == "active"
         && row.terminal_reason.is_none()
         && row.generation >= floor
-        && row.attest_environment == relay.config.attest_environment.as_str();
+        && row.attest_environment == relay.config.attest_environment.as_str()
+        && environment
+            .is_none_or(|environment| permits(relay.config.attest_environment, environment));
 
     // **The credential must be bound to the token in the request.** A bearer is
     // authority over one phone. Without this line it is authority over whichever
@@ -386,7 +406,7 @@ fn authorize(
         return Err(reply);
     }
 
-    let Some(environment) = binding_environment(&row.environment) else {
+    let Some(environment) = environment else {
         return Err(internal(
             relay,
             ROUTE,
@@ -426,12 +446,14 @@ fn charge_address(relay: &Relay, db: &rusqlite::Connection, ip: Option<&str>, no
     false
 }
 
-/// The one retry Decision 4 keeps: the opposite APNs host, tried exactly once.
+/// The one retry Decision 4 keeps: the opposite APNs host, tried exactly once,
+/// and only by a binding whose namespace may address it.
 ///
-/// A development build's token is not valid at production and the failure is
+/// A token that is not valid at the host it was posted to fails as
 /// `400 BadDeviceToken`, which reads like a corrupt token rather than like the
 /// wrong host. Retiring the binding on that evidence would delete a working
-/// registration, so the other host is tried before anything is concluded.
+/// registration, so the other host is tried before anything is concluded — but
+/// only where [`permits`] allows this attestation to reach it.
 ///
 /// **Two attempts share one budget.** This one takes what the first left of the
 /// request's [`crate::apns::Budget`] rather than starting a clock of its own, so
@@ -452,6 +474,15 @@ async fn correction(
         ApnsEnvironment::Sandbox => ApnsEnvironment::Production,
         ApnsEnvironment::Production => ApnsEnvironment::Sandbox,
     };
+    // **A correction the namespace forbids is not attempted at all**, so a
+    // development attestation never addresses a customer's phone — not even
+    // once, and not even to be told no. It is the same `rejected` as the two
+    // refusals below on purpose: three different reasons to have learned
+    // nothing more, answered with one word, so the answer is not an oracle
+    // telling a caller which of them it met.
+    if !permits(relay.config.attest_environment, opposite) {
+        return refused(relay, Outcome::Rejected, id);
+    }
     // Without that environment's key there is nothing to learn, and Apple's
     // refusal is the only evidence in hand.
     if relay.apns.absence(opposite).is_some() {
@@ -478,7 +509,25 @@ async fn correction(
 /// then be written onto a credential nobody holds, or onto a phone that has
 /// already moved. Zero rows changed is that race, resolved in favour of
 /// whoever committed.
+///
+/// **And the pairing is checked here as well as at the attempt.** [`correction`]
+/// refuses to ask Apple about a host the namespace forbids, which is the rule
+/// that matters to a phone; this is the rule that matters to the database, and
+/// it is the last line before the `UPDATE`. Reaching it with a forbidden
+/// environment is a fault in this file rather than anything a caller did, so it
+/// is counted and logged as one and nothing is written.
 fn correct_environment(relay: &Relay, binding: &Authorized, corrected: ApnsEnvironment, now: i64) {
+    if !permits(relay.config.attest_environment, corrected) {
+        relay
+            .metrics
+            .internal_errors
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            environment = corrected.as_str(),
+            "an apns environment this attest namespace cannot bind was not stored"
+        );
+        return;
+    }
     let db = relay.db.lock().unwrap_or_else(|e| e.into_inner());
     let updated = db.execute(
         "UPDATE bindings SET environment = ?4, updated_ms = ?5
@@ -758,8 +807,35 @@ mod tests {
         }
     }
 
+    /// The ordinary relay: the App Attest namespace [`RelayConfig`] defaults to,
+    /// so a test that changes it is testing the change rather than a fixture
+    /// that disagreed with the relay from the start.
     fn fixture(
         name: &str,
+        environment: &str,
+        apns: ApnsTransport,
+        extra: &[(&str, &str)],
+    ) -> Fixture {
+        attested(name, "development", environment, apns, extra)
+    }
+
+    /// A relay whose binding may take Decision 4's second attempt: attested in
+    /// the production namespace, which is the one Apple only issues to a build
+    /// it distributed, and stored on the production host enrollment paired it
+    /// with. The opposite host is the sandbox, and this namespace may reach it.
+    fn correcting(name: &str, apns: ApnsTransport) -> Fixture {
+        attested(
+            name,
+            "production",
+            "production",
+            apns,
+            &[("RELAY_ATTEST_ENVIRONMENT", "production")],
+        )
+    }
+
+    fn attested(
+        name: &str,
+        attest: &str,
         environment: &str,
         apns: ApnsTransport,
         extra: &[(&str, &str)],
@@ -779,7 +855,7 @@ mod tests {
         let config = RelayConfig::read(move |key| map.get(key).cloned()).unwrap();
 
         let db = crate::db::open_in_memory().unwrap();
-        let bearer = seed(&db, TOKEN, environment, 0);
+        let bearer = seed(&db, attest, TOKEN, environment, 0);
         Fixture {
             relay: Relay::with_transport(config, db, apns, None),
             bearer,
@@ -790,19 +866,21 @@ mod tests {
 
     /// One installation and one active binding, straight into the tables — the
     /// state a completed attestation leaves behind.
-    ///
-    /// The App Attest namespace is the one [`RelayConfig`] defaults to, so a
-    /// test that changes it is testing the change rather than a fixture that
-    /// disagreed with the relay from the start.
-    fn seed(db: &Connection, token: &str, environment: &str, generation: i64) -> Secret {
+    fn seed(
+        db: &Connection,
+        attest: &str,
+        token: &str,
+        environment: &str,
+        generation: i64,
+    ) -> Secret {
         let bearer = new_bearer().unwrap();
         db.execute(
             "INSERT INTO installations
                 (key_id_hash, public_key, receipt, attest_environment, counter, counter_trusted,
                  bundle_version, validation_category, created_ms, updated_ms)
-             VALUES (?1, X'0102', NULL, 'development', 0, 1, '1.0', 1, ?2, ?2)
+             VALUES (?1, X'0102', NULL, ?3, 0, 1, '1.0', 1, ?2, ?2)
              ON CONFLICT (key_id_hash) DO NOTHING",
-            rusqlite::params![format!("key-id-hash-for-{token}"), NOW],
+            rusqlite::params![format!("key-id-hash-for-{token}"), NOW, attest],
         )
         .unwrap();
         let installation: i64 = db
@@ -952,11 +1030,9 @@ mod tests {
     async fn the_advisory_value_cannot_move_a_push_to_the_other_host() {
         let (sandbox, sandbox_ledger) = apple(Plan::answering(200, "")).await;
         let (production, production_ledger) = apple(Plan::answering(200, "")).await;
-        let fixture = fixture(
+        let fixture = correcting(
             "advisory-reverse",
-            "production",
             transport(Some(&sandbox), Some(&production)),
-            &[],
         );
 
         let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
@@ -1285,7 +1361,10 @@ mod tests {
     #[tokio::test]
     async fn a_binding_on_an_environment_without_a_key_answers_unavailable() {
         let (base, ledger) = apple(Plan::answering(200, "")).await;
-        let fixture = fixture("no-key", "production", transport(Some(&base), None), &[]);
+        // Production attested and production bound, with only a sandbox key
+        // loaded: the binding is honoured and the environment it names has no
+        // key, which is the one state this test is about.
+        let fixture = correcting("no-key", transport(Some(&base), None));
 
         let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1356,30 +1435,89 @@ mod tests {
         fixture.drop_scratch();
     }
 
-    /// **Decision 4's one retry.** A development token posted at production
-    /// fails as `BadDeviceToken`, which reads like a corrupt token; the other
-    /// host is tried once, and an acceptance corrects the binding rather than
-    /// retiring it.
+    /// **A development attestation may never walk a binding onto the production
+    /// host.** Anybody with Xcode can mint a key in the development App Attest
+    /// namespace, and Apple pairs that namespace with the sandbox host and
+    /// nothing else. A `BadDeviceToken` there is a token that is not good — it
+    /// is not evidence that the phone is a customer's, and a relay that tried
+    /// production on it would hand the one namespace anybody can enter the
+    /// authority to address a real phone and to keep it, since an acceptance is
+    /// written back to the row.
+    ///
+    /// The negative half is the point of the test: **Apple's production host is
+    /// never asked at all**, so the refusal is not a request that happened to
+    /// fail. And the word is `rejected`, the same one a token refused at both
+    /// hosts and a missing key already answer, so a caller cannot tell the three
+    /// apart.
     #[tokio::test]
-    async fn a_bad_device_token_is_corrected_on_the_other_host_and_the_binding_is_updated() {
+    async fn a_development_attested_binding_is_never_corrected_onto_the_production_host() {
         let (sandbox, sandbox_ledger) = apple(bad_token_plan()).await;
         let (production, production_ledger) = apple(Plan::answering(200, "")).await;
         let fixture = fixture(
-            "correction",
+            "correction-forbidden",
             "sandbox",
             transport(Some(&sandbox), Some(&production)),
             &[],
         );
 
         let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(reply.body["error"], "rejected");
+        assert_eq!(
+            sandbox_ledger.streams(),
+            1,
+            "the one attempt the pairing allows"
+        );
+        assert_eq!(
+            production_ledger.connections(),
+            0,
+            "a forbidden correction must not reach Apple's production host at all"
+        );
+
+        // And nothing was stored: the binding is where enrollment put it, on the
+        // host its namespace pairs with.
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(fixture.terminal_reason(), None);
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .environments_corrected
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .internal_errors
+                .load(AtomicOrdering::Relaxed),
+            0,
+            "a refusal the pairing requires is not a fault"
+        );
+        fixture.drop_scratch();
+    }
+
+    /// **Decision 4's one retry, on the namespace that may take it.** A
+    /// production attestation is one Apple issues only to a build it
+    /// distributed, so the opposite host is open to it: `BadDeviceToken` on
+    /// production buys one attempt on the sandbox, and an acceptance corrects
+    /// the binding rather than retiring a working registration.
+    #[tokio::test]
+    async fn a_bad_device_token_is_corrected_on_the_other_host_and_the_binding_is_updated() {
+        let (sandbox, sandbox_ledger) = apple(Plan::answering(200, "")).await;
+        let (production, production_ledger) = apple(bad_token_plan()).await;
+        let fixture = correcting("correction", transport(Some(&sandbox), Some(&production)));
+
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.status, StatusCode::OK);
         assert_eq!(
-            reply.body["environment"], "production",
+            reply.body["environment"], "sandbox",
             "the corrected environment is what the daemon CAS-persists"
         );
-        assert_eq!(sandbox_ledger.streams(), 1, "exactly one attempt each");
-        assert_eq!(production_ledger.streams(), 1);
-        assert_eq!(fixture.binding().0, "production");
+        assert_eq!(production_ledger.streams(), 1, "exactly one attempt each");
+        assert_eq!(sandbox_ledger.streams(), 1);
+        assert_eq!(fixture.binding().0, "sandbox");
         assert_eq!(
             fixture
                 .relay
@@ -1391,10 +1529,108 @@ mod tests {
 
         // The correction sticks: the next push goes straight to the corrected
         // host and does not pay for the wrong one again.
-        let again = fixture.push(&doorbell(TOKEN, "sandbox")).await;
-        assert_eq!(again.body["environment"], "production");
-        assert_eq!(sandbox_ledger.streams(), 1);
-        assert_eq!(production_ledger.streams(), 2);
+        let again = fixture.push(&doorbell(TOKEN, "production")).await;
+        assert_eq!(again.body["environment"], "sandbox");
+        assert_eq!(production_ledger.streams(), 1);
+        assert_eq!(sandbox_ledger.streams(), 2);
+        fixture.drop_scratch();
+    }
+
+    /// **The row is bounded by the namespace too, not only the correction.** A
+    /// development-attested binding that names the production host is what the
+    /// relay wrote before this rule existed, and it is carried into any database
+    /// restored from that build. The first attempt is addressed by the row, so
+    /// without this the old rows would go on reaching customers' phones with no
+    /// correction involved at all.
+    ///
+    /// It is refused exactly as every other unhonoured bearer is — the same
+    /// word, no `Retry-After`, charged to the address and not to the phone — so
+    /// the refusal says nothing about which rule refused it.
+    #[tokio::test]
+    async fn a_development_attested_row_that_names_production_never_reaches_it() {
+        let (base, ledger) = apple(Plan::answering(200, "")).await;
+        let fixture = attested(
+            "drifted-row",
+            "development",
+            "production",
+            transport(None, Some(&base)),
+            &[],
+        );
+        let bucket = crate::ratelimit::binding_key(&token_hash(TOKEN));
+
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(reply.body["error"], "credential_invalid");
+        assert_eq!(reply.retry_after_seconds, None);
+        assert_eq!(ledger.connections(), 0, "nothing may reach Apple");
+
+        // The row is left alone — this relay refuses the authority, it does not
+        // retire a phone — and the phone's own budget was never opened.
+        assert_eq!(fixture.binding(), ("production".into(), "active".into()));
+        assert_eq!(fixture.terminal_reason(), None);
+        assert_eq!(fixture.day_count(&bucket), None);
+        fixture.drop_scratch();
+    }
+
+    /// **The rule itself, over every pair there is.** Three of the four are
+    /// allowed and exactly one is not, and the one that is not is the direction
+    /// that matters: the namespace anybody may mint a key in must never reach a
+    /// customer's phone. Written out rather than derived so that changing the
+    /// table is a deliberate act.
+    #[test]
+    fn only_a_distributed_build_may_reach_the_production_host() {
+        use crate::config::AttestEnvironment::{Development, Production as Distributed};
+        use ApnsEnvironment::{Production, Sandbox};
+
+        assert!(permits(Development, Sandbox), "its own pairing");
+        assert!(permits(Distributed, Production), "its own pairing");
+        assert!(
+            permits(Distributed, Sandbox),
+            "Decision 4's opposite host, for a build Apple distributed"
+        );
+        assert!(
+            !permits(Development, Production),
+            "a development attestation may never address a customer's phone"
+        );
+    }
+
+    /// **The last line before the `UPDATE`.** A correction is refused before
+    /// Apple is asked, so nothing reaches here with a forbidden environment —
+    /// and if this file ever changes so that something does, the row is still
+    /// not written and the fault is counted as the relay's own.
+    #[test]
+    fn a_forbidden_environment_is_not_stored_even_when_the_write_is_asked_for() {
+        let fixture = fixture("forbidden-write", "sandbox", transport(None, None), &[]);
+
+        correct_environment(
+            &fixture.relay,
+            &Authorized {
+                token_hash: token_hash(TOKEN),
+                bearer_hash: bearer_hash(&fixture.bearer),
+                environment: ApnsEnvironment::Sandbox,
+            },
+            ApnsEnvironment::Production,
+            NOW,
+        );
+
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .environments_corrected
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .internal_errors
+                .load(AtomicOrdering::Relaxed),
+            1,
+            "reaching the write with a forbidden environment is a fault in this file"
+        );
         fixture.drop_scratch();
     }
 
@@ -1404,11 +1640,9 @@ mod tests {
     async fn a_correction_does_not_clobber_a_binding_that_was_replaced_underneath_it() {
         let (sandbox, _s) = apple(bad_token_plan()).await;
         let (production, _p) = apple(Plan::answering(200, "")).await;
-        let fixture = fixture(
+        let fixture = correcting(
             "correction-race",
-            "sandbox",
             transport(Some(&sandbox), Some(&production)),
-            &[],
         );
 
         // The authorised binding, then the replacement an enrollment would have
@@ -1421,7 +1655,7 @@ mod tests {
                 [bearer_hash(&fixture.bearer)],
             )
             .unwrap();
-            seed(&db, TOKEN, "sandbox", 0)
+            seed(&db, "production", TOKEN, "sandbox", 0)
         };
 
         // The correction is aimed at the bearer it authenticated, which is no
@@ -1455,6 +1689,19 @@ mod tests {
                 .load(AtomicOrdering::Relaxed),
             0
         );
+        // **And the race is what refused it, not the namespace.** Every
+        // assertion above would hold just as well if the pairing guard had
+        // turned the write away before the `UPDATE` ran, and then this would be
+        // a test of the guard wearing a race's name.
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .internal_errors
+                .load(AtomicOrdering::Relaxed),
+            0,
+            "the write reached the compare-and-set"
+        );
         fixture.drop_scratch();
     }
 
@@ -1464,21 +1711,16 @@ mod tests {
     async fn a_bad_device_token_at_both_hosts_is_rejected_and_tried_no_further() {
         let (sandbox, sandbox_ledger) = apple(bad_token_plan()).await;
         let (production, production_ledger) = apple(bad_token_plan()).await;
-        let fixture = fixture(
-            "both-bad",
-            "sandbox",
-            transport(Some(&sandbox), Some(&production)),
-            &[],
-        );
+        let fixture = correcting("both-bad", transport(Some(&sandbox), Some(&production)));
 
-        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
         assert_eq!(reply.body["error"], "rejected");
-        assert_eq!(sandbox_ledger.streams(), 1);
         assert_eq!(production_ledger.streams(), 1);
+        assert_eq!(sandbox_ledger.streams(), 1);
         // And the binding is left exactly as it was: a rejection is not a
         // reason to retire a phone.
-        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(fixture.binding(), ("production".into(), "active".into()));
         fixture.drop_scratch();
     }
 
@@ -1487,9 +1729,9 @@ mod tests {
     #[tokio::test]
     async fn a_bad_device_token_with_no_opposite_key_is_rejected_without_a_second_attempt() {
         let (base, ledger) = apple(bad_token_plan()).await;
-        let fixture = fixture("no-opposite", "sandbox", transport(Some(&base), None), &[]);
+        let fixture = correcting("no-opposite", transport(None, Some(&base)));
 
-        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.body["error"], "rejected");
         assert_eq!(ledger.streams(), 1);
         fixture.drop_scratch();
@@ -1501,19 +1743,17 @@ mod tests {
     /// throws the token away rather than recovering a credential.
     #[tokio::test]
     async fn a_410_on_the_opposite_host_retires_the_binding_and_answers_unregistered() {
-        let (sandbox, _s) = apple(bad_token_plan()).await;
-        let (production, _p) = apple(Plan::answering(410, r#"{"reason":"Unregistered"}"#)).await;
-        let fixture = fixture(
+        let (sandbox, _s) = apple(Plan::answering(410, r#"{"reason":"Unregistered"}"#)).await;
+        let (production, _p) = apple(bad_token_plan()).await;
+        let fixture = correcting(
             "correction-gone",
-            "sandbox",
             transport(Some(&sandbox), Some(&production)),
-            &[],
         );
 
-        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.status, StatusCode::GONE);
         assert_eq!(reply.body["error"], "unregistered");
-        assert_eq!(fixture.binding(), ("sandbox".into(), "revoked".into()));
+        assert_eq!(fixture.binding(), ("production".into(), "revoked".into()));
         assert_eq!(
             fixture.terminal_reason().as_deref(),
             Some("unregistered"),
@@ -1537,25 +1777,23 @@ mod tests {
     #[tokio::test]
     async fn apples_own_state_on_the_opposite_host_is_unavailable_and_leaves_the_binding_alone() {
         for (status, reason) in [(429, "TooManyRequests"), (503, "ServiceUnavailable")] {
-            let (sandbox, _s) = apple(bad_token_plan()).await;
-            let (production, _p) = apple(Plan::answering(
+            let (sandbox, _s) = apple(Plan::answering(
                 status,
                 &format!(r#"{{"reason":"{reason}"}}"#),
             ))
             .await;
-            let fixture = fixture(
+            let (production, _p) = apple(bad_token_plan()).await;
+            let fixture = correcting(
                 &format!("correction-{status}"),
-                "sandbox",
                 transport(Some(&sandbox), Some(&production)),
-                &[],
             );
 
-            let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+            let reply = fixture.push(&doorbell(TOKEN, "production")).await;
             assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reason}");
             assert_eq!(reply.body["error"], "unavailable", "{reason}");
             assert_eq!(
                 fixture.binding(),
-                ("sandbox".into(), "active".into()),
+                ("production".into(), "active".into()),
                 "{reason} is not a reason to give up on a phone"
             );
             assert_eq!(fixture.terminal_reason(), None, "{reason}");
@@ -1568,21 +1806,19 @@ mod tests {
     /// the first would have been.
     #[tokio::test]
     async fn an_unreachable_opposite_host_is_unavailable_and_never_rejected() {
-        let (sandbox, _s) = apple(bad_token_plan()).await;
+        let (production, _p) = apple(bad_token_plan()).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dead = listener.local_addr().unwrap();
         drop(listener);
-        let fixture = fixture(
+        let fixture = correcting(
             "correction-unreachable",
-            "sandbox",
-            transport(Some(&sandbox), Some(&format!("http://{dead}"))),
-            &[],
+            transport(Some(&format!("http://{dead}")), Some(&production)),
         );
 
-        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(reply.body["error"], "unavailable");
-        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(fixture.binding(), ("production".into(), "active".into()));
         fixture.drop_scratch();
     }
 
@@ -1604,17 +1840,15 @@ mod tests {
         refusing.hold = hold;
         let mut accepting = Plan::answering(200, "");
         accepting.hold = hold;
-        let (sandbox, sandbox_ledger) = apple(refusing).await;
-        let (production, _p) = apple(accepting).await;
-        let fixture = fixture(
+        let (production, production_ledger) = apple(refusing).await;
+        let (sandbox, _s) = apple(accepting).await;
+        let fixture = correcting(
             "one-budget",
-            "sandbox",
             transport(Some(&sandbox), Some(&production)).with_deadline(budget),
-            &[],
         );
 
         let started = std::time::Instant::now();
-        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let reply = fixture.push(&doorbell(TOKEN, "production")).await;
         let elapsed = started.elapsed();
 
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1623,8 +1857,8 @@ mod tests {
             elapsed < budget + Duration::from_millis(500),
             "the correction started a clock of its own: {elapsed:?}"
         );
-        assert_eq!(sandbox_ledger.streams(), 1, "exactly one attempt each");
-        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(production_ledger.streams(), 1, "exactly one attempt each");
+        assert_eq!(fixture.binding(), ("production".into(), "active".into()));
         fixture.drop_scratch();
     }
 
@@ -1741,7 +1975,7 @@ mod tests {
         // the place the revoked one held.
         let replacement = {
             let db = fixture.relay.db.lock().unwrap();
-            seed(&db, TOKEN, "sandbox", 0)
+            seed(&db, "development", TOKEN, "sandbox", 0)
         };
 
         // **The phone's budget was never opened.** Six hundred replays of a

@@ -281,7 +281,7 @@ Launch behavior remains best-effort:
 - No durable spool.
 - No retry after an ambiguous send or lost response.
 - A transport may reconnect and retry only when it can prove the request body was not submitted.
-- One explicit opposite-environment attempt remains for `BadDeviceToken`.
+- One explicit opposite-environment attempt remains for `BadDeviceToken`, bounded by the attestation pairing: a development-attested binding may address sandbox only, so the retry exists only for production-attested bindings — and is therefore inert on a development-namespace relay.
 - APNs 410 invalidates the token binding.
 - APNs 429/5xx and relay outages are logged/dropped for ordinary pushes and reported for tests.
 - Credential 401/403 preserves the APNs token and triggers credential recovery; it is not misclassified as an unregistered phone.
@@ -396,7 +396,7 @@ Rules:
 - Relay answers only after APNs answers.
 - Accepted response includes optional `apns_id` and the accepted environment.
 - Typed outcomes include `accepted`, `unregistered`, `credential_invalid`, `rate_limited`, `rejected`, and `unavailable`.
-- An accepted opposite-environment attempt atomically corrects the relay binding and returns that environment for daemon CAS persistence.
+- An accepted opposite-environment attempt atomically corrects the relay binding and returns that environment for daemon CAS persistence. Both the attempt and the persist are bounded by the attestation pairing above — an environment the binding's namespace forbids is refused as itself and can never be stored.
 - **The relay binding is the single authority for a token's APNs environment, and the environment in a push request is advisory.** The relay addresses APNs by the binding's environment regardless of the advisory value and returns the authoritative environment in every accepted response — a delivery is never refused for a stale advisory environment, which is what lets a second Mac that has not yet learned a correction still deliver, be corrected by the response, and CAS-persist the truth. The app's registration environment is a hint used only when a binding does not yet exist. Today the app resends its cached environment on every handshake (`AppModel.swift:298`); Phase 3 replaces that with persistence of `hello_ack.push_environment` (section 5) into the Keychain tuple, and the correction must be proven to survive a reconnect and a push from a second Mac.
 
 ## 5. CodeConnect protocol impact
