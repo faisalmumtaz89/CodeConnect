@@ -407,6 +407,14 @@ const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
 /// sized by what a relay could plausibly hold rather than by a protocol.
 const MAX_OBJECT_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// How many listing pages are followed before the walk is a fault. Each page
+/// carries up to a thousand keys and retention holds about thirty backups, so
+/// one page is the whole of a legitimate listing — the bound exists because a
+/// store answering `IsTruncated` for ever, each page inside its own deadline,
+/// would otherwise keep the job from ever returning, and with it every later
+/// backup and the failure line that would have said so.
+const MAX_LIST_PAGES: usize = 32;
+
 /// How long one exchange with the object store may take, from the first packet
 /// of the connection to the last byte of the answer.
 ///
@@ -727,7 +735,8 @@ impl BackupSink for ObjectStore {
     fn list(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
         let mut resume: Option<String> = None;
-        loop {
+        let mut complete = false;
+        for _page in 0..MAX_LIST_PAGES {
             let mut query = vec![("list-type", "2"), ("prefix", self.prefix.as_str())];
             if let Some(token) = resume.as_deref() {
                 query.push(("continuation-token", token));
@@ -756,15 +765,28 @@ impl BackupSink for ObjectStore {
                 .map(String::as_str)
                 != Some("true")
             {
+                complete = true;
                 break;
             }
             let Some(token) = elements(&listing, "NextContinuationToken")
                 .into_iter()
                 .next()
             else {
+                complete = true;
                 break;
             };
             resume = Some(token);
+        }
+        // A walk that never ends is a fault, never a longer listing: acting on
+        // what was gathered would delete against a list the store never
+        // finished telling, and returning quietly would hide the fault the
+        // failure line exists to record.
+        if !complete {
+            bail!(
+                "the listing was still truncated after {MAX_LIST_PAGES} pages; \
+                 retention holds about thirty backups, so this walk is a fault \
+                 in the store, not a longer listing"
+            );
         }
         names.sort();
         Ok(names)
@@ -2126,6 +2148,34 @@ mod tests {
         verify(request);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A walk that never ends is a fault, not a longer listing.** Every page
+    /// answers inside its own deadline, so without a bound on the pages a store
+    /// answering `IsTruncated` for ever — quickly, politely, each page well
+    /// formed — would keep the job from ever returning, and with it every
+    /// later backup and the failure line that would have said so.
+    #[tokio::test]
+    async fn a_listing_that_never_stops_being_truncated_is_a_fault() {
+        let dir = scratch("s3-endless");
+        let (endpoint, ledger) = store(
+            (0..MAX_LIST_PAGES)
+                .map(|_| Answer::Ok(listing(&["relay-1700000000000.sqlite.enc"], Some("t"))))
+                .collect(),
+        )
+        .await;
+        let store = object_store(&dir, &endpoint);
+
+        let err = blocking(move || store.list())
+            .await
+            .expect_err("an endless listing must be refused")
+            .to_string();
+        assert!(err.contains("still truncated"), "{err}");
+        assert_eq!(
+            ledger.taken().len(),
+            MAX_LIST_PAGES,
+            "one request per page, then the fault"
+        );
     }
 
     /// **The prune reads every page or the window is a lie.** A store that
