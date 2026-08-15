@@ -17,7 +17,7 @@ Everything CodeConnect works with stays on hardware you own, with one narrow exc
 - **On your Mac** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions (a local SQLite database), pairing records for your devices, TLS material, and configuration. None of it is transmitted anywhere except directly to your paired iPhone.
 - **On your iPhone** — session data is cached locally solely so the app works offline and resumes quickly. The per-device pairing token is stored in the iOS Keychain.
 
-Deleting it is equally local: revoke a device with `codeconnect revoke`, remove the daemon with `codeconnect daemon uninstall` and delete `~/.codeconnect`, and delete the app from your phone. There is no copy anywhere else to ask us about, because we never had one.
+Deleting it is equally local: revoke a device with `codeconnect revoke`, remove the daemon with `codeconnect daemon uninstall` and delete `~/.codeconnect`, and delete the app from your phone. Your sessions, code, and conversations have no copy anywhere else to ask us about, because we never had one; the only thing we ever hold is the relay's content-free enrollment record, which disabling relay-backed notifications retires on the fixed schedule above.
 
 ## What the app does with data, on your devices
 
@@ -57,7 +57,7 @@ The link between your phone and your Mac is TLS (`wss://`), your machine's loopb
 
 ## Your rights
 
-Privacy laws give you rights to access, correct, export, and delete personal data an organization holds about you. CodeConnect holds none, so there is nothing for us to produce, correct, or erase — every copy of your data is on your own devices, under your direct control, and the section above describes how to delete it. If you believe we have this wrong, contact us and we will answer plainly.
+Privacy laws give you rights to access, correct, export, and delete personal data an organization holds about you. CodeConnect holds exactly one thing: the push relay's content-free enrollment record — key hashes, an attestation receipt, counters and timestamps, bound to a push token rather than a name. Disabling relay-backed notifications retires it on the fixed retention schedule, and you may contact us to have it removed sooner. Everything else — your sessions, code, and conversations — exists only on your own devices, under your direct control, and the section above describes how to delete it. If you believe we have this wrong, contact us and we will answer plainly.
 
 ## Children
 

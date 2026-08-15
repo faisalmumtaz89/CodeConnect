@@ -1,6 +1,6 @@
 # CodeConnect Support
 
-CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. There is no server in between: the app talks directly to the daemon on your Mac, and your sessions never leave your own devices.
+CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. Your sessions travel directly between the app and the daemon on your Mac — no server in between — and never leave your own devices; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy.
 
 ## Requirements
 

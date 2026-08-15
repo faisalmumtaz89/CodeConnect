@@ -517,7 +517,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 - Golden tests cover every kind, blocked-count branch, test payload, collapse ID, and 4 KB bound.
 - Requests containing title, body, `aps`, project/session/path/identifier fields, oversized values, or unknown fields are rejected.
 - Attestation fixtures prove certificate, nonce, App ID, AAGUID, key ID, counter, validation category, bundle version, tamper, and challenge-replay handling.
-- Credential/token/environment mismatches fail.
+- Credential and token mismatches fail. A stale advisory environment does not: the relay delivers on the binding's environment and returns the authoritative value (section 4).
 - Database inspection finds no raw APNs tokens or bearer credentials.
 - Logs contain no authorization headers, raw tokens, bearer values, attestation objects, or raw IPs.
 - Rate limits return 429 with `Retry-After`; rotation cannot reset the token budget.
