@@ -48,7 +48,7 @@ Your phone now shows every session the daemon supervises. When an agent asks for
 ## Frequently asked
 
 **Does my code ever leave my devices?**
-No. There is no CodeConnect server. Sessions travel directly from your Mac to your phone; the one thing that passes through Apple is the push notification, whose fixed, minimal shape is described in the [privacy policy](https://codeconnect.sh/privacy).
+No. Sessions travel directly from your Mac to your phone and never touch a CodeConnect server. The one exception is the push notification: it passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first, which receives only a fixed handful of content-free fields. Both shapes are described exactly in the [privacy policy](https://codeconnect.sh/privacy).
 
 **Is Tailscale required?**
 No. Any network path from phone to Mac works — same Wi-Fi, or any private network you operate. Tailscale is simply a common choice.

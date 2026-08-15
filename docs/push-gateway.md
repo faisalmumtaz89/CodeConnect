@@ -189,8 +189,8 @@ Deploy one service instance as a **Render.com web service** (an always-on paid i
 - Built from this repository via Render's native Rust or Docker build, deploys pinned to a git SHA, rollback to a pinned known-good SHA through the Render API or dashboard.
 - SQLite WAL on a Render persistent disk. A disk binds the service to single-instance semantics and takes deploys through a brief restart instead of zero-downtime handover — both acceptable and already assumed by the single-instance design.
 - TLS issuance/renewal, DNS for the `onrender.com` hostname, OS patching, process supervision, and automatic restart are managed by the platform.
-- Daily disk snapshots are provided by the platform; the restore procedure in the runbook governs their use.
-- The APNs `.p8` keys and every other secret live in Render environment variables/secret files, never in the repository.
+- Backups are the database's own: a daily job inside the relay runs SQLite's online backup, encrypts the result, and uploads it to object storage with 30-day retention. Render's disk snapshots are supplemental at most — Render's own documentation warns against restoring snapshots of custom databases, and a snapshot restore destructively overwrites the disk — so a snapshot is never the restore path for the relay database.
+- The APNs `.p8` keys and every other secret live in Render **secret files**, never in environment variables and never in the repository.
 - External health monitoring against the service's health endpoint, plus Render's own health checks.
 - Redacted structured metrics.
 - Separate logical sandbox and production endpoints, keys, and data namespaces. They may share the initial instance.
@@ -397,6 +397,7 @@ Rules:
 - Accepted response includes optional `apns_id` and the accepted environment.
 - Typed outcomes include `accepted`, `unregistered`, `credential_invalid`, `rate_limited`, `rejected`, and `unavailable`.
 - An accepted opposite-environment attempt atomically corrects the relay binding and returns that environment for daemon CAS persistence.
+- **The relay binding is the single authority for a token's APNs environment.** The environment the app sends at registration is a hint for the first attempt only. Today the app resends its cached environment on every handshake (`AppModel.swift:298`), which would silently undo a correction on reconnect or from a second paired Mac; Phase 3 makes the app persist the corrected environment into its Keychain tuple when the daemon reports it, and the correction must be proven to survive a reconnect and a push from a second Mac.
 
 ## 5. CodeConnect protocol impact
 
@@ -636,6 +637,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 - Physical development-device sandbox App Attest and APNs delivery passes.
 - TestFlight production App Attest and production APNs delivery passes.
 - Token rotation, reinstall, missing App Attest key, relay credential invalidation, relay outage, and multiple paired Macs are exercised.
+- An environment correction survives an app reconnect and a push from a second paired Mac — the app persists the corrected tuple rather than resending its cached one.
 - Notification test results and tap routing remain correct.
 
 ### Phase 4 — Documentation, rollout, and operational readiness
@@ -736,16 +738,20 @@ Sandbox and production rotate independently.
 
 ### Database loss or restore
 
-- Restore the latest encrypted snapshot.
-- Unknown surviving phone credentials receive `reenroll`.
+**A restore fails closed: it must never resurrect authority that was revoked after the snapshot.**
+
+- Restore the latest encrypted SQLite online backup — never a platform disk snapshot of the database.
+- Bump the **generation floor** — a monotonic integer stored outside the database, in a Render secret file. Every bearer credential records the generation it was minted under, and the relay refuses any bearer below the floor. Bumping it invalidates every restored bearer at once, so a credential revoked after the snapshot cannot come back to life; every phone re-enrolls through App Attest on next contact via `reenroll`.
+- Expire all restored replay state: outstanding challenges are dropped, and assertion counters are treated as untrusted until the next successful assertion re-establishes them.
 - The app generates a new App Attest key and performs fresh attestation; it does not attempt to re-attest a lost server record with an unavailable attestation object.
 - Confirm permissions, ownership, migrations, key loading, and a sandbox smoke test before reopening production sends.
+- **Restore drill, tested before launch and after any schema change:** revoke a credential, take a backup from *before* the revocation, restore it, and prove the revoked credential is refused.
 
 ### TLS, host, and release maintenance
 
-- TLS, DNS, OS patching, and process supervision are Render-managed; what remains to monitor is disk, memory, SQLite checkpoint health, snapshot recency, and the deployed git SHA.
-- Patch relay dependencies on a defined monthly cadence, accelerating for security releases.
-- Deploy relay revisions independently from Mac/App Store releases, via the Render API or dashboard.
+- TLS, DNS, host-OS patching, and process supervision are Render-managed; what remains to monitor is disk, memory, SQLite checkpoint health, backup recency, and the deployed git SHA.
+- Patch relay dependencies **and the Docker base image** on a defined monthly cadence, accelerating for security releases — Render manages the host, not the container's packages.
+- Deploy relay revisions independently from Mac/App Store releases, via the Render API or dashboard, with **auto-deploy explicitly disabled on the service** — otherwise a later branch push silently replaces a pinned release.
 - Roll back to a pinned known-good SHA; never roll back the database without following the restore procedure.
 - The Render account API key is a deployment credential: it lives outside the repository, is rotated after initial setup and after any suspected exposure, and is never required by the running relay.
 

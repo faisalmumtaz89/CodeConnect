@@ -4,11 +4,11 @@
 
 CodeConnect is an iOS app that connects your iPhone to the CodeConnect daemon (`ccd`) running on **your own computer**. This policy covers both halves — the app on your phone and the software on your Mac — because they are one system, and a policy that described only half of it would leave the interesting questions unanswered.
 
-The policy is short on collection because the design is short on collection: there is no CodeConnect server, no account, no login, and no analytics. Your data moves between your own devices, with one deliberate exception named below: a push notification passes through Apple.
+The policy is short on collection because the design is short on collection: no account, no login, no analytics, and exactly one CodeConnect-operated service — a push relay that exists so notifications can reach a closed app, and that is designed to be incapable of receiving your content. Your data moves between your own devices, with the deliberate exceptions named below: a push notification passes through Apple, and — unless your daemon holds its own Apple push key — through that relay first.
 
 ## What we collect
 
-**Nothing.** CodeConnect (the developer) operates no servers and receives no data from the app or the daemon. The app contains no analytics, advertising, crash-reporting, or tracking SDKs of any kind. There is no account to create, so there is no identity to store, and nothing in this system can associate you with anything.
+**Nothing about your work.** CodeConnect (the developer) operates exactly one service — the push relay described below — and it receives only what a notification needs: a push token, an opaque credential, one of four fixed event kinds, a count, and ordinary network metadata. It cannot receive project names, commands, file paths, diffs, or conversation content, because its interface has no field for them. The app contains no analytics, advertising, crash-reporting, or tracking SDKs of any kind. There is no account to create, so there is no identity to store.
 
 ## Where your data lives
 
@@ -26,7 +26,11 @@ Deleting it is equally local: revoke a device with `codeconnect revoke`, remove 
 - **Dictation** in the compose bar uses Apple's speech recognition, on-device wherever your language supports it. Audio is transcribed while you dictate and is not recorded or kept.
 - **Face ID / passcode** is used to confirm high-risk approvals. Biometric data never leaves your device and is never visible to the app; the app only receives Apple's yes/no result.
 - **Credentials** (per-device pairing tokens) are stored in the iOS Keychain on your iPhone. You can revoke a device's token at any time from your computer, and revocation takes effect immediately, including on open connections.
-- **Push notifications** (when enabled) are sent by *your own daemon* directly to Apple's push service, so their content passes through Apple. That content is deliberately minimal and fixed in shape: the **project** a run is working in — the last component of its working directory, for example `Aion` — one of four canned sentences ("Waiting on an approval", "Waiting for your input", "Finished a turn", "Waiting for you") or a count of how many runs need you, and one word saying which of those four rang so a tap knows where to go. Nothing an agent wrote, ran, or changed is ever included: no command text, no file paths, no diffs, no session or request identifiers. We never see any of it — CodeConnect operates no servers.
+- **Push notifications** (when enabled) reach your phone one of two ways, and the shape is deliberately minimal in both:
+  - **Direct**, when your daemon holds its own Apple push key: your Mac talks straight to Apple's push service. The content is the **project** a run is working in — the last component of its working directory, for example `Aion` — one of four canned sentences ("Waiting on an approval", "Waiting for your input", "Finished a turn", "Waiting for you") or a count of how many runs need you, and one word saying which of those four rang so a tap knows where to go. We never see any of it.
+  - **Relay-backed**, the default: your daemon sends CodeConnect's push relay only the APNs token and environment, an opaque token-bound credential, one of the four fixed event kinds, a blocked-run count, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content — its interface has no field for them. It builds a generic notification (titled "CodeConnect") and forwards it to Apple. Enrolling for relay-backed notifications sends Apple's App Attest proof that a genuine copy of the app is asking; the relay retains the verified public key and receipt, an assertion counter, hashes of the token and credential (never their raw values), status, and timestamps. Retention periods for every stored field are fixed and short — challenges minutes, diagnostic logs days, revoked records and encrypted backups 30 days.
+
+  In both paths, nothing an agent wrote, ran, or changed is ever included: no command text, no file paths, no diffs, no conversation content.
 
 ## Every network connection, enumerated
 
@@ -41,6 +45,8 @@ The **Mac daemon and tools** connect to:
 
 1. **Your paired iPhone** — directly.
 2. **GitHub** — after `codeconnect claude` starts a session, a background request to GitHub's public Releases API checks for a newer release when the 24-hour cache is stale. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable it. `codeconnect update`, when you run it, asks the same API and downloads that release's files from GitHub — it is only ever a thing you type.
+
+3. **CodeConnect's push relay** — only when relay-backed notifications are enabled, and only with the fixed fields described above. Sessions, terminals, approvals, and everything else in this system never touch it.
 
 There are no other endpoints. If you choose to reach your Mac through a VPN or tunnel you operate (for example Tailscale), that traffic is governed by that provider's policy — CodeConnect does not require any specific provider.
 
