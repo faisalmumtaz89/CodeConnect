@@ -8,6 +8,15 @@
 //! the live connection with no downtime, which is the only kind of copy worth
 //! keeping.
 //!
+//! **A backup on the database's own disk is not a backup.** The plan asks for
+//! the sealed copy to go to object storage, and the reason is the failure it is
+//! for: the disk the relay's SQLite file lives on is the disk a platform
+//! incident takes away, and a copy written beside it goes with it. So the sink
+//! below is either a directory — right for a developer machine, where the
+//! failure being rehearsed is a mistake and not a lost volume — or an
+//! S3-compatible bucket, which is the one interface AWS S3, Cloudflare R2,
+//! Backblaze B2 and MinIO all answer, and Render provides none of its own.
+//!
 //! **A restore fails closed** (§7). The backup is a database that believes in
 //! credentials the operator may have revoked since, and no query against it can
 //! know that. What makes the restore safe is the generation floor — a number in
@@ -28,11 +37,17 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full, Limited};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::rand::{SecureRandom, SystemRandom};
+use ring::{digest, hmac};
 use rusqlite::Connection;
 
 use crate::api::{BackupState, Relay};
@@ -71,11 +86,12 @@ const NAME_DIGITS: usize = 13;
 
 /// Where sealed backups are kept.
 ///
-/// **A trait with the target in configuration, not a hardcoded directory.** The
-/// deployment writes to a mounted disk today and to object storage later; the
-/// plan says thirty-day retention either way. Written as a trait, that later
-/// sink is an added implementation and a changed environment variable. Written
-/// as `std::fs` calls inside the job, it is a rewrite of the job.
+/// **A trait with the target in configuration, not a hardcoded directory.** A
+/// developer machine keeps them in a directory and the deployment keeps them in
+/// a bucket somewhere the relay's disk cannot take with it; the plan says
+/// thirty-day retention either way. Written as a trait, the second sink is an
+/// added implementation and a changed environment variable. Written as
+/// `std::fs` calls inside the job, it would be a rewrite of the job.
 pub trait BackupSink: Send + Sync {
     fn put(&self, name: &str, sealed: &[u8]) -> Result<()>;
     fn list(&self) -> Result<Vec<String>>;
@@ -135,17 +151,719 @@ impl BackupSink for Directory {
     }
 }
 
+/// The service name every S3 signature's credential scope carries.
+const S3_SERVICE: &str = "s3";
+
+/// The only signing algorithm S3 accepts on a header-signed request.
+const ALGORITHM: &str = "AWS4-HMAC-SHA256";
+
+/// The last element of a credential scope, and the last step of the key
+/// derivation. A literal in both places, because AWS defines it as one.
+const TERMINATOR: &str = "aws4_request";
+
+/// The credential every request to the object store is signed with.
+///
+/// **Not `Debug`, not `Clone` and not on any struct that is.** The secret
+/// access key reads, overwrites and deletes every backup the relay has taken,
+/// and a derived `Debug` is what puts it in the first structured log line
+/// somebody adds to this module.
+struct Signer {
+    access_key_id: String,
+    secret_access_key: String,
+    region: String,
+    /// `s3` in the relay. A field rather than the constant because AWS's own
+    /// published test vectors sign for a service literally named `service`, and
+    /// a signer that could not be pointed at it could not be checked against
+    /// them.
+    service: String,
+}
+
+/// **Signature Version 4, written here rather than taken from the AWS SDK.**
+///
+/// The relay needs four operations against one bucket. The AWS SDK for Rust is
+/// a tree of crates carrying credential providers, a retry policy, an endpoint
+/// resolver and a runtime of its own — none of which this job wants, and all of
+/// which would have to be reviewed and patched on the relay's cadence. What is
+/// actually needed is an HMAC-SHA256 chain over a canonical string, and `ring`
+/// is already here computing the AES key above.
+///
+/// What that trades away is that a signing mistake is **silent**: a wrong
+/// signature is a `403`, and a `403` every night is backups that never
+/// happened. That is why the tests below sign AWS's own published examples and
+/// compare the hex, rather than checking this implementation against itself.
+impl Signer {
+    /// The `Authorization` header for one request.
+    ///
+    /// The four steps are AWS's: a canonical request, a string to sign that
+    /// binds it to a scope, a signing key derived from the secret and that same
+    /// scope, and the HMAC of the two.
+    fn authorization(
+        &self,
+        method: &str,
+        canonical_uri: &str,
+        canonical_query: &str,
+        headers: &[(String, String)],
+        payload_sha256: &str,
+        stamp: &Stamp,
+    ) -> String {
+        let (canonical_headers, signed_headers) = canonical_headers(headers);
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n\
+             {signed_headers}\n{payload_sha256}"
+        );
+        let scope = format!(
+            "{}/{}/{}/{TERMINATOR}",
+            stamp.date, self.region, self.service
+        );
+        let string_to_sign = format!(
+            "{ALGORITHM}\n{}\n{scope}\n{}",
+            stamp.instant,
+            hex(sha256(canonical_request.as_bytes()).as_ref())
+        );
+        let signature = hex(self
+            .signature(&stamp.date, string_to_sign.as_bytes())
+            .as_ref());
+        format!(
+            "{ALGORITHM} Credential={}/{scope}, SignedHeaders={signed_headers}, \
+             Signature={signature}",
+            self.access_key_id
+        )
+    }
+
+    /// The signing key, and the signature under it.
+    ///
+    /// **The key is derived per request and scoped to date, region and
+    /// service.** That scoping is what makes a captured signature useless
+    /// anywhere else: it is not the secret that signs, it is a key that only
+    /// exists for one day, one region and one service.
+    fn signature(&self, date: &str, string_to_sign: &[u8]) -> hmac::Tag {
+        let seed = format!("AWS4{}", self.secret_access_key);
+        let date_key = hmac_sha256(seed.as_bytes(), date.as_bytes());
+        let region_key = hmac_sha256(date_key.as_ref(), self.region.as_bytes());
+        let service_key = hmac_sha256(region_key.as_ref(), self.service.as_bytes());
+        let signing_key = hmac_sha256(service_key.as_ref(), TERMINATOR.as_bytes());
+        hmac_sha256(signing_key.as_ref(), string_to_sign)
+    }
+}
+
+/// The one clock reading a request is signed under, in both forms the signature
+/// uses: `20130524` for the credential scope and `20130524T000000Z` for
+/// `x-amz-date` and the string to sign. The two must come from a single
+/// reading — taken separately, a request signed across midnight carries a scope
+/// for one day and a timestamp for the next, and the store refuses it.
+struct Stamp {
+    date: String,
+    instant: String,
+}
+
+impl Stamp {
+    fn now() -> Result<Stamp> {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("the system clock is before 1970")?
+            .as_secs();
+        Ok(Stamp::at(secs as i64))
+    }
+
+    fn at(epoch_secs: i64) -> Stamp {
+        let days = epoch_secs.div_euclid(86_400);
+        let seconds = epoch_secs.rem_euclid(86_400);
+        let (year, month, day) = civil_from_days(days);
+        Stamp {
+            date: format!("{year:04}{month:02}{day:02}"),
+            instant: format!(
+                "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+                seconds / 3_600,
+                (seconds / 60) % 60,
+                seconds % 60
+            ),
+        }
+    }
+}
+
+/// The civil date a count of days since 1970-01-01 names.
+///
+/// Written out rather than pulled from a date library: `x-amz-date` is the only
+/// calendar this relay has, and the vectors below check the arithmetic against
+/// two dates AWS published.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// The signed headers, in the two forms the canonical request needs.
+///
+/// Lower-cased, sorted by name, and every value trimmed with runs of spaces
+/// collapsed — which is AWS's `Trimall`, and is the difference between a
+/// signature the store recomputes and a `403`.
+fn canonical_headers(headers: &[(String, String)]) -> (String, String) {
+    let mut sorted: Vec<(String, String)> = headers
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), trim_all(value)))
+        .collect();
+    sorted.sort();
+    let canonical = sorted
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect::<String>();
+    let signed = sorted
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    (canonical, signed)
+}
+
+/// AWS's `Trimall`: no leading or trailing space, and no run of spaces longer
+/// than one.
+fn trim_all(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut spaced = false;
+    for character in value.trim().chars() {
+        if character == ' ' {
+            spaced = true;
+            continue;
+        }
+        if spaced && !out.is_empty() {
+            out.push(' ');
+        }
+        spaced = false;
+        out.push(character);
+    }
+    out
+}
+
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX_LOWER[usize::from(byte >> 4)] as char);
+        out.push(HEX_LOWER[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
+fn sha256(bytes: &[u8]) -> digest::Digest {
+    digest::digest(&digest::SHA256, bytes)
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> hmac::Tag {
+    hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), data)
+}
+
+/// Percent-encoding as the signature defines it: unreserved characters as
+/// themselves, everything else as upper-case `%XY`.
+///
+/// **`/` is kept in a path and encoded in a query value.** A prefix is part of
+/// the object's key and the store reads the slashes in it; the same slashes in
+/// a continuation token are data, and one left literal there is a canonical
+/// query string the store does not recompute.
+///
+/// S3 is the service AWS exempts from path normalization, so the key goes on
+/// the wire as it is written and is encoded exactly once.
+fn encode(value: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b'/' if keep_slash => out.push('/'),
+            _ => {
+                out.push('%');
+                out.push(HEX_UPPER[usize::from(byte >> 4)] as char);
+                out.push(HEX_UPPER[usize::from(byte & 0x0f)] as char);
+            }
+        }
+    }
+    out
+}
+
+/// How much of a listing is read. One page of keys is a few kilobytes; the
+/// bound is here so that a store answering with something endless cannot be
+/// read into memory by a job that only ever wanted file names.
+const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much of one object is read. A backup is the whole database, so this is
+/// sized by what a relay could plausibly hold rather than by a protocol.
+const MAX_OBJECT_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+/// A bucket at an S3-compatible store.
+///
+/// **Written against S3's API rather than one vendor's.** It is the interface
+/// AWS S3, Cloudflare R2, Backblaze B2 and MinIO all answer, and Render — where
+/// this relay runs — offers no object storage of its own, so the deployment's
+/// store is chosen after the code is written and not before.
+struct ObjectStore {
+    /// The verified trust anchors, parsed once at startup.
+    ///
+    /// **The client is built per request and this is not.** Each request runs
+    /// on a runtime of its own (see [`ObjectStore::send`]), and a pooled client
+    /// outliving the runtime that opened its connections is a pool holding
+    /// handles to a dead reactor. Reading and validating the platform trust
+    /// store is the expensive half and it happens once; building a connector
+    /// around an `Arc` of the result costs nothing.
+    tls: Arc<rustls::ClientConfig>,
+    address: Address,
+    bucket: String,
+    /// The key prefix, empty or ending in `/`.
+    prefix: String,
+    signer: Signer,
+}
+
+/// Where one bucket is addressed, and in which of S3's two URL styles.
+///
+/// **AWS is addressed by virtual host and everything else by path.** AWS has
+/// been retiring path-style addressing since 2020 and new buckets may not
+/// answer it at all, while R2, B2 and MinIO all serve path-style at a host that
+/// says nothing about the bucket. So the presence of a configured endpoint is
+/// what decides: no endpoint means AWS and `bucket.s3.region.amazonaws.com`, an
+/// endpoint means that host with the bucket as the first path segment.
+struct Address {
+    scheme: String,
+    /// The `host[:port]` that is signed as `host` and dialled.
+    host: String,
+    /// What every key hangs under: empty for a virtual-hosted bucket, `/bucket`
+    /// for a path-style endpoint.
+    root: String,
+}
+
+impl Address {
+    fn resolve(config: &RelayConfig, bucket: &str) -> Result<Address> {
+        let Some(endpoint) = &config.backup_s3_endpoint else {
+            return Ok(Address {
+                scheme: "https".to_string(),
+                host: format!("{bucket}.s3.{}.amazonaws.com", config.backup_s3_region),
+                root: String::new(),
+            });
+        };
+        let uri: http::Uri = endpoint.parse().with_context(|| {
+            format!("RELAY_BACKUP_S3_ENDPOINT is {endpoint:?}, which is not a URL")
+        })?;
+        let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
+            bail!(
+                "RELAY_BACKUP_S3_ENDPOINT is {endpoint:?}; it is a scheme and a host, \
+                 for example https://s3.us-east-1.amazonaws.com"
+            );
+        };
+        if !matches!(uri.path(), "" | "/") {
+            bail!(
+                "RELAY_BACKUP_S3_ENDPOINT is {endpoint:?}; it is the store's address and the \
+                 bucket comes from RELAY_BACKUP_TARGET, so it carries no path"
+            );
+        }
+        // **Plaintext is refused here and not left to the connector.** The
+        // sealed bytes are already ciphertext, but the request around them
+        // carries the access key id and a signature that anyone on the path can
+        // replay for as long as the store's clock skew allows — and that
+        // credential deletes every backup this relay has. The test build allows
+        // `http` because the fake store below is a plaintext socket on
+        // localhost, which is the only way to read the request the store
+        // actually receives.
+        if !cfg!(test) && scheme != "https" {
+            bail!(
+                "RELAY_BACKUP_S3_ENDPOINT is {endpoint:?}; it is `https`, because the request \
+                 carries a credential that can delete every backup this relay has taken"
+            );
+        }
+        Ok(Address {
+            scheme: scheme.to_string(),
+            host: authority.to_string(),
+            root: format!("/{bucket}"),
+        })
+    }
+}
+
+impl ObjectStore {
+    fn new(config: &RelayConfig, location: &str) -> Result<ObjectStore> {
+        let (bucket, prefix) = split_location(location)?;
+        let access_key_id = config.backup_s3_access_key_id.clone().context(
+            "RELAY_BACKUP_S3_ACCESS_KEY_ID is not set, and an `s3://` backup target cannot be \
+             written without it",
+        )?;
+        let secret_access_key = read_secret_access_key(&config.backup_s3_secret_key_file)?;
+        Ok(ObjectStore {
+            tls: Arc::new(trusted_tls()?),
+            address: Address::resolve(config, &bucket)?,
+            bucket,
+            prefix,
+            signer: Signer {
+                access_key_id,
+                secret_access_key,
+                region: config.backup_s3_region.clone(),
+                service: S3_SERVICE.to_string(),
+            },
+        })
+    }
+
+    /// The full object key one backup name lands under.
+    fn key(&self, name: &str) -> String {
+        format!("{}{name}", self.prefix)
+    }
+
+    /// One signed request, and the store's answer.
+    ///
+    /// **A thread and a runtime of its own, because [`BackupSink`] is
+    /// synchronous.** The job that calls it is already off the reactor on
+    /// `spawn_blocking` — an upload of a whole database must not sit on a
+    /// worker that is meant to be answering pushes — and a restore is run from
+    /// a context with no runtime at all. A runtime created and dropped on a
+    /// thread that is inside neither is the one arrangement that is correct in
+    /// both places; a runtime owned by this struct would panic when a caller
+    /// inside an async context dropped it.
+    fn send(
+        &self,
+        method: &str,
+        key: &str,
+        query: &[(&str, &str)],
+        body: Vec<u8>,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
+        let path = if key.is_empty() {
+            if self.address.root.is_empty() {
+                "/".to_string()
+            } else {
+                self.address.root.clone()
+            }
+        } else {
+            format!("{}/{}", self.address.root, encode(key, true))
+        };
+        let mut pairs: Vec<(String, String)> = query
+            .iter()
+            .map(|(name, value)| (encode(name, false), encode(value, false)))
+            .collect();
+        pairs.sort();
+        let canonical_query = pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let payload_sha256 = hex(sha256(&body).as_ref());
+        let stamp = Stamp::now()?;
+        // Exactly the three headers that are signed, and the ones the store
+        // checks: `host` is what stops a signature for one bucket being
+        // replayed against another, and `x-amz-content-sha256` is what stops
+        // the body being swapped under a signature that covers only the
+        // headers.
+        let headers = [
+            ("host".to_string(), self.address.host.clone()),
+            ("x-amz-content-sha256".to_string(), payload_sha256.clone()),
+            ("x-amz-date".to_string(), stamp.instant.clone()),
+        ];
+        let authorization = self.signer.authorization(
+            method,
+            &path,
+            &canonical_query,
+            &headers,
+            &payload_sha256,
+            &stamp,
+        );
+        let uri = if canonical_query.is_empty() {
+            format!("{}://{}{path}", self.address.scheme, self.address.host)
+        } else {
+            format!(
+                "{}://{}{path}?{canonical_query}",
+                self.address.scheme, self.address.host
+            )
+        };
+
+        let request = http::Request::builder()
+            .method(method)
+            .uri(&uri)
+            .header("host", &self.address.host)
+            .header("x-amz-content-sha256", &payload_sha256)
+            .header("x-amz-date", &stamp.instant)
+            .header("authorization", authorization)
+            .body(Full::new(Bytes::from(body)))
+            .context("building the object store request")?;
+
+        let tls = Arc::clone(&self.tls);
+        let request_path = path.clone();
+        let exchange = std::thread::scope(|scope| {
+            scope
+                .spawn(move || -> Result<(http::StatusCode, Vec<u8>)> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("the object store's runtime")?;
+                    runtime.block_on(async move {
+                        let response = client(tls)
+                            .request(request)
+                            .await
+                            .with_context(|| format!("{method} {request_path}"))?;
+                        let status = response.status();
+                        let body = Limited::new(response.into_body(), limit)
+                            .collect()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("reading the object store's answer: {e}"))?
+                            .to_bytes();
+                        Ok((status, body.to_vec()))
+                    })
+                })
+                .join()
+        })
+        .map_err(|_| anyhow::anyhow!("the object store request did not finish"))?;
+
+        let (status, body) = exchange?;
+        if !status.is_success() {
+            // **The store's own message is not repeated.** An S3 error document
+            // quotes the request back, which includes the access key id and the
+            // canonical request; the fault code is what an operator acts on and
+            // is the whole of what a log needs.
+            bail!(
+                "the object store answered {} to {method} {path}{}",
+                status.as_u16(),
+                fault(&body)
+            );
+        }
+        Ok(body)
+    }
+}
+
+impl BackupSink for ObjectStore {
+    /// **No temporary name and no rename.** The directory sink writes a partial
+    /// file and renames it because a process killed mid-write would otherwise
+    /// leave half a backup that a restore would read; an object appears at its
+    /// key only once the store has the whole body, so an interrupted upload is
+    /// an object that never existed.
+    fn put(&self, name: &str, sealed: &[u8]) -> Result<()> {
+        self.send(
+            "PUT",
+            &self.key(name),
+            &[],
+            sealed.to_vec(),
+            MAX_LISTING_BYTES,
+        )?;
+        Ok(())
+    }
+
+    fn list(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        let mut resume: Option<String> = None;
+        loop {
+            let mut query = vec![("list-type", "2"), ("prefix", self.prefix.as_str())];
+            if let Some(token) = resume.as_deref() {
+                query.push(("continuation-token", token));
+            }
+            let body = self.send("GET", "", &query, Vec::new(), MAX_LISTING_BYTES)?;
+            let listing = String::from_utf8_lossy(&body).into_owned();
+            names.extend(
+                elements(&listing, "Key")
+                    .into_iter()
+                    .filter_map(|key| key.strip_prefix(self.prefix.as_str()).map(str::to_string))
+                    .filter(|name| taken_at(name).is_some()),
+            );
+            // **A listing is paged, and the prune reads every page.** A store
+            // that answered the first page only would leave everything past it
+            // undeleted, so the thirty-day window would quietly become "the
+            // thirty days that fit in one page".
+            if elements(&listing, "IsTruncated")
+                .first()
+                .map(String::as_str)
+                != Some("true")
+            {
+                break;
+            }
+            let Some(token) = elements(&listing, "NextContinuationToken")
+                .into_iter()
+                .next()
+            else {
+                break;
+            };
+            resume = Some(token);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn get(&self, name: &str) -> Result<Vec<u8>> {
+        self.send("GET", &self.key(name), &[], Vec::new(), MAX_OBJECT_BYTES)
+    }
+
+    fn delete(&self, name: &str) -> Result<()> {
+        self.send(
+            "DELETE",
+            &self.key(name),
+            &[],
+            Vec::new(),
+            MAX_LISTING_BYTES,
+        )?;
+        Ok(())
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "bucket {}/{} at {}",
+            self.bucket, self.prefix, self.address.host
+        )
+    }
+}
+
+/// The bucket and the key prefix a target's `s3://` body names.
+fn split_location(location: &str) -> Result<(String, String)> {
+    let (bucket, prefix) = location.split_once('/').unwrap_or((location, ""));
+    if bucket.is_empty() {
+        bail!("the backup target names no bucket; it is `s3://bucket/optional/prefix`");
+    }
+    let prefix = prefix.trim_matches('/');
+    Ok((
+        bucket.to_string(),
+        if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        },
+    ))
+}
+
+/// The secret access key, read as one line from a mounted secret file.
+///
+/// **A file and never a variable**, for the reason the module header gives for
+/// every other secret here: a variable is printed by a process dump, inherited
+/// by every child, and shown by the deployment dashboard to anyone who can read
+/// the service. This one is the credential that can delete every backup the
+/// relay has taken, which after a disk loss is the entire state.
+///
+/// Absent or empty is an error, not a store that signs with nothing: a relay
+/// that started with no credential would answer `403` every night and the
+/// operator would find out on the morning of a restore.
+fn read_secret_access_key(path: &Path) -> Result<String> {
+    let raw = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "reading the backup object store's secret access key at {}",
+            path.display()
+        )
+    })?;
+    let key = raw.trim().to_string();
+    if key.is_empty() {
+        bail!(
+            "the backup object store's secret access key at {} is empty",
+            path.display()
+        );
+    }
+    Ok(key)
+}
+
+/// The fault code out of an S3 error document, if it says one.
+fn fault(body: &[u8]) -> String {
+    match elements(&String::from_utf8_lossy(body), "Code")
+        .into_iter()
+        .next()
+    {
+        Some(code) => format!(" ({code})"),
+        None => String::new(),
+    }
+}
+
+/// Every value of one element in the store's XML answer.
+///
+/// **A scan and not a parser.** The listing is the only XML this relay ever
+/// reads, and the three elements it needs — a key, a truncation flag, a
+/// continuation token — are element text with no attributes and no namespaces.
+/// Everything the scan cannot understand is a name [`taken_at`] rejects, so a
+/// key this relay did not write is skipped rather than acted on.
+fn elements(xml: &str, name: &str) -> Vec<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let mut found = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        let after = &rest[start + open.len()..];
+        let Some(end) = after.find(&close) else {
+            break;
+        };
+        found.push(after[..end].to_string());
+        rest = &after[end + close.len()..];
+    }
+    found
+}
+
+/// The TLS configuration every object-store request is made under.
+///
+/// The platform trust store, exactly as [`crate::apns`] does it and for the
+/// same reason: every store this can address presents a certificate chaining to
+/// a public root, and vendoring a root set would be a second thing to keep
+/// current. A trust store that will not load is a broken image, and it is
+/// reported here rather than at the first upload.
+fn trusted_tls() -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, _ignored) =
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if added == 0 {
+        bail!("no trust anchors available for the backup object store connection");
+    }
+    // Named rather than taken from the process default, which is installed by
+    // whichever crate got there first.
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("the backup object store's TLS configuration")?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    // **HTTP/1.1 in ALPN, and not `h2`.** S3's REST API is HTTP/1.1 and AWS
+    // offers no `h2` for it; a client that announced only `h2` would meet a
+    // server that selects nothing and, on the strict ones, an aborted
+    // handshake. Announcing the version that is actually spoken costs one
+    // round trip a day and works at every store this can address.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+/// A client for one request.
+///
+/// `enforce_http(false)` because the connector is handed an `https` address;
+/// the scheme itself was decided at startup by [`Address::resolve`], which is
+/// the only place a target can name one.
+fn client(
+    tls: Arc<rustls::ClientConfig>,
+) -> Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>> {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    Client::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(0)
+        .build(hyper_rustls::HttpsConnector::from((http, tls)))
+}
+
 /// The sink a target names, or a refusal that says which schemes exist.
 ///
-/// A scheme this build cannot serve is an error at startup rather than a
-/// backup that silently never happens — which is a state nobody discovers
-/// until the morning they need a restore.
-pub fn sink(target: &str) -> Result<Box<dyn BackupSink>> {
-    match target.split_once("://") {
+/// **Everything a sink needs is decided here, at startup.** A scheme this build
+/// cannot serve, a bucket with no credential, a secret file that is not
+/// mounted, an endpoint that is not a URL — each of them is an error the relay
+/// reports the moment it boots rather than a backup that silently never
+/// happens, which is a state nobody discovers until the morning they need a
+/// restore.
+pub fn sink(config: &RelayConfig) -> Result<Box<dyn BackupSink>> {
+    match config.backup_target.split_once("://") {
         Some(("file", path)) if !path.is_empty() => Ok(Box::new(Directory(PathBuf::from(path)))),
-        _ => {
-            bail!("the backup target {target:?} is not supported; this build writes `file:///path`")
+        Some(("s3", location)) if !location.is_empty() => {
+            Ok(Box::new(ObjectStore::new(config, location)?))
         }
+        _ => bail!(
+            "the backup target {:?} is not supported; it is `s3://bucket/optional/prefix` \
+             or `file:///path`",
+            config.backup_target
+        ),
     }
 }
 
@@ -169,7 +887,7 @@ impl Job {
     pub fn from_config(config: &RelayConfig) -> Result<Job> {
         Ok(Job {
             key: read_key(&config.backup_key_file)?,
-            sink: sink(&config.backup_target)?,
+            sink: sink(config)?,
             db_path: config.db_path.clone(),
             retention_days: config.backup_retention_days,
         })
@@ -450,6 +1168,10 @@ mod tests {
             std::fs::write(&key_file, format!("{KEY}\n")).unwrap();
         }
         let mut pairs: Vec<(String, String)> = vec![
+            // The namespace the seeded installation was attested in. A relay
+            // configured for the other one refuses its bearer, which is the
+            // point of the namespace and not the subject of these tests.
+            ("RELAY_ATTEST_ENVIRONMENT".into(), "production".into()),
             (
                 "RELAY_DB_PATH".into(),
                 dir.join("relay.sqlite").to_string_lossy().into_owned(),
@@ -675,20 +1397,35 @@ mod tests {
 
     #[test]
     fn an_unsupported_target_scheme_is_refused_with_the_ones_that_work() {
+        let dir = scratch("sink-schemes");
+        // A blank target is not here: blank-means-absent turns it into the
+        // default before `sink` ever sees it.
         for target in [
-            "s3://codeconnect-relay-backups",
             "https://example.invalid/backups",
             "/var/data/backups",
             "file://",
-            "",
         ] {
-            let err = sink(target)
+            let err = sink(&config(&dir, &[("RELAY_BACKUP_TARGET", target)]))
                 .err()
                 .unwrap_or_else(|| panic!("accepted {target:?}"))
                 .to_string();
             assert!(err.contains("file:///path"), "{err}");
         }
-        assert!(sink("file:///var/data/backups").is_ok());
+        // An `s3://` target is supported, so it is refused for what is
+        // actually missing — the credentials — not as an unknown scheme.
+        let err = sink(&config(
+            &dir,
+            &[("RELAY_BACKUP_TARGET", "s3://codeconnect-relay-backups")],
+        ))
+        .err()
+        .expect("an s3 target without credentials must be refused")
+        .to_string();
+        assert!(err.contains("RELAY_BACKUP_S3_ACCESS_KEY_ID"), "{err}");
+        assert!(sink(&config(
+            &dir,
+            &[("RELAY_BACKUP_TARGET", "file:///var/data/backups")]
+        ))
+        .is_ok());
     }
 
     /// Retention deletes what is past the window and nothing that is inside it.

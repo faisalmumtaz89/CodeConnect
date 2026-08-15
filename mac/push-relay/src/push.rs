@@ -169,42 +169,91 @@ pub(crate) async fn push(
     // still hold the environment from before a correction, and refusing it
     // would be refusing the delivery that the correction was supposed to make
     // work.
+
+    // **The whole request's time, opened once and spent by every attempt.** The
+    // correction below is a second send, and giving it a clock of its own would
+    // let one push run to twice the transport's bound — outside the 45 seconds
+    // the daemon waits, which is the daemon abandoning work the relay is still
+    // doing.
+    let budget = relay.apns.budget();
     let sent = relay
         .apns
-        .send(binding.environment, &request.token, &payload, collapse)
+        .send(
+            &budget,
+            binding.environment,
+            &request.token,
+            &payload,
+            collapse,
+        )
         .await;
 
+    match verdict(relay, &binding, binding.environment, sent, now) {
+        Verdict::Answered(reply) => reply,
+        Verdict::BadDeviceToken => {
+            correction(relay, &binding, &request, &payload, collapse, &budget, now).await
+        }
+    }
+}
+
+/// What one attempt settled, or that it settled nothing.
+enum Verdict {
+    Answered(Reply),
+    /// Apple does not know this token **on this host**, which on the binding's
+    /// own host is indistinguishable from the token belonging to the other one.
+    BadDeviceToken,
+}
+
+/// Apple's answer to one attempt, in §4's words.
+///
+/// **Both attempts are read by these rules, and that is the point of the
+/// function.** A `410` from the opposite host is the same fact about the phone
+/// as a `410` from the binding's host and has to retire the binding either way;
+/// Apple being busy is Apple's own state wherever it is met, and reporting it as
+/// `rejected` would tell the daemon a working token will never work again.
+/// `BadDeviceToken` is the single answer that is not a conclusion, so it is
+/// handed back for the caller to decide what a second host would prove.
+fn verdict(
+    relay: &Relay,
+    binding: &Authorized,
+    environment: ApnsEnvironment,
+    sent: Result<ApnsOutcome, crate::apns::SendError>,
+    now: i64,
+) -> Verdict {
+    let id = Some(binding.token_hash.as_str());
     match sent {
         Ok(ApnsOutcome::Accepted { apns_id }) => {
-            accepted(relay, &binding, apns_id, binding.environment)
+            // An acceptance anywhere but the binding's own host is the
+            // correction Decision 4 exists to find.
+            if environment != binding.environment {
+                correct_environment(relay, binding, environment, now);
+            }
+            Verdict::Answered(accepted(relay, binding, apns_id, environment))
         }
         // §7 and Decision 4: `410` is the single answer that retires a token,
         // and it retires the binding rather than merely this request.
         Ok(ApnsOutcome::Unregistered) => {
-            retire(relay, &binding, now);
-            refused(relay, Outcome::Unregistered, id)
+            retire(relay, binding, now);
+            Verdict::Answered(refused(relay, Outcome::Unregistered, id))
         }
-        Ok(ApnsOutcome::BadDeviceToken) => {
-            correction(relay, &binding, &request, &payload, collapse, now).await
-        }
+        Ok(ApnsOutcome::BadDeviceToken) => Verdict::BadDeviceToken,
         // Apple is busy or unwell, which says nothing about the phone. The
         // daemon drops an ordinary doorbell and reports a test honestly.
         Ok(ApnsOutcome::Retryable { status, reason }) => {
             tracing::warn!(status, reason, "apns is refusing traffic");
-            refused(relay, Outcome::Unavailable, id)
+            Verdict::Answered(refused(relay, Outcome::Unavailable, id))
         }
         // Logged with Apple's own words, which name neither a caller nor a
         // token: a `403 InvalidProviderToken` is the relay's key being wrong
         // for every user at once, and it has to be visible as that.
         Ok(ApnsOutcome::Rejected { status, reason }) => {
             tracing::warn!(status, reason, "apns rejected the notification");
-            refused(relay, Outcome::Rejected, id)
+            Verdict::Answered(refused(relay, Outcome::Rejected, id))
         }
         // Both halves of a failed attempt answer `unavailable`: nothing about
         // this phone was learned, and neither the daemon nor the relay retries.
         Err(e) => {
             tracing::warn!(error = %e, "the notification did not reach apns");
-            refused(relay, Outcome::Unavailable, id)
+            Verdict::Answered(refused(relay, Outcome::Unavailable, id))
         }
     }
 }
@@ -264,19 +313,11 @@ fn authorize(
     // same address — is exactly the traffic that would meet it.
     let Some(row) = found else {
         relay.metrics.invalid_auth.fetch_add(1, Ordering::Relaxed);
-        let address = relay.limiter.ip_key("auth", ip, now);
-        if relay
-            .limiter
-            .spent(&db, &address, ratelimit::INVALID_AUTH_IP, now)
-        {
+        if charge_address(relay, &db, ip, now) {
             relay
                 .metrics
                 .invalid_auth_limited
                 .fetch_add(1, Ordering::Relaxed);
-        } else {
-            let _ = relay
-                .limiter
-                .check(&db, &address, ratelimit::INVALID_AUTH_IP, now);
         }
         return Err(refused(relay, Outcome::CredentialInvalid, None));
     };
@@ -291,8 +332,17 @@ fn authorize(
         Ok(floor) => floor,
         Err(e) => return Err(internal(relay, ROUTE, Some(&id), format!("{e:#}"))),
     };
-    let honoured =
-        row.status == "active" && row.terminal_reason.is_none() && row.generation >= floor;
+    // **The namespace is part of being honoured, not a separate answer.** Apple
+    // issues a different App Attest namespace to a development build than to a
+    // distributed one, and a relay serves exactly one of them. A binding proved
+    // in the other namespace is authority this relay is not the relay for — so
+    // an operator who moves a deployment from one to the other must not leave
+    // every credential minted before the move still able to push, when the same
+    // credential can no longer rotate, rebind, delete, or ask for its status.
+    let honoured = row.status == "active"
+        && row.terminal_reason.is_none()
+        && row.generation >= floor
+        && row.attest_environment == relay.config.attest_environment.as_str();
 
     // **The credential must be bound to the token in the request.** A bearer is
     // authority over one phone. Without this line it is authority over whichever
@@ -300,10 +350,27 @@ fn authorize(
     // addressable by whoever holds any credential at all.
     let bound = token_hash(&request.token) == row.token_hash;
 
-    if !honoured || !bound {
-        // Charged, and still answered `credential_invalid`. A caller repeating
-        // a revoked bearer must not do it for free, and it must not be told to
-        // come back later when what it actually needs is to attest again.
+    if !honoured {
+        // **Charged to the address, and never to the phone.** This bearer is
+        // dead — revoked, retired, below the floor an incident raised, or proved
+        // in a namespace this relay does not serve — and the replacement
+        // credential the same phone is issued spends from the
+        // token's bucket, which is the one this row names. A lost Mac replaying
+        // the old bearer would otherwise drain the day's five hundred and leave
+        // the rotation that was supposed to contain it answering `429`, which is
+        // §7's remedy defeating itself. So a dead bearer meets the strict
+        // rotating-address rule instead, peeked before it is spent so an
+        // exhausted address costs no write.
+        //
+        // Still `credential_invalid` and still no `Retry-After`: a caller told
+        // when to come back has been told the credential was worth repeating,
+        // when what it needs is to attest again.
+        charge_address(relay, &db, ip, now);
+        return Err(refused(relay, Outcome::CredentialInvalid, Some(&id)));
+    }
+    if !bound {
+        // A live credential naming another phone is charged to its own budget,
+        // which is the row it authenticated and nobody else's.
         let _ = relay.limiter.check(&db, &bucket, ratelimit::BINDING, now);
         return Err(refused(relay, Outcome::CredentialInvalid, Some(&id)));
     }
@@ -336,6 +403,29 @@ fn authorize(
     })
 }
 
+/// Charge one refused credential to the address it came from.
+///
+/// **The bucket a caller cannot pick.** Every credential this route will not
+/// honour lands here — a bearer nobody minted and a bearer that has been
+/// revoked alike — because both are the same behaviour from the relay's side and
+/// neither may spend a phone's budget. Answers whether the address had already
+/// spent its allowance, in which case nothing is written: a sustained flood then
+/// costs no database row at all, which is what makes the rule an enforcement
+/// rather than a count.
+fn charge_address(relay: &Relay, db: &rusqlite::Connection, ip: Option<&str>, now: i64) -> bool {
+    let address = relay.limiter.ip_key("auth", ip, now);
+    if relay
+        .limiter
+        .spent(db, &address, ratelimit::INVALID_AUTH_IP, now)
+    {
+        return true;
+    }
+    let _ = relay
+        .limiter
+        .check(db, &address, ratelimit::INVALID_AUTH_IP, now);
+    false
+}
+
 /// The one retry Decision 4 keeps: the opposite APNs host, tried exactly once.
 ///
 /// A development build's token is not valid at production and the failure is
@@ -343,15 +433,18 @@ fn authorize(
 /// wrong host. Retiring the binding on that evidence would delete a working
 /// registration, so the other host is tried before anything is concluded.
 ///
-/// **Two attempts do not stack two deadlines in practice.** This one is reached
-/// only after Apple has already answered, and Apple answers a bad token
-/// immediately; a first attempt that ran to its deadline never gets here at all.
+/// **Two attempts share one budget.** This one takes what the first left of the
+/// request's [`crate::apns::Budget`] rather than starting a clock of its own, so
+/// a slow first attempt and this one together stay inside the envelope the
+/// daemon waits on; a budget the first attempt spent refuses here before
+/// anything is submitted, and that is `unavailable`.
 async fn correction(
     relay: &Relay,
     binding: &Authorized,
     request: &PushRequest,
     payload: &str,
     collapse: &'static str,
+    budget: &crate::apns::Budget,
     now: i64,
 ) -> Reply {
     let id = Some(binding.token_hash.as_str());
@@ -364,18 +457,15 @@ async fn correction(
     if relay.apns.absence(opposite).is_some() {
         return refused(relay, Outcome::Rejected, id);
     }
-    match relay
+    let sent = relay
         .apns
-        .send(opposite, &request.token, payload, collapse)
-        .await
-    {
-        Ok(ApnsOutcome::Accepted { apns_id }) => {
-            correct_environment(relay, binding, opposite, now);
-            accepted(relay, binding, apns_id, opposite)
-        }
+        .send(budget, opposite, &request.token, payload, collapse)
+        .await;
+    match verdict(relay, binding, opposite, sent, now) {
+        Verdict::Answered(reply) => reply,
         // Refused at both hosts is a token that is simply not good, and one
         // extra attempt is all Decision 4 allows.
-        _ => refused(relay, Outcome::Rejected, id),
+        Verdict::BadDeviceToken => refused(relay, Outcome::Rejected, id),
     }
 }
 
@@ -638,6 +728,31 @@ mod tests {
             .unwrap()
         }
 
+        /// Why the binding is terminal, which is the half of §7's rule that a
+        /// status of `revoked` alone does not say.
+        fn terminal_reason(&self) -> Option<String> {
+            let db = self.relay.db.lock().unwrap();
+            db.query_row(
+                "SELECT terminal_reason FROM bindings WHERE bearer_hash = ?1",
+                [bearer_hash(&self.bearer)],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
+        /// What one bucket has spent today, or nothing at all if it has never
+        /// been written — which is the state that matters when the question is
+        /// whether a refusal touched a budget it had no business touching.
+        fn day_count(&self, bucket: &str) -> Option<i64> {
+            let db = self.relay.db.lock().unwrap();
+            db.query_row(
+                "SELECT day_count FROM rate_buckets WHERE bucket_key = ?1",
+                [bucket],
+                |row| row.get(0),
+            )
+            .ok()
+        }
+
         fn drop_scratch(&self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -675,13 +790,17 @@ mod tests {
 
     /// One installation and one active binding, straight into the tables — the
     /// state a completed attestation leaves behind.
+    ///
+    /// The App Attest namespace is the one [`RelayConfig`] defaults to, so a
+    /// test that changes it is testing the change rather than a fixture that
+    /// disagreed with the relay from the start.
     fn seed(db: &Connection, token: &str, environment: &str, generation: i64) -> Secret {
         let bearer = new_bearer().unwrap();
         db.execute(
             "INSERT INTO installations
                 (key_id_hash, public_key, receipt, attest_environment, counter, counter_trusted,
                  bundle_version, validation_category, created_ms, updated_ms)
-             VALUES (?1, X'0102', NULL, 'production', 0, 1, '1.0', 1, ?2, ?2)
+             VALUES (?1, X'0102', NULL, 'development', 0, 1, '1.0', 1, ?2, ?2)
              ON CONFLICT (key_id_hash) DO NOTHING",
             rusqlite::params![format!("key-id-hash-for-{token}"), NOW],
         )
@@ -1373,6 +1492,327 @@ mod tests {
         let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
         assert_eq!(reply.body["error"], "rejected");
         assert_eq!(ledger.streams(), 1);
+        fixture.drop_scratch();
+    }
+
+    /// **§7 does not care which host said it.** A `410` is the app being gone
+    /// from the phone, and a `410` met on the corrected host is the same fact:
+    /// the binding is terminal, the answer is `unregistered`, and the daemon
+    /// throws the token away rather than recovering a credential.
+    #[tokio::test]
+    async fn a_410_on_the_opposite_host_retires_the_binding_and_answers_unregistered() {
+        let (sandbox, _s) = apple(bad_token_plan()).await;
+        let (production, _p) = apple(Plan::answering(410, r#"{"reason":"Unregistered"}"#)).await;
+        let fixture = fixture(
+            "correction-gone",
+            "sandbox",
+            transport(Some(&sandbox), Some(&production)),
+            &[],
+        );
+
+        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        assert_eq!(reply.status, StatusCode::GONE);
+        assert_eq!(reply.body["error"], "unregistered");
+        assert_eq!(fixture.binding(), ("sandbox".into(), "revoked".into()));
+        assert_eq!(
+            fixture.terminal_reason().as_deref(),
+            Some("unregistered"),
+            "a token apple reported as gone must never be reissued a credential"
+        );
+        assert_eq!(
+            fixture
+                .relay
+                .metrics
+                .tokens_unregistered
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        fixture.drop_scratch();
+    }
+
+    /// **Apple's own state is Apple's own state on either host.** A busy or
+    /// unwell APNs met by the second attempt is `unavailable` — transient,
+    /// nothing delivered, nothing learned — and never `rejected`, which tells
+    /// the daemon a working token will never work again.
+    #[tokio::test]
+    async fn apples_own_state_on_the_opposite_host_is_unavailable_and_leaves_the_binding_alone() {
+        for (status, reason) in [(429, "TooManyRequests"), (503, "ServiceUnavailable")] {
+            let (sandbox, _s) = apple(bad_token_plan()).await;
+            let (production, _p) = apple(Plan::answering(
+                status,
+                &format!(r#"{{"reason":"{reason}"}}"#),
+            ))
+            .await;
+            let fixture = fixture(
+                &format!("correction-{status}"),
+                "sandbox",
+                transport(Some(&sandbox), Some(&production)),
+                &[],
+            );
+
+            let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+            assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reason}");
+            assert_eq!(reply.body["error"], "unavailable", "{reason}");
+            assert_eq!(
+                fixture.binding(),
+                ("sandbox".into(), "active".into()),
+                "{reason} is not a reason to give up on a phone"
+            );
+            assert_eq!(fixture.terminal_reason(), None, "{reason}");
+            fixture.drop_scratch();
+        }
+    }
+
+    /// An attempt that never reached Apple proved nothing about the token, so
+    /// the second one that cannot reach it is `unavailable` for the same reason
+    /// the first would have been.
+    #[tokio::test]
+    async fn an_unreachable_opposite_host_is_unavailable_and_never_rejected() {
+        let (sandbox, _s) = apple(bad_token_plan()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = listener.local_addr().unwrap();
+        drop(listener);
+        let fixture = fixture(
+            "correction-unreachable",
+            "sandbox",
+            transport(Some(&sandbox), Some(&format!("http://{dead}"))),
+            &[],
+        );
+
+        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.body["error"], "unavailable");
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        fixture.drop_scratch();
+    }
+
+    /// **The two attempts share one clock.**
+    ///
+    /// A first attempt that runs nearly to the bound leaves the correction only
+    /// what is left of it, so the whole request stays inside the envelope the
+    /// daemon's 45-second outer bound is built on. Given a deadline of its own
+    /// the correction here would finish and answer `accepted` at close to twice
+    /// the budget — long after the daemon stopped waiting.
+    ///
+    /// A spent budget is `unavailable` and not `rejected`: nothing was
+    /// delivered, and the relay learned nothing about the token.
+    #[tokio::test]
+    async fn a_slow_attempt_and_its_correction_share_one_budget() {
+        let budget = Duration::from_millis(1_000);
+        let hold = Duration::from_millis(800);
+        let mut refusing = bad_token_plan();
+        refusing.hold = hold;
+        let mut accepting = Plan::answering(200, "");
+        accepting.hold = hold;
+        let (sandbox, sandbox_ledger) = apple(refusing).await;
+        let (production, _p) = apple(accepting).await;
+        let fixture = fixture(
+            "one-budget",
+            "sandbox",
+            transport(Some(&sandbox), Some(&production)).with_deadline(budget),
+            &[],
+        );
+
+        let started = std::time::Instant::now();
+        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.body["error"], "unavailable");
+        assert!(
+            elapsed < budget + Duration::from_millis(500),
+            "the correction started a clock of its own: {elapsed:?}"
+        );
+        assert_eq!(sandbox_ledger.streams(), 1, "exactly one attempt each");
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        fixture.drop_scratch();
+    }
+
+    /// **A relay serves one App Attest namespace, and a binding proved in the
+    /// other one is authority it is not the relay for.**
+    ///
+    /// Apple issues a different namespace to a development build than to a
+    /// distributed one, and they are two namespaces rather than a strict and a
+    /// lenient one. An operator who moves a deployment across must not leave
+    /// every credential minted before the move still pushing, when the same
+    /// credential can no longer rotate, rebind, delete, or ask for its status.
+    ///
+    /// **And the refusal is the same one every dead bearer gets.** A namespace
+    /// that answered differently — a `429`, a different word, a spend on the
+    /// phone's own bucket — would be an oracle telling a caller which of the two
+    /// namespaces its credential came from.
+    #[tokio::test]
+    async fn a_binding_from_the_other_attest_namespace_cannot_push() {
+        let (base, ledger) = apple(Plan::answering(200, "")).await;
+        let fixture = fixture(
+            "foreign-namespace",
+            "sandbox",
+            transport(Some(&base), None),
+            &[("RELAY_ATTEST_ENVIRONMENT", "production")],
+        );
+        let body = doorbell(TOKEN, "sandbox");
+        let bucket = crate::ratelimit::binding_key(&token_hash(TOKEN));
+
+        for attempt in 0..20 {
+            let reply = fixture.push(&body).await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "attempt {attempt}");
+            assert_eq!(reply.body["error"], "credential_invalid");
+            assert_eq!(
+                reply.retry_after_seconds, None,
+                "a namespace this relay does not serve is not a rate limit"
+            );
+        }
+        assert_eq!(ledger.connections(), 0, "nothing may reach Apple");
+
+        // The binding is left exactly as it was: this relay refuses the
+        // authority, it does not retire a phone the other relay still serves.
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+        assert_eq!(fixture.terminal_reason(), None);
+
+        // And charged where every other dead bearer is charged.
+        assert_eq!(fixture.day_count(&bucket), None);
+        let address = fixture
+            .relay
+            .limiter
+            .ip_key("auth", Some("203.0.113.7"), NOW);
+        assert_eq!(
+            fixture.day_count(&address),
+            Some(i64::from(crate::ratelimit::INVALID_AUTH_IP.burst))
+        );
+        fixture.drop_scratch();
+    }
+
+    /// **A dead bearer must not spend the budget its replacement will need.**
+    ///
+    /// §7's remedy for a lost Mac is rotation: revoke the old credential and
+    /// issue a new one for the same phone. The rate key is the token, so both
+    /// credentials name one bucket — and a relay that charged the refusal of the
+    /// old bearer to that bucket would let whoever holds the lost Mac spend the
+    /// phone's five hundred a day on requests it never served, leaving the
+    /// replacement answering `429`. The containment would be the outage.
+    ///
+    /// Every way a bearer can be dead is here, because all three read the same
+    /// row and all three refuse.
+    #[tokio::test]
+    async fn a_revoked_bearer_cannot_spend_the_budget_its_replacement_needs() {
+        let (base, ledger) = apple(Plan::answering(200, "")).await;
+        let fixture = fixture("dead-bearer", "sandbox", transport(Some(&base), None), &[]);
+        let body = doorbell(TOKEN, "sandbox");
+        let bucket = crate::ratelimit::binding_key(&token_hash(TOKEN));
+
+        let dead = fixture.authorization();
+        let set = |status: &str, reason: Option<&str>| {
+            let db = fixture.relay.db.lock().unwrap();
+            db.execute(
+                "UPDATE bindings SET status = ?2, terminal_reason = ?3
+                 WHERE bearer_hash = ?1",
+                rusqlite::params![bearer_hash(&fixture.bearer), status, reason],
+            )
+            .unwrap();
+        };
+        // Every way a bearer can be dead, replayed between them far past the
+        // five hundred a phone gets in a day. The floor is §7's containment for
+        // a broad compromise and is the one that leaves the row looking alive.
+        for state in ["below the floor", "revoked", "terminal"] {
+            match state {
+                "below the floor" => std::fs::write(&fixture.floor_file, "1\n").unwrap(),
+                "revoked" => {
+                    std::fs::write(&fixture.floor_file, "0\n").unwrap();
+                    set("revoked", Some("rotated"));
+                }
+                _ => set("revoked", Some("unregistered")),
+            }
+            for attempt in 0..200 {
+                let reply = fixture.push_as(&dead, &body).await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::UNAUTHORIZED,
+                    "{state}, attempt {attempt}"
+                );
+                assert_eq!(reply.body["error"], "credential_invalid");
+                assert_eq!(
+                    reply.retry_after_seconds, None,
+                    "a dead credential needs to attest again, not to come back later"
+                );
+            }
+        }
+
+        // The rotation §7 prescribes: a new credential for the same phone, in
+        // the place the revoked one held.
+        let replacement = {
+            let db = fixture.relay.db.lock().unwrap();
+            seed(&db, TOKEN, "sandbox", 0)
+        };
+
+        // **The phone's budget was never opened.** Six hundred replays of a
+        // credential nobody honours, and the token has not spent one of its five
+        // hundred.
+        assert_eq!(fixture.day_count(&bucket), None);
+        assert_eq!(ledger.connections(), 0, "nothing may reach Apple");
+
+        // It was not free either: the refusals were charged to the address,
+        // which stops being written to once its own allowance is gone.
+        let address = fixture
+            .relay
+            .limiter
+            .ip_key("auth", Some("203.0.113.7"), NOW);
+        assert_eq!(
+            fixture.day_count(&address),
+            Some(i64::from(crate::ratelimit::INVALID_AUTH_IP.burst))
+        );
+
+        // And the replacement has its whole allowance, which is the property the
+        // rotation exists to preserve.
+        let authorization = format!("Bearer {}", replacement.expose());
+        for attempt in 0..crate::ratelimit::BINDING.burst {
+            assert_eq!(
+                fixture.push_as(&authorization, &body).await.status,
+                StatusCode::OK,
+                "the replacement was refused on attempt {attempt}"
+            );
+        }
+        assert_eq!(
+            fixture.day_count(&bucket),
+            Some(i64::from(crate::ratelimit::BINDING.burst)),
+            "the only spending on this token is the replacement's own"
+        );
+        fixture.drop_scratch();
+    }
+
+    /// A `.p8` that is mounted and is not a key can sign nothing, and the push
+    /// says so rather than reaching Apple with a signature it cannot make.
+    ///
+    /// The same state `/readyz` and the metric report as absent, met from the
+    /// other end — which is the point: an operator watching readiness has to be
+    /// watching the thing that decides this answer.
+    #[tokio::test]
+    async fn a_key_file_that_is_not_a_key_answers_unavailable() {
+        let dir = scratch("malformed-key");
+        let key_file = dir.join("apns-sandbox.p8");
+        std::fs::write(&key_file, b"a file that exists").unwrap();
+        let pairs: HashMap<String, String> = [
+            ("RELAY_APNS_SANDBOX_KEY_ID", "SANDKEYID1"),
+            ("RELAY_APNS_SANDBOX_TEAM_ID", "TEAMID1234"),
+            ("RELAY_APNS_SANDBOX_TOPIC", "com.example.app"),
+            ("RELAY_APNS_SANDBOX_KEY_FILE", key_file.to_str().unwrap()),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+        let config = RelayConfig::read(move |key| pairs.get(key).cloned()).unwrap();
+        let fixture = fixture(
+            "malformed-key-push",
+            "sandbox",
+            ApnsTransport::from_config(&config).unwrap(),
+            &[],
+        );
+
+        let reply = fixture.push(&doorbell(TOKEN, "sandbox")).await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.body["error"], "unavailable");
+        assert_eq!(fixture.binding(), ("sandbox".into(), "active".into()));
+
+        let _ = std::fs::remove_dir_all(&dir);
         fixture.drop_scratch();
     }
 

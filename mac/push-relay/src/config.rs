@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use push_core::{ApnsEnvironment, ApnsIdentity};
+use push_core::{ApnsEnvironment, ApnsIdentity, ProviderToken};
 
 const DEFAULT_PORT: u16 = 10_000;
 const DEFAULT_DB_PATH: &str = "/var/data/relay.sqlite";
@@ -27,7 +27,9 @@ const DEFAULT_PRODUCTION_KEY_FILE: &str = "/etc/secrets/apns-production.p8";
 const DEFAULT_GENERATION_FLOOR_FILE: &str = "/etc/secrets/generation-floor";
 const DEFAULT_BACKUP_KEY_FILE: &str = "/etc/secrets/backup-key";
 const DEFAULT_IP_PEPPER_FILE: &str = "/etc/secrets/ip-pepper";
+const DEFAULT_BACKUP_S3_SECRET_KEY_FILE: &str = "/etc/secrets/backup-s3-secret-key";
 const DEFAULT_BACKUP_TARGET: &str = "file:///var/data/backups";
+const DEFAULT_BACKUP_S3_REGION: &str = "us-east-1";
 const DEFAULT_BACKUP_RETENTION_DAYS: u32 = 30;
 
 /// Which App Attest namespace an attestation is checked against.
@@ -122,7 +124,30 @@ pub struct RelayConfig {
     pub generation_floor_file: PathBuf,
     pub backup_key_file: PathBuf,
     pub ip_pepper_file: PathBuf,
+    /// Where sealed backups go: `file:///path` or `s3://bucket/optional/prefix`.
+    ///
+    /// **The default is a directory because a developer machine has no bucket**,
+    /// and the deployment overrides it — a relay whose database and whose
+    /// backups are on one disk loses both to one disk, which is the state this
+    /// setting exists to move a deployment out of.
     pub backup_target: String,
+    /// The S3 API address, when it is not AWS's own.
+    ///
+    /// Present so that Cloudflare R2, Backblaze B2 and MinIO are reachable and
+    /// not only AWS: they speak the same API at a different host. Absent means
+    /// AWS, whose host this build derives from the bucket and the region.
+    pub backup_s3_endpoint: Option<String>,
+    /// The region every signature's credential scope names. A signature scoped
+    /// to the wrong region is refused by the store, so this is not cosmetic.
+    pub backup_s3_region: String,
+    pub backup_s3_access_key_id: Option<String>,
+    /// **The secret access key is a file, like every other secret here.** An
+    /// environment variable is printed by a process dump, inherited by every
+    /// child the relay spawns and shown by the deployment dashboard to anyone
+    /// who can read the service — and this one key can read, overwrite and
+    /// delete every backup the relay has ever taken, which is the whole of the
+    /// state after a disk loss.
+    pub backup_s3_secret_key_file: PathBuf,
     pub backup_retention_days: u32,
     /// The deployed commit, reported so an operator reading a metric knows
     /// which code produced it.
@@ -177,6 +202,12 @@ impl RelayConfig {
                 .map_or_else(|| DEFAULT_IP_PEPPER_FILE.into(), PathBuf::from),
             backup_target: get("RELAY_BACKUP_TARGET")
                 .unwrap_or_else(|| DEFAULT_BACKUP_TARGET.to_string()),
+            backup_s3_endpoint: get("RELAY_BACKUP_S3_ENDPOINT"),
+            backup_s3_region: get("RELAY_BACKUP_S3_REGION")
+                .unwrap_or_else(|| DEFAULT_BACKUP_S3_REGION.to_string()),
+            backup_s3_access_key_id: get("RELAY_BACKUP_S3_ACCESS_KEY_ID"),
+            backup_s3_secret_key_file: get("RELAY_BACKUP_S3_SECRET_KEY_FILE")
+                .map_or_else(|| DEFAULT_BACKUP_S3_SECRET_KEY_FILE.into(), PathBuf::from),
             backup_retention_days,
             git_sha: get("RELAY_GIT_SHA"),
         })
@@ -270,11 +301,17 @@ fn flag(get: &impl Fn(&str) -> Option<String>, key: &str) -> Result<bool> {
 
 /// Whether one environment can sign, and if not, exactly what is missing.
 ///
-/// The key is opened rather than parsed: parsing belongs to the code that signs
-/// with it, and this has to answer before any of that runs. Opening is what
-/// separates "the deployment has not mounted a key" from "the process cannot
-/// read the one it mounted", which are different operator actions and read
-/// identically in a log that only says the key is unusable.
+/// **The key is parsed here, because this slot is what readiness is read from.**
+/// A `.p8` that opens and is not a key would otherwise be reported as loaded by
+/// the startup log, by `/readyz` and by the metric, while every push for that
+/// environment answered `unavailable` — an operator watching the one place that
+/// should have told them would see nothing wrong. Signing still parses it again
+/// where it signs; what happens here is a check, and the parsed key is
+/// deliberately not carried on a struct that is `Debug` and `Clone`.
+///
+/// The three failures stay three sentences. "Not set", "cannot be read" and "not
+/// a key" are three different things for an operator to go and do, and a log
+/// that says only that the key is unusable sends them to the wrong one.
 fn slot(get: &impl Fn(&str) -> Option<String>, environment: ApnsEnvironment) -> ApnsSlot {
     let (prefix, default_file) = match environment {
         ApnsEnvironment::Sandbox => ("RELAY_APNS_SANDBOX", DEFAULT_SANDBOX_KEY_FILE),
@@ -306,14 +343,25 @@ fn slot(get: &impl Fn(&str) -> Option<String>, environment: ApnsEnvironment) -> 
         ));
     }
 
-    ApnsSlot::Ready(ApnsKey {
-        identity: ApnsIdentity {
-            key_id,
-            team_id,
-            topic,
-        },
-        key_file,
-    })
+    let identity = ApnsIdentity {
+        key_id,
+        team_id,
+        topic,
+    };
+    // **The parser's own message is not repeated.** It can quote the line it
+    // choked on, and every path this module reads is under a secret mount — so
+    // an operator who transposes two filenames would put key material into a
+    // structured log that leaves the machine. The file and the shape it should
+    // have are enough to fix it.
+    if ProviderToken::load(&key_file, identity.clone()).is_err() {
+        return ApnsSlot::Absent(format!(
+            "{} is not a usable APNs signing key; it is the PKCS#8 PEM Apple hands you, \
+             unconverted",
+            key_file.display()
+        ));
+    }
+
+    ApnsSlot::Ready(ApnsKey { identity, key_file })
 }
 
 #[cfg(test)]
@@ -364,8 +412,65 @@ mod tests {
             PathBuf::from("/etc/secrets/ip-pepper")
         );
         assert_eq!(config.backup_target, "file:///var/data/backups");
+        assert_eq!(config.backup_s3_endpoint, None);
+        assert_eq!(config.backup_s3_region, "us-east-1");
+        assert_eq!(config.backup_s3_access_key_id, None);
+        assert_eq!(
+            config.backup_s3_secret_key_file,
+            PathBuf::from("/etc/secrets/backup-s3-secret-key")
+        );
         assert_eq!(config.backup_retention_days, 30);
         assert_eq!(config.git_sha, None);
+    }
+
+    /// **The object-store credential follows the module's two rules.** The
+    /// address, the region and the key id are ordinary settings; the secret
+    /// access key is a path, because a variable holding it is printed by a
+    /// process dump and shown by the deployment dashboard — and that one key can
+    /// delete every backup the relay has.
+    #[test]
+    fn an_object_store_target_reads_its_address_from_variables_and_its_secret_from_a_file() {
+        let config = from(&[
+            ("RELAY_BACKUP_TARGET", "s3://relay-backups/nightly"),
+            (
+                "RELAY_BACKUP_S3_ENDPOINT",
+                "https://accountid.r2.cloudflarestorage.com",
+            ),
+            ("RELAY_BACKUP_S3_REGION", "auto"),
+            ("RELAY_BACKUP_S3_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+            (
+                "RELAY_BACKUP_S3_SECRET_KEY_FILE",
+                "/run/secrets/backup-s3-secret-key",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(config.backup_target, "s3://relay-backups/nightly");
+        assert_eq!(
+            config.backup_s3_endpoint.as_deref(),
+            Some("https://accountid.r2.cloudflarestorage.com")
+        );
+        assert_eq!(config.backup_s3_region, "auto");
+        assert_eq!(
+            config.backup_s3_access_key_id.as_deref(),
+            Some("AKIAIOSFODNN7EXAMPLE")
+        );
+        assert_eq!(
+            config.backup_s3_secret_key_file,
+            PathBuf::from("/run/secrets/backup-s3-secret-key")
+        );
+
+        // And the blank placeholders a deployment writes before the bucket
+        // exists are unset values, not an endpoint named "" and a region named
+        // "" that every signature would be scoped to.
+        let blank = from(&[
+            ("RELAY_BACKUP_S3_ENDPOINT", "  "),
+            ("RELAY_BACKUP_S3_REGION", ""),
+            ("RELAY_BACKUP_S3_ACCESS_KEY_ID", ""),
+        ])
+        .unwrap();
+        assert_eq!(blank.backup_s3_endpoint, None);
+        assert_eq!(blank.backup_s3_region, "us-east-1");
+        assert_eq!(blank.backup_s3_access_key_id, None);
     }
 
     /// **The placeholder case.** A deployment writes these as empty strings
@@ -456,7 +561,7 @@ mod tests {
     fn a_missing_key_leaves_the_relay_running_and_says_which_environment_cannot_send() {
         let dir = scratch("keys-absent");
         let sandbox_key = dir.join("apns-sandbox.p8");
-        std::fs::write(&sandbox_key, b"not parsed here").unwrap();
+        std::fs::write(&sandbox_key, crate::apns::fake_apple::signing_key_file()).unwrap();
 
         let config = from(&[
             ("RELAY_APNS_SANDBOX_KEY_ID", "SANDKEYID1"),
@@ -502,6 +607,60 @@ mod tests {
         for name in ["KEY_ID", "TEAM_ID", "TOPIC"] {
             assert!(why.contains(name), "{why}");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is there and is not a key is its own state, and it is not
+    /// "ready".** Readiness is read from this slot, so a slot that called a
+    /// malformed `.p8` loaded would put "the key is fine" on `/readyz`, in the
+    /// metric and in the startup log while every push for that environment
+    /// answered `unavailable`.
+    ///
+    /// The three sentences stay three sentences: not set, cannot be read, and
+    /// not a key are three different things to go and do about it.
+    #[test]
+    fn a_key_file_that_is_not_a_key_is_absent_and_says_so_in_its_own_words() {
+        let dir = scratch("keys-malformed");
+        let key_file = dir.join("apns-sandbox.p8");
+        let with_key = |file: &std::path::Path| {
+            from(&[
+                ("RELAY_APNS_SANDBOX_KEY_ID", "SANDKEYID1"),
+                ("RELAY_APNS_SANDBOX_TEAM_ID", "TEAMID1234"),
+                ("RELAY_APNS_SANDBOX_TOPIC", "com.example.app"),
+                ("RELAY_APNS_SANDBOX_KEY_FILE", file.to_str().unwrap()),
+            ])
+            .unwrap()
+        };
+
+        // The mistake this catches: a `.p8` converted to something else, or a
+        // file that is simply not one.
+        std::fs::write(&key_file, b"a file that exists").unwrap();
+        let malformed = with_key(&key_file);
+        assert!(malformed.sandbox.key().is_none());
+        let why = malformed.sandbox.absence().expect("the key does not parse");
+        assert!(why.contains("apns-sandbox.p8"), "{why}");
+        assert!(why.contains("not a usable APNs signing key"), "{why}");
+        assert!(
+            !why.contains("cannot be read"),
+            "a malformed key must not read as a missing one: {why}"
+        );
+
+        // And the file that is not there says the other thing.
+        let missing = with_key(&dir.join("never-mounted.p8"));
+        let why = missing.sandbox.absence().expect("the key is not there");
+        assert!(why.contains("cannot be read"), "{why}");
+        assert!(!why.contains("not a usable"), "{why}");
+
+        // Neither message carries what was in the file.
+        std::fs::write(&key_file, "wRoNgFiLe-32-bytes-of-key-materia").unwrap();
+        let leaked = with_key(&key_file);
+        let why = leaked.sandbox.absence().unwrap();
+        assert!(!why.contains("wRoNgFiLe"), "{why}");
+
+        // The key Apple hands you, unconverted, is the one that is ready.
+        std::fs::write(&key_file, crate::apns::fake_apple::signing_key_file()).unwrap();
+        assert_eq!(with_key(&key_file).sandbox.absence(), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

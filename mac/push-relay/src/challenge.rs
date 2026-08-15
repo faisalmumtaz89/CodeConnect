@@ -77,9 +77,11 @@ impl std::fmt::Display for ChallengeError {
 
 /// Issue one challenge, and take the expired ones out of the table while here.
 ///
-/// Pruning on the issuing path rather than on a timer keeps the retention
-/// promise — at most ten minutes — true of the file and not merely of a
-/// background task that may not have run.
+/// Pruning on the issuing path is what keeps the common case immediate: on a
+/// relay anyone is enrolling against, an expired challenge is gone by the time
+/// the next one is asked for, which costs a single indexed delete. It is not
+/// what makes ten minutes a *maximum* — a relay nobody asks would keep the row
+/// for as long as nobody asked — and [`crate::db::spawn_sweeps`] is.
 pub fn issue(conn: &Connection, now_ms: i64) -> Result<Issued> {
     let mut bytes = [0u8; CHALLENGE_BYTES];
     SystemRandom::new()
@@ -374,12 +376,26 @@ mod tests {
         }
         assert_eq!(outstanding(&conn), 5);
 
-        // Issuing after the window is what sweeps them, so the table cannot
-        // grow with challenges nobody will ever spend.
+        // Issuing after the window sweeps them, which is the immediate case;
+        // the timer in `crate::db` is what covers the relay nobody is asking.
         issue(&conn, NOW + LIFETIME_MS).unwrap();
         assert_eq!(outstanding(&conn), 1);
 
         assert_eq!(prune(&conn, NOW + LIFETIME_MS * 3).unwrap(), 1);
+        assert_eq!(outstanding(&conn), 0);
+    }
+
+    /// The far end of the same rule: a challenge inside its ten minutes is not
+    /// swept, so a sweep on a short interval cannot take one a phone still has
+    /// time to spend.
+    #[test]
+    fn a_challenge_still_inside_its_ten_minutes_survives_a_sweep() {
+        let conn = database();
+        issue(&conn, NOW).unwrap();
+
+        assert_eq!(prune(&conn, NOW + LIFETIME_MS - 1).unwrap(), 0);
+        assert_eq!(outstanding(&conn), 1);
+        assert_eq!(prune(&conn, NOW + LIFETIME_MS).unwrap(), 1);
         assert_eq!(outstanding(&conn), 0);
     }
 }

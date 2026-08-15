@@ -11,8 +11,14 @@
 //! a fresh database and not of the deployed one, which is the failure that ends
 //! with two production shapes and one set of queries.
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
+
+use crate::api::Relay;
+use crate::ratelimit::Limiter;
 
 /// Every schema change this relay has ever made, in order.
 ///
@@ -120,9 +126,13 @@ pub struct Pruned {
 
 /// Delete every terminal record whose thirty days are up.
 ///
-/// Called where a credential is issued rather than on a timer, for the reason
-/// `challenge::prune` is: a retention promise kept by a background task is a
-/// promise about whether the task ran, and this one is about the file.
+/// Called from two places, and both are needed. The credential-issuing path
+/// keeps the common case immediate — on a relay phones are enrolling against,
+/// a row leaves within one enrollment of its deadline for the price of two
+/// statements somebody was already paying for. [`spawn_sweeps`] is what makes
+/// thirty days a maximum rather than "thirty days, then until the next
+/// enrollment", which on a weekend or an incident with enrollment switched off
+/// is indefinite.
 ///
 /// Measured from `updated_ms`, which is when the row became terminal — a
 /// binding revoked today is kept for thirty days from today and not from the
@@ -152,6 +162,120 @@ pub fn prune_terminal_records(conn: &Connection, now_ms: i64) -> rusqlite::Resul
         bindings,
         installations,
     })
+}
+
+/// How often the retention rules are applied with no traffic to apply them.
+///
+/// **Sized to the tightest promise.** A row can outlive its deadline by at most
+/// one interval, and the shortest deadline the relay publishes is the
+/// challenge table's ten minutes — so a minute keeps every published maximum
+/// accurate to a minute, which is the resolution a retention statement is worth.
+/// Three indexed deletes against small tables is not work worth spacing out
+/// further, and it is the same interval the request path already sweeps rate
+/// buckets on.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// What one pass over every retention rule removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Swept {
+    pub challenges: usize,
+    pub bindings: usize,
+    pub installations: usize,
+    pub rate_buckets: usize,
+}
+
+impl Swept {
+    fn is_empty(self) -> bool {
+        self == Swept::default()
+    }
+}
+
+/// Apply every retention rule once, against the clock the caller names.
+///
+/// One function rather than three call sites so that "what the relay keeps" is
+/// a single list somebody can read, and so that a rule added to the schedule
+/// without being added here is a rule that is visibly missing.
+pub fn sweep(conn: &Connection, limiter: &Limiter, now_ms: i64) -> Result<Swept> {
+    let challenges = crate::challenge::prune(conn, now_ms)?;
+    let Pruned {
+        bindings,
+        installations,
+    } = prune_terminal_records(conn, now_ms).context("pruning terminal binding records")?;
+    let rate_buckets = limiter.sweep(conn, now_ms)?;
+    Ok(Swept {
+        challenges,
+        bindings,
+        installations,
+        rate_buckets,
+    })
+}
+
+/// Run [`sweep`] now, and every [`SWEEP_INTERVAL`] for as long as the process
+/// lives.
+///
+/// **Every other sweep in the relay is a side effect of somebody else's
+/// request**, and traffic is the one thing a published retention maximum
+/// cannot be conditional on. A weekend, an incident with enrollment switched
+/// off, a fleet that has stopped pushing: under any of them the ten minutes,
+/// the thirty days and the day quietly become "until the next caller", which is
+/// unbounded growth and a privacy statement that is no longer true. This is
+/// what makes each of them a maximum. The opportunistic calls stay where they
+/// are — one statement each, on paths that were already writing — because they
+/// are what keeps the ordinary case immediate rather than up to a minute late.
+///
+/// The first tick is immediate, so a relay that has just been restored or
+/// redeployed does not serve its first minute holding state its own schedule
+/// says it deleted.
+///
+/// **`spawn_blocking` and the shared connection, as the backup job does it.**
+/// The sweep is disk work behind the one mutex every request contends for; on a
+/// runtime worker it would stall every request the process is serving for as
+/// long as SQLite takes.
+pub fn spawn_sweeps(relay: &Relay) {
+    tokio::spawn(sweeps(
+        Arc::clone(&relay.db),
+        Arc::clone(&relay.limiter),
+        SWEEP_INTERVAL,
+    ));
+}
+
+/// The loop itself, given the state it works on and the period it works at
+/// rather than reaching for either — so it can be driven at a speed a test can
+/// wait through, against a database with no relay listening behind it.
+///
+/// **A failed pass is logged and the loop continues.** The failures this can
+/// meet — a full disk, a database that has gone read-only — are conditions that
+/// end, and a task that returned on the first of them would leave a relay whose
+/// retention silently stopped being enforced with nothing to say so. The next
+/// tick tries again.
+async fn sweeps(db: Arc<Mutex<Connection>>, limiter: Arc<Limiter>, period: Duration) {
+    let mut ticker = tokio::time::interval(period);
+    loop {
+        ticker.tick().await;
+        let db = Arc::clone(&db);
+        let limiter = Arc::clone(&limiter);
+        let now = crate::enroll::now_ms();
+        let done = tokio::task::spawn_blocking(move || {
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+            sweep(&conn, &limiter, now)
+        })
+        .await;
+        match done {
+            // Silent when there was nothing to remove, which is most minutes:
+            // a line a minute saying "nothing" is a line nobody reads, and the
+            // ones that say what left are the ones worth finding.
+            Ok(Ok(swept)) if swept.is_empty() => {}
+            Ok(Ok(swept)) => tracing::info!(
+                challenges = swept.challenges,
+                bindings = swept.bindings,
+                installations = swept.installations,
+                rate_buckets = swept.rate_buckets,
+                "retention sweep"
+            ),
+            Ok(Err(e)) => tracing::error!(error = %format!("{e:#}"), "the retention sweep failed"),
+            Err(e) => tracing::error!(error = %e, "the retention sweep did not finish"),
+        }
+    }
 }
 
 /// How long a statement waits for a writer before giving up.
@@ -516,5 +640,185 @@ mod tests {
         for column in ["token_hash", "bearer_hash", "challenge_hash", "key_id_hash"] {
             assert!(columns.iter().any(|name| name == column), "{columns:?}");
         }
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+    const NOW: i64 = 1_800_000_000_000;
+
+    fn limiter() -> Limiter {
+        Limiter::new(std::path::Path::new("/nonexistent/ip-pepper"))
+    }
+
+    fn revoke(conn: &Connection, bearer_hash: &str, updated_ms: i64) {
+        conn.execute(
+            "UPDATE bindings SET status = 'revoked', terminal_reason = 'rotated', updated_ms = ?1
+             WHERE bearer_hash = ?2",
+            rusqlite::params![updated_ms, bearer_hash],
+        )
+        .unwrap();
+    }
+
+    fn bucket(conn: &Connection, key: &str, day_start_ms: i64) {
+        conn.execute(
+            "INSERT INTO rate_buckets (bucket_key, day_start_ms, day_count) VALUES (?1, ?2, 1)",
+            rusqlite::params![key, day_start_ms],
+        )
+        .unwrap();
+    }
+
+    /// One row on each side of each of the three deadlines, so the sweep is
+    /// shown to be the retention policy rather than a delete.
+    #[test]
+    fn one_sweep_removes_what_is_past_its_deadline_and_leaves_what_is_not() {
+        let conn = open_in_memory().unwrap();
+        let limiter = limiter();
+        let day_start = NOW - NOW.rem_euclid(DAY_MS);
+
+        crate::challenge::store(&conn, "expired", NOW - crate::challenge::LIFETIME_MS).unwrap();
+        crate::challenge::store(&conn, "outstanding", NOW).unwrap();
+
+        let old = keyed_installation(&conn, "0f0e0d0c");
+        let recent = keyed_installation(&conn, "0a0b0c0d");
+        bind(&conn, old, "token-one", "bearer-old").unwrap();
+        bind(&conn, recent, "token-two", "bearer-new").unwrap();
+        revoke(&conn, "bearer-old", NOW - REVOKED_RETENTION_MS);
+        revoke(&conn, "bearer-new", NOW);
+        conn.execute(
+            "UPDATE installations SET updated_ms = ?1 WHERE id = ?2",
+            rusqlite::params![NOW - REVOKED_RETENTION_MS, old],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE installations SET updated_ms = ?1 WHERE id = ?2",
+            rusqlite::params![NOW, recent],
+        )
+        .unwrap();
+
+        bucket(&conn, "enroll:yesterday", day_start - DAY_MS);
+        bucket(&conn, "enroll:today", day_start);
+
+        assert_eq!(
+            sweep(&conn, &limiter, NOW).unwrap(),
+            Swept {
+                challenges: 1,
+                bindings: 1,
+                installations: 1,
+                rate_buckets: 1,
+            }
+        );
+
+        let survivors = |table: &str, column: &str| -> Vec<String> {
+            conn.prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(survivors("bindings", "bearer_hash"), ["bearer-new"]);
+        assert_eq!(survivors("installations", "key_id_hash"), ["0a0b0c0d"]);
+        assert_eq!(survivors("rate_buckets", "bucket_key"), ["enroll:today"]);
+        let outstanding: i64 = conn
+            .query_row("SELECT COUNT(*) FROM challenges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outstanding, 1);
+
+        // And a second pass at the same moment has nothing left to do, so the
+        // minute-by-minute cost of the timer on a quiet relay is three deletes
+        // that match no rows.
+        assert_eq!(sweep(&conn, &limiter, NOW).unwrap(), Swept::default());
+    }
+
+    /// The sweeps under test are driven at a period a test can wait through;
+    /// the deadlines are real, so the rows are seeded far enough in the past
+    /// that the wall clock the loop reads puts every one of them past its own.
+    fn stale() -> Connection {
+        let conn = open_in_memory().unwrap();
+        crate::challenge::store(&conn, "expired", 0).unwrap();
+        let id = keyed_installation(&conn, "0f0e0d0c");
+        bind(&conn, id, "token-one", "bearer-old").unwrap();
+        revoke(&conn, "bearer-old", 0);
+        conn.execute("UPDATE installations SET updated_ms = 0", [])
+            .unwrap();
+        bucket(&conn, "enroll:long-ago", 0);
+        conn
+    }
+
+    fn remaining(db: &Arc<Mutex<Connection>>) -> i64 {
+        let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM challenges)
+                  + (SELECT COUNT(*) FROM bindings)
+                  + (SELECT COUNT(*) FROM installations)
+                  + (SELECT COUNT(*) FROM rate_buckets)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Poll rather than sleep a fixed length, so the assertion is about what the
+    /// loop did and not about how fast the machine running it was.
+    async fn until(db: &Arc<Mutex<Connection>>, wanted: i64) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while remaining(db) != wanted {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the sweeps left {} rows, wanted {wanted}", remaining(db)));
+    }
+
+    /// **The tick is what is under test**, not the statements it runs: nothing
+    /// here issues a challenge, enrols a credential or spends a rate bucket, so
+    /// every opportunistic sweep in the relay is unreachable and the table is
+    /// emptied by the timer or not at all.
+    #[tokio::test]
+    async fn the_timer_alone_empties_a_relay_that_nobody_is_calling() {
+        let db = Arc::new(Mutex::new(stale()));
+        assert_eq!(remaining(&db), 4);
+
+        let task = tokio::spawn(sweeps(
+            Arc::clone(&db),
+            Arc::new(limiter()),
+            Duration::from_millis(10),
+        ));
+        until(&db, 0).await;
+        task.abort();
+    }
+
+    /// **A pass that fails is a pass, not the end of the schedule.** A database
+    /// that will not take a write is a condition that ends — a full disk, a
+    /// volume remounted read-only — and a task that returned on the first one
+    /// would leave a relay keeping everything forever with nothing but one old
+    /// log line to say so.
+    #[tokio::test]
+    async fn a_sweep_that_fails_does_not_stop_the_ones_after_it() {
+        let conn = stale();
+        // Every delete a pass makes now raises "attempt to write a readonly
+        // database", which is the failure being simulated rather than a
+        // stand-in for it.
+        conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let task = tokio::spawn(sweeps(
+            Arc::clone(&db),
+            Arc::new(limiter()),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(remaining(&db), 4, "a failing pass must remove nothing");
+        assert!(!task.is_finished(), "the loop stopped on a failing pass");
+
+        db.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .execute_batch("PRAGMA query_only = OFF")
+            .unwrap();
+
+        // Nothing else has changed, so what removes the rows the failing passes
+        // left behind is a later tick of the same task.
+        until(&db, 0).await;
+        assert!(!task.is_finished());
+        task.abort();
     }
 }

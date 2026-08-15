@@ -82,7 +82,24 @@ const CREDENTIAL_ID_START: usize = 55;
 
 /// The shortest `authenticatorData` an assertion can carry: hash, flags,
 /// counter, and nothing else. Assertions never repeat the attested credential.
+///
+/// **A minimum, and never an equality.** From iOS 27 a device appends the same
+/// extensions map an attestation carries, so an assertion is these 37 bytes on
+/// every phone shipping today and these 37 bytes followed by a CBOR map on the
+/// ones that are not. A length check would refuse the newer phone.
 const ASSERTION_AUTH_DATA_LEN: usize = 37;
+
+/// The names a device may write the validation category under.
+///
+/// **Two spellings, because Apple documents two.** The attestation steps name it
+/// `apple_validation_category_01` and the assertion steps name the same value
+/// `validationCategory`; which one a given iOS writes is not something a server
+/// gets to assume, and reading only one of them is a policy that silently stops
+/// applying.
+const CATEGORY_KEYS: &[&str] = &["apple_validation_category_01", "validationCategory"];
+
+/// The names a device may write the bundle version under, for the same reason.
+const BUNDLE_VERSION_KEYS: &[&str] = &["apple_bundle_version_01", "bundleVersion"];
 
 /// Which App Attest world a key was minted in.
 ///
@@ -128,6 +145,23 @@ pub struct VerifiedAttestation {
     /// **Optional because the extension is, not because it is unimportant.**
     /// Older iOS omits it, and the relay's policy — not its parser — decides
     /// what an absent distribution category means.
+    pub validation_category: Option<u32>,
+    pub bundle_version: Option<String>,
+}
+
+/// What an accepted assertion established.
+///
+/// **The two policy inputs are optional here for a different reason than they
+/// are on an attestation.** iOS 27 appends them to an assertion and no earlier
+/// release does, so an assertion that carries them is a phone describing the
+/// build it is running *now* — later than, and authoritative over, whatever it
+/// was running when it attested — and an assertion without them is not a phone
+/// declining to say, it is a phone that has no way to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAssertion {
+    /// The counter this assertion reached. The caller stores it; the next
+    /// assertion must exceed it.
+    pub counter: u32,
     pub validation_category: Option<u32>,
     pub bundle_version: Option<String>,
 }
@@ -262,6 +296,10 @@ fn entry<'a>(map: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
         .map(|(_, v)| v)
 }
 
+fn entry_any<'a>(map: &'a [(Value, Value)], keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| entry(map, key))
+}
+
 fn bytes(value: &Value, what: &'static str) -> Result<Vec<u8>, AttestError> {
     value
         .as_bytes()
@@ -307,16 +345,14 @@ fn slice_auth_data(auth_data: &[u8]) -> Result<AuthData<'_>, AttestError> {
     })
 }
 
-/// Read the two policy inputs out of the `authData` extensions map.
+/// Read the two policy inputs out of an `authData` extensions map, wherever the
+/// map begins.
 ///
-/// **The ED flag is not consulted.** Apple's own attestation sets flags to
-/// `0x40` — the attested-credential bit alone — while carrying a full
-/// extensions map, so a reader that waited for `0x80` would return `None` for
-/// every real device and quietly disable the distribution-category policy.
-fn read_extensions(tail: &[u8]) -> Result<(Option<u32>, Option<String>), AttestError> {
-    let mut rest = tail;
-    let _cose_key: Value =
-        ciborium::de::from_reader(&mut rest).map_err(|e| AttestError::Cbor(e.to_string()))?;
+/// **Absence is not an error.** The extensions are appended by iOS 27 and by no
+/// earlier release, so an empty tail is what almost every phone in the world
+/// produces today and the relay's policy — not its parser — decides what that
+/// means.
+fn read_extension_map(mut rest: &[u8]) -> Result<(Option<u32>, Option<String>), AttestError> {
     if rest.is_empty() {
         return Ok((None, None));
     }
@@ -327,8 +363,9 @@ fn read_extensions(tail: &[u8]) -> Result<(Option<u32>, Option<String>), AttestE
         .ok_or(AttestError::Shape("the extensions are not a CBOR map"))?;
 
     // The category is a four-byte CBOR byte string holding a little-endian
-    // integer, not a CBOR integer. Reading it as one finds nothing.
-    let category = match entry(entries, "apple_validation_category_01") {
+    // integer, not a CBOR integer. Reading it as one finds nothing, and reading
+    // the four bytes the other way round turns a 1 into 16777216.
+    let category = match entry_any(entries, CATEGORY_KEYS) {
         Some(value) => {
             let raw = bytes(value, "the validation category is not a byte string")?;
             let raw = <[u8; 4]>::try_from(raw.as_slice())
@@ -337,7 +374,7 @@ fn read_extensions(tail: &[u8]) -> Result<(Option<u32>, Option<String>), AttestE
         }
         None => None,
     };
-    let version = match entry(entries, "apple_bundle_version_01") {
+    let version = match entry_any(entries, BUNDLE_VERSION_KEYS) {
         Some(value) => Some(
             value
                 .as_text()
@@ -347,6 +384,20 @@ fn read_extensions(tail: &[u8]) -> Result<(Option<u32>, Option<String>), AttestE
         None => None,
     };
     Ok((category, version))
+}
+
+/// The same two values out of an attestation, where a COSE key sits in front of
+/// them.
+///
+/// **The ED flag is not consulted.** Apple's own attestation sets flags to
+/// `0x40` — the attested-credential bit alone — while carrying a full
+/// extensions map, so a reader that waited for `0x80` would return `None` for
+/// every real device and quietly disable the distribution-category policy.
+fn read_extensions(tail: &[u8]) -> Result<(Option<u32>, Option<String>), AttestError> {
+    let mut rest = tail;
+    let _cose_key: Value =
+        ciborium::de::from_reader(&mut rest).map_err(|e| AttestError::Cbor(e.to_string()))?;
+    read_extension_map(rest)
 }
 
 /// The nonce Apple put in the credCert, or the reason there is none to read.
@@ -528,16 +579,14 @@ fn verify_attestation_with(
     })
 }
 
-/// Verify an App Attest assertion and return the counter it advanced to.
-///
-/// The caller stores the returned value; the next assertion must exceed it.
+/// Verify an App Attest assertion and return everything it established.
 pub fn verify_assertion(
     assertion_cbor: &[u8],
     client_data_hash: &[u8],
     stored_public_key: &[u8],
     expected_app_id: &str,
     stored_counter: u32,
-) -> Result<u32, AttestError> {
+) -> Result<VerifiedAssertion, AttestError> {
     let object: Value =
         ciborium::de::from_reader(assertion_cbor).map_err(|e| AttestError::Cbor(e.to_string()))?;
     let object = object
@@ -583,7 +632,17 @@ pub fn verify_assertion(
             offered: counter,
         });
     }
-    Ok(counter)
+
+    // Read last, because everything before it is what makes these bytes the
+    // device's own: the whole buffer is inside the signature, so what the map
+    // says is as trustworthy as the counter beside it.
+    let (validation_category, bundle_version) =
+        read_extension_map(&auth_data[ASSERTION_AUTH_DATA_LEN..])?;
+    Ok(VerifiedAssertion {
+        counter,
+        validation_category,
+        bundle_version,
+    })
 }
 
 #[cfg(test)]
@@ -1272,6 +1331,12 @@ mod tests {
 
     const ASSERTION_APP_ID: &str = "1234567890.com.example.myapp";
 
+    /// The counter on its own, for the tests whose subject is not the map that
+    /// may follow it.
+    fn counter_of(result: Result<VerifiedAssertion, AttestError>) -> Result<u32, AttestError> {
+        result.map(|assertion| assertion.counter)
+    }
+
     fn assertion_key() -> EcdsaKeyPair {
         let rng = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
@@ -1284,10 +1349,24 @@ mod tests {
         counter: u32,
         client_data_hash: &[u8],
     ) -> Vec<u8> {
+        assertion_with(key, app_id, counter, client_data_hash, None)
+    }
+
+    /// The same, with whatever an iOS 27 device would append after the counter.
+    fn assertion_with(
+        key: &EcdsaKeyPair,
+        app_id: &str,
+        counter: u32,
+        client_data_hash: &[u8],
+        extensions: Option<Value>,
+    ) -> Vec<u8> {
         let mut auth_data = Vec::new();
         auth_data.extend_from_slice(&sha256(app_id.as_bytes()));
         auth_data.push(0x00);
         auth_data.extend_from_slice(&counter.to_be_bytes());
+        if let Some(extensions) = &extensions {
+            auth_data.extend_from_slice(&cbor(extensions));
+        }
         let signature = key
             .sign(&SystemRandom::new(), &nonce(&auth_data, client_data_hash))
             .unwrap();
@@ -1309,13 +1388,13 @@ mod tests {
         let hash = sha256(b"a challenge");
         let object = assertion(&key, ASSERTION_APP_ID, 4, &hash);
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 3
-            ),
+            )),
             Ok(4)
         );
     }
@@ -1347,13 +1426,13 @@ mod tests {
         ]));
 
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 3
-            ),
+            )),
             Err(AttestError::Shape(
                 "the authenticator data is too short to carry a counter"
             ))
@@ -1366,13 +1445,13 @@ mod tests {
         let hash = sha256(b"a challenge");
         let object = assertion(&key, ASSERTION_APP_ID, 4, &hash);
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 4
-            ),
+            )),
             Err(AttestError::CounterNotAdvanced {
                 stored: 4,
                 offered: 4
@@ -1386,13 +1465,13 @@ mod tests {
         let hash = sha256(b"a challenge");
         let object = assertion(&key, ASSERTION_APP_ID, 2, &hash);
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 9
-            ),
+            )),
             Err(AttestError::CounterNotAdvanced {
                 stored: 9,
                 offered: 2
@@ -1408,13 +1487,13 @@ mod tests {
         let last = object.len() - 1;
         object[last] ^= 0xff;
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 3
-            ),
+            )),
             Err(AttestError::Signature)
         );
     }
@@ -1425,13 +1504,13 @@ mod tests {
         let hash = sha256(b"a challenge");
         let object = assertion(&key, "1234567890.com.example.otherapp", 4, &hash);
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &hash,
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 3
-            ),
+            )),
             Err(AttestError::AppIdMismatch)
         );
     }
@@ -1443,6 +1522,37 @@ mod tests {
         let hash = sha256(b"a challenge");
         let object = assertion(&stranger, ASSERTION_APP_ID, 4, &hash);
         assert_eq!(
+            counter_of(verify_assertion(
+                &object,
+                &hash,
+                key.public_key().as_ref(),
+                ASSERTION_APP_ID,
+                3
+            )),
+            Err(AttestError::Signature)
+        );
+    }
+
+    /// **An assertion says what the phone is running now, when it can.** iOS 27
+    /// appends the same two values an attestation carries, under the camel-case
+    /// spelling Apple's assertion steps use — and the byte string is read the
+    /// little-endian way round, because the other way turns a 4 into 67108864.
+    #[test]
+    fn an_assertion_from_a_phone_that_appends_extensions_reports_the_build_it_is_running() {
+        let key = assertion_key();
+        let hash = sha256(b"a challenge");
+        let extensions = Value::Map(vec![
+            (
+                Value::Text("validationCategory".to_string()),
+                Value::Bytes(4u32.to_le_bytes().to_vec()),
+            ),
+            (
+                Value::Text("bundleVersion".to_string()),
+                Value::Text("41.3".to_string()),
+            ),
+        ]);
+        let object = assertion_with(&key, ASSERTION_APP_ID, 4, &hash, Some(extensions));
+        assert_eq!(
             verify_assertion(
                 &object,
                 &hash,
@@ -1450,8 +1560,105 @@ mod tests {
                 ASSERTION_APP_ID,
                 3
             ),
-            Err(AttestError::Signature)
+            Ok(VerifiedAssertion {
+                counter: 4,
+                validation_category: Some(4),
+                bundle_version: Some("41.3".to_string()),
+            })
         );
+    }
+
+    /// The other spelling, which is the one Apple's attestation steps document —
+    /// and the shape of every phone before iOS 27, which appends nothing and
+    /// must not be refused for it.
+    #[test]
+    fn an_assertion_is_read_under_either_spelling_and_is_accepted_carrying_neither() {
+        let key = assertion_key();
+        let hash = sha256(b"a challenge");
+        let snake = Value::Map(vec![
+            (
+                Value::Text("apple_validation_category_01".to_string()),
+                Value::Bytes(2u32.to_le_bytes().to_vec()),
+            ),
+            (
+                Value::Text("apple_bundle_version_01".to_string()),
+                Value::Text("7".to_string()),
+            ),
+        ]);
+        let object = assertion_with(&key, ASSERTION_APP_ID, 4, &hash, Some(snake));
+        assert_eq!(
+            verify_assertion(
+                &object,
+                &hash,
+                key.public_key().as_ref(),
+                ASSERTION_APP_ID,
+                3
+            ),
+            Ok(VerifiedAssertion {
+                counter: 4,
+                validation_category: Some(2),
+                bundle_version: Some("7".to_string()),
+            })
+        );
+
+        let bare = assertion(&key, ASSERTION_APP_ID, 4, &hash);
+        assert_eq!(
+            verify_assertion(&bare, &hash, key.public_key().as_ref(), ASSERTION_APP_ID, 3),
+            Ok(VerifiedAssertion {
+                counter: 4,
+                validation_category: None,
+                bundle_version: None,
+            })
+        );
+    }
+
+    /// The map is inside the signature, so a map of the wrong shape is a device
+    /// producing bytes no device produces — refused by the rule it broke rather
+    /// than read as whichever type is convenient.
+    #[test]
+    fn an_assertion_extensions_map_of_the_wrong_shape_is_refused_by_the_rule_it_broke() {
+        let key = assertion_key();
+        let hash = sha256(b"a challenge");
+        let cases = [
+            (
+                Value::Text("extensions".to_string()),
+                "the extensions are not a CBOR map",
+            ),
+            (
+                Value::Map(vec![(
+                    Value::Text("validationCategory".to_string()),
+                    Value::Integer(4.into()),
+                )]),
+                "the validation category is not a byte string",
+            ),
+            (
+                Value::Map(vec![(
+                    Value::Text("validationCategory".to_string()),
+                    Value::Bytes(vec![4, 0]),
+                )]),
+                "the validation category is not four bytes",
+            ),
+            (
+                Value::Map(vec![(
+                    Value::Text("bundleVersion".to_string()),
+                    Value::Integer(41.into()),
+                )]),
+                "the bundle version is not text",
+            ),
+        ];
+        for (extensions, expected) in cases {
+            let object = assertion_with(&key, ASSERTION_APP_ID, 4, &hash, Some(extensions));
+            assert_eq!(
+                verify_assertion(
+                    &object,
+                    &hash,
+                    key.public_key().as_ref(),
+                    ASSERTION_APP_ID,
+                    3
+                ),
+                Err(AttestError::Shape(expected))
+            );
+        }
     }
 
     /// A challenge the relay did not issue produces a different nonce, so the
@@ -1461,13 +1668,13 @@ mod tests {
         let key = assertion_key();
         let object = assertion(&key, ASSERTION_APP_ID, 4, &sha256(b"a challenge"));
         assert_eq!(
-            verify_assertion(
+            counter_of(verify_assertion(
                 &object,
                 &sha256(b"another challenge"),
                 key.public_key().as_ref(),
                 ASSERTION_APP_ID,
                 3
-            ),
+            )),
             Err(AttestError::Signature)
         );
     }

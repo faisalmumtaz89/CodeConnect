@@ -177,6 +177,18 @@ impl Relay {
     fn backups_enabled(&self) -> bool {
         self.backup_absence.is_none() && self.backup.healthy()
     }
+
+    /// **Whether a push for this environment could actually be signed**, which
+    /// is the only sense in which a key is "present".
+    ///
+    /// Asked of the transport rather than of the configuration: a `.p8` that is
+    /// mounted and is not a key leaves the configuration describing a perfectly
+    /// good credential and the signer holding nothing, and an operator reading
+    /// the endpoint that exists to say so would be told the key was fine while
+    /// every push answered `unavailable`.
+    fn can_send(&self, environment: ApnsEnvironment) -> bool {
+        self.apns.absence(environment).is_none()
+    }
 }
 
 /// The transport the deployment's keys describe, or one that can send nothing.
@@ -237,6 +249,12 @@ async fn healthz(State(relay): State<Relay>) -> impl IntoResponse {
 /// names a variable or a path, which is a fact about the deployment rather than
 /// about the service, and this endpoint answers strangers; the full sentence is
 /// logged once at startup where the operator reads it.
+///
+/// **Read from the transport and not from the configuration**, because the
+/// transport is what a push is signed by. The two agree on a key that is
+/// missing; they part company on a trust store that would not load, where the
+/// configuration describes two perfectly good keys and nothing can be sent with
+/// either.
 async fn readyz(State(relay): State<Relay>) -> impl IntoResponse {
     relay
         .metrics
@@ -272,8 +290,8 @@ async fn readyz(State(relay): State<Relay>) -> impl IntoResponse {
         "ip_pepper": relay.limiter.pepper_source(),
         "git_sha": relay.config.git_sha.as_deref(),
         "apns": {
-            "sandbox": relay.config.slot(ApnsEnvironment::Sandbox).key().is_some(),
-            "production": relay.config.slot(ApnsEnvironment::Production).key().is_some(),
+            "sandbox": relay.can_send(ApnsEnvironment::Sandbox),
+            "production": relay.can_send(ApnsEnvironment::Production),
         },
         // **Present or absent, like the keys, and for the same reason.** A
         // relay whose backups are silently off is one restore away from the
@@ -373,8 +391,8 @@ async fn metrics(State(relay): State<Relay>) -> impl IntoResponse {
         u8::from(config.enrollment_enabled),
         u8::from(relay.backups_enabled()),
         relay.backup.age_seconds(crate::enroll::now_ms()),
-        u8::from(config.slot(ApnsEnvironment::Sandbox).key().is_some()),
-        u8::from(config.slot(ApnsEnvironment::Production).key().is_some()),
+        u8::from(relay.can_send(ApnsEnvironment::Sandbox)),
+        u8::from(relay.can_send(ApnsEnvironment::Production)),
     );
     RequestLog {
         route: "/metrics",
@@ -400,6 +418,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::apns::fake_apple;
 
     fn relay(env: &[(&str, &str)]) -> Relay {
         let map: HashMap<String, String> = env
@@ -465,7 +484,10 @@ mod tests {
     async fn readiness_reports_the_state_an_operator_has_to_act_on() {
         let dir = scratch("readyz");
         let sandbox_key = dir.join("apns-sandbox.p8");
-        std::fs::write(&sandbox_key, b"a file that exists").unwrap();
+        // A key this relay can actually sign with, because that is what the
+        // word on this endpoint means. A file that merely exists is the state
+        // `a_malformed_apns_key_is_not_a_loaded_one` covers, and it is not ready.
+        std::fs::write(&sandbox_key, fake_apple::signing_key_file()).unwrap();
         std::fs::write(dir.join("generation-floor"), "12\n").unwrap();
         std::fs::write(dir.join("ip-pepper"), b"a mounted secret file").unwrap();
 
@@ -506,6 +528,39 @@ mod tests {
         assert!(!body.contains("/etc/secrets"), "{body}");
         assert!(!body.contains("SANDKEYID1"), "{body}");
         assert!(!body.contains(sandbox_key.to_str().unwrap()), "{body}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A `.p8` that is mounted and is not a key is not a loaded key**, on the
+    /// endpoint and in the metric alike.
+    ///
+    /// Reported from the signer rather than from the file, because the signer is
+    /// what a push is signed by: the configuration describing a credential the
+    /// relay cannot sign with is precisely the state where an operator would
+    /// otherwise read "ready" here and watch every push answer `unavailable`.
+    #[tokio::test]
+    async fn a_malformed_apns_key_is_not_a_loaded_one() {
+        let dir = scratch("readyz-malformed");
+        let malformed = dir.join("apns-sandbox.p8");
+        std::fs::write(&malformed, b"a file that exists").unwrap();
+        let relay = relay(&[
+            ("RELAY_APNS_SANDBOX_KEY_ID", "SANDKEYID1"),
+            ("RELAY_APNS_SANDBOX_TEAM_ID", "TEAMID1234"),
+            ("RELAY_APNS_SANDBOX_TOPIC", "com.example.app"),
+            ("RELAY_APNS_SANDBOX_KEY_FILE", malformed.to_str().unwrap()),
+        ]);
+
+        let (status, body) = get_route(relay.clone(), "/readyz").await;
+        assert_eq!(status, StatusCode::OK, "a bad key is not an unready relay");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["apns"]["sandbox"], false);
+
+        let (_, body) = get_route(relay, "/metrics").await;
+        assert!(
+            body.contains("codeconnect_relay_apns_key_present{environment=\"sandbox\"} 0"),
+            "{body}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

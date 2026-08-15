@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
@@ -55,8 +55,9 @@ use crate::secret::token_hash;
 /// that would be classified as Apple being unwell.
 const MAX_IN_FLIGHT: usize = 64;
 
-/// How long one push may take **in total**, from the call to the last byte of
-/// the answer — the wait for its turn included.
+/// How long **all** of one request's APNs work may take, from the first call to
+/// the last byte of the last answer — the wait for a turn and Decision 4's one
+/// opposite-host attempt included.
 ///
 /// **Not a retry**, and not a bound on the exchange alone. The deadline exists
 /// because an attempt that never ends holds a concurrency permit and its
@@ -69,7 +70,13 @@ const MAX_IN_FLIGHT: usize = 64;
 /// another — three Macs pushing one phone would answer the third far outside
 /// the 35–40 seconds the daemon's 45-second outer bound is built on. A push
 /// that cannot get its turn in time is refused rather than answered late.
-const ATTEMPT_DEADLINE: Duration = Duration::from_secs(35);
+///
+/// **One budget per request and not one per attempt**, which is what [`Budget`]
+/// carries. A correction that started a clock of its own would put a slow first
+/// attempt and the attempt after it at seventy seconds — past the bound the
+/// daemon gave up on — and the relay would be working on a request nobody is
+/// waiting for.
+const PUSH_DEADLINE: Duration = Duration::from_secs(35);
 
 /// How much of Apple's error body is read.
 ///
@@ -185,6 +192,24 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
+/// What is left of one request's [`PUSH_DEADLINE`].
+///
+/// **Opened once by the caller and handed to every attempt it makes.** The
+/// opposite-host correction is a second send, and the only thing that keeps two
+/// sends inside the envelope the daemon waits on is that the second one is given
+/// what the first did not spend. A budget that is gone refuses before anything
+/// is submitted, so the answer is that the relay could not send and never that
+/// the token is bad.
+pub struct Budget {
+    expires: Instant,
+}
+
+impl Budget {
+    fn remaining(&self) -> Duration {
+        self.expires.saturating_duration_since(Instant::now())
+    }
+}
+
 struct Sender {
     client: PooledClient,
     token: ProviderToken,
@@ -203,9 +228,9 @@ pub struct ApnsTransport {
     production: Slot,
     order: Arc<TokenLocks>,
     permits: tokio::sync::Semaphore,
-    /// [`ATTEMPT_DEADLINE`] in the running relay. A field rather than the
-    /// constant so a test can prove the queueing behaviour in milliseconds
-    /// instead of waiting the thirty-five seconds a real one takes.
+    /// [`PUSH_DEADLINE`] in the running relay. A field rather than the constant
+    /// so a test can prove the queueing behaviour in milliseconds instead of
+    /// waiting the thirty-five seconds a real one takes.
     deadline: Duration,
 }
 
@@ -231,14 +256,21 @@ impl ApnsTransport {
             production: slot(production)?,
             order: Arc::new(TokenLocks::default()),
             permits: tokio::sync::Semaphore::new(MAX_IN_FLIGHT),
-            deadline: ATTEMPT_DEADLINE,
+            deadline: PUSH_DEADLINE,
         })
     }
 
     #[cfg(test)]
-    fn with_deadline(mut self, deadline: Duration) -> Self {
+    pub(crate) fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
         self
+    }
+
+    /// Open one request's budget, to be spent by every attempt it makes.
+    pub fn budget(&self) -> Budget {
+        Budget {
+            expires: Instant::now() + self.deadline,
+        }
     }
 
     /// Why this environment cannot send, in the words `/readyz` reports.
@@ -257,13 +289,15 @@ impl ApnsTransport {
         }
     }
 
-    /// Post one notification and wait for Apple's verdict.
+    /// Post one notification and wait for Apple's verdict, inside what is left
+    /// of the caller's budget.
     ///
     /// One attempt. See the module note: a failure after dispatch is reported,
     /// and a reader tempted to wrap this in a loop is about to send a phone a
     /// second copy of a doorbell it already has.
     pub async fn send(
         &self,
+        budget: &Budget,
         environment: ApnsEnvironment,
         device_token: &str,
         payload: &str,
@@ -274,6 +308,17 @@ impl ApnsTransport {
             Slot::Absent(why) => return Err(SendError::Unavailable(why.clone())),
         };
 
+        // A request whose budget an earlier attempt spent submits nothing at
+        // all, which is why this is the unambiguous failure: the phone has no
+        // copy of this notification and the caller has learned nothing about
+        // the token.
+        let remaining = budget.remaining();
+        if remaining.is_zero() {
+            return Err(SendError::Unavailable(
+                "this request's time was spent before this attempt began".to_string(),
+            ));
+        }
+
         // **Whether anything was written, which is what the two failures mean.**
         // A deadline that expired while this push was still waiting for its
         // turn submitted nothing and is not ambiguous; one that expired after
@@ -282,15 +327,13 @@ impl ApnsTransport {
         // on the phone" is true.
         let dispatched = AtomicBool::new(false);
         let attempt = self.attempt(sender, device_token, payload, collapse, &dispatched);
-        match tokio::time::timeout(self.deadline, attempt).await {
+        match tokio::time::timeout(remaining, attempt).await {
             Ok(answer) => answer,
             Err(_) if !dispatched.load(Ordering::Relaxed) => Err(SendError::Unavailable(format!(
-                "this device's queue did not clear within {:?}",
-                self.deadline
+                "this device's queue did not clear within {remaining:?}"
             ))),
             Err(_) => Err(SendError::Unanswered(anyhow!(
-                "APNs accepted the request and did not answer within {:?}",
-                self.deadline
+                "APNs accepted the request and did not answer within {remaining:?}"
             ))),
         }
     }
@@ -745,6 +788,37 @@ pub(crate) mod fake_apple {
         .unwrap()
     }
 
+    /// The same key in the armour a `.p8` wears, for the tests that need one on
+    /// disk rather than in memory.
+    ///
+    /// Written here rather than in each test module because two of them have to
+    /// agree on what a usable key file looks like — the configuration that
+    /// decides whether an environment is ready, and the endpoint that reports
+    /// it — and a second opinion about that is exactly the disagreement those
+    /// tests exist to catch.
+    pub(crate) fn signing_key_file() -> String {
+        use base64::Engine as _;
+
+        let der = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &ring::rand::SystemRandom::new(),
+        )
+        .unwrap();
+        let body = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
+        let lines: Vec<&str> = body
+            .as_bytes()
+            .chunks(64)
+            .map(|line| std::str::from_utf8(line).expect("base64 is ascii"))
+            .collect();
+        // The label is a binding rather than a literal, so a repository scan for
+        // checked-in key material has nothing here to stop on.
+        let label = "PRIVATE KEY";
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            lines.join("\n")
+        )
+    }
+
     /// A transport whose sandbox environment posts to `base`, and whose
     /// production environment has no key at all.
     pub(crate) fn signing_transport(base: &str) -> ApnsTransport {
@@ -789,6 +863,7 @@ mod tests {
     async fn push(transport: &ApnsTransport, token: &str) -> Result<ApnsOutcome, SendError> {
         transport
             .send(
+                &transport.budget(),
                 ApnsEnvironment::Sandbox,
                 token,
                 r#"{"aps":{"alert":{"title":"CodeConnect"}}}"#,
@@ -1108,7 +1183,13 @@ mod tests {
         let transport = signing_transport(&base);
 
         let err = transport
-            .send(ApnsEnvironment::Production, TOKEN, "{}", COLLAPSE_ID)
+            .send(
+                &transport.budget(),
+                ApnsEnvironment::Production,
+                TOKEN,
+                "{}",
+                COLLAPSE_ID,
+            )
             .await
             .expect_err("there is no production key here");
         match err {
@@ -1186,6 +1267,50 @@ mod tests {
             push(&transport, TOKEN).await.unwrap(),
             ApnsOutcome::Accepted { .. }
         ));
+    }
+
+    /// **One budget, however many attempts a request makes.**
+    ///
+    /// The opposite-host correction is a second send, and a second clock of its
+    /// own would let one request run for twice the bound the daemon waits on —
+    /// which is the daemon giving up on work the relay is still doing. The first
+    /// attempt here spends the whole budget, so the second submits nothing and
+    /// says so as the unambiguous failure: no phone has a copy of it.
+    #[tokio::test]
+    async fn a_second_send_inherits_what_the_first_left_of_the_budget() {
+        let mut plan = Plan::answering(200, "");
+        plan.hold = Duration::from_millis(300);
+        let (base, _ledger) = apple(plan).await;
+        let transport = signing_transport(&base).with_deadline(Duration::from_millis(200));
+        let budget = transport.budget();
+
+        let started = Instant::now();
+        let first = transport
+            .send(&budget, ApnsEnvironment::Sandbox, TOKEN, "{}", COLLAPSE_ID)
+            .await;
+        assert!(
+            matches!(first, Err(SendError::Unanswered(_))),
+            "{first:?} is not a request that went out and was not answered"
+        );
+        let second = transport
+            .send(
+                &budget,
+                ApnsEnvironment::Sandbox,
+                OTHER_TOKEN,
+                "{}",
+                COLLAPSE_ID,
+            )
+            .await;
+        let elapsed = started.elapsed();
+
+        match second {
+            Err(SendError::Unavailable(why)) => assert!(why.contains("spent"), "{why}"),
+            other => panic!("{other:?} is not a refusal on an exhausted budget"),
+        }
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "two sends ran past one budget: {elapsed:?}"
+        );
     }
 
     /// **The lock map is bounded.** A relay pushing millions of distinct

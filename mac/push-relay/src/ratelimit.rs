@@ -359,7 +359,7 @@ impl Limiter {
     /// from becoming a list of every address that ever called.
     fn daily(&self, conn: &Connection, key: &str, limit: Limit, now_ms: i64) -> Result<Decision> {
         let day_start = now_ms - now_ms.rem_euclid(DAY_MS);
-        self.sweep(conn, day_start, now_ms)?;
+        self.sweep_if_due(conn, now_ms)?;
 
         // One statement, so two callers on one key cannot both read the same
         // count and both write it back incremented by one.
@@ -386,21 +386,54 @@ impl Limiter {
         Ok(Decision::Allowed)
     }
 
-    /// Delete every bucket from a day that has ended.
+    /// Delete every bucket from a day that has ended, and answer how many.
     ///
     /// A bucket for a live key is reset in place by the upsert above, so what
     /// accumulates is the keys nobody will use again — every rotated address
     /// key, once a day, forever. This is what bounds the table.
-    fn sweep(&self, conn: &Connection, day_start: i64, now_ms: i64) -> Result<()> {
+    ///
+    /// **The idle memory windows go with them.** They are the same rotating
+    /// address keys held in this process, and the request path only reaches
+    /// them while requests are arriving — so the fleet that stops pushing is
+    /// exactly the case neither half was swept in.
+    ///
+    /// Public and driven by `now_ms` because the timer in [`crate::db`] calls
+    /// it with no request to derive a clock from, and because a test that had
+    /// to wait for a day to end would be a test that waits for a day to end.
+    pub fn sweep(&self, conn: &Connection, now_ms: i64) -> Result<usize> {
+        let day_start = now_ms - now_ms.rem_euclid(DAY_MS);
+        let removed = conn
+            .execute(
+                "DELETE FROM rate_buckets WHERE day_start_ms < ?1",
+                [day_start],
+            )
+            .context("sweeping expired rate buckets")?;
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, window| now_ms.saturating_sub(window.updated_ms) <= IDLE_WINDOW_MS);
+        Ok(removed)
+    }
+
+    /// The same sweep on a request that needs a daily limit, at most once per
+    /// [`PRUNE_INTERVAL_MS`] so that a limiter is not the most expensive part
+    /// of a request it allowed.
+    fn sweep_if_due(&self, conn: &Connection, now_ms: i64) -> Result<()> {
         if !due(&self.buckets_swept_ms, now_ms) {
             return Ok(());
         }
-        conn.execute(
-            "DELETE FROM rate_buckets WHERE day_start_ms < ?1",
-            [day_start],
-        )
-        .context("sweeping expired rate buckets")?;
+        self.sweep(conn, now_ms)?;
         Ok(())
+    }
+
+    /// How many memory windows are being held, for the test that the sweep
+    /// releases the ones nobody is spending from.
+    #[cfg(test)]
+    fn window_count(&self) -> usize {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -573,6 +606,36 @@ mod tests {
             .check(&conn, &tomorrow, ENROLL_IP, NOW + DAY_MS)
             .unwrap();
         assert_eq!(buckets(&conn), 1, "yesterday's rows must not survive");
+    }
+
+    /// **The same rows go without a second request arriving**, which is the
+    /// case the timer exists for: a fleet that stopped calling yesterday must
+    /// not leave a table of yesterday's address keys behind it.
+    #[test]
+    fn the_sweep_drops_a_finished_day_and_keeps_the_one_in_progress() {
+        let limiter = limiter();
+        let conn = database();
+
+        for index in 0..20 {
+            let key = limiter.ip_key("enroll", Some(&format!("198.51.100.{index}")), NOW);
+            limiter.check(&conn, &key, ENROLL_IP, NOW).unwrap();
+        }
+        assert_eq!(buckets(&conn), 20);
+        assert_eq!(limiter.window_count(), 20);
+
+        // Later the same day: every row is still the day in progress, and the
+        // windows have been spent from within the idle interval.
+        assert_eq!(limiter.sweep(&conn, NOW + 1_000).unwrap(), 0);
+        assert_eq!(buckets(&conn), 20);
+        assert_eq!(limiter.window_count(), 20);
+
+        assert_eq!(limiter.sweep(&conn, NOW + DAY_MS).unwrap(), 20);
+        assert_eq!(buckets(&conn), 0);
+        assert_eq!(
+            limiter.window_count(),
+            0,
+            "a caller who has gone away must not be held in memory either"
+        );
     }
 
     /// A rule with no daily component writes nothing, which is what keeps the

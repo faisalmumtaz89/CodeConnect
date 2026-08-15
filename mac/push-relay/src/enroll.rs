@@ -89,15 +89,64 @@ const FORWARDED_FOR: &str = "x-forwarded-for";
 /// included. Anything longer is not one and is not carried into a rate key.
 const MAX_ADDRESS_CHARS: usize = 45;
 
-/// Apple's distribution validation category for a build shipped through the App
-/// Store or TestFlight.
+/// Apple's validation categories, under the names its own table gives them.
+const TESTFLIGHT_CATEGORY: u32 = 2;
+const DEVELOPMENT_IDENTITY_CATEGORY: u32 = 3;
+const APP_STORE_CATEGORY: u32 = 4;
+
+/// What a build the relay serves customers may report.
+///
+/// **Both values, and never the store one alone.** Apple documents that an app
+/// shipped through the App Store can still report a TestFlight launch, so a
+/// relay that accepted only `4` would refuse a genuine customer whenever Apple
+/// felt like saying `2`. Everything else in Apple's table describes a build that
+/// did not come through Apple's distribution channels — an operating-system
+/// executable, a development identity, an enterprise or ad-hoc profile, a
+/// Developer ID binary, the restricted system categories, or any other signing
+/// identity — and the relay is not for those.
+const DISTRIBUTED_CATEGORIES: &[u32] = &[TESTFLIGHT_CATEGORY, APP_STORE_CATEGORY];
+
+/// What a build in the development namespace may report.
+///
+/// **A rule rather than none.** The development AAGUID has already established
+/// that the key was minted by a build signed with a development identity, and
+/// `3` is what such a build reports; a namespace with no rule at all would
+/// accept an operating-system executable or a Developer ID binary in the one
+/// namespace whose keys anybody able to sign a build can mint. The two sets do
+/// not overlap, so nothing about production is widened by this.
+const DEVELOPMENT_CATEGORIES: &[u32] = &[DEVELOPMENT_IDENTITY_CATEGORY];
+
+/// The categories a namespace accepts.
 ///
 /// **Checked when present and not required to be.** The extension is absent on
-/// older iOS, and refusing an attestation for its absence would refuse a genuine
-/// phone for the version of the OS it is running — while the AAGUID has already
-/// proved the key was minted by a production build. A value that is present and
-/// is not this one is a build distributed some other way, and that is refused.
-const DISTRIBUTION_VALIDATION_CATEGORY: u32 = 1;
+/// every iOS before 27, and refusing an attestation for its absence would refuse
+/// a genuine phone for the version of the OS it is running — while the AAGUID
+/// has already proved which namespace minted the key. A value that is present
+/// and outside the namespace's set is a build distributed some other way, and
+/// that is refused.
+fn accepted_categories(environment: AttestEnvironment) -> &'static [u32] {
+    match environment {
+        AttestEnvironment::Development => DEVELOPMENT_CATEGORIES,
+        AttestEnvironment::Production => DISTRIBUTED_CATEGORIES,
+    }
+}
+
+/// The APNs host an attestation from this namespace is allowed to bind.
+///
+/// **Apple makes the pairing, twice, and the relay only has to agree with it.**
+/// A build signed with a development profile is given the development App Attest
+/// environment and the sandbox APNs host; a build distributed through TestFlight
+/// or the App Store is given the production App Attest environment and the
+/// production host. Nothing a phone can install produces one half of either pair
+/// with the other half of the other, so a development attestation offered
+/// against a production token is either a mistake or somebody using the
+/// namespace anyone can mint keys in to take a binding on a customer's phone.
+fn bindable_environment(environment: AttestEnvironment) -> ApnsEnvironment {
+    match environment {
+        AttestEnvironment::Development => ApnsEnvironment::Sandbox,
+        AttestEnvironment::Production => ApnsEnvironment::Production,
+    }
+}
 
 /// The routes this module owns, mounted by [`crate::api::router`].
 pub fn routes() -> Router<Relay> {
@@ -519,6 +568,32 @@ fn issue_challenge(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Re
 // ---------------------------------------------------------------------------
 
 fn enroll(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
+    enroll_accepting(
+        relay,
+        body,
+        ip,
+        now,
+        accepted_categories(relay.config.attest_environment),
+    )
+}
+
+/// Enrollment, and the one thing a test is allowed to differ about.
+///
+/// The seam exists for the reason `attest.rs`'s does: the only attestation
+/// object Apple has ever published was made by an operating-system executable
+/// and reports category 1, no test can re-sign it into something else, and a
+/// suite that drove it through the real policy could therefore only ever assert
+/// a refusal. The route passes its namespace's own set, the policy is asserted
+/// directly against every category in Apple's table, and the tests that need
+/// Apple's object to reach the far side of enrollment pass the category it was
+/// made with.
+fn enroll_accepting(
+    relay: &Relay,
+    body: &[u8],
+    ip: Option<&str>,
+    now: i64,
+    accepted: &[u32],
+) -> Reply {
     const ROUTE: &str = "/v1/attest/enroll";
 
     // The kill switch is checked before anything is parsed, so that turning
@@ -563,7 +638,7 @@ fn enroll(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
     let Ok(token) = normalize_device_token(&request.token) else {
         return refuse(ROUTE, Refusal::Token, None);
     };
-    let Some(environment) = strict_environment(&request.environment) else {
+    let Some(environment) = bindable(&request.environment, relay.config.attest_environment) else {
         return refuse(ROUTE, Refusal::Environment, None);
     };
     let Some(key_id) = decode_base64(&request.key_id) else {
@@ -635,9 +710,20 @@ fn enroll(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
         Ok(verified) => verified,
         Err(_) => return refuse(ROUTE, Refusal::Attestation, binding),
     };
-    if let Some(refusal) = distribution_policy(relay, &verified, request.bundle_version.as_deref())
-    {
+    if let Some(refusal) = distribution_policy(
+        relay,
+        accepted,
+        verified.validation_category,
+        verified.bundle_version.as_deref(),
+    ) {
         return refuse(ROUTE, refusal, binding);
+    }
+    // What the app believes it is has to be what the device attested, or one of
+    // the two is describing a build that is not running.
+    if let Some(claimed) = request.bundle_version.as_deref() {
+        if verified.bundle_version.as_deref() != Some(claimed) {
+            return refuse(ROUTE, Refusal::BundleVersion, binding);
+        }
     }
 
     // **And now the token's own budget**, because the attestation has just made
@@ -717,31 +803,32 @@ fn credential_body(
 }
 
 /// The distribution policy, which is the relay's and not the parser's.
+///
+/// **Applied wherever authority is exercised and not only where it is granted.**
+/// An App Attest key outlives the build that minted it: an installation that was
+/// acceptable the day it attested keeps a working private key for as long as the
+/// phone holds it, so a minimum the operator raises afterwards — or a category
+/// that stops being accepted — has to be met by the assertion that rebinds or
+/// rotates as much as by the attestation that enrolled. Enforcing it only at
+/// enrollment leaves every installation already in the database with permanent
+/// lifecycle authority over its own binding.
 fn distribution_policy(
     relay: &Relay,
-    verified: &VerifiedAttestation,
-    claimed_version: Option<&str>,
+    accepted: &[u32],
+    category: Option<u32>,
+    version: Option<&str>,
 ) -> Option<Refusal> {
-    if let Some(category) = verified.validation_category {
-        if relay.config.attest_environment == AttestEnvironment::Production
-            && category != DISTRIBUTION_VALIDATION_CATEGORY
-        {
+    if let Some(category) = category {
+        if !accepted.contains(&category) {
             return Some(Refusal::Attestation);
         }
     }
     if let Some(minimum) = relay.config.min_bundle_version.as_deref() {
-        match verified.bundle_version.as_deref() {
+        match version {
             Some(found) if version_is_at_least(found, minimum) => {}
             // An absent version cannot be shown to meet a minimum, and a
             // deployment that set one asked for it to be met.
             _ => return Some(Refusal::BundleVersion),
-        }
-    }
-    // What the app believes it is has to be what the device attested, or one of
-    // the two is describing a build that is not running.
-    if let Some(claimed) = claimed_version {
-        if verified.bundle_version.as_deref() != Some(claimed) {
-            return Some(Refusal::BundleVersion);
         }
     }
     None
@@ -796,7 +883,7 @@ fn lifecycle(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
     let Ok(token) = normalize_device_token(&request.token) else {
         return refuse(ROUTE, Refusal::Token, None);
     };
-    let Some(environment) = strict_environment(&request.environment) else {
+    let Some(environment) = bindable(&request.environment, relay.config.attest_environment) else {
         return refuse(ROUTE, Refusal::Environment, None);
     };
     let Some(key_id) = decode_base64(&request.key_id) else {
@@ -841,7 +928,7 @@ fn lifecycle(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
     };
 
     let key_id_hash = sha256_hex(&key_id);
-    let installation = match find_installation(&tx, &key_id_hash) {
+    let installation = match find_installation(&tx, &key_id_hash, relay.config.attest_environment) {
         Ok(Some(installation)) => installation,
         Ok(None) => return refuse(ROUTE, Refusal::Installation, binding),
         Err(e) => return internal(relay, ROUTE, binding, e),
@@ -863,17 +950,39 @@ fn lifecycle(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
         &token,
         environment,
     );
-    let counter = match attest::verify_assertion(
+    let asserted = match attest::verify_assertion(
         &assertion,
         &client_data,
         &installation.public_key,
         app_id,
         stored_counter,
     ) {
-        Ok(counter) => counter,
+        Ok(asserted) => asserted,
         Err(_) => return refuse(ROUTE, Refusal::Assertion, binding),
     };
-    if let Err(e) = advance_counter(&tx, installation.id, counter, now) {
+
+    // **The assertion's own account of the build, when it has one, outranks the
+    // attestation's.** From iOS 27 a device appends the distribution extensions
+    // to every assertion, and those describe the build running now rather than
+    // the one that enrolled — so a phone that has been updated can meet a raised
+    // minimum with the key it already holds instead of being sent through an
+    // attestation it does not need. Every earlier iOS appends nothing, and what
+    // it enrolled with is then all there is.
+    let category = asserted
+        .validation_category
+        .or(installation.validation_category);
+    let version = asserted
+        .bundle_version
+        .clone()
+        .or_else(|| installation.bundle_version.clone());
+    if let Err(e) = record_assertion(
+        &tx,
+        installation.id,
+        asserted.counter,
+        category,
+        version.as_deref(),
+        now,
+    ) {
         return internal(relay, ROUTE, binding, e);
     }
 
@@ -891,6 +1000,22 @@ fn lifecycle(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
         now,
     ) {
         return reply;
+    }
+
+    // **A phone may always give up its credential.** §7 has a lost Mac answered
+    // by rotating the shared bearer and an incident answered by revoking it, and
+    // a distribution rule that stood in the way of a revocation would leave the
+    // credential the operator is trying to retire alive for as long as the phone
+    // sits below the policy. Everything that mints one is held to it.
+    if request.operation != Operation::Delete {
+        if let Some(refusal) = distribution_policy(
+            relay,
+            accepted_categories(relay.config.attest_environment),
+            category,
+            version.as_deref(),
+        ) {
+            return refuse(ROUTE, refusal, binding);
+        }
     }
 
     let outcome = match apply(
@@ -1099,6 +1224,11 @@ fn credential_status(
         Ok(found) => found,
         Err(e) => return internal(relay, ROUTE, None, e),
     };
+    // A binding from the other App Attest namespace is not this relay's to
+    // answer for, and is not found rather than answered about: the phone is told
+    // to attest again, which is the only thing that can make it real here.
+    let found = found
+        .filter(|binding| binding.attest_environment == relay.config.attest_environment.as_str());
 
     // A bearer nobody minted is guessing, and it is counted against the strict
     // rotating-address rule rather than against a binding it does not have.
@@ -1187,6 +1317,11 @@ struct Installation {
     public_key: Vec<u8>,
     counter: u32,
     counter_trusted: bool,
+    /// What the attestation that admitted this installation said the build was.
+    /// The policy is applied to these on every later assertion, so an
+    /// installation cannot outlive the rule it was admitted under.
+    validation_category: Option<u32>,
+    bundle_version: Option<String>,
 }
 
 pub(crate) struct BindingRow {
@@ -1196,31 +1331,53 @@ pub(crate) struct BindingRow {
     pub(crate) generation: i64,
     pub(crate) status: String,
     pub(crate) terminal_reason: Option<String>,
+    /// The App Attest namespace the installation behind this binding proved
+    /// itself in. **Part of the row rather than only of the configuration**, so
+    /// that a relay pointed at the other namespace can refuse authority it is
+    /// not the relay for instead of honouring whatever the file happens to hold.
+    pub(crate) attest_environment: String,
 }
 
+/// The installation a key id names **in this namespace**.
+///
+/// **The namespace is part of the identity and not a startup switch.** A key id
+/// looked up on its own is found whichever world it was minted in, so changing
+/// the relay's configuration would leave every record it had ever admitted still
+/// able to rebind, rotate and delete — the configuration would decide which
+/// attestations are accepted from now on and nothing about the authority already
+/// in the file. Scoped, a record from the other namespace is simply not there.
 fn find_installation(
     conn: &Connection,
     key_id_hash: &str,
+    attest_environment: AttestEnvironment,
 ) -> rusqlite::Result<Option<Installation>> {
     conn.query_row(
-        "SELECT id, public_key, counter, counter_trusted FROM installations WHERE key_id_hash = ?1",
-        [key_id_hash],
+        "SELECT id, public_key, counter, counter_trusted, validation_category, bundle_version
+         FROM installations WHERE key_id_hash = ?1 AND attest_environment = ?2",
+        rusqlite::params![key_id_hash, attest_environment.as_str()],
         |row| {
             Ok(Installation {
                 id: row.get(0)?,
                 public_key: row.get(1)?,
                 counter: row.get::<_, i64>(2)? as u32,
                 counter_trusted: row.get::<_, i64>(3)? != 0,
+                validation_category: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+                bundle_version: row.get(5)?,
             })
         },
     )
     .optional()
 }
 
+/// The live binding on a token, **whichever namespace holds it**.
+///
+/// Deliberately not scoped: the caller compares the row's installation with the
+/// one the assertion proved, so a token another namespace's installation is
+/// holding is answered `forbidden` rather than looking free and then colliding
+/// with `bindings_one_active_per_token` as a five hundred.
 fn active_binding(conn: &Connection, token_hash: &str) -> rusqlite::Result<Option<BindingRow>> {
     conn.query_row(
-        "SELECT installation_id, token_hash, environment, generation, status, terminal_reason
-         FROM bindings WHERE token_hash = ?1 AND status = 'active'",
+        &binding_query("b.token_hash = ?1 AND b.status = 'active'"),
         [token_hash],
         read_binding,
     )
@@ -1232,12 +1389,20 @@ pub(crate) fn binding_for_bearer(
     bearer_hash: &str,
 ) -> rusqlite::Result<Option<BindingRow>> {
     conn.query_row(
-        "SELECT installation_id, token_hash, environment, generation, status, terminal_reason
-         FROM bindings WHERE bearer_hash = ?1",
+        &binding_query("b.bearer_hash = ?1"),
         [bearer_hash],
         read_binding,
     )
     .optional()
+}
+
+fn binding_query(predicate: &str) -> String {
+    format!(
+        "SELECT b.installation_id, b.token_hash, b.environment, b.generation, b.status,
+                b.terminal_reason, i.attest_environment
+         FROM bindings b JOIN installations i ON i.id = b.installation_id
+         WHERE {predicate}"
+    )
 }
 
 fn read_binding(row: &rusqlite::Row<'_>) -> rusqlite::Result<BindingRow> {
@@ -1248,6 +1413,7 @@ fn read_binding(row: &rusqlite::Row<'_>) -> rusqlite::Result<BindingRow> {
         generation: row.get(3)?,
         status: row.get(4)?,
         terminal_reason: row.get(5)?,
+        attest_environment: row.get(6)?,
     })
 }
 
@@ -1350,15 +1516,28 @@ fn insert_binding(
     Ok(())
 }
 
-fn advance_counter(
+/// Everything one accepted assertion changes about its installation: the
+/// counter it reached, and what it said the build is.
+fn record_assertion(
     tx: &Transaction<'_>,
     installation_id: i64,
     counter: u32,
+    validation_category: Option<u32>,
+    bundle_version: Option<&str>,
     now: i64,
 ) -> rusqlite::Result<usize> {
     tx.execute(
-        "UPDATE installations SET counter = ?2, counter_trusted = 1, updated_ms = ?3 WHERE id = ?1",
-        rusqlite::params![installation_id, i64::from(counter), now],
+        "UPDATE installations
+            SET counter = ?2, counter_trusted = 1, validation_category = ?3,
+                bundle_version = ?4, updated_ms = ?5
+          WHERE id = ?1",
+        rusqlite::params![
+            installation_id,
+            i64::from(counter),
+            validation_category.map(i64::from),
+            bundle_version,
+            now
+        ],
     )
 }
 
@@ -1454,6 +1633,11 @@ fn strict_environment(value: &str) -> Option<ApnsEnvironment> {
         "sandbox" => Some(ApnsEnvironment::Sandbox),
         _ => None,
     }
+}
+
+/// The environment a document names, when this namespace is allowed to bind it.
+fn bindable(value: &str, attest_environment: AttestEnvironment) -> Option<ApnsEnvironment> {
+    strict_environment(value).filter(|&named| named == bindable_environment(attest_environment))
 }
 
 /// Standard base64, which is what `DCAppAttestService` hands the app.
@@ -1577,6 +1761,28 @@ mod tests {
         Relay::new(config(&pairs), crate::db::open_in_memory().unwrap())
     }
 
+    /// The same relay in the other App Attest namespace.
+    fn development_relay(extra: &[(&str, &str)]) -> Relay {
+        let mut pairs = vec![
+            ("RELAY_APP_ID", REAL_APP_ID),
+            ("RELAY_ATTEST_ENVIRONMENT", "development"),
+        ];
+        pairs.extend_from_slice(extra);
+        Relay::new(config(&pairs), crate::db::open_in_memory().unwrap())
+    }
+
+    /// The category Apple's published object reports: an operating-system
+    /// executable, which no namespace accepts and which no test can re-sign into
+    /// anything else. The tests below drive enrollment with that category named,
+    /// so that what they are about — challenges, atomicity, storage, limits — is
+    /// what they measure; the policy itself is asserted against Apple's whole
+    /// table, and the route's own set is asserted against this object.
+    const REAL_OBJECT_CATEGORY: u32 = 1;
+
+    fn enrol(relay: &Relay, body: &[u8], ip: Option<&str>, now: i64) -> Reply {
+        enroll_accepting(relay, body, ip, now, &[REAL_OBJECT_CATEGORY])
+    }
+
     fn real_attestation() -> String {
         REAL_OBJECT.split_whitespace().collect()
     }
@@ -1644,7 +1850,7 @@ mod tests {
         let relay = relay(&[]);
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
 
-        let reply = enroll(
+        let reply = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             Some("203.0.113.7"),
@@ -1703,10 +1909,10 @@ mod tests {
         let body = enroll_body(&challenge, TOKEN);
 
         assert_eq!(
-            enroll(&relay, body.as_bytes(), None, REAL_CLOCK_MS).status,
+            enrol(&relay, body.as_bytes(), None, REAL_CLOCK_MS).status,
             StatusCode::OK
         );
-        let replay = enroll(&relay, body.as_bytes(), None, REAL_CLOCK_MS);
+        let replay = enrol(&relay, body.as_bytes(), None, REAL_CLOCK_MS);
         assert_eq!(replay.status, StatusCode::FORBIDDEN);
         assert_eq!(replay.body["error"], "challenge_consumed");
         assert_eq!(active_count(&relay, TOKEN), 1);
@@ -1717,7 +1923,7 @@ mod tests {
         let relay = relay(&[]);
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
 
-        let late = enroll(
+        let late = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             None,
@@ -1733,7 +1939,7 @@ mod tests {
     #[test]
     fn an_unissued_challenge_authorises_nothing() {
         let relay = relay(&[]);
-        let refused = enroll(
+        let refused = enrol(
             &relay,
             enroll_body(&real_challenge(), TOKEN).as_bytes(),
             None,
@@ -1745,23 +1951,18 @@ mod tests {
 
     /// **Separate namespaces.** The same object, the same challenge, a relay
     /// configured for the development namespace — and it is refused, because a
-    /// development key can be minted by anybody who can sign a build.
+    /// development key can be minted by anybody who can sign a build. The token
+    /// is offered against the sandbox host, which is the only one a development
+    /// namespace may bind, so what refuses it is the AAGUID and nothing earlier.
     #[test]
     fn development_and_production_attestations_are_separate_namespaces() {
-        let relay = Relay::new(
-            config(&[
-                ("RELAY_APP_ID", REAL_APP_ID),
-                ("RELAY_ATTEST_ENVIRONMENT", "development"),
-            ]),
-            crate::db::open_in_memory().unwrap(),
-        );
+        let relay = development_relay(&[]);
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
-        let refused = enroll(
-            &relay,
-            enroll_body(&challenge, TOKEN).as_bytes(),
-            None,
-            REAL_CLOCK_MS,
-        );
+        let mut document: serde_json::Value =
+            serde_json::from_str(&enroll_body(&challenge, TOKEN)).unwrap();
+        document["environment"] = serde_json::json!("sandbox");
+
+        let refused = enrol(&relay, document.to_string().as_bytes(), None, REAL_CLOCK_MS);
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         assert_eq!(refused.body["error"], "attestation");
     }
@@ -1769,7 +1970,7 @@ mod tests {
     #[test]
     fn a_relay_without_an_app_id_cannot_verify_anything_and_says_so() {
         let relay = Relay::new(config(&[]), crate::db::open_in_memory().unwrap());
-        let refused = enroll(
+        let refused = enrol(
             &relay,
             enroll_body("x", TOKEN).as_bytes(),
             None,
@@ -1787,7 +1988,7 @@ mod tests {
             serde_json::from_str(&enroll_body(&challenge, TOKEN)).unwrap();
         document["bundle_version"] = serde_json::json!("9");
 
-        let refused = enroll(&relay, document.to_string().as_bytes(), None, REAL_CLOCK_MS);
+        let refused = enrol(&relay, document.to_string().as_bytes(), None, REAL_CLOCK_MS);
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
         assert_eq!(refused.body["error"], "bundle_version");
     }
@@ -1803,7 +2004,7 @@ mod tests {
 
         let relay = relay(&[("RELAY_MIN_BUNDLE_VERSION", "2")]);
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
-        let refused = enroll(
+        let refused = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             None,
@@ -1811,6 +2012,104 @@ mod tests {
         );
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
         assert_eq!(refused.body["error"], "bundle_version");
+        assert_eq!(active_count(&relay, TOKEN), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // The distribution policy, against Apple's whole table.
+    // -----------------------------------------------------------------------
+
+    /// **Every category Apple publishes, and what each one means for a relay
+    /// serving customers.** Only a TestFlight or App Store launch is a build the
+    /// relay is for; an operating-system executable, a development identity, an
+    /// enterprise or ad-hoc profile, a Developer ID binary, the restricted
+    /// system categories, and any other signing identity are not — and neither
+    /// is `0`, which Apple names invalid.
+    #[test]
+    fn the_only_builds_production_serves_are_testflight_and_the_app_store() {
+        let relay = relay(&[]);
+        let accepted = accepted_categories(AttestEnvironment::Production);
+        let decide = |category: Option<u32>| distribution_policy(&relay, accepted, category, None);
+
+        for (category, what) in [
+            (
+                TESTFLIGHT_CATEGORY,
+                "an executable distributed through TestFlight",
+            ),
+            (
+                APP_STORE_CATEGORY,
+                "an executable distributed through the App Store",
+            ),
+        ] {
+            assert_eq!(decide(Some(category)), None, "{category}: {what}");
+        }
+        for (category, what) in [
+            (0, "invalid"),
+            (1, "an operating system executable"),
+            (
+                3,
+                "an executable signed by a development code signing identity",
+            ),
+            (5, "an enterprise universal provisioning profile, or ad-hoc"),
+            (6, "signed using Developer ID"),
+            (7, "a restricted system-generated category"),
+            (8, "a restricted system-generated category"),
+            (9, "a restricted system-generated category"),
+            (10, "any other code signing identity"),
+        ] {
+            assert_eq!(
+                decide(Some(category)),
+                Some(Refusal::Attestation),
+                "{category}: {what}"
+            );
+        }
+
+        // **And absence is not a refusal.** No iOS before 27 writes the
+        // extension at all, so a relay that required it would refuse every phone
+        // in the world for the version of the OS it is running.
+        assert_eq!(decide(None), None);
+    }
+
+    /// The other namespace has a rule of its own rather than none: the
+    /// development AAGUID is minted by a build signed with a development
+    /// identity, and that is the one category it may report.
+    #[test]
+    fn the_development_namespace_accepts_a_development_identity_and_nothing_else() {
+        let relay = development_relay(&[]);
+        let accepted = accepted_categories(AttestEnvironment::Development);
+        let decide = |category: Option<u32>| distribution_policy(&relay, accepted, category, None);
+
+        assert_eq!(decide(Some(DEVELOPMENT_IDENTITY_CATEGORY)), None);
+        assert_eq!(decide(None), None);
+        for category in [0, 1, TESTFLIGHT_CATEGORY, APP_STORE_CATEGORY, 5, 6, 10] {
+            assert_eq!(
+                decide(Some(category)),
+                Some(Refusal::Attestation),
+                "{category}"
+            );
+        }
+        // The two sets do not overlap, so nothing here is reachable from a
+        // production relay.
+        assert!(!accepted_categories(AttestEnvironment::Production)
+            .contains(&DEVELOPMENT_IDENTITY_CATEGORY));
+    }
+
+    /// **The route's own set, against the one object Apple signed.** Its
+    /// authenticator data says an operating-system executable made it, so a
+    /// relay serving customers refuses it — which is exactly what the seam every
+    /// other test uses exists to work around.
+    #[test]
+    fn apples_published_object_is_refused_for_the_build_it_says_made_it() {
+        let relay = relay(&[]);
+        let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
+        let refused = enroll(
+            &relay,
+            enroll_body(&challenge, TOKEN).as_bytes(),
+            None,
+            REAL_CLOCK_MS,
+        );
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        assert_eq!(refused.body["error"], "attestation");
         assert_eq!(active_count(&relay, TOKEN), 0);
     }
 
@@ -1825,7 +2124,7 @@ mod tests {
             receipt: b"an opaque receipt".to_vec(),
             counter,
             aaguid: Aaguid::PRODUCTION,
-            validation_category: Some(1),
+            validation_category: Some(APP_STORE_CATEGORY),
             bundle_version: Some("1".to_string()),
         }
     }
@@ -1976,7 +2275,7 @@ mod tests {
             .unwrap();
         }
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
-        let refused = enroll(
+        let refused = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             None,
@@ -2023,9 +2322,38 @@ mod tests {
             environment: ApnsEnvironment,
             counter: u32,
         ) -> String {
+            self.assertion_saying(operation, challenge, token, environment, counter, None)
+        }
+
+        /// The same assertion from a phone new enough to append the
+        /// distribution extensions to it, naming a category and a version.
+        fn assertion_saying(
+            &self,
+            operation: Operation,
+            challenge: &str,
+            token: &str,
+            environment: ApnsEnvironment,
+            counter: u32,
+            says: Option<(u32, &str)>,
+        ) -> String {
             let mut auth_data = sha256(REAL_APP_ID.as_bytes()).to_vec();
             auth_data.push(0);
             auth_data.extend_from_slice(&counter.to_be_bytes());
+            if let Some((category, version)) = says {
+                let extensions = Value::Map(vec![
+                    (
+                        Value::Text("validationCategory".to_string()),
+                        Value::Bytes(category.to_le_bytes().to_vec()),
+                    ),
+                    (
+                        Value::Text("bundleVersion".to_string()),
+                        Value::Text(version.to_string()),
+                    ),
+                ]);
+                let mut encoded = Vec::new();
+                ciborium::ser::into_writer(&extensions, &mut encoded).unwrap();
+                auth_data.extend_from_slice(&encoded);
+            }
 
             let challenge_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(challenge)
@@ -2069,19 +2397,33 @@ mod tests {
     /// Record an installation and one active binding, the way an enrollment
     /// would have, and hand back the bearer it minted.
     fn enrolled(relay: &Relay, phone: &Phone, token: &str, now: i64) -> String {
+        enrolled_in(relay, phone, token, now, AttestEnvironment::Production)
+    }
+
+    /// The same, in whichever App Attest namespace — and therefore against
+    /// whichever APNs host Apple pairs with it.
+    fn enrolled_in(
+        relay: &Relay,
+        phone: &Phone,
+        token: &str,
+        now: i64,
+        attest_environment: AttestEnvironment,
+    ) -> String {
         let bearer = new_bearer().unwrap();
         let mut db = relay.db.lock().unwrap();
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
+        let mut verified = synthetic(0, phone.key.public_key().as_ref().to_vec());
+        verified.validation_category = Some(accepted_categories(attest_environment)[0]);
         record_enrollment(
             &tx,
             &Enrollment {
-                verified: &synthetic(0, phone.key.public_key().as_ref().to_vec()),
+                verified: &verified,
                 key_id_hash: &sha256_hex(&phone.key_id),
-                attest_environment: AttestEnvironment::Production,
+                attest_environment,
                 token_hash: &token_hash(token),
-                environment: ApnsEnvironment::Production,
+                environment: bindable_environment(attest_environment),
                 bearer_hash: &bearer_hash(&bearer),
                 generation: 0,
             },
@@ -2099,20 +2441,32 @@ mod tests {
         token: &str,
         counter: u32,
     ) -> String {
+        assert_body_in(
+            phone,
+            operation,
+            challenge,
+            token,
+            counter,
+            ApnsEnvironment::Production,
+        )
+    }
+
+    fn assert_body_in(
+        phone: &Phone,
+        operation: Operation,
+        challenge: &str,
+        token: &str,
+        counter: u32,
+        environment: ApnsEnvironment,
+    ) -> String {
         serde_json::json!({
             "schema": 1,
             "key_id": phone.key_id_b64(),
-            "assertion": phone.assertion(
-                operation,
-                challenge,
-                token,
-                ApnsEnvironment::Production,
-                counter,
-            ),
+            "assertion": phone.assertion(operation, challenge, token, environment, counter),
             "challenge": challenge,
             "operation": operation.as_str(),
             "token": token,
-            "environment": "production",
+            "environment": environment.as_str(),
         })
         .to_string()
     }
@@ -2326,6 +2680,252 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The distribution policy on the far side of enrollment.
+    // -----------------------------------------------------------------------
+
+    /// **A minimum raised afterwards reaches the installations that are already
+    /// there.** An App Attest key outlives the build that minted it, so an
+    /// installation admitted under the old minimum would otherwise keep full
+    /// lifecycle authority over its binding for as long as the phone held the
+    /// key — and the operator who raised the minimum would have changed nothing
+    /// except which phones may enrol next.
+    #[test]
+    fn a_raised_minimum_bundle_version_reaches_an_installation_that_already_attested() {
+        let relay = relay(&[("RELAY_MIN_BUNDLE_VERSION", "2")]);
+        let phone = Phone::new();
+        let bearer = enrolled(&relay, &phone, TOKEN, NOW);
+
+        for (operation, token) in [(Operation::Rotate, TOKEN), (Operation::Rebind, OTHER_TOKEN)] {
+            let challenge = issued_challenge(&relay, NOW);
+            let refused = lifecycle(
+                &relay,
+                assert_body(&phone, operation, &challenge, token, 1).as_bytes(),
+                None,
+                NOW,
+            );
+            assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{operation:?}");
+            assert_eq!(refused.body["error"], "bundle_version");
+        }
+        assert_eq!(active_count(&relay, TOKEN), 1);
+        assert_eq!(status_of(&relay, &bearer, NOW).1["status"], "active");
+
+        // **And a phone may still give up its credential.** §7 answers a lost
+        // Mac by rotating the shared bearer and an incident by revoking it, so a
+        // rule that stood in the way of a revocation would keep alive exactly
+        // the credential an operator is trying to retire.
+        let challenge = issued_challenge(&relay, NOW);
+        let deleted = lifecycle(
+            &relay,
+            assert_body(&phone, Operation::Delete, &challenge, TOKEN, 1).as_bytes(),
+            None,
+            NOW,
+        );
+        assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+        assert_eq!(active_count(&relay, TOKEN), 0);
+    }
+
+    /// The same rule for the category: an installation whose recorded build is
+    /// not one the relay serves cannot mint another credential with the key it
+    /// already holds.
+    #[test]
+    fn an_installation_whose_recorded_category_is_not_served_cannot_mint_another_credential() {
+        let relay = relay(&[]);
+        let phone = Phone::new();
+        enrolled(&relay, &phone, TOKEN, NOW);
+        {
+            let db = relay.db.lock().unwrap();
+            db.execute(
+                "UPDATE installations SET validation_category = ?1",
+                [i64::from(DEVELOPMENT_IDENTITY_CATEGORY)],
+            )
+            .unwrap();
+        }
+
+        for (operation, token) in [(Operation::Rotate, TOKEN), (Operation::Rebind, OTHER_TOKEN)] {
+            let challenge = issued_challenge(&relay, NOW);
+            let refused = lifecycle(
+                &relay,
+                assert_body(&phone, operation, &challenge, token, 1).as_bytes(),
+                None,
+                NOW,
+            );
+            assert_eq!(refused.status, StatusCode::FORBIDDEN, "{operation:?}");
+            assert_eq!(refused.body["error"], "attestation");
+        }
+        assert_eq!(active_count(&relay, TOKEN), 1);
+
+        let challenge = issued_challenge(&relay, NOW);
+        let deleted = lifecycle(
+            &relay,
+            assert_body(&phone, Operation::Delete, &challenge, TOKEN, 1).as_bytes(),
+            None,
+            NOW,
+        );
+        assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+        assert_eq!(active_count(&relay, TOKEN), 0);
+    }
+
+    /// **A phone that has been updated says so, and is believed.** iOS 27
+    /// appends the distribution extensions to every assertion, and those describe
+    /// the build running now — so the phone meets a minimum raised after it
+    /// enrolled with the key it already holds, instead of being sent through an
+    /// attestation that would tell the relay nothing it is not being told here.
+    #[test]
+    fn an_assertion_that_names_a_newer_build_meets_a_minimum_raised_after_enrollment() {
+        let relay = relay(&[("RELAY_MIN_BUNDLE_VERSION", "2")]);
+        let phone = Phone::new();
+        enrolled(&relay, &phone, TOKEN, NOW);
+
+        let challenge = issued_challenge(&relay, NOW);
+        let document = serde_json::json!({
+            "schema": 1,
+            "key_id": phone.key_id_b64(),
+            "assertion": phone.assertion_saying(
+                Operation::Rotate,
+                &challenge,
+                TOKEN,
+                ApnsEnvironment::Production,
+                1,
+                Some((APP_STORE_CATEGORY, "3")),
+            ),
+            "challenge": challenge,
+            "operation": "rotate",
+            "token": TOKEN,
+            "environment": "production",
+        })
+        .to_string();
+
+        let reply = lifecycle(&relay, document.as_bytes(), None, NOW);
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(active_count(&relay, TOKEN), 1);
+
+        // And the row now says what the phone said, so the next assertion does
+        // not have to repeat it.
+        let db = relay.db.lock().unwrap();
+        let (category, version): (i64, String) = db
+            .query_row(
+                "SELECT validation_category, bundle_version FROM installations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(category, i64::from(APP_STORE_CATEGORY));
+        assert_eq!(version, "3");
+    }
+
+    // -----------------------------------------------------------------------
+    // Namespaces.
+    // -----------------------------------------------------------------------
+
+    /// **A record from the other namespace is not there.** Without this the
+    /// configuration decides only which attestations are accepted from now on,
+    /// and every installation the relay ever admitted keeps rebind, rotate and
+    /// delete over its binding whichever world the relay is now serving.
+    #[test]
+    fn an_installation_from_the_other_namespace_is_not_found_and_cannot_act() {
+        for (configured, recorded) in [
+            (
+                AttestEnvironment::Production,
+                AttestEnvironment::Development,
+            ),
+            (
+                AttestEnvironment::Development,
+                AttestEnvironment::Production,
+            ),
+        ] {
+            let relay = match configured {
+                AttestEnvironment::Production => relay(&[]),
+                AttestEnvironment::Development => development_relay(&[]),
+            };
+            let phone = Phone::new();
+            let bearer = enrolled_in(&relay, &phone, TOKEN, NOW, recorded);
+            let environment = bindable_environment(configured);
+
+            for operation in [Operation::Rotate, Operation::Rebind, Operation::Delete] {
+                let challenge = issued_challenge(&relay, NOW);
+                let refused = lifecycle(
+                    &relay,
+                    assert_body_in(&phone, operation, &challenge, TOKEN, 1, environment).as_bytes(),
+                    None,
+                    NOW,
+                );
+                assert_eq!(refused.status, StatusCode::FORBIDDEN, "{configured:?}");
+                assert_eq!(refused.body["error"], "installation_unknown");
+            }
+
+            // And its bearer is not a credential this relay answers for either:
+            // the phone is told to attest again, which is the only thing that
+            // can make it real here.
+            assert_eq!(status_of(&relay, &bearer, NOW).1["status"], "reenroll");
+
+            // The row is untouched — it is unreachable, not deleted, so pointing
+            // the relay back at its own namespace restores it.
+            assert_eq!(active_count(&relay, TOKEN), 1);
+        }
+    }
+
+    /// **The pairing Apple makes twice.** A development profile is given the
+    /// development App Attest environment and the sandbox APNs host; TestFlight
+    /// and the App Store are given the production environment and the production
+    /// host. A relay that let one half of either pair meet the other would let a
+    /// key anybody can mint take a binding on a customer's phone.
+    #[test]
+    fn a_namespace_may_bind_only_the_apns_host_apple_pairs_it_with() {
+        assert_eq!(
+            bindable_environment(AttestEnvironment::Development),
+            ApnsEnvironment::Sandbox
+        );
+        assert_eq!(
+            bindable_environment(AttestEnvironment::Production),
+            ApnsEnvironment::Production
+        );
+
+        // The development relay, offered the production host.
+        let development = development_relay(&[]);
+        let challenge = seed_real_challenge(&development, REAL_CLOCK_MS);
+        let refused = enrol(
+            &development,
+            enroll_body(&challenge, TOKEN).as_bytes(),
+            None,
+            REAL_CLOCK_MS,
+        );
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+        assert_eq!(refused.body["error"], "environment");
+
+        // And the production relay, offered the sandbox one.
+        let relay = relay(&[]);
+        let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
+        let mut document: serde_json::Value =
+            serde_json::from_str(&enroll_body(&challenge, TOKEN)).unwrap();
+        document["environment"] = serde_json::json!("sandbox");
+        let refused = enrol(&relay, document.to_string().as_bytes(), None, REAL_CLOCK_MS);
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+        assert_eq!(refused.body["error"], "environment");
+
+        // A rebind cannot walk a binding across the pair either.
+        let phone = Phone::new();
+        enrolled(&relay, &phone, TOKEN, NOW);
+        let challenge = issued_challenge(&relay, NOW);
+        let refused = lifecycle(
+            &relay,
+            assert_body_in(
+                &phone,
+                Operation::Rebind,
+                &challenge,
+                OTHER_TOKEN,
+                1,
+                ApnsEnvironment::Sandbox,
+            )
+            .as_bytes(),
+            None,
+            NOW,
+        );
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.body["error"], "environment");
+        assert_eq!(active_count(&relay, OTHER_TOKEN), 0);
+    }
+
+    // -----------------------------------------------------------------------
     // The generation floor.
     // -----------------------------------------------------------------------
 
@@ -2349,7 +2949,7 @@ mod tests {
         );
         let phone = Phone::new();
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
-        let reply = enroll(
+        let reply = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             None,
@@ -2377,11 +2977,15 @@ mod tests {
             let tx = db
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .unwrap();
+            // The phone that will sign the assertions, reporting a category the
+            // route accepts — so that what refuses it below is the floor.
             tx.execute(
-                "UPDATE installations SET public_key = ?1, key_id_hash = ?2",
+                "UPDATE installations
+                    SET public_key = ?1, key_id_hash = ?2, validation_category = ?3",
                 rusqlite::params![
                     phone.key.public_key().as_ref().to_vec(),
-                    sha256_hex(&phone.key_id)
+                    sha256_hex(&phone.key_id),
+                    i64::from(APP_STORE_CATEGORY)
                 ],
             )
             .unwrap();
@@ -2426,7 +3030,7 @@ mod tests {
         let phone = Phone::new();
         let bearer = enrolled(&relay, &phone, TOKEN, NOW);
 
-        let refused = enroll(&relay, enroll_body("anything", TOKEN).as_bytes(), None, NOW);
+        let refused = enrol(&relay, enroll_body("anything", TOKEN).as_bytes(), None, NOW);
         assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(refused.body["error"], "enrollment_disabled");
 
@@ -2647,7 +3251,7 @@ mod tests {
         let stranger = Phone::new();
         for index in 0..40u32 {
             let address = format!("198.51.100.{}", index % 200);
-            let refused = enroll(&relay, enrolment.as_bytes(), Some(&address), NOW);
+            let refused = enrol(&relay, enrolment.as_bytes(), Some(&address), NOW);
             assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
             let challenge = issued_challenge(&relay, NOW);
             let refused = lifecycle(
@@ -2739,10 +3343,10 @@ mod tests {
         let relay = relay(&[]);
         let document = enroll_body("never-issued", TOKEN);
         for _ in 0..ratelimit::ENROLL_IP.burst {
-            let reply = enroll(&relay, document.as_bytes(), Some("203.0.113.7"), NOW);
+            let reply = enrol(&relay, document.as_bytes(), Some("203.0.113.7"), NOW);
             assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
         }
-        let refused = enroll(&relay, document.as_bytes(), Some("203.0.113.7"), NOW);
+        let refused = enrol(&relay, document.as_bytes(), Some("203.0.113.7"), NOW);
         assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
         assert!(refused.retry_after_seconds.unwrap() > 0);
     }
@@ -2802,7 +3406,7 @@ mod tests {
         let base: serde_json::Value =
             serde_json::from_str(&enroll_body("a-challenge", TOKEN)).unwrap();
         let refusal = |document: String| -> String {
-            let reply = enroll(&relay, document.as_bytes(), Some(&from()), NOW);
+            let reply = enrol(&relay, document.as_bytes(), Some(&from()), NOW);
             reply.body["error"].as_str().unwrap().to_string()
         };
         let with = |field: &str, value: serde_json::Value| {
@@ -3121,7 +3725,7 @@ mod tests {
     fn no_raw_token_bearer_or_challenge_reaches_any_column() {
         let relay = relay(&[]);
         let challenge = seed_real_challenge(&relay, REAL_CLOCK_MS);
-        let reply = enroll(
+        let reply = enrol(
             &relay,
             enroll_body(&challenge, TOKEN).as_bytes(),
             Some("203.0.113.7"),
@@ -3237,7 +3841,7 @@ mod tests {
             .with_max_level(tracing::Level::TRACE)
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            let reply = enroll(
+            let reply = enrol(
                 &relay,
                 enroll_body(&challenge, TOKEN).as_bytes(),
                 Some(address),
