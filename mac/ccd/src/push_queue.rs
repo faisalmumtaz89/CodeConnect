@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use protocol::secret::Redacted;
 use push_core::{ApnsEnvironment, DeviceGone};
 
 use crate::apns::TestDelivery;
@@ -60,26 +61,27 @@ pub(crate) struct PushTarget {
     pub(crate) device_id: String,
     /// The relay bearer for this token, for a daemon in relay mode. `None` in
     /// direct mode, where there is no third party to authorise.
-    pub(crate) credential: Option<String>,
+    ///
+    /// **The type is the guard.** [`Redacted`] cannot print its value, so the
+    /// bearer survives no `Debug` — not the one derived on this struct's
+    /// callers, not the field printed on its own, not the `anyhow` chain three
+    /// layers away that nobody was thinking about secrets while writing. A bare
+    /// `String` here made the redaction a promise about a hand-written `Debug`
+    /// that the next carrier to hold this field could quietly break.
+    pub(crate) credential: Option<Redacted>,
 }
 
-/// **Hand-written so the bearer cannot print itself.** A derived `Debug` would
-/// put the credential into every `anyhow` chain that ever wrapped a target and
-/// into every structure dump that contained one — which is how a secret reaches
-/// a log file without anybody having written a line that logs it.
+/// **Hand-written so the token is abbreviated.** The credential renders itself
+/// safely — it is a [`Redacted`] — but the token is a bare `String`, and a
+/// derived `Debug` would print it whole; enough of it to recognise across two
+/// log lines is all a reader needs and all this shows.
 impl std::fmt::Debug for PushTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PushTarget")
-            // Enough of the token to recognise it again across two log lines,
-            // never enough to address a phone with — the same policy the store
-            // applies to the same value.
             .field("token", &crate::store::abbreviated(&self.token))
             .field("environment", &self.environment)
             .field("device_id", &self.device_id)
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|_| "<redacted>"),
-            )
+            .field("credential", &self.credential)
             .finish()
     }
 }
@@ -119,15 +121,38 @@ pub(crate) trait PushRegistry: Send + Sync {
     /// the *wrong host* for a perfectly good token, which is why the delivery
     /// path retries against the other environment and records a correction
     /// before it would ever give up on a device.
-    /// `refused` is the token Apple rejected, so a late refusal cannot erase a
-    /// token registered since. Returns whether it *was* the registered token:
-    /// `false` means the phone has re-registered and this answer is about a
-    /// device that is, as far as anything now cares, still there.
-    fn forget(&self, device_id: &str, refused: &str, reason: &str) -> bool;
+    /// `refused` names the token *and* the credential the attempt was made
+    /// with, so a late refusal cannot erase a tuple registered since. Returns
+    /// whether it *was* the registered tuple: `false` means the phone has
+    /// re-registered and this answer is about a device that is, as far as
+    /// anything now cares, still there.
+    ///
+    /// **Both halves, because a rotation moves either.** A relay reissues a
+    /// credential for the same token; a phone reinstalls and registers a new
+    /// token. An attempt snapshots one `(token, credential)` tuple and answers
+    /// against whatever the row holds now — so a `410` about `(T, C1)` must be
+    /// inert once the row reads `(T, C2)`, exactly as it is inert once the row
+    /// reads `(T2, …)`. Comparing the token alone would let `C1`'s late
+    /// departure clear a live `C2`.
+    fn forget(
+        &self,
+        device_id: &str,
+        refused_token: &str,
+        refused_credential: Option<&Redacted>,
+        reason: &str,
+    ) -> bool;
     /// Apple refused the token on the host we chose but the *other* host is
     /// plausible. Records the correction so the next push goes straight there.
-    /// Scoped to the token that was corrected, for the same reason as `forget`.
-    fn correct_environment(&self, device_id: &str, token: &str, environment: ApnsEnvironment);
+    /// Scoped to the whole `(token, credential)` tuple, for the same reason as
+    /// `forget`: a correction snapshotted under `(T, C1)` must not move the
+    /// environment of a row the phone has since rotated to `(T, C2)`.
+    fn correct_environment(
+        &self,
+        device_id: &str,
+        token: &str,
+        credential: Option<&Redacted>,
+        environment: ApnsEnvironment,
+    );
 }
 
 /// One delivery, waiting its turn.
@@ -386,6 +411,36 @@ mod tests {
             device_id: device.into(),
             credential: None,
         }
+    }
+
+    /// **The carrier cannot print its bearer, and the type is why.** Every
+    /// struct that holds a `PushTarget` derives `Debug`, and a bare `String`
+    /// credential would ride into a log the first time any of them was printed
+    /// in an error path nobody was thinking about secrets while writing. The
+    /// bearer is a [`Redacted`], so the field renders `<redacted>` no matter who
+    /// prints the target.
+    ///
+    /// **The negative check:** make the `credential` field a bare `String` and
+    /// this fails — the value appears in the rendering.
+    #[test]
+    fn a_targets_debug_never_prints_its_bearer() {
+        let mut with_bearer = target("phone");
+        with_bearer.credential = Some(Redacted::from("s3cret-bearer-nobody-may-log"));
+        let rendered = format!("{with_bearer:?}");
+        assert!(
+            !rendered.contains("s3cret-bearer-nobody-may-log"),
+            "the bearer reached a Debug rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "and its presence is still visible, which an operator needs: {rendered}"
+        );
+        // The token is a bare string and is shown, abbreviated — a reader has to
+        // be able to tell two registrations apart.
+        assert!(
+            rendered.contains("aa"),
+            "the token still prints: {rendered}"
+        );
     }
 
     /// Await something a regression would never deliver, without hanging.

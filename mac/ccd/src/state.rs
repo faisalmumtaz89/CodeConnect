@@ -4139,7 +4139,7 @@ impl Daemon {
         device_id: &str,
         token: &str,
         environment: &str,
-        credential: Option<&str>,
+        credential: Option<&protocol::secret::Redacted>,
     ) -> Result<()> {
         let displaced = self
             .db
@@ -4147,7 +4147,7 @@ impl Daemon {
                 device_id.to_string(),
                 token.to_string(),
                 environment.to_string(),
-                credential.map(str::to_string),
+                credential.cloned(),
             )
             .await?;
         for previous in displaced {

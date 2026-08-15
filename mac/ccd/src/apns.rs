@@ -228,6 +228,27 @@ impl std::fmt::Display for SendRateLimited {
 
 impl std::error::Error for SendRateLimited {}
 
+/// **The row has a token but no bearer to authorise it** — an incomplete tuple,
+/// not a refusal.
+///
+/// The plan's table (`docs/push-gateway.md`) is explicit: a missing tuple is
+/// `NoRegisteredToken`, and `credential_invalid` is reserved for a relay that
+/// actually answered `401`/`403`. A relay-mode row registered while the daemon
+/// was direct, or before the phone enrolled, has no bearer at all — so nothing
+/// is sent, nothing is refused, and reporting a credential refusal would name a
+/// conversation with the relay that never took place. A typed marker rather
+/// than a string, for the reason `CredentialRefused` is one.
+#[derive(Debug)]
+pub struct NoRegistration;
+
+impl std::fmt::Display for NoRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "this device has no complete push registration")
+    }
+}
+
+impl std::error::Error for NoRegistration {}
+
 impl TestDelivery {
     /// What to tell whoever asked for a test, given the error its attempt
     /// produced.
@@ -237,6 +258,13 @@ impl TestDelivery {
     /// a failure may carry a typed marker, and that everything else is a
     /// failure with a reason attached.
     pub fn from_error(err: &anyhow::Error) -> TestDelivery {
+        // Checked before `CredentialRefused`, because they are opposites the
+        // phone acts on differently: a missing tuple asks it to register, a
+        // refused credential asks it to enrol for a new bearer. An incomplete
+        // registration is the first, never the second.
+        if err.chain().any(|e| e.is::<NoRegistration>()) {
+            return TestDelivery::NoToken;
+        }
         if err.chain().any(|e| e.is::<CredentialRefused>()) {
             return TestDelivery::CredentialInvalid;
         }

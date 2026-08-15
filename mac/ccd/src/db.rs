@@ -327,10 +327,18 @@ impl Db {
         device_id: String,
         token: String,
         environment: String,
-        credential: Option<String>,
+        credential: Option<protocol::secret::Redacted>,
     ) -> Result<Vec<String>> {
         self.run(move |store| {
-            store.set_push_token(&device_id, &token, &environment, credential.as_deref())
+            // Exposed only here, at the store's SQL bind — the one boundary a
+            // bearer must cross to be persisted. It arrived wrapped and is
+            // wrapped again the instant it is read back.
+            store.set_push_token(
+                &device_id,
+                &token,
+                &environment,
+                credential.as_ref().map(protocol::secret::Redacted::expose),
+            )
         })
         .await
     }

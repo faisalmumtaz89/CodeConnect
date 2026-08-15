@@ -399,9 +399,23 @@ Three things behave differently on a Mac that has been running for a while.
   daemon did not launch — have `tmux_session` and `tmux_socket` cleared, because
   empty is the honest answer for a process this daemon cannot locate; a location
   a newer build recorded there does not survive the trip down. And
-  `user_version` is stamped with this build's number. Nothing here ever reads it
-  back, so an older daemon opens a newer database, never compares the two, and
-  leaves its own number behind.
+  `user_version` is stamped with this build's number.
+
+  **The push tuple is the one exception to "an added column survives a
+  rollback untouched," and deliberately so.** `(push_token, push_environment,
+  push_credential)` must move together — the relay checks the credential
+  against the token in one request — and a rollback breaks exactly that
+  coupling: an older build updates the token in place and leaves a credential
+  minted for the token before it, so the way back up would read a pair the
+  relay refuses on every push. So `user_version` *is* read at open now, once, to
+  tell an upgrade from a restart, and on the upgrade a one-shot pass clears any
+  credential whose token pairing cannot be proven current (the phone
+  re-registers the whole tuple) and clears the whole tuple off any row a prior
+  build revoked without clearing it. It is gated on the version transition
+  rather than run every boot precisely because it clears a credential that is
+  usually valid: repeating it every start would re-register relay push for ever.
+  The column still survives the trip down whole; what the upgrade repairs is the
+  *coherence* of the three values, not the presence of the column.
 
 ## The LaunchAgent
 

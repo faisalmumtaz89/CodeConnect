@@ -61,6 +61,7 @@ const READERS: usize = 4;
 use anyhow::{Context, Result};
 use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::pairing::DeviceSummary;
+use protocol::secret::Redacted;
 use protocol::ws::AnswerOutcome;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -75,7 +76,18 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     typed, so a daemon killed mid-injection can say "I do not know" instead
 ///     of typing again). Additive tables only — nothing existing is rewritten,
 ///     so a downgrade still reads the log.
-const SCHEMA_VERSION: i64 = 2;
+///   * `3` — the push tuple `(token, environment, credential)` is normalized
+///     once on the way up (see [`normalize_push_tuples`]). **A version gate, not
+///     an idempotent normalizer.** The GLOB fix below runs every start because
+///     the value it clears is always wrong; this one clears a *credential*,
+///     which usually is not — so running it every start would wipe every relay
+///     bearer on every restart and leave relay push permanently re-registering.
+///     It can therefore only fire on the transition, which is exactly what a
+///     version bump buys. The push_credential *column* was added under version 2
+///     without a bump (it is an additive `ALTER`, and the GLOB normalizer proves
+///     a column can arrive that way); what needs the bump is the one-shot data
+///     repair, not the column.
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -161,28 +173,26 @@ pub struct PushRegistration {
     pub device_id: String,
     pub token: String,
     pub environment: String,
-    pub credential: Option<String>,
+    /// The bearer as a [`Redacted`], so it survives no `Debug` on the way to a
+    /// sender — not this struct's, not a caller's, not an `anyhow` chain. The
+    /// store is the one place a raw bearer touches disk; everywhere else it
+    /// stays wrapped, and the type is what keeps it so rather than a hand-written
+    /// `Debug` a later field could break.
+    pub credential: Option<Redacted>,
 }
 
-/// **The credential never renders.** It is a bearer secret: anything that
-/// reaches a log or a panic message is a value someone can push with, and the
-/// derived `Debug` would put it in every `{targets:?}` in the daemon. Whether
-/// there *is* one still renders, because that is the difference between the
-/// relay path and the direct path and an operator reading a failure needs it.
-///
-/// The token is abbreviated rather than hidden. It addresses a phone but
-/// authorizes nothing on its own, and a stable few characters are what lets two
-/// log lines about the same registration be recognised as one.
+/// **The token is abbreviated.** The credential renders itself safely — it is a
+/// [`Redacted`] — but the token is a bare `String`, and a derived `Debug` would
+/// print it whole. It addresses a phone but authorizes nothing on its own, and a
+/// stable few characters are what lets two log lines about one registration be
+/// recognised as one.
 impl std::fmt::Debug for PushRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PushRegistration")
             .field("device_id", &self.device_id)
             .field("token", &abbreviated(&self.token))
             .field("environment", &self.environment)
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|_| "<redacted>"),
-            )
+            .field("credential", &self.credential)
             .finish()
     }
 }
@@ -400,6 +410,12 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         let mut conn = self.write();
+        // Read *before* anything below writes it: this is the version the
+        // database was last left at, and the only thing that can tell a
+        // one-shot repair from a restart. `0` on a database this build has never
+        // opened — a fresh file, or one from before `user_version` was used —
+        // and every one-shot gate below reads that as "everything is new here".
+        let from_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         // The rebuild has to happen before `create_schema`: `CREATE TABLE IF NOT
         // EXISTS` is a no-op against a legacy table, so it would leave the old
         // shape in place and every later statement would fail on a missing
@@ -428,9 +444,11 @@ impl Store {
                  and the next start tries the removal again"
             );
         }
-        // A normalizer, not a versioned migration — there is no version gate to
-        // hang one on (`user_version` below is write-only), and an idempotent
-        // UPDATE costs nothing to repeat. Adopted rows (`claude:*`, the prefix
+        // A normalizer that runs every start, not a version-gated repair: the
+        // value it clears is always wrong, so repeating it costs nothing and
+        // needs no gate — unlike [`normalize_push_tuples`] below, which clears a
+        // credential that usually is not wrong and therefore fires only on the
+        // transition. Adopted rows (`claude:*`, the prefix
         // cc-hook mints for sessions CodeConnect did not launch) were written
         // with a fabricated tmux location — a name in a server they never lived
         // in — and the liveness sweep read the inevitable "no such session" as
@@ -445,6 +463,12 @@ impl Store {
                 AND (tmux_session != '' OR tmux_socket != '')",
             [],
         )?;
+        // The one-shot push-tuple repair — see [`SCHEMA_VERSION`] on why it is
+        // gated where the GLOB fix above is not. Ordered after the column
+        // additions so the columns it names are present on a legacy database.
+        if from_version < 3 {
+            normalize_push_tuples(&conn)?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     }
@@ -1447,24 +1471,30 @@ impl Store {
         Ok(displaced)
     }
 
-    /// Record the environment Apple actually accepted, leaving the token alone.
-    /// **Only for the token that was actually corrected.** A late answer about a
-    /// token the phone has already replaced must not move the new token to the
-    /// wrong host, which would make every push to it fail.
-    /// The credential is not touched and not compared: a correction is about
-    /// where a token lives, and the credential that authorizes it is the same
-    /// credential either side of the answer. Rewriting it here would mean an
-    /// accepted push could invalidate the authorization that carried it.
+    /// Record the environment Apple actually accepted, leaving the token and the
+    /// credential alone.
+    /// **Only for the exact `(token, credential)` tuple that was corrected.** A
+    /// late answer about a tuple the phone has already rotated must not move the
+    /// current one to the wrong host, which would make every push to it fail.
+    /// The token can be rotated by a reinstall and the credential by a relay
+    /// reissue, and either happening between the attempt and its answer makes
+    /// this answer stale — so both are compared and neither is written.
+    /// `push_credential IS ?4` rather than `= ?4`: `IS` is SQLite's null-safe
+    /// equality, so a direct-mode row (credential `NULL`) is matched by a
+    /// correction that carries `None`, and a relay row only by the exact bearer
+    /// — with no separate branch for the two.
     pub fn set_push_environment(
         &self,
         device_id: &str,
         token: &str,
+        credential: Option<&str>,
         environment: &str,
     ) -> Result<()> {
         let conn = self.write();
         conn.execute(
-            "UPDATE devices SET push_environment = ?3 WHERE device_id = ?1 AND push_token = ?2",
-            params![device_id, token, environment],
+            "UPDATE devices SET push_environment = ?4
+              WHERE device_id = ?1 AND push_token = ?2 AND push_credential IS ?3",
+            params![device_id, token, credential, environment],
         )?;
         Ok(())
     }
@@ -1479,14 +1509,26 @@ impl Store {
     /// The relay credential goes with it, on the same terms as the strip in
     /// [`Store::set_push_token`]: it names a token Apple has disowned, and the
     /// phone mints a fresh one when it registers again.
-    /// Returns whether the refused token was the one registered — `false` means
-    /// the phone has since registered another and nothing was cleared.
-    pub fn clear_push_token(&self, device_id: &str, refused: &str) -> Result<bool> {
+    /// Returns whether the refused tuple was the one registered — `false` means
+    /// the phone has since rotated to another and nothing was cleared.
+    /// **The whole tuple is the key.** A `410` snapshotted under `(T, C1)` must
+    /// leave a row now reading `(T, C2)` untouched, exactly as it leaves one
+    /// reading `(T2, …)` untouched: a relay reissue rotates the credential
+    /// under a token Apple still knows, and a departure about the old bearer is
+    /// not a departure about the phone. `push_credential IS ?3` is the same
+    /// null-safe compare `set_push_environment` uses, so a direct-mode row is
+    /// matched by a clear carrying `None` and a relay row only by its bearer.
+    pub fn clear_push_token(
+        &self,
+        device_id: &str,
+        refused_token: &str,
+        refused_credential: Option<&str>,
+    ) -> Result<bool> {
         let conn = self.write();
         let cleared = conn.execute(
             "UPDATE devices SET push_token = NULL, push_environment = NULL, push_credential = NULL \
-             WHERE device_id = ?1 AND push_token = ?2",
-            params![device_id, refused],
+             WHERE device_id = ?1 AND push_token = ?2 AND push_credential IS ?3",
+            params![device_id, refused_token, refused_credential],
         )?;
         Ok(cleared > 0)
     }
@@ -1514,7 +1556,9 @@ impl Store {
                 device_id: row.get(0)?,
                 token: row.get(1)?,
                 environment: row.get(2)?,
-                credential: row.get(3)?,
+                // Wrapped the instant it leaves the database, so the raw bearer
+                // exists as a bare `String` only inside this closure.
+                credential: row.get::<_, Option<String>>(3)?.map(Redacted::from),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2294,6 +2338,61 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("devices", "push_environment", "TEXT"),
     ("devices", "push_credential", "TEXT"),
 ];
+
+/// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
+///
+/// **Two defects, one transition, and the same safe rule for both.** A tuple is
+/// three columns that must move together, and two histories can leave them out
+/// of step:
+///
+///   * A build that carried the credential column wrote `(T1, C1)`. A rollback
+///     to a build that predates it updated the token in place — it knows only
+///     `push_token` — and left `(T2, C1)`. On the way back up that reads as a
+///     live relay registration, but `C1` was minted for `T1` and the relay
+///     refuses it on every push. The credential cannot be proven current
+///     against its token from inside the database — it is opaque, and there is
+///     nothing here to check it against — so the only safe rule is to clear it
+///     wherever one is present and let the phone re-register the whole tuple.
+///     The token stays: it is Apple's and still valid, and a direct-mode row
+///     (no credential) was never at risk and is left alone.
+///   * A build that predates [`Store::revoke_device`]'s tuple-clear revoked a
+///     row and kept its token, environment and credential. The row never
+///     delivers — `push_targets` filters it — but the routing tuple lingers on
+///     a device the operator has withdrawn trust from, which is the opposite of
+///     what revocation means. The whole tuple goes.
+///
+/// **Fires once, by the version gate in [`Store::migrate`].** Clearing a live
+/// credential is the price of not being able to prove it stale; paying it on
+/// every restart would make relay push re-register for ever, so this is not the
+/// GLOB fix's always-on shape. At this point in the rollout no phone can obtain
+/// a credential yet — the attestation flow is a later phase — so the one-time
+/// clear costs nothing real and buys coherence against both rollback paths.
+fn normalize_push_tuples(conn: &Connection) -> Result<()> {
+    let mixed = conn.execute(
+        "UPDATE devices SET push_credential = NULL, push_environment = NULL
+          WHERE revoked_at IS NULL AND push_credential IS NOT NULL",
+        [],
+    )?;
+    if mixed > 0 {
+        crate::log_info!(
+            "schema: cleared {mixed} relay credential(s) whose token pairing could not be \
+             proven current; the phone re-registers the tuple on next contact"
+        );
+    }
+    let revoked = conn.execute(
+        "UPDATE devices SET push_token = NULL, push_environment = NULL, push_credential = NULL
+          WHERE revoked_at IS NOT NULL
+            AND (push_token IS NOT NULL OR push_credential IS NOT NULL)",
+        [],
+    )?;
+    if revoked > 0 {
+        crate::log_info!(
+            "schema: cleared the push tuple on {revoked} revoked device row(s) a prior build left \
+             addressable"
+        );
+    }
+    Ok(())
+}
 
 /// The entries of [`COLUMN_ADDITIONS`] this database is still missing.
 ///
@@ -4836,7 +4935,7 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 2, "the schema version other builds will read");
+        assert_eq!(version, 3, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());
@@ -4861,7 +4960,10 @@ mod tests {
                     target.device_id,
                     target.token,
                     target.environment,
-                    target.credential,
+                    // Exposed for the comparison the tests make; the wrapper is
+                    // the on-the-wire and in-memory guard, not a barrier to a
+                    // test reading its own fixture back.
+                    target.credential.map(|c| c.expose().to_string()),
                 )
             })
             .collect();
@@ -4954,7 +5056,7 @@ mod tests {
             .unwrap();
 
         store
-            .set_push_environment("dev-1", "tok-a", "production")
+            .set_push_environment("dev-1", "tok-a", None, "production")
             .unwrap();
         assert_eq!(
             registrations(&store),
@@ -4968,7 +5070,7 @@ mod tests {
         );
 
         store
-            .set_push_environment("dev-1", "tok-b", "production")
+            .set_push_environment("dev-1", "tok-b", None, "production")
             .unwrap();
         assert_eq!(
             store.push_targets().unwrap()[0].environment,
@@ -4998,7 +5100,7 @@ mod tests {
             .set_push_token("dev-1", "tok-b", "production", None)
             .unwrap();
         assert!(
-            !store.clear_push_token("dev-1", "tok-a").unwrap(),
+            !store.clear_push_token("dev-1", "tok-a", None).unwrap(),
             "and says it cleared nothing, so the caller can tell the device is still there"
         );
 
@@ -5017,7 +5119,7 @@ mod tests {
         // says so, which is what `forget` reports and the delivery path types
         // its refusal on.
         assert!(
-            store.clear_push_token("dev-1", "tok-b").unwrap(),
+            store.clear_push_token("dev-1", "tok-b", None).unwrap(),
             "clearing the registered token reports that it did"
         );
         assert!(
@@ -5050,7 +5152,7 @@ mod tests {
         assert_eq!(targets.len(), 1, "the owner survived: {targets:?}");
         assert_eq!(targets[0].device_id, "dev-live");
         assert_eq!(
-            targets[0].credential.as_deref(),
+            targets[0].credential.as_ref().map(|c| c.expose()),
             Some("cred-live"),
             "the rollback restored the whole tuple, not the token alone"
         );
@@ -5187,18 +5289,114 @@ mod tests {
             .set_push_token("dev-1", "tok-b", "production", Some("cred-b"))
             .unwrap();
 
-        assert!(!store.clear_push_token("dev-1", "tok-a").unwrap());
+        assert!(!store
+            .clear_push_token("dev-1", "tok-a", Some("cred-a"))
+            .unwrap());
         assert_eq!(
             stored_credential(&path, "dev-1"),
             Some("cred-b".to_string()),
             "a refusal about a replaced token must leave the live credential alone"
         );
 
-        assert!(store.clear_push_token("dev-1", "tok-b").unwrap());
+        assert!(store
+            .clear_push_token("dev-1", "tok-b", Some("cred-b"))
+            .unwrap());
         assert_eq!(
             stored_credential(&path, "dev-1"),
             None,
             "the credential for a token Apple has disowned does not outlive it"
+        );
+        assert!(store.push_targets().unwrap().is_empty());
+    }
+
+    /// **A late correction for a superseded *credential* is a no-op**, the
+    /// credential half of the tuple-CAS the token half already had.
+    ///
+    /// The race: an attempt snapshots `(T, C1)`; the relay reissues, so the row
+    /// now reads `(T, C2)` under the *same token*; then `C1`'s accepted answer
+    /// arrives carrying an environment correction. Scoped to the token alone it
+    /// would move `C2`'s environment to whatever `C1` was told — a live
+    /// registration corrupted by a stale answer about a bearer nobody holds.
+    ///
+    /// **The negative check:** drop `AND push_credential IS ?3` from
+    /// `set_push_environment` and this fails — the token still matches, so the
+    /// stale correction fires. That predicate is the whole fix.
+    #[test]
+    fn a_late_environment_correction_for_a_superseded_credential_is_a_no_op() {
+        let (store, _path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        // Same token, rotated credential — the relay reissued a bearer.
+        store
+            .set_push_token("dev-1", "tok-a", "sandbox", Some("cred-1"))
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-a", "sandbox", Some("cred-2"))
+            .unwrap();
+
+        // C1's late correction, for a bearer the row no longer holds.
+        store
+            .set_push_environment("dev-1", "tok-a", Some("cred-1"), "production")
+            .unwrap();
+        assert_eq!(
+            store.push_targets().unwrap()[0].environment,
+            "sandbox",
+            "a correction under the superseded credential must not move the live one"
+        );
+
+        // C2's correction, for the bearer the row does hold, still applies.
+        store
+            .set_push_environment("dev-1", "tok-a", Some("cred-2"), "production")
+            .unwrap();
+        assert_eq!(
+            store.push_targets().unwrap()[0].environment,
+            "production",
+            "a correction under the current credential is the one that lands"
+        );
+    }
+
+    /// **A late `410` for a superseded credential clears nothing**, the
+    /// credential half of the same tuple-CAS.
+    ///
+    /// A relay reissue rotates the bearer under a token Apple still knows. A
+    /// `410` snapshotted under `(T, C1)` is a departure about the old bearer,
+    /// not about the phone — and clearing by token alone would strip a live
+    /// `(T, C2)` and leave every push refused as if the phone were gone.
+    ///
+    /// **The negative check:** drop `AND push_credential IS ?3` from
+    /// `clear_push_token` and this fails — the token matches, so the stale
+    /// departure wipes the live tuple.
+    #[test]
+    fn a_late_410_for_a_superseded_credential_clears_nothing() {
+        let (store, path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-a", "production", Some("cred-1"))
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-a", "production", Some("cred-2"))
+            .unwrap();
+
+        assert!(
+            !store
+                .clear_push_token("dev-1", "tok-a", Some("cred-1"))
+                .unwrap(),
+            "a 410 about the superseded credential reports it cleared nothing"
+        );
+        assert_eq!(
+            stored_credential(&path, "dev-1"),
+            Some("cred-2".to_string()),
+            "the live tuple survives a departure about the bearer it replaced"
+        );
+
+        assert!(
+            store
+                .clear_push_token("dev-1", "tok-a", Some("cred-2"))
+                .unwrap(),
+            "a 410 about the current credential does clear it"
         );
         assert!(store.push_targets().unwrap().is_empty());
     }
@@ -5220,7 +5418,7 @@ mod tests {
             .unwrap();
 
         store
-            .set_push_environment("dev-1", "tok-a", "production")
+            .set_push_environment("dev-1", "tok-a", Some("cred-a"), "production")
             .unwrap();
         assert_eq!(
             registrations(&store),
@@ -5231,6 +5429,159 @@ mod tests {
                 Some("cred-a".to_string())
             )],
             "only the host moved"
+        );
+    }
+
+    /// Reopen a database that a build at `user_version` 2 last wrote, so the
+    /// one-shot normalizer in [`Store::migrate`] sees the upgrade it gates on.
+    /// The raw connection is how a legacy state is manufactured that no current
+    /// accessor could write — a mixed tuple, or a revoked row that kept its
+    /// token — exactly what a rollback or a pre-tuple build left behind.
+    fn reopen_from_v2(path: &Path, craft: impl FnOnce(&Connection)) -> Store {
+        let raw = Connection::open(path).unwrap();
+        craft(&raw);
+        raw.pragma_update(None, "user_version", 2i64).unwrap();
+        drop(raw);
+        Store::open(path).unwrap()
+    }
+
+    /// **A rollback-mixed tuple is repaired on the way back up.** (D2)
+    ///
+    /// A build carrying the credential column wrote `(T1, C1)`. A rollback to a
+    /// build that predates it updated the token in place — it knows only
+    /// `push_token` — leaving `(T2, C1)`, which reads as a live relay
+    /// registration the relay will refuse on every push because `C1` was minted
+    /// for `T1`. The credential is opaque and cannot be proven current from
+    /// inside the database, so the upgrade clears it and keeps the token, and
+    /// the phone re-registers the whole tuple.
+    ///
+    /// **The negative check:** remove the `from_version < 3` call to
+    /// `normalize_push_tuples` (or the SCHEMA bump that makes the gate fire) and
+    /// this fails — the mixed credential survives and reads as live.
+    #[test]
+    fn a_rollback_mixed_tuple_is_cleared_on_the_next_upgrade() {
+        let (store, path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-1", "production", Some("cred-1"))
+            .unwrap();
+        drop(store);
+
+        // The rollback's token-only update: a new token beside the old bearer.
+        let store = reopen_from_v2(&path, |raw| {
+            raw.execute(
+                "UPDATE devices SET push_token = 'tok-2' WHERE device_id = 'dev-1'",
+                [],
+            )
+            .unwrap();
+        });
+
+        assert_eq!(
+            stored_credential(&path, "dev-1"),
+            None,
+            "the credential that cannot be proven current is cleared"
+        );
+        assert_eq!(
+            stored_column(&path, "dev-1", "push_environment"),
+            None,
+            "and its environment with it, so the phone re-establishes the tuple"
+        );
+        assert_eq!(
+            stored_token(&path, "dev-1"),
+            Some("tok-2".to_string()),
+            "the token is Apple's and still valid; it stays"
+        );
+        // The row is still a target — it kept its token — but now credential-less,
+        // which the relay path answers as a missing tuple and the phone repairs
+        // by re-registering. That is the whole intent: coherent, not deleted.
+        let targets = store.push_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].token, "tok-2");
+        assert_eq!(
+            targets[0].credential.as_ref().map(|c| c.expose()),
+            None,
+            "no bearer the relay would refuse rides on the surviving token"
+        );
+    }
+
+    /// **A historically revoked row loses its lingering push tuple.** (D3)
+    ///
+    /// A build that predated [`Store::revoke_device`]'s tuple-clear revoked a
+    /// row and kept its token and credential. It never delivers — `push_targets`
+    /// filters it — but the routing tuple sits on a device the operator withdrew
+    /// trust from, which revocation is supposed to have ended. The upgrade
+    /// clears the whole tuple.
+    ///
+    /// **The negative check:** remove the revoked-row `UPDATE` from
+    /// `normalize_push_tuples` and this fails — the tuple lingers on the revoked
+    /// row.
+    #[test]
+    fn a_historically_revoked_row_loses_its_push_tuple_on_upgrade() {
+        let (store, path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        drop(store);
+
+        // A pre-tuple-clear revocation: revoked, but token/env/credential kept.
+        let _store = reopen_from_v2(&path, |raw| {
+            raw.execute(
+                "UPDATE devices
+                    SET revoked_at = '2026-08-02T00:00:00Z',
+                        push_token = 'tok-a',
+                        push_environment = 'production',
+                        push_credential = 'cred-a'
+                  WHERE device_id = 'dev-1'",
+                [],
+            )
+            .unwrap();
+        });
+
+        assert_eq!(stored_token(&path, "dev-1"), None, "the token goes");
+        assert_eq!(
+            stored_column(&path, "dev-1", "push_environment"),
+            None,
+            "the environment goes"
+        );
+        assert_eq!(
+            stored_credential(&path, "dev-1"),
+            None,
+            "and the bearer goes — nothing addressable outlives the revocation"
+        );
+    }
+
+    /// **The gate is what makes clearing a credential safe.** An ordinary
+    /// restart is not an upgrade, so a live credential must survive it — the
+    /// property that separates this one-shot repair from the always-on GLOB
+    /// normalizer, which clears a value that is always wrong.
+    ///
+    /// **The negative check:** drop the `from_version < 3` gate so the
+    /// normalizer runs every start, and this fails — the credential is wiped on
+    /// the reopen and relay push would re-register for ever.
+    #[test]
+    fn a_current_credential_survives_a_restart_that_is_not_an_upgrade() {
+        let (store, path) = temp_store();
+        store
+            .insert_device("dev-1", "iPhone", "hash-a", "2026-08-01T00:00:00Z")
+            .unwrap();
+        store
+            .set_push_token("dev-1", "tok-a", "production", Some("cred-a"))
+            .unwrap();
+        // `temp_store` already migrated to the current version, so this reopen
+        // is a plain restart: `from_version` equals `SCHEMA_VERSION`, the gate
+        // is closed, and the normalizer does not run.
+        drop(store);
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(
+            store.push_targets().unwrap()[0]
+                .credential
+                .as_ref()
+                .map(|c| c.expose()),
+            Some("cred-a"),
+            "a restart is not an upgrade; a live bearer is not touched"
         );
     }
 
@@ -5334,7 +5685,9 @@ mod tests {
         );
 
         // Apple disowns the token, and the answer goes with it.
-        assert!(store.clear_push_token("dev-1", "tok-a").unwrap());
+        assert!(store
+            .clear_push_token("dev-1", "tok-a", Some("cred-a"))
+            .unwrap());
         assert_eq!(store.push_environment_for("dev-1").unwrap(), None);
 
         // The empty token, which only a hand-written row or an older build
@@ -5369,7 +5722,7 @@ mod tests {
             device_id: "dev-1".to_string(),
             token: TOKEN.to_string(),
             environment: "production".to_string(),
-            credential: Some(CREDENTIAL.to_string()),
+            credential: Some(Redacted::from(CREDENTIAL)),
         };
 
         let rendered = format!("{relay:?}");

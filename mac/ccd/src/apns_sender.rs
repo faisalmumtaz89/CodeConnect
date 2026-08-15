@@ -266,6 +266,7 @@ impl ApnsPushSender {
             let was_current = registry.forget(
                 &target.device_id,
                 &target.token,
+                target.credential.as_ref(),
                 &format!("{status}: {reason}"),
             );
             return Err(terminal_refusal(status.as_u16(), &reason, was_current));
@@ -303,7 +304,12 @@ impl ApnsPushSender {
                 true,
             ))
             .await?;
-            registry.correct_environment(&target.device_id, &target.token, other);
+            registry.correct_environment(
+                &target.device_id,
+                &target.token,
+                target.credential.as_ref(),
+                other,
+            );
             return Ok(apns_id);
         }
         bail!("APNs refused the push: {status} {reason}")
@@ -415,8 +421,18 @@ impl PushRegistry for StoreRegistry {
         }
     }
 
-    fn forget(&self, device_id: &str, refused: &str, reason: &str) -> bool {
-        match self.store.clear_push_token(device_id, refused) {
+    fn forget(
+        &self,
+        device_id: &str,
+        refused_token: &str,
+        refused_credential: Option<&protocol::secret::Redacted>,
+        reason: &str,
+    ) -> bool {
+        match self.store.clear_push_token(
+            device_id,
+            refused_token,
+            refused_credential.map(protocol::secret::Redacted::expose),
+        ) {
             Ok(true) => {
                 crate::log_info!("push: cleared the token for {device_id} — Apple said {reason}");
                 true
@@ -437,15 +453,23 @@ impl PushRegistry for StoreRegistry {
         }
     }
 
-    fn correct_environment(&self, device_id: &str, token: &str, environment: ApnsEnvironment) {
+    fn correct_environment(
+        &self,
+        device_id: &str,
+        token: &str,
+        credential: Option<&protocol::secret::Redacted>,
+        environment: ApnsEnvironment,
+    ) {
         crate::log_info!(
             "push: {device_id} is actually a {} build; remembering that",
             environment.as_str()
         );
-        if let Err(err) = self
-            .store
-            .set_push_environment(device_id, token, environment.as_str())
-        {
+        if let Err(err) = self.store.set_push_environment(
+            device_id,
+            token,
+            credential.map(protocol::secret::Redacted::expose),
+            environment.as_str(),
+        ) {
             crate::log_error!("push: could not record the environment for {device_id}: {err:#}");
         }
     }

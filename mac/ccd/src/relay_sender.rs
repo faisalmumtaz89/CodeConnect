@@ -24,12 +24,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use protocol::secret::Redacted;
 use push_core::{terminal_refusal, ApnsEnvironment, COLLAPSE_ID, TEST_COLLAPSE_ID};
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 
 use crate::apns::{
-    CredentialRefused, PushHint, PushMode, PushSender, SendRateLimited, TestDelivery,
+    CredentialRefused, NoRegistration, PushHint, PushMode, PushSender, SendRateLimited,
+    TestDelivery,
 };
 use crate::push_queue::{
     keep_running, queue_for, recipients, retire, serve_with, Delivery, DeviceQueue, PushRegistry,
@@ -92,9 +94,12 @@ pub(crate) struct RelayReply {
 /// instantly and exactly, which no test against the real service could do.
 /// There is one production implementation and it reaches exactly one host.
 pub(crate) trait RelayTransport: Send + Sync {
+    /// The bearer arrives [`Redacted`] and stays that way until the header is
+    /// built, so no implementation — production or fake — can print it by
+    /// accident on the way in.
     fn post(
         &self,
-        credential: String,
+        credential: Redacted,
         body: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RelayReply>> + Send>>;
 }
@@ -132,7 +137,7 @@ impl HttpsRelay {
 impl RelayTransport for HttpsRelay {
     fn post(
         &self,
-        credential: String,
+        credential: Redacted,
         body: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RelayReply>> + Send>> {
         let (host, port, tls) = (self.host.clone(), self.port, self.tls.clone());
@@ -147,11 +152,18 @@ impl RelayTransport for HttpsRelay {
 /// the path, and a document is what the relay stores and this daemon composes;
 /// the header is the one place a secret belongs. Separated from [`post`] so that
 /// claim is asserted by a test rather than by this comment.
-fn relay_request(host: &str, credential: &str) -> Result<http::Request<()>> {
+///
+/// **This is the one line that exposes the bearer.** It arrives [`Redacted`] and
+/// is unwrapped here, at the header build and nowhere earlier — the single byte
+/// the plan permits it in the clear.
+fn relay_request(host: &str, credential: &Redacted) -> Result<http::Request<()>> {
     http::Request::builder()
         .method(http::Method::POST)
         .uri(format!("https://{host}{RELAY_PATH}"))
-        .header(http::header::AUTHORIZATION, format!("Bearer {credential}"))
+        .header(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", credential.expose()),
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(())
         .context("building the relay request")
@@ -162,7 +174,7 @@ async fn post(
     host: String,
     port: u16,
     tls: TlsConnector,
-    credential: String,
+    credential: Redacted,
     body: String,
 ) -> Result<RelayReply> {
     let stream = tokio::time::timeout(
@@ -428,14 +440,17 @@ impl RelayPushSender {
     ) -> Result<Option<String>> {
         let Some(credential) = target.credential.clone() else {
             // Registered without a bearer — a phone that paired to this Mac
-            // while it was in direct mode, or one that never enrolled. The
-            // token is fine and the repair is a credential, so this is refused
-            // as a credential problem rather than as a missing registration.
-            return Err(anyhow::Error::new(CredentialRefused)
+            // while it was in direct mode, or one that never enrolled. **This
+            // is a missing tuple, not a refusal**: nothing was sent and nothing
+            // was refused, so the plan's table calls for `NoRegisteredToken`,
+            // which asks the phone to register — not `credential_invalid`,
+            // which would name a relay conversation that never happened and
+            // send it enrolling for a replacement bearer instead.
+            return Err(anyhow::Error::new(NoRegistration)
                 .context("this device registered no relay credential"));
         };
 
-        let reply = transport.post(credential, document).await?;
+        let reply = transport.post(credential.clone(), document).await?;
         match read(&reply) {
             RelayOutcome::Accepted {
                 apns_id,
@@ -456,7 +471,15 @@ impl RelayPushSender {
                             target.device_id,
                             target.environment.as_str()
                         );
-                        registry.correct_environment(&target.device_id, &target.token, environment);
+                        // Scoped to the tuple this attempt carried, so a
+                        // correction snapshotted under `(T, C1)` cannot move the
+                        // environment of a row the phone has since rotated.
+                        registry.correct_environment(
+                            &target.device_id,
+                            &target.token,
+                            Some(&credential),
+                            environment,
+                        );
                     }
                 }
                 Ok(apns_id)
@@ -468,6 +491,7 @@ impl RelayPushSender {
                 let was_current = registry.forget(
                     &target.device_id,
                     &target.token,
+                    Some(&credential),
                     "410: the relay reports this device unregistered",
                 );
                 Err(terminal_refusal(
@@ -634,7 +658,7 @@ mod tests {
             token: TOKEN.into(),
             environment: ApnsEnvironment::Sandbox,
             device_id: "phone".into(),
-            credential: Some("bearer-value".into()),
+            credential: Some(Redacted::from("bearer-value")),
         }
     }
 
@@ -838,11 +862,17 @@ mod tests {
     impl RelayTransport for FakeRelay {
         fn post(
             &self,
-            credential: String,
+            credential: Redacted,
             body: String,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RelayReply>> + Send>>
         {
-            self.asked.lock().unwrap().push((credential, body));
+            // The fake exposes it to record it, which is exactly what lets a
+            // test assert the bearer reached the transport and stayed out of the
+            // body.
+            self.asked
+                .lock()
+                .unwrap()
+                .push((credential.expose().to_string(), body));
             let reply = self.replies.lock().unwrap().pop_front();
             let gate = self.gate.clone();
             Box::pin(async move {
@@ -856,10 +886,15 @@ mod tests {
 
     /// A registry over one or more devices, recording what the delivery path
     /// told it.
+    /// One recorded `correct_environment`: `(device, token, credential, env)`.
+    type Correction = (String, String, Option<String>, ApnsEnvironment);
+
     struct FakeRegistry {
         targets: Vec<PushTarget>,
+        /// Each `forget`, as `device:token:credential`, so a test can prove the
+        /// whole tuple reached the store rather than the token alone.
         forgotten: std::sync::Mutex<Vec<String>>,
-        corrected: std::sync::Mutex<Vec<(String, String, ApnsEnvironment)>>,
+        corrected: std::sync::Mutex<Vec<Correction>>,
         /// What `forget` answers — `false` is "the phone has re-registered".
         was_current: bool,
     }
@@ -887,17 +922,33 @@ mod tests {
         fn targets(&self) -> Vec<PushTarget> {
             self.targets.clone()
         }
-        fn forget(&self, device_id: &str, refused: &str, _reason: &str) -> bool {
+        fn forget(
+            &self,
+            device_id: &str,
+            refused_token: &str,
+            refused_credential: Option<&Redacted>,
+            _reason: &str,
+        ) -> bool {
+            let credential = refused_credential
+                .map(|c| c.expose().to_string())
+                .unwrap_or_else(|| "<none>".into());
             self.forgotten
                 .lock()
                 .unwrap()
-                .push(format!("{device_id}:{refused}"));
+                .push(format!("{device_id}:{refused_token}:{credential}"));
             self.was_current
         }
-        fn correct_environment(&self, device_id: &str, token: &str, environment: ApnsEnvironment) {
+        fn correct_environment(
+            &self,
+            device_id: &str,
+            token: &str,
+            credential: Option<&Redacted>,
+            environment: ApnsEnvironment,
+        ) {
             self.corrected.lock().unwrap().push((
                 device_id.to_string(),
                 token.to_string(),
+                credential.map(|c| c.expose().to_string()),
                 environment,
             ));
         }
@@ -931,9 +982,10 @@ mod tests {
             vec![(
                 "phone".to_string(),
                 TOKEN.to_string(),
+                Some("bearer-value".to_string()),
                 ApnsEnvironment::Production
             )],
-            "the correction names the token it is about, so a CAS can refuse a stale one"
+            "the correction names the whole tuple, so a CAS can refuse a stale one"
         );
         assert!(registry.forgotten.lock().unwrap().is_empty());
     }
@@ -987,8 +1039,8 @@ mod tests {
             .expect_err("a departed device is a failed attempt");
         assert_eq!(
             *registry.forgotten.lock().unwrap(),
-            vec![format!("phone:{TOKEN}")],
-            "the clear names the token Apple refused, never merely the device"
+            vec![format!("phone:{TOKEN}:bearer-value")],
+            "the clear names the whole tuple, never merely the device or the token"
         );
         assert!(
             err.chain().any(|e| e.is::<push_core::DeviceGone>()),
@@ -1033,11 +1085,16 @@ mod tests {
         );
     }
 
-    /// **A row with no bearer never reaches the network.** It is a phone that
-    /// paired while this Mac was in direct mode, or one that never enrolled;
-    /// the token is fine and the repair is a credential.
+    /// **A row with no bearer never reaches the network, and is a *missing
+    /// tuple* — not a refusal.** It is a phone that paired while this Mac was in
+    /// direct mode, or one that never enrolled: nothing was sent and nothing was
+    /// refused, so the plan's table (`docs/push-gateway.md`) calls for
+    /// `NoRegisteredToken`, which asks the phone to register. Reporting
+    /// `credential_invalid` would name a relay refusal that never happened and
+    /// send the phone enrolling for a replacement bearer instead of registering
+    /// the one it is missing.
     #[tokio::test]
-    async fn a_device_with_no_credential_is_refused_without_asking_the_relay() {
+    async fn a_device_with_no_credential_is_a_missing_tuple_not_a_relay_refusal() {
         let mut bare = target();
         bare.credential = None;
         let registry = FakeRegistry::over(bare);
@@ -1047,11 +1104,14 @@ mod tests {
             .expect_err("there is nothing to authorise the send");
         assert_eq!(
             TestDelivery::from_error(&err),
-            TestDelivery::CredentialInvalid
+            TestDelivery::NoToken,
+            "an incomplete registration reports a missing tuple, never a refusal the \
+             relay never made"
         );
         assert!(
             relay.asked.lock().unwrap().is_empty(),
-            "no request may be composed without a bearer to carry it"
+            "no request may be composed without a bearer to carry it — the relay is \
+             never contacted, so it cannot have refused anything"
         );
         assert!(registry.forgotten.lock().unwrap().is_empty());
     }
@@ -1196,7 +1256,7 @@ mod tests {
                 token: TOKEN.into(),
                 environment: ApnsEnvironment::Sandbox,
                 device_id: (*device).into(),
-                credential: Some(format!("bearer-{device}")),
+                credential: Some(Redacted::from(format!("bearer-{device}"))),
             })
             .collect();
         let relay = FakeRelay::answering(vec![
@@ -1307,7 +1367,8 @@ mod tests {
     /// path goes through a fake that is given the two values already separated.
     #[test]
     fn the_production_request_puts_the_bearer_in_the_header_and_nowhere_else() {
-        let request = relay_request(RELAY_HOST, "a-relay-bearer").expect("a request");
+        let bearer = Redacted::from("a-relay-bearer");
+        let request = relay_request(RELAY_HOST, &bearer).expect("a request");
         assert_eq!(request.method(), http::Method::POST);
         assert_eq!(
             request.uri().to_string(),
@@ -1342,7 +1403,7 @@ mod tests {
     fn a_header_forging_credential_is_refused_by_the_builder_as_well() {
         for hostile in ["line\r\nAuthorization: Bearer other", "with\nnewline"] {
             assert!(
-                relay_request(RELAY_HOST, hostile).is_err(),
+                relay_request(RELAY_HOST, &Redacted::from(hostile)).is_err(),
                 "the builder accepted {hostile:?}"
             );
         }
