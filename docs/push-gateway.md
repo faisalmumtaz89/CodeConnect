@@ -159,7 +159,7 @@ Retention policy:
 - Rotating IP rate buckets: at most 24 hours.
 - Encrypted backups: 30 days; deletion may therefore take up to 30 additional days to disappear from backups.
 
-### Decision 3: Same-repo Rust relay on one small VPS
+### Decision 3: Same-repo Rust relay on Render.com
 
 Create two crates in the existing Rust workspace:
 
@@ -184,17 +184,18 @@ Start with one long-lived connection pool per APNs environment, bounded concurre
 
 Provision separate sandbox and production topic-specific keys for the CodeConnect app topic. Apple’s current key model supports environment-specific topic keys and a related key for rotation, reducing blast radius compared with a team-wide production key. [Apple: token-based APNs connections](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
 
-Deploy one service instance on a small dual-stack VM with:
+Deploy one service instance as a **Render.com web service** (an always-on paid instance — free instances sleep, which is disqualifying for a push path):
 
-- SQLite WAL on encrypted persistent storage.
-- A supervisor and automatic restart.
-- Automatic TLS certificate renewal.
-- Encrypted daily snapshots.
-- External health monitoring.
+- Built from this repository via Render's native Rust or Docker build, deploys pinned to a git SHA, rollback to a pinned known-good SHA through the Render API or dashboard.
+- SQLite WAL on a Render persistent disk. A disk binds the service to single-instance semantics and takes deploys through a brief restart instead of zero-downtime handover — both acceptable and already assumed by the single-instance design.
+- TLS issuance/renewal, DNS for the `onrender.com` hostname, OS patching, process supervision, and automatic restart are managed by the platform.
+- Daily disk snapshots are provided by the platform; the restore procedure in the runbook governs their use.
+- The APNs `.p8` keys and every other secret live in Render environment variables/secret files, never in the repository.
+- External health monitoring against the service's health endpoint, plus Render's own health checks.
 - Redacted structured metrics.
-- Separate logical sandbox and production endpoints, keys, and data namespaces. They may share the initial VM.
+- Separate logical sandbox and production endpoints, keys, and data namespaces. They may share the initial instance.
 
-A 1 GB public-IPv4 Lightsail-class VM is currently about $7/month; compute plus backups and monitoring should remain approximately **$10–20/month**. [AWS Lightsail pricing](https://aws.amazon.com/lightsail/pricing/).
+A Render starter instance is currently about $7/month and a 1 GB persistent disk about $0.25/month; compute plus monitoring should remain approximately **$8–15/month**. [Render pricing](https://render.com/pricing).
 
 Cloudflare Workers is technically plausible using `fetch` and WebCrypto, and its paid plan currently starts at $5 with 10 million requests included. However, its Node `http2` module is explicitly a non-functional stub, outbound connection lifecycle is abstracted, and adopting it would rewrite the existing Rust signing/request logic. [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/), [Workers Node compatibility](https://developers.cloudflare.com/workers/runtime-apis/nodejs/). Cold start is not the deciding issue under a 45-second envelope; controlled APNs connection reuse and code reuse are.
 
@@ -742,10 +743,11 @@ Sandbox and production rotate independently.
 
 ### TLS, host, and release maintenance
 
-- Monitor certificate expiry, DNS, disk, memory, SQLite checkpoint health, backup completion, and deployed git SHA.
-- Patch the OS and relay dependencies on a defined monthly cadence, accelerating for security releases.
-- Deploy relay revisions independently from Mac/App Store releases.
+- TLS, DNS, OS patching, and process supervision are Render-managed; what remains to monitor is disk, memory, SQLite checkpoint health, snapshot recency, and the deployed git SHA.
+- Patch relay dependencies on a defined monthly cadence, accelerating for security releases.
+- Deploy relay revisions independently from Mac/App Store releases, via the Render API or dashboard.
 - Roll back to a pinned known-good SHA; never roll back the database without following the restore procedure.
+- The Render account API key is a deployment credential: it lives outside the repository, is rotated after initial setup and after any suspected exposure, and is never required by the running relay.
 
 ## 8. Cost and scale estimate
 
@@ -760,9 +762,9 @@ Bursts matter more than averages, but this remains comfortably within one small 
 
 Expected launch cost:
 
-- VM: approximately $7/month.
-- Backup storage, external monitoring, and DNS: approximately $3–13/month.
-- Total: approximately **$10–20/month**.
+- Render starter instance: approximately $7/month; persistent disk: approximately $0.25/month.
+- External monitoring: $0–8/month.
+- Total: approximately **$8–15/month**.
 
 Scale out only after measurements show sustained connection saturation, SQLite contention, unacceptable latency, or an availability requirement that justifies a second instance. None of those should be designed pre-emptively for 1–10k users.
 
