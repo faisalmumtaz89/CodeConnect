@@ -15,14 +15,72 @@
 //! `std::io::Result` rather than `anyhow`: `protocol` is the crate every other
 //! one depends on, and an error type is not worth a dependency when the only
 //! failure is a read.
+//!
+//! It is also where a secret that arrives *from* the wire is given a type that
+//! will not print it — see [`Redacted`].
 
 use std::io::Read;
+
+use serde::{Deserialize, Serialize};
 
 /// Fill `N` bytes from the kernel CSPRNG.
 pub fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
     let mut bytes = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes)
+}
+
+/// What a value renders as when it is a secret. Fixed text rather than an
+/// elision of the real one: a prefix is a head start, and a length is a fact
+/// about the value.
+const REDACTED: &str = "<redacted>";
+
+/// A string from the wire that must not print itself.
+///
+/// **The hazard is the derive, not the log line.** Every message this crate
+/// defines derives `Debug`, and a bearer credential sitting in one as a bare
+/// `String` reaches a log the first time anybody writes `{message:?}` — in a
+/// parse-error branch, a panic message, or an `anyhow` context three layers
+/// away that nobody was thinking about secrets while writing. A type that
+/// cannot render itself removes the possibility rather than relying on every
+/// future author noticing.
+///
+/// `serde(transparent)`, so it is exactly the string it was on the wire and no
+/// peer can tell it apart from one.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// The value itself, at a call site that has had to name what it is asking
+    /// for.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Redacted {
+    fn from(value: String) -> Self {
+        Redacted(value)
+    }
+}
+
+impl From<&str> for Redacted {
+    fn from(value: &str) -> Self {
+        Redacted(value.to_string())
+    }
+}
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REDACTED)
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REDACTED)
+    }
 }
 
 #[cfg(test)]
@@ -43,5 +101,35 @@ mod tests {
     #[test]
     fn a_zero_length_draw_is_legal_and_empty() {
         assert_eq!(random_bytes::<0>().unwrap(), [0u8; 0]);
+    }
+
+    /// **The whole point of the type.** A `Debug` that leaked even a prefix
+    /// would leak it into every message dump and every error chain that ever
+    /// contained one.
+    #[test]
+    fn a_redacted_value_never_prints_itself_or_any_part_of_it() {
+        let secret = Redacted::from("s3cret-bearer-value-with-entropy");
+        for rendered in [
+            format!("{secret:?}"),
+            format!("{secret}"),
+            format!("{:?}", Some(secret.clone())),
+            format!("{:?}", vec![secret.clone()]),
+        ] {
+            assert!(!rendered.contains("s3cret"), "{rendered}");
+            assert!(rendered.contains(REDACTED), "{rendered}");
+        }
+        assert_eq!(secret.expose(), "s3cret-bearer-value-with-entropy");
+    }
+
+    /// Transparent on the wire: a peer cannot tell it from the string it was,
+    /// which is what lets the type be introduced without a protocol change.
+    #[test]
+    fn the_wrapper_is_invisible_on_the_wire() {
+        let secret = Redacted::from("opaque");
+        assert_eq!(serde_json::to_string(&secret).unwrap(), "\"opaque\"");
+        assert_eq!(
+            serde_json::from_str::<Redacted>("\"opaque\"").unwrap(),
+            secret
+        );
     }
 }

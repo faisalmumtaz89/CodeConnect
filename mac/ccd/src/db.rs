@@ -122,6 +122,8 @@ db_ops! {
     fn find_device(needle: String) -> DeviceLookup;
     fn device_by_token_hash(token_hash: String) -> Option<DeviceRow>;
     fn device_is_active(device_id: String) -> bool;
+    /// Where this device's token is registered, or `None` when it has none.
+    fn push_environment_for(device_id: String) -> Option<String>;
     fn recover_text_mutations(at: String) -> usize;
     fn orphan_event_count() -> u64;
 }
@@ -315,14 +317,22 @@ impl Db {
     }
 
     /// Returns the device rows the token was taken from — see the store.
+    ///
+    /// The credential is owned rather than borrowed, like every other argument
+    /// here, and travels with the token in one call: there is no wrapper that
+    /// registers a token now and a credential afterwards, because a window
+    /// between the two is a window in which the row names one and not the other.
     pub async fn set_push_token(
         &self,
         device_id: String,
         token: String,
         environment: String,
+        credential: Option<String>,
     ) -> Result<Vec<String>> {
-        self.run(move |store| store.set_push_token(&device_id, &token, &environment))
-            .await
+        self.run(move |store| {
+            store.set_push_token(&device_id, &token, &environment, credential.as_deref())
+        })
+        .await
     }
 
     pub async fn touch_device(&self, device_id: String, at: String) -> Result<()> {

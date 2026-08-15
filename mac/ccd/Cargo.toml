@@ -23,6 +23,9 @@ futures-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 h2 = { workspace = true }
+# The relay request is an ordinary POST, so unlike the APNs path — whose whole
+# header set is built inside `push-core` — this one names `http`'s own types.
+http = { workspace = true }
 ring = { workspace = true }
 rustls-native-certs = { workspace = true }
 notify = { workspace = true }

@@ -12,11 +12,13 @@
 //! opinion about any of them — so a caller brings its own HTTP/2 client and its
 //! own payload.
 
+mod device;
 mod outcome;
 mod refusal;
 mod request;
 mod token;
 
+pub use device::{normalize_device_token, MAX_TOKEN_HEX, MIN_TOKEN_HEX};
 pub use outcome::{classify, parse_reason, ApnsOutcome};
 pub use refusal::{is_terminal, refusal, terminal_refusal, DeviceGone};
 pub use request::{request, ApnsEnvironment, COLLAPSE_ID, TEST_COLLAPSE_ID};

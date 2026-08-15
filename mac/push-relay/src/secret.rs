@@ -11,7 +11,7 @@
 //! every future call site has to remember at the moment it is writing a log
 //! line about a failure, which is the moment nobody is careful.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use base64::Engine;
 use ring::digest;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -19,20 +19,6 @@ use ring::rand::{SecureRandom, SystemRandom};
 /// What every redaction prints, everywhere, so a log line reads the same
 /// whether the value was present or not — an empty field would say which.
 const REDACTED: &str = "<redacted>";
-
-/// A device token shorter than this is not a token. Sixteen bytes is well under
-/// anything Apple has issued and is here only to refuse the empty-ish input a
-/// caller sends when it means "none".
-const MIN_TOKEN_HEX: usize = 32;
-
-/// And an upper bound that is deliberately **not** Apple's current 32 bytes.
-///
-/// Apple has changed device-token length before and documents no maximum, so a
-/// relay that hard-coded 64 hex characters would start refusing every phone on
-/// the day it changed — a total outage, arriving without a deploy. 256 hex
-/// characters is four times anything issued and still small enough that the
-/// request-body limit is the real bound.
-const MAX_TOKEN_HEX: usize = 256;
 
 /// The domain each digest is taken in.
 ///
@@ -135,36 +121,21 @@ pub fn bearer_hash(bearer: &Secret) -> String {
     domain_hash(BEARER_DOMAIN, bearer.0.as_bytes())
 }
 
-/// Lowercase hex, even length, bounded — or a refusal that says which rule
-/// failed.
+/// What a token is, from the crate this service and the daemon both depend on.
 ///
-/// Normalising rather than merely checking matters because the token is the
-/// rate-limit key and the binding key: the same phone sending uppercase from
-/// one Mac and lowercase from another would otherwise be two bindings with two
-/// budgets, and the second one would not be revoked when the first was.
-pub fn normalize_device_token(raw: &str) -> Result<String> {
-    if raw.is_empty() {
-        bail!("the device token is empty");
-    }
-    if raw.len() < MIN_TOKEN_HEX || raw.len() > MAX_TOKEN_HEX {
-        bail!(
-            "the device token is {} characters; a token is between {MIN_TOKEN_HEX} and \
-             {MAX_TOKEN_HEX} hex characters",
-            raw.len()
-        );
-    }
-    if raw.len() % 2 != 0 {
-        bail!("the device token has an odd number of characters, so it is not whole bytes");
-    }
-    if !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("the device token contains a character that is not a hex digit");
-    }
-    Ok(raw.to_ascii_lowercase())
-}
+/// **Not restated here.** This value keys a binding and a rate-limit budget, and
+/// the daemon decides on the same rule whether to store one at all. Two copies
+/// that drifted would produce a token a daemon files happily and this service
+/// refuses on every push for ever, with each side's tests green.
+pub use push_core::normalize_device_token;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The bound the rule itself declares, so the test below measures against
+    // one number rather than a second copy that happens to agree today.
+    use push_core::MAX_TOKEN_HEX;
 
     /// **The whole point of the type.** A `Debug` that leaked even a prefix
     /// would leak it into every `anyhow` chain and every struct dump that ever

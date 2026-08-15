@@ -191,6 +191,7 @@ dependencies = [
  "base64",
  "futures-util",
  "h2",
+ "http",
  "notify",
  "protocol",
  "push-core",

@@ -174,13 +174,36 @@ pub struct Config {
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
 
+    /// Whether this daemon may ring a phone at all.
+    ///
+    /// **The only off switch, and the only push setting with a default of
+    /// `true`.** Off, the sender is the logging stub, no capability is
+    /// advertised, and a registration is refused — the phone is told push is
+    /// unconfigured rather than left believing a notification is coming. On is
+    /// not a promise of delivery: which transport carries it is decided by the
+    /// `apns_*` fields below and nothing else.
+    ///
+    /// There is deliberately no `push_mode` and no relay URL. A mode setting
+    /// would be a second, disagreeing source of truth beside the key fields; a
+    /// URL setting would let a config file point every notification this Mac
+    /// sends at a stranger's server.
+    #[serde(default = "default_true")]
+    pub push_enabled: bool,
+
     /// Where the Apple `.p8` push key lives, and who it belongs to.
     ///
-    /// All four are absent by default and push stays a logging stub until every
-    /// one is present: a half-configured sender would advertise `push: live` in
-    /// `hello_ack` and then fail on every send, which is worse than saying
-    /// plainly that push is off. None can be guessed — the key id and team id
-    /// come from the developer account and the topic is the app's bundle id.
+    /// **Presence of any one of these is a request for direct delivery**, and
+    /// all four are then required: a half-configured sender would advertise
+    /// `push: live` in `hello_ack` and then fail on every send, which is worse
+    /// than saying plainly that push is off. None can be guessed — the key id
+    /// and team id come from the developer account and the topic is the app's
+    /// bundle id. A partial or unreadable set leaves push off with an error and
+    /// never falls back to the relay: a Mac that asked to talk to Apple itself
+    /// must not start routing its notifications through a third party because a
+    /// path was misspelled.
+    ///
+    /// All four absent is the ordinary case, and it selects the relay — the
+    /// key cannot be shipped to a customer's Mac.
     ///
     /// The key is a **private key**. Keep it outside the repository;
     /// `~/.codeconnect/secrets/` is created `0700` for exactly this.
@@ -463,6 +486,7 @@ impl Default for Config {
             ws_loopback: true,
             gate_hook: default_gate_hook(),
             hold_ms: 0,
+            push_enabled: true,
             apns_key_path: None,
             apns_key_id: None,
             apns_team_id: None,

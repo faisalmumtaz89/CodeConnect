@@ -182,6 +182,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     false for the static bootstrap token.
 ///     Additive: an older daemon omits the capability and the phone offers no
 ///     Terminal; an older client ignores the messages.
+///
+///     *Shipped under 13 without adding to the wire.* The composer is now
+///     recognised by the box Claude draws it in rather than by footer copy that
+///     yields to other hints, and a pane where tmux holds the keyboard refuses
+///     a send instead of reporting one that never arrived. No message, field or
+///     capability changed — but [`ws::SendTextResult::Sent`]`.matched` gained a
+///     value it can carry, the literal `composer`, for a send no needle
+///     authorised. It is a reason, not an enumerable set; a client renders it
+///     and must not match on it.
 ///   * `12` — a send carries **when its asker stops listening**.
 ///     `SupervisorRequest::SendText.respond_by_monotonic_ms` stamps the
 ///     daemon's own answer deadline, on the host's monotonic clock, into the
@@ -229,7 +238,38 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     serialise every hook behind a database write to close that instant — a
 ///     doorbell is best-effort by construction, the app reconciles from the
 ///     event log, and the cost of the alternative is paid by every hook.
-pub const PROTOCOL_MINOR: u32 = 13;
+///   * `14` — a daemon with **no Apple key of its own** can ring a phone. The
+///     key cannot be shipped to a customer's Mac, so a CodeConnect-operated
+///     relay holds it: the daemon hands over a closed event document — which of
+///     four kinds rang, how many runs are blocked, the device's token and an
+///     opaque credential — and the relay composes a generic alert and talks to
+///     Apple. Every decision about *whether* to ring stays on the Mac. Four
+///     additions, and a client written against minor 13 needs none of them:
+///       - [`ws::Capabilities::push_relay`] — this daemon sends through the
+///         relay. **One-hot with the legacy `push`,** which from here means
+///         *direct key* and nothing else: a relay daemon advertises
+///         `push = false` on purpose, because a client that predates this minor
+///         would otherwise ask for notification permission and register a token
+///         with no credential attached, and every send would be refused. A
+///         client on this minor resolves the two flags with `push` taking
+///         precedence.
+///       - [`ws::ClientMessage::RegisterPush`]`.relay_credential` — the opaque
+///         bearer the phone obtained from the relay, absent for a direct
+///         registration. The daemon stores it beside the token and presents it
+///         on every send; it never mints one, and never sees the attestation
+///         that authorised it.
+///       - [`ws::TestPushResult::CredentialInvalid`] — the relay refused the
+///         credential. Distinct from `no_registered_token`, and the distinction
+///         is the whole point: the APNs token is still good, so a client that
+///         read this as a dead token would throw away a working registration
+///         instead of renewing a bearer.
+///       - `hello_ack.push_environment` — the daemon's authoritative APNs
+///         environment for this device's registered token, absent when no token
+///         is registered. The relay's binding is the single authority for a
+///         token's environment and corrects the daemon on an accepted send;
+///         this is how that correction reaches the phone, which persists it
+///         rather than resending the value it first cached.
+pub const PROTOCOL_MINOR: u32 = 14;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";
