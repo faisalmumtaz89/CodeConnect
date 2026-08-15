@@ -6,10 +6,10 @@
 	     uploads whose binaries use "required reason" APIs without a matching
 	     entry here (ITMS-91053).
 
-	     The app collects nothing and tracks nothing: no account and no
-	     analytics, and the one CodeConnect-operated service is the push
-	     relay, which receives only the content-free notification fields and
-	     enrollment records named by the privacy policy at
+	     The app collects nothing about the user's work and tracks nothing:
+	     no account and no analytics. The one CodeConnect-operated service is
+	     the push relay, which receives only the content-free notification
+	     fields and enrollment records named by the privacy policy at
 	     codeconnect.sh/privacy - the same claims, kept honest together.
 
 	     The single declared API is UserDefaults, used only for the app's own

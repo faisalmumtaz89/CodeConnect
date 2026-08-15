@@ -1060,8 +1060,10 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
-* **APNs is a logging stub** until a `.p8` key exists; `hello_ack` advertises
-  `push: false` so the phone can tell "not configured" from "failed".
+* **Direct APNs is a logging stub** until a `.p8` key exists; relay-backed
+  push, when enabled, needs no key on the Mac. `hello_ack` advertises the
+  push capabilities so the phone can tell "not configured" from "failed"
+  and direct from relay.
 * **A certificate from Tailscale depends on the tailnet.** `tailscale cert`
   needs HTTPS Certificates enabled for the tailnet, and issues only for this
   node's MagicDNS name. Without it the daemon serves `ws://` and says so; a

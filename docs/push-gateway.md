@@ -635,6 +635,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 - Direct mode generates no relay network request.
 - Unsupported App Attest devices retain all non-relay app functionality.
 - Deny-in-app, enable-in-Settings, foreground, and register flow works in one launch.
+- `PrivacyInfo.xcprivacy` declares the relay enrollment data under App Store collection definitions (the record is transmitted off-device to a developer-operated service), and the declaration matches the privacy policy exactly.
 - Physical development-device sandbox App Attest and APNs delivery passes.
 - TestFlight production App Attest and production APNs delivery passes.
 - Token rotation, reinstall, missing App Attest key, relay credential invalidation, relay outage, and multiple paired Macs are exercised.

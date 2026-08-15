@@ -65,7 +65,7 @@ CodeConnect is a developer tool and is not directed at children.
 
 ## Changes
 
-If this policy changes, the new version will be posted at this URL with a new effective date. Because the app collects nothing, changes are expected to be rare and editorial.
+If this policy changes, the new version will be posted at this URL with a new effective date. Because the system holds nothing beyond the relay's content-free enrollment record, changes are expected to be rare and editorial.
 
 ## Contact
 
