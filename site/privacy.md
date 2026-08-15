@@ -12,7 +12,7 @@ The policy is short on collection because the design is short on collection: no 
 
 ## Where your data lives
 
-Everything CodeConnect works with stays on hardware you own:
+Everything CodeConnect works with stays on hardware you own, with one narrow exception: when relay-backed notifications are enabled, the push relay holds the enrollment records described under push notifications below — key hashes, an attestation receipt, counters and timestamps, never content — for the fixed retention periods. Everything else:
 
 - **On your Mac** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions (a local SQLite database), pairing records for your devices, TLS material, and configuration. None of it is transmitted anywhere except directly to your paired iPhone.
 - **On your iPhone** — session data is cached locally solely so the app works offline and resumes quickly. The per-device pairing token is stored in the iOS Keychain.
@@ -40,6 +40,7 @@ The **iPhone app** connects to:
 
 1. **Your own Mac** — directly, over the connection you configure.
 2. **Apple** — to receive push notifications, and for speech recognition where your language is not handled on-device. Both are Apple's services under Apple's policy.
+3. **CodeConnect's push relay** — only when enrolling for relay-backed notifications and for credential lifecycle changes afterwards: the app sends Apple's App Attest proof and the token binding described above, and nothing else, ever.
 
 The **Mac daemon and tools** connect to:
 

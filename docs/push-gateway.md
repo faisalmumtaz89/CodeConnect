@@ -397,7 +397,7 @@ Rules:
 - Accepted response includes optional `apns_id` and the accepted environment.
 - Typed outcomes include `accepted`, `unregistered`, `credential_invalid`, `rate_limited`, `rejected`, and `unavailable`.
 - An accepted opposite-environment attempt atomically corrects the relay binding and returns that environment for daemon CAS persistence.
-- **The relay binding is the single authority for a token's APNs environment.** The environment the app sends at registration is a hint for the first attempt only. Today the app resends its cached environment on every handshake (`AppModel.swift:298`), which would silently undo a correction on reconnect or from a second paired Mac; Phase 3 makes the app persist the corrected environment into its Keychain tuple when the daemon reports it, and the correction must be proven to survive a reconnect and a push from a second Mac.
+- **The relay binding is the single authority for a token's APNs environment, and the environment in a push request is advisory.** The relay addresses APNs by the binding's environment regardless of the advisory value and returns the authoritative environment in every accepted response — a delivery is never refused for a stale advisory environment, which is what lets a second Mac that has not yet learned a correction still deliver, be corrected by the response, and CAS-persist the truth. The app's registration environment is a hint used only when a binding does not yet exist. Today the app resends its cached environment on every handshake (`AppModel.swift:298`); Phase 3 replaces that with persistence of `hello_ack.push_environment` (section 5) into the Keychain tuple, and the correction must be proven to survive a reconnect and a push from a second Mac.
 
 ## 5. CodeConnect protocol impact
 
@@ -408,6 +408,7 @@ Add:
 - `Capabilities.push_relay: bool`, default false.
 - `RegisterPush.relay_credential: Option<String>`, default absent.
 - `TestPushResult.credential_invalid`.
+- `hello_ack.push_environment: Option<String>` — the daemon's current authoritative APNs environment for this device's registered token, absent when no token is registered. The app compares it to its cached tuple on every handshake and persists a difference into the Keychain instead of resending the stale value; this is the concrete daemon→app propagation path for relay-side corrections.
 
 Do not add a client-minor field to `hello` and do not add `RegisterPushResult`. Registration remains idempotent, server errors remain visible, and `test_push` is the meaningful end-to-end proof. An acknowledgement would prove only a database write.
 
