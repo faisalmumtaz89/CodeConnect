@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "cc-hook", "ccd", "codeconnect", "demo-daemon", "soak"]
+members = [
+    "protocol",
+    "cc-hook",
+    "ccd",
+    "codeconnect",
+    "demo-daemon",
+    "push-core",
+    "push-relay",
+    "soak",
+]
 
 [workspace.package]
 version = "0.5.2"
@@ -13,6 +22,7 @@ license = "MIT"
 
 [workspace.dependencies]
 protocol = { path = "protocol" }
+push-core = { path = "push-core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +32,10 @@ sha2 = "0.10"
 # kernel releases the lock when the holder dies, which is what deletes the
 # entire corpse/staleness/takeover protocol a file-based lock would need.
 libc = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+# `backup` is SQLite's own online-backup API: it copies a live database under
+# WAL without stopping writers, which a file copy of a WAL database cannot do —
+# it captures a main file whose newest pages are still in the log.
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
@@ -72,6 +85,64 @@ qrcode = { version = "0.14", default-features = false }
 
 # The terminal wire carries raw bytes as base64 inside the existing JSON frames.
 base64 = "0.22"
+
+# The push relay, and only the push relay, needs the rest of this file. It is
+# the one member that serves HTTP to strangers and the one that runs on Linux.
+#
+# `axum` because the relay's whole defence is a closed request schema behind a
+# body limit, and both of those are things a framework already gets right;
+# hand-rolling them on `hyper` means hand-rolling the limit that keeps a
+# hostile body from being read in full. `tower` is the middleware vocabulary
+# axum is written in, so it is not a second choice.
+axum = "0.8"
+tower = "0.5"
+
+# Outbound HTTP/2 to Apple. `h2` above is one connection driven by hand, which
+# is right for a Mac sending its own pushes and wrong for a service holding a
+# connection open per environment for every user at once: Apple ends a
+# connection with `GOAWAY`, and something has to reconnect without replaying a
+# request that may already have reached the phone.
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
+# `native-tokio` reads the platform trust store, which in the relay's container
+# is the `ca-certificates` package rather than the Keychain. `ring` for the
+# same reason as everywhere else here: no C++ toolchain.
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "ring",
+    "http2",
+    "native-tokio",
+    "tls12",
+] }
+http-body-util = "0.1"
+bytes = "1"
+
+# Logs as JSON documents rather than lines, because the relay's logs are read
+# by a log service and searched for the absence of things — a bearer, a token,
+# an address — and a grep over prose cannot prove absence the way a fixed set
+# of typed fields can.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# App Attest verification, which is parsing attacker-supplied bytes and is
+# therefore all borrowed code. The attestation object is CBOR wrapping an X.509
+# chain that has to be verified to Apple's root; `rustls-webpki` is the path
+# validator rustls already trusts, and `rustls-pki-types` is the vocabulary it
+# speaks — the certificate, trust-anchor and verification-time types come from
+# there rather than from `rustls` itself.
+ciborium = "0.2"
+x509-parser = "0.16"
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
+rustls-pki-types = "1"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+    "std",
+] }
+
+# Certificates for the attestation tests, minted at test time. A checked-in
+# fixture chain would be a private key in the repository and would expire.
+rcgen = "0.13"
 
 [profile.release]
 opt-level = "z"

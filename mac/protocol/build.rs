@@ -26,6 +26,7 @@ const SHIP_SOURCE_PATHS: &[&str] = &[
     "mac/codeconnect",
     "mac/ccd",
     "mac/cc-hook",
+    "mac/push-core",
 ];
 
 /// Git's stdout when it ran and exited zero; `None` for every other outcome —
@@ -91,6 +92,7 @@ fn main() {
         "../codeconnect",
         "../ccd",
         "../cc-hook",
+        "../push-core",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

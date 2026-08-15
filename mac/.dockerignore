@@ -1,4 +1,5 @@
-# The build context for `demo-daemon/Dockerfile` is this directory. Without
-# this, every image build would upload the local build tree — gigabytes of
+# Both `demo-daemon/Dockerfile` and `ops/push-relay/Dockerfile` build with this
+# directory as their context — the relay needs the workspace manifests. Without
+# this, every image build would upload the local build tree: gigabytes of
 # artefacts the container rebuilds from source anyway.
 target/

@@ -25,17 +25,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use push_core::{
+    is_terminal, terminal_refusal, DeviceGone, ProviderToken, COLLAPSE_ID, TEST_COLLAPSE_ID,
+};
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
 use crate::apns::{alert, PushHint, PushSender, TestDelivery};
 
-/// How long APNs should keep trying to deliver a push to a phone that is off.
-///
-/// Long enough to survive a commute, short enough that a decision nobody
-/// answered is not still buzzing tomorrow.
-const PUSH_LIFETIME_SECS: i64 = 3600;
+/// Which world a device lives in travels with the device, so the socket handler
+/// that registers one names this type too.
+pub use push_core::ApnsEnvironment;
 
 /// Now, in whole seconds — the unit `apns-expiration` is written in.
 fn now_secs() -> i64 {
@@ -80,36 +81,6 @@ fn retire(queues: &mut HashMap<String, Arc<DeviceQueue>>, device_id: &str) {
     }
 }
 
-/// Apple said the app is gone from this device.
-///
-/// **A fact from Apple, not an inference.** The alternative was asking the
-/// registry whether the device was still listed, which cannot tell "revoked"
-/// from "the database did not answer just then" — and a database that blinks
-/// would have retired every worker that happened to ask.
-#[derive(Debug)]
-struct DeviceGone;
-
-impl std::fmt::Display for DeviceGone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("APNs says the app is gone from this device")
-    }
-}
-
-impl std::error::Error for DeviceGone {}
-
-/// The one slot an ordinary doorbell occupies on a phone.
-///
-/// Constant on purpose — see the header's comment in `request`.
-const COLLAPSE_ID: &str = "codeconnect";
-
-/// The slot a **test** notification occupies, which is deliberately not the
-/// doorbell's.
-///
-/// The user asked for this one and is watching for it; letting it replace a
-/// waiting decision — or be replaced by one — would answer a different
-/// question than the one they asked.
-const TEST_COLLAPSE_ID: &str = "codeconnect-test";
-
 /// How long one delivery may take in total, retry included.
 ///
 /// **The legs are bounded individually and that is not enough.** A TLS
@@ -119,45 +90,6 @@ const TEST_COLLAPSE_ID: &str = "codeconnect-test";
 /// waiting behind it, for as long as the peer stayed silent. This bounds the
 /// whole attempt rather than adding a deadline to each leg one bug at a time.
 const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
-use crate::apns_token::ProviderToken;
-
-/// Which Apple host to talk to.
-///
-/// A development build's token is **not valid on production** and vice versa;
-/// the failure is a `400 BadDeviceToken`, which reads like a corrupt token
-/// rather than like the wrong endpoint. The device says which world it is in
-/// when it registers, so this is per-device rather than global.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApnsEnvironment {
-    Sandbox,
-    Production,
-}
-
-impl ApnsEnvironment {
-    pub fn host(self) -> &'static str {
-        match self {
-            ApnsEnvironment::Sandbox => "api.sandbox.push.apple.com",
-            ApnsEnvironment::Production => "api.push.apple.com",
-        }
-    }
-
-    pub fn parse(value: &str) -> ApnsEnvironment {
-        match value {
-            "production" | "prod" => ApnsEnvironment::Production,
-            // Anything unrecognised is sandbox: a development build pushed at
-            // production is silently undeliverable, whereas the reverse fails
-            // loudly and is fixed by one config line.
-            _ => ApnsEnvironment::Sandbox,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ApnsEnvironment::Sandbox => "sandbox",
-            ApnsEnvironment::Production => "production",
-        }
-    }
-}
 
 /// Where a push is going.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,56 +282,6 @@ impl ApnsPushSender {
             tls: TlsConnector::from(Arc::new(config)),
             queues: std::sync::Mutex::new(HashMap::new()),
         })
-    }
-
-    /// The APNs request, headers and all.
-    ///
-    /// **Extracted so the headers can be asserted.** The expiry in particular
-    /// is invisible to a payload test: Apple reads `apns-expiration` as an
-    /// absolute UNIX time, so a literal duration there means January 1970 — a
-    /// notification born expired, with no store-and-forward for a phone that is
-    /// switched off. A test that
-    /// recomputes the arithmetic proves nothing about what is on the wire; this
-    /// is what is on the wire.
-    fn request(
-        host: &str,
-        device_token: &str,
-        bearer: &str,
-        topic: &str,
-        now_secs: i64,
-        collapse: &str,
-    ) -> Result<http::Request<()>> {
-        http::Request::builder()
-            .method("POST")
-            .uri(format!("https://{host}/3/device/{device_token}"))
-            .header("authorization", format!("bearer {bearer}"))
-            .header("apns-topic", topic)
-            .header("apns-push-type", "alert")
-            // **One doorbell, replaced rather than queued.** Ordering the
-            // sends is all this daemon can do; which notification Apple keeps
-            // for a phone that is switched off is Apple's to decide, and it
-            // does not promise the newest. A collapse id makes that explicit:
-            // a later push *replaces* the earlier one, so a reader who was
-            // away comes back to the current state rather than to whichever
-            // arrived in the order the network chose.
-            //
-            // A constant, and deliberately not per run: this header reaches
-            // Apple, and anything varying per session would let a device's
-            // pushes be grouped and timed. It says only "this is CodeConnect's
-            // notification", which is exactly the one slot the aggregate body
-            // is written for.
-            .header("apns-collapse-id", collapse)
-            // 10 = deliver immediately. This is a human waiting on an agent.
-            .header("apns-priority", "10")
-            // An hour from now, as an absolute time: an approval nobody
-            // answered by then is not worth waking anyone for, and the app
-            // shows it on next foreground regardless.
-            .header(
-                "apns-expiration",
-                (now_secs + PUSH_LIFETIME_SECS).to_string(),
-            )
-            .body(())
-            .map_err(Into::into)
     }
 
     /// The alert JSON. Deliberately austere — see the module note.
@@ -597,7 +479,7 @@ impl ApnsPushSender {
             }
         });
 
-        let request = Self::request(
+        let request = push_core::request(
             host,
             &target.token,
             &bearer,
@@ -825,45 +707,6 @@ fn platform_roots() -> Vec<tokio_rustls::rustls::pki_types::CertificateDer<'stat
     rustls_native_certs::load_native_certs().certs
 }
 
-/// What Apple's refusal means for this device, as one decision.
-///
-/// **Classification and consequence together.** Read apart, a build could go on
-/// deciding `410` is terminal while the refusal it produced was an ordinary
-/// error — and the worker, which retires on the *typed* one, would go on
-/// ringing a phone the app had been deleted from.
-fn refusal(status: u16, reason: &str) -> anyhow::Error {
-    let described = format!("APNs refused the push: {status} {reason}");
-    if status == 410 {
-        // `410 Unregistered` is Apple saying the app is gone from that device,
-        // which never recovers.
-        return anyhow::Error::new(DeviceGone).context(described);
-    }
-    anyhow::Error::msg(described)
-}
-
-/// The same refusal, once it is known whether it was about the token the device
-/// is actually using.
-///
-/// **Only a refusal about the live token retires the device.** A late `410` for
-/// a token the phone has already replaced says nothing about the one it is
-/// using now, and typing it as a departure would close a queue holding that
-/// token's work and answer its test push as though the phone were gone.
-fn terminal_refusal(status: u16, reason: &str, was_current: bool) -> anyhow::Error {
-    if was_current {
-        return refusal(status, reason);
-    }
-    anyhow::Error::msg(format!(
-        "APNs refused a token this device has already replaced: {status} {reason}"
-    ))
-}
-
-/// Whether that refusal means this device token will never work again.
-fn is_terminal(status: u16, reason: &str) -> bool {
-    refusal(status, reason)
-        .chain()
-        .any(|cause| cause.is::<DeviceGone>())
-}
-
 /// The database as a push registry.
 ///
 /// Synchronous on purpose: `PushSender::send` is sync, and the alternative —
@@ -964,13 +807,13 @@ pub fn build(
         return Arc::new(crate::apns::LoggingPushSender::new());
     };
 
-    let identity = crate::apns_token::ApnsIdentity {
+    let identity = push_core::ApnsIdentity {
         key_id: key_id.clone(),
         team_id: team_id.clone(),
         topic: topic.clone(),
     };
     let expanded = shellexpand_home(path);
-    match crate::apns_token::ProviderToken::load(std::path::Path::new(&expanded), identity)
+    match ProviderToken::load(std::path::Path::new(&expanded), identity)
         .and_then(|token| ApnsPushSender::new(token, Arc::new(StoreRegistry::new(store))))
     {
         Ok(sender) => {
@@ -1015,63 +858,6 @@ mod tests {
             environment: ApnsEnvironment::Sandbox,
             device_id: device.into(),
         }
-    }
-
-    /// **The header on the wire, against a fixed clock.**
-    ///
-    /// Apple reads `apns-expiration` as an absolute UNIX time, so a literal
-    /// duration there means January 1970: every notification born expired, and
-    /// nothing stored for a phone that is switched off. A test that recomputes
-    /// the arithmetic would pass against that too, which is why this reads the
-    /// built request.
-    #[test]
-    fn the_expiry_header_is_an_absolute_time_an_hour_ahead() {
-        let now = 1_800_000_000i64;
-        let request = ApnsPushSender::request(
-            "api.push.apple.com",
-            "aa",
-            "bearer",
-            "topic",
-            now,
-            COLLAPSE_ID,
-        )
-        .unwrap();
-        let expiry = request.headers()["apns-expiration"].to_str().unwrap();
-
-        assert_eq!(expiry, (now + 3600).to_string());
-        assert!(
-            expiry.parse::<i64>().unwrap() > now,
-            "an expiry in the past is a push APNs will never store"
-        );
-        assert_ne!(expiry, "3600", "3600 is 1970, not an hour from now");
-    }
-
-    #[test]
-    fn the_request_addresses_one_device_and_says_it_is_an_alert() {
-        let request = ApnsPushSender::request(
-            "api.push.apple.com",
-            "dev-token",
-            "b",
-            "topic",
-            0,
-            COLLAPSE_ID,
-        )
-        .unwrap();
-        assert_eq!(request.uri().path(), "/3/device/dev-token");
-        assert_eq!(request.headers()["apns-push-type"], "alert");
-        assert_eq!(request.headers()["apns-priority"], "10");
-        assert_eq!(
-            request.headers()["apns-collapse-id"],
-            "codeconnect",
-            "a later doorbell replaces the earlier one rather than racing it"
-        );
-        assert!(
-            !request.headers()["apns-collapse-id"]
-                .to_str()
-                .unwrap()
-                .contains(|c: char| c.is_ascii_digit()),
-            "and it carries no run, device or request identity through Apple"
-        );
     }
 
     /// Await something a regression would never deliver, without hanging.
@@ -1253,26 +1039,6 @@ mod tests {
         assert!(
             drained(&queue).is_empty(),
             "and nothing is left behind for a worker that is gone"
-        );
-    }
-
-    /// **A refusal about a token the phone has already replaced is not a
-    /// departure.** Typed as one, it would retire a queue holding the *new*
-    /// token's work and answer its test push as though the phone were gone.
-    #[test]
-    fn only_a_refusal_about_the_live_token_retires_the_device() {
-        let gone = |err: anyhow::Error| err.chain().any(|cause| cause.is::<DeviceGone>());
-        assert!(
-            gone(terminal_refusal(410, "{\"reason\":\"Unregistered\"}", true)),
-            "the token it is using was disowned: the device is gone"
-        );
-        assert!(
-            !gone(terminal_refusal(
-                410,
-                "{\"reason\":\"Unregistered\"}",
-                false
-            )),
-            "a token it has already replaced says nothing about the one it uses now"
         );
     }
 
@@ -1563,68 +1329,5 @@ mod tests {
         assert_eq!(parsed["aps"]["badge"], 4);
         let body = parsed["aps"]["alert"]["body"].as_str().unwrap_or_default();
         assert!(body.contains('4'), "the count is the useful fact: {body}");
-    }
-
-    /// The distinction that cost a live registration.
-    /// The failure the first TestFlight install produced.
-    #[test]
-    fn a_bad_device_token_is_an_environment_problem_before_it_is_a_dead_one() {
-        // `400 BadDeviceToken` means "not valid **for this host**", which a
-        // wrong environment produces just as readily as a dead token. It must
-        // not clear the registration, and it must leave room for the other
-        // host to be tried.
-        assert!(!is_terminal(400, "{\"reason\":\"BadDeviceToken\"}"));
-        assert!(is_terminal(410, "{\"reason\":\"Unregistered\"}"));
-        // The two hosts are genuinely different endpoints, so "the other one"
-        // is always well defined.
-        assert_ne!(
-            ApnsEnvironment::Sandbox.host(),
-            ApnsEnvironment::Production.host()
-        );
-    }
-
-    #[test]
-    fn only_410_is_terminal_for_a_device_token() {
-        // Apple returns `400 BadDeviceToken` for a token that is simply on the
-        // wrong host, which is recoverable and common while a build moves
-        // between development and TestFlight. Clearing on it deletes a working
-        // registration; only `410 Unregistered` means the app is gone.
-        assert!(is_terminal(410, "{\"reason\":\"Unregistered\"}"));
-        assert!(!is_terminal(400, "{\"reason\":\"BadDeviceToken\"}"));
-        // **And that verdict is what the worker acts on.** The worker retires
-        // on the typed refusal, so a build that classified `410` as terminal
-        // while producing an ordinary error would go on ringing a phone the
-        // app had been deleted from.
-        let gone = |status, reason| {
-            refusal(status, reason)
-                .chain()
-                .any(|cause| cause.is::<DeviceGone>())
-        };
-        assert!(gone(410, "{\"reason\":\"Unregistered\"}"));
-        assert!(!gone(400, "{\"reason\":\"BadDeviceToken\"}"));
-        assert!(!gone(503, "{\"reason\":\"ServiceUnavailable\"}"));
-        assert!(!is_terminal(
-            403,
-            "{\"reason\":\"BadEnvironmentKeyInToken\"}"
-        ));
-        assert!(!is_terminal(429, "{\"reason\":\"TooManyRequests\"}"));
-    }
-
-    #[test]
-    fn an_unknown_environment_falls_back_to_sandbox_rather_than_production() {
-        // Wrong-way-round is the recoverable failure: a development token sent
-        // to production is refused loudly, where the reverse is accepted and
-        // silently never delivered.
-        assert_eq!(ApnsEnvironment::parse(""), ApnsEnvironment::Sandbox);
-        assert_eq!(ApnsEnvironment::parse("nonsense"), ApnsEnvironment::Sandbox);
-        assert_eq!(
-            ApnsEnvironment::parse("production"),
-            ApnsEnvironment::Production
-        );
-        assert_eq!(ApnsEnvironment::Production.host(), "api.push.apple.com");
-        assert_eq!(
-            ApnsEnvironment::Sandbox.host(),
-            "api.sandbox.push.apple.com"
-        );
     }
 }
