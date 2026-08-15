@@ -28,6 +28,11 @@ Packages/
 *.pem
 *.key
 *.mobileprovision
+# One public certificate rides with the source: Apple's App Attestation root
+# CA, which the relay compiles in via include_str!. It contains no private
+# material — a certificate is the shareable half — and pinning it as a file
+# keeps it auditable where an embedded string constant would hide it.
+!mac/push-relay/apple-app-attest-root-ca.pem
 *.certSigningRequest
 .env
 .env.*
