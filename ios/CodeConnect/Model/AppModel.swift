@@ -763,13 +763,16 @@ final class AppModel {
         /// cached-fleet and snapshot seams stage theirs.
         private func applyPushStateFixture() {
             guard let raw = UserDefaults.standard.string(forKey: "CC_PUSH_STATE") else { return }
+            // `bootstrap` stages a relay-capable daemon reached over a static
+            // connection: no device row, so enrollment can never begin.
+            let deviceID: String? = raw == "bootstrap" ? nil : "render-device"
             connection.injectForTesting(
                 .helloAck(
                     HelloAck(
                         protocolVersion: 1, protocolMinor: 14, serverTime: "",
                         capabilities: Capabilities(
                             pushRelay: true, extra: ["test_push": .bool(true)]),
-                        deviceToken: nil, deviceID: "render-device", deviceName: "iPhone",
+                        deviceToken: nil, deviceID: deviceID, deviceName: "iPhone",
                         pushEnvironment: "production")))
             switch raw {
             case "enrolling": relayPushState = .enrolling

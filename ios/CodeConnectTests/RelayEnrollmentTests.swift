@@ -15,19 +15,30 @@ import XCTest
 
 // MARK: - Doubles
 
+private struct FakeAttestError: Error {}
+
 private final class FakeAttest: AppAttesting, @unchecked Sendable {
     var supported = true
     var keyID = "FAKE-KEY-ID"
+    /// Number of `attestKey` calls that throw (an availability failure) before
+    /// succeeding — for the key-reuse-on-retry case.
+    var attestFailuresRemaining = 0
     private(set) var generatedKeys = 0
+    private(set) var attestKeyIDs: [String] = []
     private(set) var attestHashes: [Data] = []
     private(set) var assertHashes: [Data] = []
 
     var isSupported: Bool { supported }
     func generateKey() async throws -> String {
         generatedKeys += 1
-        return keyID
+        return generatedKeys == 1 ? keyID : "\(keyID)-\(generatedKeys)"
     }
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        if attestFailuresRemaining > 0 {
+            attestFailuresRemaining -= 1
+            throw FakeAttestError()
+        }
+        attestKeyIDs.append(keyID)
         attestHashes.append(clientDataHash)
         return Data("attestation-object".utf8)
     }
@@ -44,11 +55,12 @@ private final class FakeTransport: RelayTransport, @unchecked Sendable {
     var statusQueue: [RelayHTTPResponse] = []
     private(set) var posts: [(path: String, body: Data)] = []
     private(set) var gets: [(path: String, bearer: String)] = []
-    /// Opened by the test to release a blocked enroll/assert — for parked-flight
-    /// races. The response is captured before the gate, so which credential a
-    /// parked request receives never depends on resume order.
+    /// Opened by the test to release a blocked enroll/assert/status — for
+    /// parked-flight races. The response is captured before the gate, so which
+    /// credential a parked request receives never depends on resume order.
     var enrollGate: (() async -> Void)?
     var assertGate: (() async -> Void)?
+    var statusGate: (() async -> Void)?
 
     func post(path: String, json: Data) async throws -> RelayHTTPResponse {
         posts.append((path, json))
@@ -74,8 +86,12 @@ private final class FakeTransport: RelayTransport, @unchecked Sendable {
     }
     func get(path: String, bearer: String) async throws -> RelayHTTPResponse {
         gets.append((path, bearer))
-        return statusQueue.isEmpty ? Self.notFound : statusQueue.removeFirst()
+        let response = statusQueue.isEmpty ? Self.notFound : statusQueue.removeFirst()
+        if let gate = statusGate { await gate() }
+        return response
     }
+
+    var statusGets: Int { gets.filter { $0.path == RelayEndpoint.status }.count }
 
     var challengePosts: Int { posts.filter { $0.path == RelayEndpoint.challenge }.count }
     var enrollPosts: Int { posts.filter { $0.path == RelayEndpoint.enroll }.count }
@@ -98,6 +114,205 @@ private actor Gate {
     private var open = false
     func release() { open = true }
     func wait() async { while !open { await Task.yield() } }
+}
+
+/// Gates only the *first* caller and lets every later one through — so a stale
+/// operation can be parked while its replacement runs to completion, giving a
+/// deterministic reproduction of "the late result overwrites the new one".
+private actor OneShotGate {
+    private var seen = 0
+    private var open = false
+    func release() { open = true }
+    func wait() async {
+        seen += 1
+        if seen > 1 { return }
+        while !open { await Task.yield() }
+    }
+}
+
+/// Spin until a condition holds — the transport is mutated on the actor's
+/// executor, so a test waits for the parked state rather than guessing at it.
+private func spin(
+    _ what: String, file: StaticString = #filePath, line: UInt = #line,
+    _ condition: @escaping () -> Bool
+) async {
+    for _ in 0..<400 {
+        if condition() { return }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    XCTFail("timed out waiting for \(what)", file: file, line: line)
+}
+
+/// Lifecycle-aware handling of the relay's typed refusals, and Apple's
+/// retry-the-same-key guidance.
+final class RelayLifecycleTests: XCTestCase {
+    /// A dead APNs token surfaced by enroll becomes `.tokenInvalid`, not a
+    /// generic failure — there is no bearer to repair via status.
+    func testEnrollTokenUnregisteredBecomesTokenInvalid() async {
+        let transport = FakeTransport()
+        transport.challengeQueue = [challengeResponse()]
+        transport.enrollQueue = [jsonResponse(["error": "token_unregistered"], status: 409)]
+        let store = InMemoryStore()
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        let outcome = await enrollment.credential(token: sampleToken, environment: "production")
+        XCTAssertEqual(outcome, .tokenInvalid)
+        XCTAssertNil(store.load())
+    }
+
+    /// A rebind the relay answers with `binding_unknown` (a raised floor, a
+    /// restore) re-enrolls with a fresh key rather than repeating forever.
+    func testBindingUnknownReenrollsWithFreshKey() async {
+        let store = InMemoryStore(seeded(keyID: "OLD-KEY", token: "oldtoken", credential: "OLD"))
+        let attest = FakeAttest()
+        let transport = FakeTransport()
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.assertQueue = [jsonResponse(["error": "binding_unknown"], status: 403)]
+        transport.enrollQueue = [credentialResponse(credential: "REBOUND-FRESH")]
+        let enrollment = RelayEnrollment(
+            attest: attest, transport: transport, store: store, installID: installID)
+
+        let outcome = await enrollment.credential(token: sampleToken, environment: "production")
+        guard case .ready(let credential) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(credential.credential, "REBOUND-FRESH")
+        XCTAssertEqual(credential.token, sampleToken)
+        XCTAssertEqual(attest.generatedKeys, 1, "binding_unknown drove one fresh attestation")
+    }
+
+    /// An `attestKey` availability failure is retried with the *same* key id, not
+    /// a newly generated one.
+    func testKeyIDReusedAcrossAttestFailure() async {
+        let attest = FakeAttest()
+        attest.attestFailuresRemaining = 1
+        let transport = FakeTransport()
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [credentialResponse(credential: "OK")]
+        let store = InMemoryStore()
+        let enrollment = RelayEnrollment(
+            attest: attest, transport: transport, store: store, installID: installID)
+
+        let first = await enrollment.credential(token: sampleToken, environment: "production")
+        guard case .failed = first else { return XCTFail("first attempt should fail: \(first)") }
+        XCTAssertEqual(attest.generatedKeys, 1)
+
+        let second = await enrollment.credential(token: sampleToken, environment: "production")
+        guard case .ready = second else { return XCTFail("second attempt should succeed: \(second)") }
+        XCTAssertEqual(attest.generatedKeys, 1, "the pending key was reused, not regenerated")
+        XCTAssertEqual(attest.attestKeyIDs, ["FAKE-KEY-ID"], "attested with the reused key id")
+    }
+}
+
+/// Reentrancy: an actor await lets a newer operation become current, so every
+/// post-await mutation must re-check identity, not just the token. Each test here
+/// parks a stale operation, lets a newer one win, then releases the stale one and
+/// proves it changed nothing.
+final class RelayReentrancyTests: XCTestCase {
+    private let tokenB = String(repeating: "b", count: 64)
+
+    /// A stale `active`-status refresh for token A, resumed after token B became
+    /// current, must not overwrite B's binding.
+    func testLateActiveRefreshDoesNotOverwriteNewerToken() async {
+        let store = InMemoryStore(seeded(credential: "A-CRED"))
+        let transport = FakeTransport()
+        let gate = Gate()
+        transport.statusGate = { await gate.wait() }
+        transport.statusQueue = [jsonResponse(["status": "active", "environment": "sandbox"])]
+        transport.challengeQueue = [challengeResponse()]
+        transport.assertQueue = [credentialResponse(credential: "B-CRED")]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        async let refreshA = enrollment.refresh(token: sampleToken, environment: "production")
+        await spin("A parked at status") { transport.statusGets == 1 }
+
+        let outcomeB = await enrollment.credential(token: tokenB, environment: "production")
+        guard case .ready = outcomeB else { return XCTFail("B: \(outcomeB)") }
+        XCTAssertEqual(store.load()?.token, tokenB)
+
+        await gate.release()
+        _ = await refreshA
+        XCTAssertEqual(store.load()?.token, tokenB, "the late active refresh must not overwrite B")
+        XCTAssertEqual(store.load()?.credential, "B-CRED")
+    }
+
+    /// A stale `reenroll`-status refresh for A, resumed after B is current, must
+    /// not clear B's binding.
+    func testLateReenrollRefreshDoesNotClearNewerToken() async {
+        let store = InMemoryStore(seeded(credential: "A-CRED"))
+        let transport = FakeTransport()
+        let gate = Gate()
+        transport.statusGate = { await gate.wait() }
+        transport.statusQueue = [jsonResponse(["status": "reenroll"])]
+        transport.challengeQueue = [challengeResponse()]
+        transport.assertQueue = [credentialResponse(credential: "B-CRED")]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        async let refreshA = enrollment.refresh(token: sampleToken, environment: "production")
+        await spin("A parked at status") { transport.statusGets == 1 }
+        _ = await enrollment.credential(token: tokenB, environment: "production")
+        XCTAssertEqual(store.load()?.token, tokenB)
+
+        await gate.release()
+        _ = await refreshA
+        XCTAssertEqual(store.load()?.token, tokenB, "the late reenroll must not clear B")
+    }
+
+    /// A stale `token_invalid`-status refresh for A, resumed after B is current,
+    /// must not clear B's binding.
+    func testLateTokenInvalidRefreshDoesNotClearNewerToken() async {
+        let store = InMemoryStore(seeded(credential: "A-CRED"))
+        let transport = FakeTransport()
+        let gate = Gate()
+        transport.statusGate = { await gate.wait() }
+        transport.statusQueue = [jsonResponse(["status": "token_invalid"])]
+        transport.challengeQueue = [challengeResponse()]
+        transport.assertQueue = [credentialResponse(credential: "B-CRED")]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        async let refreshA = enrollment.refresh(token: sampleToken, environment: "production")
+        await spin("A parked at status") { transport.statusGets == 1 }
+        _ = await enrollment.credential(token: tokenB, environment: "production")
+        XCTAssertEqual(store.load()?.token, tokenB)
+
+        await gate.release()
+        _ = await refreshA
+        XCTAssertEqual(store.load()?.token, tokenB, "the late token_invalid must not clear B")
+    }
+
+    /// Reset then re-drive the same token: a pre-reset enrollment that lands after
+    /// the fresh one must not resurrect the revoked bearer.
+    func testResetThenRedriveDoesNotResurrectRevokedBearer() async {
+        let store = InMemoryStore()
+        let transport = FakeTransport()
+        let gate = OneShotGate()
+        transport.enrollGate = { await gate.wait() }
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [
+            credentialResponse(credential: "STALE"), credentialResponse(credential: "FRESH"),
+        ]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        // The pre-reset enrollment parks at the gate holding "STALE".
+        async let stale = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("stale parked") { transport.enrollPosts == 1 }
+
+        // Reset revokes it; the re-drive enrolls "FRESH" (not gated — OneShotGate
+        // only holds the first) and stores it.
+        await enrollment.reset()
+        let fresh = await enrollment.credential(token: sampleToken, environment: "production")
+        guard case .ready(let freshCred) = fresh else { return XCTFail("fresh: \(fresh)") }
+        XCTAssertEqual(freshCred.credential, "FRESH")
+
+        // Release the pre-reset enrollment; it must not overwrite FRESH.
+        await gate.release()
+        let staleOutcome = await stale
+        XCTAssertEqual(staleOutcome, .superseded)
+        XCTAssertEqual(store.load()?.credential, "FRESH", "the revoked bearer was not resurrected")
+    }
 }
 
 // MARK: - Fixtures

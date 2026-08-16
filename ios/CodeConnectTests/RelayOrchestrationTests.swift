@@ -15,15 +15,18 @@ import XCTest
 private actor LockedTransport: RelayTransport {
     private var challengeQueue: [RelayHTTPResponse]
     private var enrollQueue: [RelayHTTPResponse]
+    private var statusQueue: [RelayHTTPResponse]
     private var recordedPosts: [String] = []
+    private var recordedGets: [String] = []
     private let gate: (@Sendable () async -> Void)?
 
     init(
         challenges: [RelayHTTPResponse] = [], enrolls: [RelayHTTPResponse] = [],
-        gate: (@Sendable () async -> Void)? = nil
+        statuses: [RelayHTTPResponse] = [], gate: (@Sendable () async -> Void)? = nil
     ) {
         challengeQueue = challenges
         enrollQueue = enrolls
+        statusQueue = statuses
         self.gate = gate
     }
 
@@ -48,10 +51,13 @@ private actor LockedTransport: RelayTransport {
         }
     }
     func get(path: String, bearer: String) async throws -> RelayHTTPResponse {
-        RelayHTTPResponse(status: 404, body: Data())
+        recordedGets.append(path)
+        return statusQueue.isEmpty
+            ? RelayHTTPResponse(status: 404, body: Data()) : statusQueue.removeFirst()
     }
 
     var posts: [String] { recordedPosts }
+    var statusGets: Int { recordedGets.filter { $0 == RelayEndpoint.status }.count }
     func count(_ path: String) -> Int { recordedPosts.filter { $0 == path }.count }
 }
 
@@ -89,6 +95,12 @@ private func challengeResponse() -> RelayHTTPResponse {
 private func credentialResponse(_ bearer: String) -> RelayHTTPResponse {
     let body = try! JSONSerialization.data(withJSONObject: [
         "credential": bearer, "environment": "production", "generation": 1,
+    ])
+    return RelayHTTPResponse(status: 200, body: body)
+}
+private func statusResponse(_ status: String) -> RelayHTTPResponse {
+    let body = try! JSONSerialization.data(withJSONObject: [
+        "status": status, "environment": "production",
     ])
     return RelayHTTPResponse(status: 200, body: body)
 }
@@ -264,6 +276,104 @@ final class RelayOrchestrationTests: XCTestCase {
         await waitUntil(
             { await transport.count(RelayEndpoint.enroll) >= 1 },
             "enrollment from the cached token")
+    }
+
+    /// A relay→direct switch while enrollment is in flight: the connection sends
+    /// the token directly, and the late relay result is suppressed — the token is
+    /// registered exactly once (the direct send), never a second time by the
+    /// stale relay credential.
+    func testRelayToDirectDuringEnrollmentSendsDirectSuppressesRelay() async {
+        let gate = GateActor()
+        let transport = LockedTransport(
+            challenges: [challengeResponse()], enrolls: [credentialResponse("BEARER")],
+            gate: { await gate.wait() })
+        let model = makeModel(
+            RelayEnrollment(attest: alwaysSupported(), transport: transport, store: StoreBox()))
+        var delivered: [String] = []
+        model.onPushDeliveryAttempted = { delivered.append($0) }
+
+        // Relay handshake; enrollment parks at the gate.
+        model.connection.simulateConnectedForTesting()
+        model.connection.injectForTesting(ack(pushRelay: true))
+        model.simulatePushTokenForTesting(tokenA, environment: "production")
+        await waitUntil({ await transport.count(RelayEndpoint.enroll) >= 1 }, "relay enroll in flight")
+
+        // The daemon becomes a direct-key daemon (new handshake, new generation).
+        model.connection.injectForTesting(ack(push: true))
+        await waitUntil({ delivered.contains(self.tokenA) }, "the direct registration")
+
+        // Release the stale relay enrollment; it must not register a second time.
+        await gate.release()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(
+            delivered.filter { $0 == tokenA }.count, 1,
+            "only the direct send registered; the stale relay result was suppressed")
+    }
+
+    /// Foreground status checks are debounced (one GET, not many) and keyed to the
+    /// token — a new token clears the debounce so its own credential is checked.
+    func testForegroundRefreshIsDebouncedAndTokenKeyed() async {
+        let store = StoreBox(
+            RelayCredential(
+                keyID: "K", token: tokenA, environment: "production", credential: "BEARER",
+                generation: 1, installID: DeviceIdentity.installationID))
+        let transport = LockedTransport(
+            statuses: [
+                statusResponse("active"), statusResponse("active"),
+            ])
+        let model = makeModel(
+            RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
+
+        model.connection.simulateConnectedForTesting()
+        model.connection.injectForTesting(ack(pushRelay: true))
+        model.simulatePushTokenForTesting(tokenA, environment: "production")
+
+        model.foregroundPushCheck()
+        await waitUntil({ await transport.statusGets == 1 }, "first status check")
+        model.foregroundPushCheck()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let afterSecond = await transport.statusGets
+        XCTAssertEqual(afterSecond, 1, "the second foreground is debounced")
+
+        // A new token clears the debounce. Seed B so the check reuses it (a status
+        // GET), rather than diverting to a rebind.
+        store.save(
+            RelayCredential(
+                keyID: "K", token: tokenB, environment: "production", credential: "BEARER-B",
+                generation: 1, installID: DeviceIdentity.installationID))
+        model.simulatePushTokenForTesting(tokenB, environment: "production")
+        model.foregroundPushCheck()
+        await waitUntil({ await transport.statusGets == 2 }, "a new token is checked")
+    }
+
+    /// The complete environment-correction sequence: enroll production, a reconnect
+    /// carrying a `sandbox` correction persists it, and a further reconnect that no
+    /// longer carries a correction keeps the corrected value — the app never
+    /// resends its stale one.
+    func testEnvironmentCorrectionSurvivesReconnectAndSecondMac() async {
+        let store = StoreBox(
+            RelayCredential(
+                keyID: "K", token: tokenA, environment: "production", credential: "BEARER",
+                generation: 1, installID: DeviceIdentity.installationID))
+        let transport = LockedTransport()
+        let model = makeModel(
+            RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
+
+        model.connection.simulateConnectedForTesting()
+        // First reconnect (or a second Mac) reports the authoritative env as sandbox.
+        model.connection.injectForTesting(ack(pushRelay: true, pushEnvironment: "sandbox"))
+        model.simulatePushTokenForTesting(tokenA, environment: "production")
+        await waitUntil({ store.load()?.environment == "sandbox" }, "correction persisted")
+
+        // A later reconnect no longer carries a correction; the corrected value
+        // must survive rather than being overwritten by the cached production one.
+        model.connection.injectForTesting(ack(pushRelay: true))
+        model.simulatePushTokenForTesting(tokenA, environment: "production")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(store.load()?.environment, "sandbox", "the corrected env survived reconnect")
+        XCTAssertEqual(store.load()?.credential, "BEARER")
+        let posts = await transport.posts
+        XCTAssertTrue(posts.isEmpty, "no re-enrollment was needed")
     }
 }
 

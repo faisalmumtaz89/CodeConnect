@@ -57,7 +57,7 @@ The link between your phone and your Mac is TLS (`wss://`), your machine's loopb
 
 ## Your rights
 
-Privacy laws give you rights to access, correct, export, and delete personal data an organization holds about you. CodeConnect holds exactly one thing: the push relay's content-free enrollment record — key hashes, an attestation receipt, counters and timestamps, bound to a push token rather than a name. Disabling relay-backed notifications retires it on the fixed retention schedule, and you may contact us to have it removed sooner. Everything else — your sessions, code, and conversations — exists only on your own devices, under your direct control, and the section above describes how to delete it. If you believe we have this wrong, contact us and we will answer plainly.
+Privacy laws give you rights to access, correct, export, and delete personal data an organization holds about you. CodeConnect holds exactly one thing: the push relay's content-free enrollment record — key hashes, an attestation receipt, counters and timestamps, bound to a push token rather than a name. There is no account, but the record is linked at the device level: the push token is a device identifier, and the enrollment record is joined to it. Disabling relay-backed notifications retires it on the fixed retention schedule, and you may contact us to have it removed sooner. Everything else — your sessions, code, and conversations — exists only on your own devices, under your direct control, and the section above describes how to delete it. If you believe we have this wrong, contact us and we will answer plainly.
 
 ## Children
 

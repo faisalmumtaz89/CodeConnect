@@ -684,6 +684,17 @@ enum RenderCatalog {
                     driver.element(containing: "App Attest", in: app).isHittable
                 }
             }),
+        RenderScenario(
+            name: "push-relay-bootstrap",
+            purpose: "a relay daemon over a bootstrap connection: pairing required, no dead reset",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "bootstrap"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.scrollUntil(app, "the pairing-required message on screen") {
+                    driver.element(containing: "bootstrap connection", in: app).isHittable
+                }
+            }),
     ]
 
     /// The kit's own review surface, one render per page.

@@ -263,6 +263,11 @@ private struct StatusBody: Decodable {
     let environment: String?
 }
 
+/// The relay's refusal body — `{"error": "<word>"}` (`enroll.rs` `refuse`).
+private struct ErrorBody: Decodable {
+    let error: String
+}
+
 // MARK: - The actor
 
 /// Owns the relay binding and every operation that mints, rebinds, refreshes, or
@@ -301,15 +306,44 @@ actor RelayEnrollment {
 
     /// In-flight enrollments keyed by `(token hash, environment)`, so two
     /// handshakes racing to enroll the same tuple share one attestation instead
-    /// of minting two credentials and revoking the first.
-    private var inFlight: [String: Task<Outcome, Never>] = [:]
+    /// of minting two credentials and revoking the first. Each carries a flight
+    /// id so a completing flight only ever clears *its own* handle.
+    private var inFlight: [String: (id: UInt64, task: Task<Outcome, Never>)] = [:]
+    private var flightCounter: UInt64 = 0
 
-    /// The token the most recent request was for. A completing flight persists
-    /// its credential only while this still matches, so a late result for a
-    /// superseded token cannot clobber the current binding in the Keychain, and a
-    /// reset (which nils this) cannot be undone by an enrollment already in
-    /// flight.
+    /// The token the most recent operation was for.
     private var latestToken: String?
+
+    /// A monotonic operation epoch. It advances whenever the current binding
+    /// intent changes — a new token, or a reset. Every operation captures the
+    /// epoch it began under and, because an actor `await` is a reentrancy point
+    /// where a newer operation can take over, re-checks it before **any**
+    /// post-await mutation (save, clear, register-worthy `.ready`). The token
+    /// check alone is insufficient: a reset then a re-drive of the *same* token
+    /// leaves the token equal but the epoch advanced, which is exactly how a
+    /// revoked bearer would otherwise resurrect.
+    private var epoch: UInt64 = 0
+
+    /// A key id generated for an enrollment that has not yet been confirmed by the
+    /// relay. Apple's guidance is to retry `attestKey` with the *same* key after
+    /// an availability failure rather than generating another, so the id is held
+    /// here and reused on the next enrollment attempt, then cleared on success or
+    /// reset.
+    private var pendingKeyID: String?
+
+    /// Begins an operation for `token`, advancing the epoch when the intent
+    /// changes, and returns the epoch to re-check against later.
+    private func beginOperation(token: String) -> UInt64 {
+        if latestToken != token { epoch &+= 1 }
+        latestToken = token
+        return epoch
+    }
+
+    /// Whether an operation that began at `opEpoch` for `token` is still the
+    /// current one — nothing newer (a token change or a reset) has superseded it.
+    private func isCurrent(_ opEpoch: UInt64, _ token: String) -> Bool {
+        opEpoch == epoch && latestToken == token
+    }
 
     init(
         attest: AppAttesting = DeviceAppAttest(),
@@ -337,7 +371,7 @@ actor RelayEnrollment {
     func credential(
         token: String, environment: String, daemonEnvironment: String? = nil
     ) async -> Outcome {
-        latestToken = token
+        let opEpoch = beginOperation(token: token)
         if let daemonEnvironment {
             adoptEnvironment(daemonEnvironment, token: token)
         }
@@ -352,9 +386,9 @@ actor RelayEnrollment {
             if let stored = self.store.load(), stored.installID == self.installID {
                 return await self.runAssert(
                     operation: "rebind", keyID: stored.keyID, token: token,
-                    environment: environment)
+                    environment: environment, epoch: opEpoch)
             }
-            return await self.runEnroll(token: token, environment: environment)
+            return await self.runEnroll(token: token, environment: environment, epoch: opEpoch)
         }
     }
 
@@ -362,7 +396,7 @@ actor RelayEnrollment {
     /// stored binding and acts on the answer: keep it, rotate via assertion,
     /// re-enroll with a fresh key, or surrender the token to APNs.
     func refresh(token: String, environment: String) async -> Outcome {
-        latestToken = token
+        let opEpoch = beginOperation(token: token)
         guard let stored = store.load(), stored.token == token, stored.installID == installID
         else {
             return await credential(token: token, environment: environment)
@@ -373,6 +407,9 @@ actor RelayEnrollment {
         } catch {
             return .failed("status check failed: \(error.localizedDescription)")
         }
+        // The status GET was an await; a newer operation may have taken over
+        // while it was outstanding. Every branch below mutates, so re-check.
+        guard isCurrent(opEpoch, token) else { return .superseded }
         guard response.status == 200,
             let body = try? JSONDecoder().decode(StatusBody.self, from: response.body)
         else { return .failed("status unavailable (\(response.status))") }
@@ -394,12 +431,12 @@ actor RelayEnrollment {
             return await singleFlight(token: token, environment: environment) {
                 await self.runAssert(
                     operation: "rotate", keyID: stored.keyID, token: token,
-                    environment: environment)
+                    environment: environment, epoch: opEpoch)
             }
         case "reenroll":
             store.clear()
             return await singleFlight(token: token, environment: environment) {
-                await self.runEnroll(token: token, environment: environment)
+                await self.runEnroll(token: token, environment: environment, epoch: opEpoch)
             }
         case "token_invalid":
             store.clear()
@@ -420,7 +457,9 @@ actor RelayEnrollment {
     /// assertion-authorized rotation runs there — then redistributes on each
     /// Mac's next handshake.
     func reset() {
+        epoch &+= 1
         latestToken = nil
+        pendingKeyID = nil
         inFlight.removeAll()
         store.clear()
     }
@@ -444,7 +483,7 @@ actor RelayEnrollment {
 
     // MARK: Flow core
 
-    private func runEnroll(token: String, environment: String) async -> Outcome {
+    private func runEnroll(token: String, environment: String, epoch: UInt64) async -> Outcome {
         guard attest.isSupported else { return .unsupported }
         let challenge: (string: String, bytes: Data)
         switch await fetchChallenge() {
@@ -452,13 +491,26 @@ actor RelayEnrollment {
         case .failed(let reason): return .failed(reason)
         }
 
+        // Reuse a key id from a previous attempt that never confirmed, rather
+        // than minting another; persist a freshly generated one *before* attest,
+        // so an availability failure retries the same key (Apple's guidance).
         let keyID: String
+        if let pending = pendingKeyID {
+            keyID = pending
+        } else {
+            do {
+                keyID = try await attest.generateKey()
+            } catch {
+                return .failed("could not create an App Attest key: \(error.localizedDescription)")
+            }
+            pendingKeyID = keyID
+        }
         let attestation: Data
         do {
-            keyID = try await attest.generateKey()
             attestation = try await attest.attestKey(
                 keyID, clientDataHash: RelayClientData.attestation(challengeBytes: challenge.bytes))
         } catch {
+            // Keep `pendingKeyID` for the retry.
             return .failed("attestation failed: \(error.localizedDescription)")
         }
 
@@ -466,11 +518,13 @@ actor RelayEnrollment {
             schema: RelayEndpoint.schema, keyID: keyID,
             attestation: attestation.base64EncodedString(), challenge: challenge.string,
             token: token, environment: environment)
-        return await postCredential(path: RelayEndpoint.enroll, body: body, keyID: keyID, token: token)
+        return await postCredential(
+            path: RelayEndpoint.enroll, body: body, keyID: keyID, token: token, environment: environment,
+            epoch: epoch, isEnroll: true)
     }
 
     private func runAssert(
-        operation: String, keyID: String, token: String, environment: String
+        operation: String, keyID: String, token: String, environment: String, epoch: UInt64
     ) async -> Outcome {
         guard attest.isSupported else { return .unsupported }
         let challenge: (string: String, bytes: Data)
@@ -488,18 +542,21 @@ actor RelayEnrollment {
         } catch {
             // A key the hardware no longer has cannot assert; fall back to a fresh
             // enrollment so a changed or restored device still recovers.
-            return await runEnroll(token: token, environment: environment)
+            return await runEnroll(token: token, environment: environment, epoch: epoch)
         }
 
         let body = AssertRequestBody(
             schema: RelayEndpoint.schema, keyID: keyID,
             assertion: assertion.base64EncodedString(), challenge: challenge.string,
             operation: operation, token: token, environment: environment)
-        return await postCredential(path: RelayEndpoint.assert, body: body, keyID: keyID, token: token)
+        return await postCredential(
+            path: RelayEndpoint.assert, body: body, keyID: keyID, token: token,
+            environment: environment, epoch: epoch, isEnroll: false)
     }
 
     private func postCredential(
-        path: String, body: Encodable, keyID: String, token: String
+        path: String, body: Encodable, keyID: String, token: String, environment: String,
+        epoch: UInt64, isEnroll: Bool
     ) async -> Outcome {
         let json: Data
         do {
@@ -513,20 +570,54 @@ actor RelayEnrollment {
         } catch {
             return .failed("relay unreachable: \(error.localizedDescription)")
         }
+
         guard response.status == 200,
             let credential = try? JSONDecoder().decode(CredentialBody.self, from: response.body)
-        else { return .failed("relay refused enrollment (\(response.status))") }
+        else {
+            return await handleRefusal(
+                response, token: token, environment: environment, epoch: epoch, isEnroll: isEnroll)
+        }
 
         let record = RelayCredential(
             keyID: keyID, token: token, environment: credential.environment,
             credential: credential.credential, generation: credential.generation,
             installID: installID)
-        // Only persist while this is still the current token. A rotation or a
-        // reset moved `latestToken` on while this flight was in the air, so
-        // saving now would resurrect a superseded binding in the Keychain.
-        guard token == latestToken else { return .superseded }
+        // Only persist while this operation is still current. A rotation or a
+        // reset advanced the epoch while this flight was in the air, so saving
+        // now would resurrect a superseded binding in the Keychain.
+        guard isCurrent(epoch, token) else { return .superseded }
+        pendingKeyID = nil
         store.save(record)
         return .ready(record)
+    }
+
+    /// Map the relay's typed refusal to the right recovery. Lifecycle reasons are
+    /// distinguished from transient ones (`enroll.rs` `Refusal`): a dead token
+    /// surrenders to APNs, a lost install/binding re-enrolls with a fresh key,
+    /// and everything else is a retryable failure.
+    private func handleRefusal(
+        _ response: RelayHTTPResponse, token: String, environment: String, epoch: UInt64,
+        isEnroll: Bool
+    ) async -> Outcome {
+        let error = (try? JSONDecoder().decode(ErrorBody.self, from: response.body))?.error
+        switch error {
+        case "token_unregistered":
+            // The APNs token is dead. Discard the binding and let the app ask
+            // Apple for a new token; there is no bearer to repair via status.
+            guard isCurrent(epoch, token) else { return .superseded }
+            store.clear()
+            return .tokenInvalid
+        case "installation_unknown", "binding_unknown":
+            // The relay no longer knows this key/binding (a restore, a raised
+            // generation floor). An assertion cannot recover it — attest a fresh
+            // key. Guard against re-entering enroll forever.
+            if isEnroll { return .failed("relay refused enrollment (\(error ?? "unknown"))") }
+            pendingKeyID = nil
+            store.clear()
+            return await runEnroll(token: token, environment: environment, epoch: epoch)
+        default:
+            return .failed("relay refused (\(error ?? String(response.status)))")
+        }
     }
 
     /// The outcome of fetching and decoding one challenge — a challenge and its
@@ -561,11 +652,16 @@ actor RelayEnrollment {
         token: String, environment: String, _ work: @escaping @Sendable () async -> Outcome
     ) async -> Outcome {
         let key = Self.flightKey(token: token, environment: environment)
-        if let existing = inFlight[key] { return await existing.value }
+        if let existing = inFlight[key] { return await existing.task.value }
+        flightCounter &+= 1
+        let id = flightCounter
         let task = Task { await work() }
-        inFlight[key] = task
+        inFlight[key] = (id, task)
         let outcome = await task.value
-        inFlight[key] = nil
+        // Clear only our own handle. A reset (which empties the map) followed by
+        // a re-drive can install a *newer* flight under this key while ours was
+        // in the air; nilling unconditionally would drop that replacement.
+        if inFlight[key]?.id == id { inFlight[key] = nil }
         return outcome
     }
 

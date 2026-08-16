@@ -1709,10 +1709,14 @@ struct LinkHealthSheet: View {
                     }
                 }
             }
-            if model.connection.capabilities?.pushMode == .relay {
-                // Relay only: this forgets the App Attest credential and enrolls
-                // again from scratch — the fix for a credential the relay has
-                // stopped trusting. Direct mode holds nothing to reset.
+            if model.connection.capabilities?.pushMode == .relay,
+                model.connection.helloAck?.deviceID != nil
+            {
+                // Relay only, and only once paired: this forgets the App Attest
+                // credential and enrolls again from scratch — the fix for a
+                // credential the relay has stopped trusting. Direct mode holds
+                // nothing to reset, and a bootstrap connection has nothing to
+                // enroll, so the action would do nothing there.
                 CCButton(
                     "Reset notification registration", variant: .ghost, size: .lg, fullWidth: true
                 ) {
@@ -1773,6 +1777,11 @@ struct LinkHealthSheet: View {
         // Relay mode has an enrollment step direct mode does not; its states fold
         // in here so the one button explains why it is waiting or stuck.
         if capabilities.pushMode == .relay {
+            // A bootstrap/static connection has no device row, so enrollment can
+            // never begin — say that plainly instead of "Setting up…" forever.
+            guard model.connection.helloAck?.deviceID != nil else {
+                return "This is a bootstrap connection. Pair this iPhone with the Mac to receive notifications."
+            }
             switch model.relayPushState {
             case .unsupported:
                 return "This iPhone can’t use CodeConnect’s push relay — it has no App Attest support. Everything else still works; a Mac with its own Apple push key can notify you directly."
