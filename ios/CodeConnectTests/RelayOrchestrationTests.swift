@@ -19,15 +19,18 @@ private actor LockedTransport: RelayTransport {
     private var recordedPosts: [String] = []
     private var recordedGets: [String] = []
     private let gate: (@Sendable () async -> Void)?
+    private let statusGate: (@Sendable () async -> Void)?
 
     init(
         challenges: [RelayHTTPResponse] = [], enrolls: [RelayHTTPResponse] = [],
-        statuses: [RelayHTTPResponse] = [], gate: (@Sendable () async -> Void)? = nil
+        statuses: [RelayHTTPResponse] = [], gate: (@Sendable () async -> Void)? = nil,
+        statusGate: (@Sendable () async -> Void)? = nil
     ) {
         challengeQueue = challenges
         enrollQueue = enrolls
         statusQueue = statuses
         self.gate = gate
+        self.statusGate = statusGate
     }
 
     func post(path: String, json: Data) async throws -> RelayHTTPResponse {
@@ -52,8 +55,11 @@ private actor LockedTransport: RelayTransport {
     }
     func get(path: String, bearer: String) async throws -> RelayHTTPResponse {
         recordedGets.append(path)
-        return statusQueue.isEmpty
+        let response =
+            statusQueue.isEmpty
             ? RelayHTTPResponse(status: 404, body: Data()) : statusQueue.removeFirst()
+        if let statusGate { await statusGate() }
+        return response
     }
 
     var posts: [String] { recordedPosts }
@@ -302,54 +308,70 @@ final class RelayOrchestrationTests: XCTestCase {
         model.connection.injectForTesting(ack(push: true))
         await waitUntil({ delivered.contains(self.tokenA) }, "the direct registration")
 
-        // Release the stale relay enrollment; it must not register a second time.
+        // Release the stale relay enrollment. Barrier on its outcome actually
+        // being applied (no sleep), then prove it registered nothing.
+        var relayApplied = false
+        model.onRelayOutcomeApplied = { relayApplied = true }
         await gate.release()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        await waitUntil({ relayApplied }, "the stale relay outcome was applied")
         XCTAssertEqual(
             delivered.filter { $0 == tokenA }.count, 1,
             "only the direct send registered; the stale relay result was suppressed")
     }
 
-    /// Foreground status checks are debounced (one GET, not many) and keyed to the
-    /// token — a new token clears the debounce so its own credential is checked.
+    /// Two separate properties, each with a completion barrier: while a status
+    /// check is in flight a second foreground does not overlap it (the in-flight
+    /// latch), and after one completes a second within the day is skipped (the
+    /// daily debounce) — until a new token clears it.
     func testForegroundRefreshIsDebouncedAndTokenKeyed() async {
         let store = StoreBox(
             RelayCredential(
                 keyID: "K", token: tokenA, environment: "production", credential: "BEARER",
                 generation: 1, installID: DeviceIdentity.installationID))
+        let statusGate = GateActor()
         let transport = LockedTransport(
-            statuses: [
-                statusResponse("active"), statusResponse("active"),
-            ])
+            statuses: [statusResponse("active"), statusResponse("active")],
+            statusGate: { await statusGate.wait() })
         let model = makeModel(
             RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
+        var refreshes = 0
+        model.onRelayRefreshComplete = { refreshes += 1 }
 
         model.connection.simulateConnectedForTesting()
         model.connection.injectForTesting(ack(pushRelay: true))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
 
+        // In-flight latch: check #1 parks at its status GET; check #2, fired while
+        // #1 is still in flight, must not issue a second GET.
         model.foregroundPushCheck()
-        await waitUntil({ await transport.statusGets == 1 }, "first status check")
+        await waitUntil({ await transport.statusGets == 1 }, "first status GET parked")
         model.foregroundPushCheck()
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        let afterSecond = await transport.statusGets
-        XCTAssertEqual(afterSecond, 1, "the second foreground is debounced")
+        let duringLatch = await transport.statusGets
+        XCTAssertEqual(duringLatch, 1, "in-flight latch: no overlapping status GET")
 
-        // A new token clears the debounce. Seed B so the check reuses it (a status
-        // GET), rather than diverting to a rebind.
+        // Release #1 and barrier on its completion.
+        await statusGate.release()
+        await waitUntil({ refreshes == 1 }, "first refresh completed")
+
+        // Daily debounce: check #3 after completion is skipped for the same token.
+        model.foregroundPushCheck()
+        let afterDebounce = await transport.statusGets
+        XCTAssertEqual(afterDebounce, 1, "daily debounce: no GET within the window")
+
+        // Token-keyed: a new token clears the debounce and gets its own check.
         store.save(
             RelayCredential(
                 keyID: "K", token: tokenB, environment: "production", credential: "BEARER-B",
                 generation: 1, installID: DeviceIdentity.installationID))
         model.simulatePushTokenForTesting(tokenB, environment: "production")
         model.foregroundPushCheck()
-        await waitUntil({ await transport.statusGets == 2 }, "a new token is checked")
+        await waitUntil({ await transport.statusGets == 2 }, "the new token is checked")
     }
 
-    /// The complete environment-correction sequence: enroll production, a reconnect
-    /// carrying a `sandbox` correction persists it, and a further reconnect that no
-    /// longer carries a correction keeps the corrected value — the app never
-    /// resends its stale one.
+    /// The complete environment-correction sequence, observed at the wire: a
+    /// reconnect (a second Mac) reports `sandbox`; the app persists it and
+    /// registers the corrected environment, and a later reconnect with no
+    /// correction still sends `sandbox` — the cached `production` is never resent.
     func testEnvironmentCorrectionSurvivesReconnectAndSecondMac() async {
         let store = StoreBox(
             RelayCredential(
@@ -358,20 +380,30 @@ final class RelayOrchestrationTests: XCTestCase {
         let transport = LockedTransport()
         let model = makeModel(
             RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
+        var registered: [(token: String, environment: String, credential: String?)] = []
+        model.onRegisterPushForTesting = { registered.append(($0, $1, $2)) }
 
         model.connection.simulateConnectedForTesting()
-        // First reconnect (or a second Mac) reports the authoritative env as sandbox.
+        // A second Mac's push made the relay correct the environment to sandbox;
+        // the daemon reports that authoritative value on this handshake.
         model.connection.injectForTesting(ack(pushRelay: true, pushEnvironment: "sandbox"))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
-        await waitUntil({ store.load()?.environment == "sandbox" }, "correction persisted")
+        await waitUntil({ !registered.isEmpty }, "the first registration")
+        XCTAssertEqual(
+            registered.last?.environment, "sandbox",
+            "registered the corrected environment, not the cached production")
+        XCTAssertEqual(store.load()?.environment, "sandbox")
 
-        // A later reconnect no longer carries a correction; the corrected value
-        // must survive rather than being overwritten by the cached production one.
+        // A later reconnect carries no correction. The app must keep sending the
+        // corrected value, never resend its cached production one.
+        let before = registered.count
         model.connection.injectForTesting(ack(pushRelay: true))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(store.load()?.environment, "sandbox", "the corrected env survived reconnect")
-        XCTAssertEqual(store.load()?.credential, "BEARER")
+        await waitUntil({ registered.count > before }, "the second registration")
+        XCTAssertEqual(registered.last?.environment, "sandbox", "still sends the corrected env")
+        XCTAssertFalse(
+            registered.contains { $0.environment == "production" },
+            "the cached production environment was never resent")
         let posts = await transport.posts
         XCTAssertTrue(posts.isEmpty, "no re-enrollment was needed")
     }

@@ -243,6 +243,15 @@ final class AppModel {
         /// the gate deleted, which is what these seams exist to prevent.
         var onPushRegistrationRequested: (() -> Void)?
         var onPushDeliveryAttempted: ((String) -> Void)?
+        /// The full outbound `RegisterPush` — so a test can observe the exact
+        /// environment and credential the app sends, not just the token.
+        var onRegisterPushForTesting: ((_ token: String, _ environment: String, _ credential: String?) -> Void)?
+        /// Fires when a relay outcome has finished being applied — a completion
+        /// barrier so a test never sleeps a guess at when a parked flight resumed.
+        var onRelayOutcomeApplied: (() -> Void)?
+        /// Fires when a foreground status refresh has fully settled (its debounce
+        /// window set, its in-flight latch cleared).
+        var onRelayRefreshComplete: (() -> Void)?
 
         /// Inject the token Apple would have issued, through the same path.
         func simulatePushTokenForTesting(_ token: String, environment: String) {
@@ -383,6 +392,7 @@ final class AppModel {
             else { return }
             #if DEBUG
                 onPushDeliveryAttempted?(token)
+                onRegisterPushForTesting?(token, environment, credential)
             #endif
             do {
                 try await connection.send(
@@ -418,6 +428,9 @@ final class AppModel {
     private func applyRelayOutcome(
         _ outcome: RelayEnrollment.Outcome, forToken token: String, generation: Int
     ) {
+        #if DEBUG
+            defer { onRelayOutcomeApplied?() }
+        #endif
         guard connection.generation == generation, pushEligible,
             pushMode == .relay, latestPushToken?.token == token
         else {
@@ -516,6 +529,9 @@ final class AppModel {
                 nextRelayRefreshAllowed = Date().addingTimeInterval(5 * 60)
             }
             relayRefreshInFlight = false
+            #if DEBUG
+                onRelayRefreshComplete?()
+            #endif
         }
     }
 

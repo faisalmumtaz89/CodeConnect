@@ -15,18 +15,29 @@ import XCTest
 
 // MARK: - Doubles
 
-private struct FakeAttestError: Error {}
-
+/// A double that **enforces** Apple's App Attest constraints, so a client that
+/// violates them fails the test rather than passing quietly:
+///   - a key that already attested successfully cannot attest again — `invalidKey`;
+///   - a retry after a transient failure must present the identical clientDataHash
+///     for that key — a changed hash (i.e. a refetched challenge) is rejected.
 private final class FakeAttest: AppAttesting, @unchecked Sendable {
     var supported = true
     var keyID = "FAKE-KEY-ID"
-    /// Number of `attestKey` calls that throw (an availability failure) before
-    /// succeeding — for the key-reuse-on-retry case.
+    /// `attestKey` calls that throw `.transient` before succeeding.
     var attestFailuresRemaining = 0
     private(set) var generatedKeys = 0
     private(set) var attestKeyIDs: [String] = []
     private(set) var attestHashes: [Data] = []
     private(set) var assertHashes: [Data] = []
+    /// Set if a retry presented a different clientDataHash for the same key — a
+    /// violation the fake also throws on, so it can never pass unseen.
+    private(set) var sawInconsistentRetry = false
+    private var attestedKeys: Set<String> = []
+    private var firstHashByKey: [String: Data] = [:]
+    /// Parks a flight at attestation (before it can POST) — the point a stale
+    /// flight must be caught so it never issues its revoking enroll.
+    var attestGate: (() async -> Void)?
+    private(set) var attestCalls = 0
 
     var isSupported: Bool { supported }
     func generateKey() async throws -> String {
@@ -34,10 +45,22 @@ private final class FakeAttest: AppAttesting, @unchecked Sendable {
         return generatedKeys == 1 ? keyID : "\(keyID)-\(generatedKeys)"
     }
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        attestCalls += 1
+        if let gate = attestGate { await gate() }
+        // A key attests exactly once; attesting it again is the permanent error
+        // a client must avoid by never reusing an already-attested key.
+        if attestedKeys.contains(keyID) { throw AppAttestError.invalidKey }
+        // The retry contract: same key ⇒ same clientDataHash.
+        if let first = firstHashByKey[keyID], first != clientDataHash {
+            sawInconsistentRetry = true
+            throw AppAttestError.other("clientDataHash changed across retry for the same key")
+        }
+        firstHashByKey[keyID] = clientDataHash
         if attestFailuresRemaining > 0 {
             attestFailuresRemaining -= 1
-            throw FakeAttestError()
+            throw AppAttestError.transient
         }
+        attestedKeys.insert(keyID)
         attestKeyIDs.append(keyID)
         attestHashes.append(clientDataHash)
         return Data("attestation-object".utf8)
@@ -134,10 +157,10 @@ private actor OneShotGate {
 /// executor, so a test waits for the parked state rather than guessing at it.
 private func spin(
     _ what: String, file: StaticString = #filePath, line: UInt = #line,
-    _ condition: @escaping () -> Bool
+    _ condition: @escaping () async -> Bool
 ) async {
     for _ in 0..<400 {
-        if condition() { return }
+        if await condition() { return }
         try? await Task.sleep(nanoseconds: 5_000_000)
     }
     XCTFail("timed out waiting for \(what)", file: file, line: line)
@@ -182,11 +205,15 @@ final class RelayLifecycleTests: XCTestCase {
 
     /// An `attestKey` availability failure is retried with the *same* key id, not
     /// a newly generated one.
-    func testKeyIDReusedAcrossAttestFailure() async {
+    /// A transient `attestKey` failure retries with the SAME key, challenge, and
+    /// clientDataHash — never a refetched challenge. Only one challenge is
+    /// supplied, so a client that refetched would run dry (and the hardened fake
+    /// would reject the changed hash).
+    func testTransientRetryReusesSameKeyChallengeAndHash() async {
         let attest = FakeAttest()
         attest.attestFailuresRemaining = 1
         let transport = FakeTransport()
-        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.challengeQueue = [challengeResponse()]  // exactly one — no refetch allowed
         transport.enrollQueue = [credentialResponse(credential: "OK")]
         let store = InMemoryStore()
         let enrollment = RelayEnrollment(
@@ -194,12 +221,42 @@ final class RelayLifecycleTests: XCTestCase {
 
         let first = await enrollment.credential(token: sampleToken, environment: "production")
         guard case .failed = first else { return XCTFail("first attempt should fail: \(first)") }
-        XCTAssertEqual(attest.generatedKeys, 1)
 
         let second = await enrollment.credential(token: sampleToken, environment: "production")
         guard case .ready = second else { return XCTFail("second attempt should succeed: \(second)") }
-        XCTAssertEqual(attest.generatedKeys, 1, "the pending key was reused, not regenerated")
-        XCTAssertEqual(attest.attestKeyIDs, ["FAKE-KEY-ID"], "attested with the reused key id")
+        XCTAssertEqual(transport.challengePosts, 1, "the retry reused the challenge, not a new one")
+        XCTAssertEqual(attest.attestCalls, 2, "attested twice: the transient failure, then success")
+        XCTAssertEqual(attest.generatedKeys, 1, "the same key, not a fresh one")
+        XCTAssertFalse(attest.sawInconsistentRetry, "same clientDataHash across the retry")
+    }
+
+    /// After a key has attested, a *new* enrollment must never reuse it (that
+    /// raises `invalidKey` on device). A relay failure that lands after a
+    /// successful attestation must still leave the next enrollment minting a
+    /// fresh key.
+    func testKeyNeverReattestedAcrossNewEnrollment() async {
+        let attest = FakeAttest()
+        let transport = FakeTransport()
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [
+            jsonResponse(["error": "token_unregistered"], status: 409),
+            credentialResponse(credential: "OK"),
+        ]
+        let store = InMemoryStore()
+        let enrollment = RelayEnrollment(
+            attest: attest, transport: transport, store: store, installID: installID)
+
+        // First enrollment attests successfully, then the relay reports the token
+        // dead — a failure *after* attestation.
+        let first = await enrollment.credential(token: sampleToken, environment: "production")
+        XCTAssertEqual(first, .tokenInvalid)
+
+        // A new enrollment must mint a fresh key, not re-attest the spent one.
+        let tokenB = String(repeating: "b", count: 64)
+        let second = await enrollment.credential(token: tokenB, environment: "production")
+        guard case .ready = second else { return XCTFail("second should succeed: \(second)") }
+        XCTAssertEqual(attest.generatedKeys, 2, "a fresh key, not the already-attested one")
+        XCTAssertEqual(attest.attestKeyIDs.count, 2, "two distinct keys attested once each")
     }
 }
 
@@ -312,6 +369,146 @@ final class RelayReentrancyTests: XCTestCase {
         let staleOutcome = await stale
         XCTAssertEqual(staleOutcome, .superseded)
         XCTAssertEqual(store.load()?.credential, "FRESH", "the revoked bearer was not resurrected")
+    }
+
+    /// The enroll POST revokes the current same-token binding server-side, so a
+    /// flight superseded *before* its POST must not issue it at all. Parked at
+    /// attestation (before the POST), superseded by a reset+redrive, then released
+    /// — it must make zero enroll POSTs.
+    func testStaleEnrollDoesNotPostAfterSupersession() async {
+        let store = InMemoryStore()
+        let attest = FakeAttest()
+        let attestGate = OneShotGate()
+        attest.attestGate = { await attestGate.wait() }
+        let transport = FakeTransport()
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [credentialResponse(credential: "FRESH")]
+        let enrollment = RelayEnrollment(
+            attest: attest, transport: transport, store: store, installID: installID)
+
+        // Stale flight parks at attestation, before it can POST.
+        async let stale = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("stale parked at attest") { attest.attestCalls == 1 }
+
+        // Reset + redrive: the replacement attests its own key and POSTs FRESH.
+        await enrollment.reset()
+        let fresh = await enrollment.credential(token: sampleToken, environment: "production")
+        guard case .ready(let freshCred) = fresh else { return XCTFail("fresh: \(fresh)") }
+        XCTAssertEqual(freshCred.credential, "FRESH")
+
+        await attestGate.release()
+        let staleOutcome = await stale
+        XCTAssertEqual(staleOutcome, .superseded)
+        XCTAssertEqual(
+            transport.enrollPosts, 1, "the stale flight never issued its revoking enroll POST")
+        XCTAssertEqual(store.load()?.credential, "FRESH")
+    }
+
+    /// A late `binding_unknown` refusal for a superseded token must not clear the
+    /// newer binding — the recovery clear is gated on the epoch.
+    func testLateBindingUnknownDoesNotClearNewerToken() async {
+        let store = InMemoryStore(seeded(keyID: "OLD-KEY", token: "oldtoken", credential: "OLD"))
+        let assertGate = OneShotGate()
+        let transport = FakeTransport()
+        transport.assertGate = { await assertGate.wait() }
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.assertQueue = [
+            jsonResponse(["error": "binding_unknown"], status: 403),
+            credentialResponse(credential: "B-CRED"),
+        ]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        // A (rebind of oldtoken → sampleToken) parks at its assert POST holding the
+        // binding_unknown refusal.
+        async let rebindA = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("A parked at assert") { transport.assertPosts == 1 }
+
+        // B becomes current via its own rebind (the OneShot lets it through).
+        _ = await enrollment.credential(token: tokenB, environment: "production")
+        XCTAssertEqual(store.load()?.token, tokenB)
+
+        await assertGate.release()
+        let outcomeA = await rebindA
+        XCTAssertEqual(outcomeA, .superseded)
+        XCTAssertEqual(store.load()?.token, tokenB, "the late binding_unknown must not clear B")
+    }
+
+    /// A relay/transport failure for a superseded op returns `.superseded`, never
+    /// `.failed` — a stale failure must be inert, not clobber the fresh state.
+    func testSupersededFailureReturnsSupersededNotFailed() async {
+        let store = InMemoryStore()
+        let enrollGate = OneShotGate()
+        let transport = FakeTransport()
+        transport.enrollGate = { await enrollGate.wait() }
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [
+            jsonResponse(["error": "internal"], status: 500),  // A's response, captured first
+            credentialResponse(credential: "B-CRED"),
+        ]
+        let enrollment = RelayEnrollment(
+            attest: FakeAttest(), transport: transport, store: store, installID: installID)
+
+        async let enrollA = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("A parked at POST") { transport.enrollPosts == 1 }
+        _ = await enrollment.credential(token: tokenB, environment: "production")
+        XCTAssertEqual(store.load()?.token, tokenB)
+
+        await enrollGate.release()
+        let outcomeA = await enrollA
+        XCTAssertEqual(outcomeA, .superseded, "a superseded 500 is inert, not a .failed")
+    }
+
+    /// The replacement flight's handle must survive a stale flight's cleanup:
+    /// releasing the stale flight after the replacement is in flight must not drop
+    /// the replacement, so a later same-token request joins it (no extra challenge
+    /// or enroll) rather than starting a third flight.
+    func testConcurrentCleanupPreservesReplacementHandle() async {
+        let store = InMemoryStore()
+        let attest = FakeAttest()
+        let attestGate = OneShotGate()  // holds the stale flight at attest
+        attest.attestGate = { await attestGate.wait() }
+        let enrollGate = Gate()  // holds the replacement at its POST
+        let transport = FakeTransport()
+        transport.enrollGate = { await enrollGate.wait() }
+        transport.challengeQueue = [challengeResponse(), challengeResponse()]
+        transport.enrollQueue = [credentialResponse(credential: "FRESH")]
+        let enrollment = RelayEnrollment(
+            attest: attest, transport: transport, store: store, installID: installID)
+
+        // Stale flight parks at attest.
+        async let stale = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("stale at attest") { attest.attestCalls == 1 }
+
+        // Reset + redrive: the replacement attests (OneShot lets it through) and
+        // parks at its enroll POST — its handle is now the one under the key.
+        await enrollment.reset()
+        async let replacement = enrollment.credential(token: sampleToken, environment: "production")
+        await spin("replacement at POST") { transport.enrollPosts == 1 }
+
+        // Release the stale flight; its cleanup must not drop the replacement.
+        await attestGate.release()
+        let staleOutcome = await stale
+        XCTAssertEqual(staleOutcome, .superseded)
+
+        // A third request for the same token must JOIN the replacement — no new
+        // challenge, no new enroll — which only holds if the handle survived.
+        async let joiner = enrollment.credential(token: sampleToken, environment: "production")
+        // Barrier on the join itself, so the assertion cannot pass by the joiner
+        // simply not having run yet.
+        await spin("the joiner joined the replacement") {
+            await enrollment.joinsForTesting == 1
+        }
+        await enrollGate.release()
+        let replacementOutcome = await replacement
+        let joinerOutcome = await joiner
+        guard case .ready(let a) = replacementOutcome, case .ready(let b) = joinerOutcome else {
+            return XCTFail("replacement=\(replacementOutcome) joiner=\(joinerOutcome)")
+        }
+        XCTAssertEqual(a.credential, "FRESH")
+        XCTAssertEqual(b.credential, "FRESH")
+        XCTAssertEqual(transport.challengePosts, 2, "the joiner reused the replacement's flight")
+        XCTAssertEqual(transport.enrollPosts, 1, "no third enroll POST")
     }
 }
 
