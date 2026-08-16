@@ -151,8 +151,9 @@ struct DeviceAppAttest: AppAttesting {
 
     /// Map Apple's `DCError` to the retry policy. `serverUnavailable` is the only
     /// error a retry of the same key may follow; `invalidKey` means the key is
-    /// spent; anything else is a non-transient failure.
-    private static func classify(_ error: Error) -> AppAttestError {
+    /// spent; anything else is a non-transient failure. Internal, not private, so a
+    /// unit test can pin the mapping without a device raising a real `DCError`.
+    static func classify(_ error: Error) -> AppAttestError {
         guard let code = (error as? DCError)?.code else {
             return .other(error.localizedDescription)
         }
@@ -360,6 +361,13 @@ actor RelayEnrollment {
     /// attestation, a non-transient failure, an intent change, and reset, so a new
     /// enrollment always mints a fresh key.
     private struct PendingAttestation {
+        /// The operation identity this attempt belongs to. Reuse, and every clear,
+        /// are gated on this triple, and the commit into the shared slot is gated
+        /// on the operation still being current — so a stale flight can neither
+        /// read nor overwrite another operation's staged key/challenge/hash.
+        let epoch: UInt64
+        let token: String
+        let environment: String
         let keyID: String
         let challenge: String
         let challengeBytes: Data
@@ -367,14 +375,29 @@ actor RelayEnrollment {
     }
     private var pendingAttestation: PendingAttestation?
 
+    /// Clear the pending attestation only if it is this operation's own. A stale
+    /// flight resuming after a newer one took over must never wipe the current
+    /// operation's staged attempt — doing so would force the transient-retry
+    /// contract to mint a fresh key, challenge, and hash, which Apple forbids.
+    private func clearPendingIfOwned(_ opEpoch: UInt64, _ token: String, _ environment: String) {
+        if let pending = pendingAttestation, pending.epoch == opEpoch,
+            pending.token == token, pending.environment == environment
+        {
+            pendingAttestation = nil
+        }
+    }
+
     /// Begins an operation for `token`, advancing the epoch when the intent
     /// changes, and returns the epoch to re-check against later. An intent change
     /// also abandons any pending attestation — a new token must not reuse the key
-    /// staged for the old one.
+    /// staged for the old one — and cancels every flight the old intent had in the
+    /// air, so an already-submitted enroll POST aborts instead of landing at the
+    /// relay and revoking the new token's binding.
     private func beginOperation(token: String) -> UInt64 {
         if latestToken != token {
             epoch &+= 1
             pendingAttestation = nil
+            for (_, flight) in inFlight { flight.task.cancel() }
         }
         latestToken = token
         return epoch
@@ -453,7 +476,10 @@ actor RelayEnrollment {
         do {
             response = try await transport.get(path: RelayEndpoint.status, bearer: stored.credential)
         } catch {
-            return .failed("status check failed: \(error.localizedDescription)")
+            // A status check the transport threw on is a failure like any other:
+            // inert once superseded, so a stale throw cannot clobber the fresh
+            // `.ready` a newer operation set. The success path re-checks below.
+            return supersededOr("status check failed: \(error.localizedDescription)", opEpoch, token)
         }
         // The status GET was an await; a newer operation may have taken over
         // while it was outstanding. Every branch below mutates, so re-check.
@@ -508,6 +534,11 @@ actor RelayEnrollment {
         epoch &+= 1
         latestToken = nil
         pendingAttestation = nil
+        // Cancel — not merely drop — every flight in the air. An enroll whose POST
+        // is already awaiting transport would otherwise land at the relay and
+        // revoke the binding this reset's re-drive is about to mint; cancelling
+        // aborts the request client-side (the transport is cancellation-aware).
+        for (_, flight) in inFlight { flight.task.cancel() }
         inFlight.removeAll()
         store.clear()
     }
@@ -534,10 +565,15 @@ actor RelayEnrollment {
     private func runEnroll(token: String, environment: String, epoch: UInt64) async -> Outcome {
         guard attest.isSupported else { return .unsupported }
 
-        // Reuse a pending attestation *only* to retry a transient failure: the
-        // same key, challenge, and clientDataHash. Otherwise stage a fresh one.
+        // Reuse a pending attestation *only* to retry a transient failure of THIS
+        // operation: the same key, challenge, and clientDataHash. Matching the full
+        // operation identity is what makes the slot owned — a stale flight's
+        // pending never satisfies a current op's reuse, and a current op's pending
+        // is never read by a stale flight.
         let attempt: PendingAttestation
-        if let pending = pendingAttestation {
+        if let pending = pendingAttestation, pending.epoch == epoch,
+            pending.token == token, pending.environment == environment
+        {
             attempt = pending
         } else {
             let challenge: (string: String, bytes: Data)
@@ -552,15 +588,20 @@ actor RelayEnrollment {
                 return supersededOr(
                     "could not create an App Attest key: \(error.localizedDescription)", epoch, token)
             }
+            // Commit the staged attempt to the shared slot only while still current.
+            // A stale flight that reached here after a newer operation took over must
+            // not overwrite the current operation's pending attestation.
+            guard isCurrent(epoch, token) else { return .superseded }
             attempt = PendingAttestation(
-                keyID: keyID, challenge: challenge.string, challengeBytes: challenge.bytes,
+                epoch: epoch, token: token, environment: environment, keyID: keyID,
+                challenge: challenge.string, challengeBytes: challenge.bytes,
                 clientDataHash: RelayClientData.attestation(challengeBytes: challenge.bytes))
             pendingAttestation = attempt
         }
 
         // Superseded before attesting: don't spend a single-use key on a dead op.
         guard isCurrent(epoch, token) else {
-            pendingAttestation = nil
+            clearPendingIfOwned(epoch, token, environment)
             return .superseded
         }
 
@@ -569,16 +610,16 @@ actor RelayEnrollment {
             attestation = try await attest.attestKey(
                 attempt.keyID, clientDataHash: attempt.clientDataHash)
         } catch AppAttestError.transient {
-            // The one error a retry may follow — keep the attempt exactly as is.
+            // The one error a retry may follow — keep our pending exactly as is.
             return supersededOr("App Attest is temporarily unavailable", epoch, token)
         } catch {
             // Any other failure spends or invalidates the key; never reuse it.
-            pendingAttestation = nil
+            clearPendingIfOwned(epoch, token, environment)
             return supersededOr("attestation failed: \(error.localizedDescription)", epoch, token)
         }
-        // The key is attested now — single-use and never re-attestable, so the
+        // The key is attested now — single-use and never re-attestable, so our
         // attempt is done regardless of what the relay says next.
-        pendingAttestation = nil
+        clearPendingIfOwned(epoch, token, environment)
 
         // Superseded before the POST: the enroll/rebind POST revokes the current
         // same-token binding server-side (`enroll.rs` `revoke_active_for_token`),
@@ -684,11 +725,18 @@ actor RelayEnrollment {
             guard isCurrent(epoch, token) else { return .superseded }
             store.clear()
             return .tokenInvalid
-        case "installation_unknown", "binding_unknown":
-            // The relay no longer knows this key/binding (a restore, a raised
-            // generation floor). An assertion cannot recover it — attest a fresh
-            // key. Guard the clear against a superseding op, and don't loop from a
-            // fresh enroll.
+        case "installation_unknown", "binding_unknown", "forbidden":
+            // The relay will not let *this* key act on the token: it no longer knows
+            // the key/binding (a restore, a raised floor → `installation_unknown`/
+            // `binding_unknown`), or the token's active binding belongs to a
+            // different installation (`forbidden`) — which is the DEF-1(a) end-state,
+            // where an already-committed late enroll from an abandoned key took the
+            // token. An assertion cannot recover any of these; only a fresh
+            // attestation can. Its enroll unconditionally supersedes the current
+            // binding (`enroll.rs` `revoke_active_for_token`), so the phone re-takes
+            // its own token in one step. `forbidden` cannot come back from an enroll
+            // (enroll never checks installation ownership), so the `isEnroll` guard
+            // makes this terminal there rather than a re-enroll loop.
             guard isCurrent(epoch, token) else { return .superseded }
             if isEnroll { return .failed("relay refused enrollment (\(error ?? "unknown"))") }
             store.clear()

@@ -20,17 +20,20 @@ private actor LockedTransport: RelayTransport {
     private var recordedGets: [String] = []
     private let gate: (@Sendable () async -> Void)?
     private let statusGate: (@Sendable () async -> Void)?
+    /// Thrown by `get` after its gate — the status transport-exception path.
+    private let statusError: Error?
 
     init(
         challenges: [RelayHTTPResponse] = [], enrolls: [RelayHTTPResponse] = [],
         statuses: [RelayHTTPResponse] = [], gate: (@Sendable () async -> Void)? = nil,
-        statusGate: (@Sendable () async -> Void)? = nil
+        statusGate: (@Sendable () async -> Void)? = nil, statusError: Error? = nil
     ) {
         challengeQueue = challenges
         enrollQueue = enrolls
         statusQueue = statuses
         self.gate = gate
         self.statusGate = statusGate
+        self.statusError = statusError
     }
 
     func post(path: String, json: Data) async throws -> RelayHTTPResponse {
@@ -59,6 +62,7 @@ private actor LockedTransport: RelayTransport {
             statusQueue.isEmpty
             ? RelayHTTPResponse(status: 404, body: Data()) : statusQueue.removeFirst()
         if let statusGate { await statusGate() }
+        if let statusError { throw statusError }
         return response
     }
 
@@ -89,6 +93,24 @@ private actor GateActor {
     func wait() async {
         while !open { await Task.yield() }
     }
+}
+
+/// Records every registration's intent — synchronously, the moment
+/// `sendRegistration` is called — and every registration Task's completion, so a
+/// test can wait for ALL registration work to settle (`quiescent` is true only
+/// when nothing is still in the air) and then inspect exactly what was sent. This
+/// is the barrier `onRelayOutcomeApplied` is not: that fires while a registration
+/// the outcome just scheduled is still pending.
+@MainActor
+private final class RegistrationLog {
+    private(set) var scheduled: [(token: String, environment: String, credential: String?)] = []
+    private(set) var settled = 0
+    func attach(to model: AppModel) {
+        model.onRegisterPushScheduledForTesting = { [self] in scheduled.append(($0, $1, $2)) }
+        model.onRegisterPushSettledForTesting = { [self] in settled += 1 }
+    }
+    /// No registration is still in flight: every scheduled one has settled.
+    var quiescent: Bool { scheduled.count == settled }
 }
 
 private func challengeResponse() -> RelayHTTPResponse {
@@ -295,8 +317,10 @@ final class RelayOrchestrationTests: XCTestCase {
             gate: { await gate.wait() })
         let model = makeModel(
             RelayEnrollment(attest: alwaysSupported(), transport: transport, store: StoreBox()))
-        var delivered: [String] = []
-        model.onPushDeliveryAttempted = { delivered.append($0) }
+        let reg = RegistrationLog()
+        reg.attach(to: model)
+        var relayApplied = false
+        model.onRelayOutcomeApplied = { relayApplied = true }
 
         // Relay handshake; enrollment parks at the gate.
         model.connection.simulateConnectedForTesting()
@@ -306,31 +330,38 @@ final class RelayOrchestrationTests: XCTestCase {
 
         // The daemon becomes a direct-key daemon (new handshake, new generation).
         model.connection.injectForTesting(ack(push: true))
-        await waitUntil({ delivered.contains(self.tokenA) }, "the direct registration")
+        await waitUntil({ reg.scheduled.contains { $0.token == self.tokenA } }, "the direct registration")
 
-        // Release the stale relay enrollment. Barrier on its outcome actually
-        // being applied (no sleep), then prove it registered nothing.
-        var relayApplied = false
-        model.onRelayOutcomeApplied = { relayApplied = true }
+        // Release the stale relay enrollment. Barrier on its outcome being applied
+        // AND on ALL registration work settling — so a registration the (buggy)
+        // relay path might have scheduled would have run and been recorded, rather
+        // than slipping past an assertion that fired while it was still in the air.
         await gate.release()
-        await waitUntil({ relayApplied }, "the stale relay outcome was applied")
-        XCTAssertEqual(
-            delivered.filter { $0 == tokenA }.count, 1,
-            "only the direct send registered; the stale relay result was suppressed")
+        await waitUntil(
+            { relayApplied && reg.quiescent }, "the stale relay outcome and all registrations settled")
+
+        let forA = reg.scheduled.filter { $0.token == tokenA }
+        XCTAssertEqual(forA.count, 1, "the token registered exactly once")
+        XCTAssertNil(forA.first?.credential, "the one registration was the direct, credential-less send")
+        XCTAssertFalse(
+            reg.scheduled.contains { $0.token == tokenA && $0.credential != nil },
+            "the stale relay credential was never registered")
     }
 
-    /// Two separate properties, each with a completion barrier: while a status
-    /// check is in flight a second foreground does not overlap it (the in-flight
-    /// latch), and after one completes a second within the day is skipped (the
-    /// daily debounce) — until a new token clears it.
-    func testForegroundRefreshIsDebouncedAndTokenKeyed() async {
+    /// The in-flight latch, isolated from the daily debounce, plus the debounce and
+    /// token-keying. The latch is the hard one: the production code sets the 24-hour
+    /// deadline *before* awaiting, so a naive overlap test proves nothing — the
+    /// deadline alone would block the second GET. Here the debounce is deliberately
+    /// CLEARED (a new token) while check #1 is in flight, so the *only* thing that
+    /// can stop the overlapping check is the in-flight latch.
+    func testForegroundRefreshInFlightLatchAndDebounce() async {
         let store = StoreBox(
             RelayCredential(
                 keyID: "K", token: tokenA, environment: "production", credential: "BEARER",
                 generation: 1, installID: DeviceIdentity.installationID))
         let statusGate = GateActor()
         let transport = LockedTransport(
-            statuses: [statusResponse("active"), statusResponse("active")],
+            statuses: [statusResponse("active"), statusResponse("active"), statusResponse("active")],
             statusGate: { await statusGate.wait() })
         let model = makeModel(
             RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
@@ -341,31 +372,39 @@ final class RelayOrchestrationTests: XCTestCase {
         model.connection.injectForTesting(ack(pushRelay: true))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
 
-        // In-flight latch: check #1 parks at its status GET; check #2, fired while
-        // #1 is still in flight, must not issue a second GET.
+        // Check #1 parks at its status GET, claiming the in-flight latch.
         model.foregroundPushCheck()
         await waitUntil({ await transport.statusGets == 1 }, "first status GET parked")
-        model.foregroundPushCheck()
-        let duringLatch = await transport.statusGets
-        XCTAssertEqual(duringLatch, 1, "in-flight latch: no overlapping status GET")
 
-        // Release #1 and barrier on its completion.
-        await statusGate.release()
-        await waitUntil({ refreshes == 1 }, "first refresh completed")
-
-        // Daily debounce: check #3 after completion is skipped for the same token.
-        model.foregroundPushCheck()
-        let afterDebounce = await transport.statusGets
-        XCTAssertEqual(afterDebounce, 1, "daily debounce: no GET within the window")
-
-        // Token-keyed: a new token clears the debounce and gets its own check.
+        // Clear the DAILY debounce without releasing the latch: a new token resets
+        // nextRelayRefreshAllowed to distantPast. Token B's binding is already
+        // stored, so its enrollment path returns `.ready` with no status GET.
         store.save(
             RelayCredential(
                 keyID: "K", token: tokenB, environment: "production", credential: "BEARER-B",
                 generation: 1, installID: DeviceIdentity.installationID))
         model.simulatePushTokenForTesting(tokenB, environment: "production")
+
+        // A second foreground now — the debounce is cleared, so ONLY the in-flight
+        // latch can stop it. It must not start a second GET.
         model.foregroundPushCheck()
-        await waitUntil({ await transport.statusGets == 2 }, "the new token is checked")
+        let duringLatch = await transport.statusGets
+        XCTAssertEqual(duringLatch, 1, "the in-flight latch blocks the overlap even with the debounce cleared")
+
+        // Release #1 and barrier on its completion.
+        await statusGate.release()
+        await waitUntil({ refreshes == 1 }, "first refresh completed")
+
+        // Latch released and token-B debounce still clear: the next foreground runs
+        // token B's own check.
+        model.foregroundPushCheck()
+        await waitUntil({ await transport.statusGets == 2 }, "token B gets its own check")
+        await waitUntil({ refreshes == 2 }, "token B's refresh completed")
+
+        // Daily debounce: a further check for the SAME token B is skipped.
+        model.foregroundPushCheck()
+        let afterDebounce = await transport.statusGets
+        XCTAssertEqual(afterDebounce, 2, "daily debounce: no third GET within the window")
     }
 
     /// The complete environment-correction sequence, observed at the wire: a
@@ -380,32 +419,79 @@ final class RelayOrchestrationTests: XCTestCase {
         let transport = LockedTransport()
         let model = makeModel(
             RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
-        var registered: [(token: String, environment: String, credential: String?)] = []
-        model.onRegisterPushForTesting = { registered.append(($0, $1, $2)) }
+        let reg = RegistrationLog()
+        reg.attach(to: model)
 
         model.connection.simulateConnectedForTesting()
         // A second Mac's push made the relay correct the environment to sandbox;
-        // the daemon reports that authoritative value on this handshake.
+        // the daemon reports that authoritative value on this handshake — the
+        // documented daemon→app propagation path, the only form in which a second
+        // Mac's correction reaches iOS.
         model.connection.injectForTesting(ack(pushRelay: true, pushEnvironment: "sandbox"))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
-        await waitUntil({ !registered.isEmpty }, "the first registration")
+        await waitUntil({ reg.quiescent && reg.settled >= 1 }, "the first registration settled")
         XCTAssertEqual(
-            registered.last?.environment, "sandbox",
+            reg.scheduled.last?.environment, "sandbox",
             "registered the corrected environment, not the cached production")
         XCTAssertEqual(store.load()?.environment, "sandbox")
 
         // A later reconnect carries no correction. The app must keep sending the
         // corrected value, never resend its cached production one.
-        let before = registered.count
         model.connection.injectForTesting(ack(pushRelay: true))
         model.simulatePushTokenForTesting(tokenA, environment: "production")
-        await waitUntil({ registered.count > before }, "the second registration")
-        XCTAssertEqual(registered.last?.environment, "sandbox", "still sends the corrected env")
+        // Barrier on ALL registration work settling, so no later registration
+        // resending the cached production value could still be in the air.
+        await waitUntil({ reg.quiescent && reg.settled >= 2 }, "all registration work settled")
+        XCTAssertEqual(reg.scheduled.last?.environment, "sandbox", "still sends the corrected env")
         XCTAssertFalse(
-            registered.contains { $0.environment == "production" },
-            "the cached production environment was never resent")
+            reg.scheduled.contains { $0.environment == "production" },
+            "the cached production environment was never resent, in any registration")
         let posts = await transport.posts
         XCTAssertTrue(posts.isEmpty, "no re-enrollment was needed")
+    }
+
+    /// DEF-1(b) at the orchestration boundary: a foreground status check that is
+    /// superseded by a same-token reset and whose transport then THROWS must be
+    /// inert. Because the token (and generation and mode) are unchanged across the
+    /// reset, `applyRelayOutcome`'s own guards accept the result — only the actor's
+    /// `.superseded` verdict keeps the thrown status from clobbering the fresh
+    /// `.ready` the reset's re-enrollment set.
+    func testSupersededStatusThrowDoesNotClobberReady() async {
+        let store = StoreBox(
+            RelayCredential(
+                keyID: "K", token: tokenA, environment: "production", credential: "BEARER",
+                generation: 1, installID: DeviceIdentity.installationID))
+        let statusGate = GateActor()
+        let transport = LockedTransport(
+            challenges: [challengeResponse()], enrolls: [credentialResponse("FRESH")],
+            statuses: [statusResponse("active")],
+            statusGate: { await statusGate.wait() }, statusError: URLError(.timedOut))
+        let model = makeModel(
+            RelayEnrollment(attest: alwaysSupported(), transport: transport, store: store))
+        var refreshDone = false
+        model.onRelayRefreshComplete = { refreshDone = true }
+
+        model.connection.simulateConnectedForTesting()
+        model.connection.injectForTesting(ack(pushRelay: true))
+        model.simulatePushTokenForTesting(tokenA, environment: "production")
+        await waitUntil({ model.relayPushState == .ready }, "the stored binding is ready")
+
+        // A foreground status check parks at its GET (which is primed to throw).
+        model.foregroundPushCheck()
+        await waitUntil({ await transport.statusGets == 1 }, "the status GET parked")
+
+        // A same-token reset supersedes it and re-enrolls fresh → ready again.
+        model.resetNotificationRegistration()
+        await waitUntil(
+            { store.load()?.credential == "FRESH" && model.relayPushState == .ready },
+            "the reset re-enrolled and is ready")
+
+        // Release the parked GET; it throws. The superseded refresh must be inert.
+        await statusGate.release()
+        await waitUntil({ refreshDone }, "the superseded refresh settled")
+        XCTAssertEqual(
+            model.relayPushState, .ready,
+            "a superseded status throw did not clobber the fresh ready state")
     }
 }
 

@@ -246,6 +246,16 @@ final class AppModel {
         /// The full outbound `RegisterPush` — so a test can observe the exact
         /// environment and credential the app sends, not just the token.
         var onRegisterPushForTesting: ((_ token: String, _ environment: String, _ credential: String?) -> Void)?
+        /// Fires **synchronously** the instant `sendRegistration` is called, before
+        /// its Task is scheduled — so a test counts registration *intent* the moment
+        /// it is decided, and a buggy registration that has not run yet is still
+        /// observed. Paired with `onRegisterPushSettledForTesting` this is an
+        /// all-registration-work-settled barrier: `scheduled == settled` proves no
+        /// registration is still in the air.
+        var onRegisterPushScheduledForTesting: ((_ token: String, _ environment: String, _ credential: String?) -> Void)?
+        /// Fires when a `sendRegistration` Task has fully finished — whether it sent
+        /// or was guarded out — so `scheduled == settled` is a true quiescence check.
+        var onRegisterPushSettledForTesting: (() -> Void)?
         /// Fires when a relay outcome has finished being applied — a completion
         /// barrier so a test never sleeps a guess at when a parked flight resumed.
         var onRelayOutcomeApplied: (() -> Void)?
@@ -381,7 +391,15 @@ final class AppModel {
     private func sendRegistration(
         token: String, environment: String, credential: String?, generation: Int
     ) {
+        #if DEBUG
+            // Synchronous with the decision to register, before the Task — so a test
+            // observes registration intent even when the Task has not yet run.
+            onRegisterPushScheduledForTesting?(token, environment, credential)
+        #endif
         Task {
+            #if DEBUG
+                defer { onRegisterPushSettledForTesting?() }
+            #endif
             // The token check is not redundant with `applyRelayOutcome`'s: a hop
             // separates them, and an APNs token change inside it would otherwise
             // send a credential bound to a token that is no longer current. The
