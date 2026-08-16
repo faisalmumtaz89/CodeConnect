@@ -1578,7 +1578,10 @@ struct LinkHealthSheet: View {
                         capabilityRow("Answer approvals", capabilities.canApproveReliably)
                         capabilityRow("Type into the session", capabilities.sendText)
                         capabilityRow("Screen snapshots", capabilities.capture)
-                        capabilityRow("Push notifications", capabilities.push)
+                        // Normalized, not raw `push`: a relay daemon advertises
+                        // `push = false` on purpose and would otherwise read here
+                        // as "no", though it is exactly the daemon that does send.
+                        capabilityRow("Push notifications", capabilities.pushMode != .none)
                         capabilityRow("Holds a certificate", capabilities.tls)
                         capabilityRow(
                             "This connection encrypted", capabilities.tlsActive,
@@ -1615,8 +1618,8 @@ struct LinkHealthSheet: View {
     /// The advertised keys this build does not have a named row for, sorted.
     private var extraAdvertised: [(name: String, value: String, isFlag: Bool, isOn: Bool)] {
         let named: Set<String> = [
-            "approve", "can_approve_reliably", "send_text", "capture", "push", "tls",
-            "tls_active", "fail_mode", "answer_path", "hold_secs",
+            "approve", "can_approve_reliably", "send_text", "capture", "push", "push_relay",
+            "tls", "tls_active", "fail_mode", "answer_path", "hold_secs",
         ]
         return (model.connection.capabilities?.advertisedRows ?? [])
             .filter { !named.contains($0.name) }
@@ -1706,6 +1709,16 @@ struct LinkHealthSheet: View {
                     }
                 }
             }
+            if model.connection.capabilities?.pushMode == .relay {
+                // Relay only: this forgets the App Attest credential and enrolls
+                // again from scratch — the fix for a credential the relay has
+                // stopped trusting. Direct mode holds nothing to reset.
+                CCButton(
+                    "Reset notification registration", variant: .ghost, size: .lg, fullWidth: true
+                ) {
+                    model.resetNotificationRegistration()
+                }
+            }
             CCButton("Reconnect now", variant: .ghost, size: .lg, fullWidth: true) {
                 model.connection.retryNow()
             }
@@ -1729,6 +1742,8 @@ struct LinkHealthSheet: View {
             return "This connection uses the bootstrap token; pair the phone to test push."
         case .noRegisteredToken:
             return "The Mac holds no notification token for this phone yet. Enable notifications, then try again."
+        case .credentialInvalid:
+            return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
             return "Tested a moment ago — try again in \(secs)s."
         case .failed(let reason):
@@ -1749,11 +1764,29 @@ struct LinkHealthSheet: View {
         guard let capabilities = model.connection.capabilities else {
             return "Not connected. The daemon has not told us what it can do."
         }
-        guard capabilities.push else {
+        guard capabilities.pushMode != .none else {
             return "This daemon does not send push notifications, so there is nothing to test."
         }
         guard capabilities.testsPush else {
             return "This daemon predates push testing. Update the Mac to prove the doorbell."
+        }
+        // Relay mode has an enrollment step direct mode does not; its states fold
+        // in here so the one button explains why it is waiting or stuck.
+        if capabilities.pushMode == .relay {
+            switch model.relayPushState {
+            case .unsupported:
+                return "This iPhone can’t use CodeConnect’s push relay — it has no App Attest support. Everything else still works; a Mac with its own Apple push key can notify you directly."
+            case .enrolling:
+                return "Enrolling this iPhone with the push relay…"
+            case .failed(let reason):
+                return "Couldn’t enroll with the push relay: \(reason)"
+            case .idle:
+                // Relay mode with no credential yet: there is nothing for the
+                // daemon to send to, so a test would only report a missing token.
+                return "Setting up notifications on this iPhone…"
+            case .ready:
+                break
+            }
         }
         switch pushPermission {
         case .denied:

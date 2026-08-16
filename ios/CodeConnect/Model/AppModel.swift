@@ -90,6 +90,23 @@ enum DiffState: Sendable {
     }
 }
 
+/// What the relay enrollment path is doing, folded into the push test-button
+/// explanation. Only a relay daemon drives this; direct and off stay `.idle`.
+enum RelayPushState: Equatable, Sendable {
+    /// No relay work in flight — direct mode, off, or before the first handshake.
+    case idle
+    /// Attesting and minting the credential.
+    case enrolling
+    /// A credential is held and registered.
+    case ready
+    /// This device has no App Attest hardware. No relay push, and — by design —
+    /// no insecure fallback; every non-relay affordance stays.
+    case unsupported
+    /// Enrollment failed for a stated, reader-facing reason. Retried on the next
+    /// foreground.
+    case failed(String)
+}
+
 /// Application state: one daemon, N sessions, one event stream.
 @MainActor
 @Observable
@@ -165,7 +182,8 @@ final class AppModel {
 
     init(
         pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
-        settings: AppSettings = AppSettings()
+        settings: AppSettings = AppSettings(),
+        relayEnrollment: RelayEnrollment = RelayEnrollment()
     ) {
         // Startup housekeeping, on the one object the app builds exactly once.
         LegacyCredentials.purge()
@@ -173,6 +191,7 @@ final class AppModel {
         self.connection = DaemonConnection()
         self.settings = settings
         self.cache = cache
+        self.relayEnrollment = relayEnrollment
         // Owned here, not by the Terminal tab: the terminal rides the paired
         // connection, and a view that owns it would drop the session every time
         // SwiftUI rebuilt the tab. One carrier per connection is also what makes
@@ -193,6 +212,11 @@ final class AppModel {
             // only knowable here, once `hello_ack` has landed. Idempotent:
             // re-registration replaces, the daemon keys on the device.
             self.enablePush()
+            // And check the credential's standing now the handshake exists —
+            // a cold launch that activated before it connected skipped the
+            // foreground check, and this is where its prerequisites arrive.
+            // Debounced, so it is at most a daily status GET.
+            self.foregroundRelayRefresh()
         }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
@@ -250,6 +274,24 @@ final class AppModel {
     /// that needs the token is whichever daemon is connected *now*.
     private var latestPushToken: (token: String, environment: String)?
 
+    /// Owns the App Attest key, the relay credential, and every operation that
+    /// mints or repairs it. Kept apart from `pushRegistrar` (permission + token)
+    /// because they are different trust boundaries: one talks to Apple for a
+    /// routing token, the other proves this install to the relay for a bearer.
+    /// Injected so a test can drive the orchestration against a scripted relay
+    /// and a fake attester.
+    private let relayEnrollment: RelayEnrollment
+    /// What the relay path is doing, for the test-button explanation. Relay mode
+    /// only; a direct-key daemon never leaves `.idle`.
+    private(set) var relayPushState: RelayPushState = .idle
+    /// Earliest the next foreground status check may run. Success caps it to
+    /// daily; a failure backs off a few minutes so a flaky relay does not pin the
+    /// foreground. `distantPast` so the first foreground after launch checks.
+    private var nextRelayRefreshAllowed = Date.distantPast
+    /// A status check is in flight. Guards against a second scene activation
+    /// firing an overlapping GET before the first has set the debounce.
+    private var relayRefreshInFlight = false
+
     /// The registrar's callbacks and the failure observer, installed exactly
     /// once. This used to live inside `enablePush`, which is called per
     /// handshake — every reconnect stacked another observer and another
@@ -275,47 +317,133 @@ final class AppModel {
     /// Apple issued (or re-issued) a token: remember it, then hand it to
     /// whichever daemon is connected right now.
     private func acceptPushToken(_ token: String, environment: String) {
+        // A new token is a new binding; the daily status debounce is about the
+        // *previous* token and must not suppress the first check of this one.
+        if latestPushToken?.token != token { nextRelayRefreshAllowed = .distantPast }
         latestPushToken = (token, environment)
         deliverPushToken()
     }
 
-    /// Whether the *current* connection can accept a push registration: the
-    /// daemon advertises push, and this session has a device row to store
-    /// the token against. One definition, consulted by both the ask and the
-    /// delivery — Apple's callback arrives whenever Apple pleases, including
-    /// after a switch to a Mac this predicate says no to.
-    private var pushEligible: Bool {
-        connection.capabilities?.push == true && connection.helloAck?.deviceID != nil
+    /// The one push decision the rest of the model reads, normalized from the
+    /// wire with direct precedence. Bootstrap/static connections have no
+    /// capabilities and resolve to `.none`.
+    private var pushMode: PushMode {
+        connection.capabilities?.pushMode ?? .none
     }
 
-    /// Send the cached token to the current connection's device row. Safe to
-    /// repeat: the daemon upserts by device, so re-delivery replaces rather
-    /// than accumulates — which is exactly what a re-pair or a retried flap
-    /// needs. Gated here, at the single choke point, not only at the
-    /// callers: the APNs callback path used to deliver unconditionally, and
-    /// a token that began its journey against an eligible Mac would land on
-    /// whatever ineligible daemon was connected by the time Apple answered.
+    /// Whether the *current* connection can accept a push registration: the
+    /// daemon sends push in *some* mode, and this session has a device row to
+    /// store the token against. `pushMode != .none` replaces the old raw
+    /// `capabilities.push` check so a relay daemon (which advertises `push =
+    /// false`) is eligible too. A static-token session has no device row and is
+    /// refused here, so no prompt or enrollment is ever attempted for it.
+    private var pushEligible: Bool {
+        pushMode != .none && connection.helloAck?.deviceID != nil
+    }
+
+    /// Send the cached token to the current connection's device row. Branches on
+    /// the normalized mode: a direct-key daemon takes the legacy token-only
+    /// registration and the relay is never contacted; a relay daemon takes the
+    /// App Attest credential, enrolling first if one is not already held. Off and
+    /// static resolve to `.none` and do nothing. Safe to repeat: the daemon
+    /// upserts by device.
     private func deliverPushToken() {
         guard let latest = latestPushToken, pushEligible else { return }
-        // The send happens a hop later, and the connection can change inside
-        // that hop — a re-pair completing, a handshake replacing the socket.
-        // The eligibility that mattered at the guard is re-established at the
-        // moment of sending, bound to this connection's generation so a
-        // *newer* connection is never handed a delivery that was judged
-        // against an older one. The observation seam sits at this recheck —
-        // the real decision point — not at the guard above.
         let generation = connection.generation
+        switch pushMode {
+        case .direct:
+            // Byte-identical to the pre-relay flow: no credential, the wire key
+            // omitted entirely. The relay is never reached in direct mode.
+            sendRegistration(
+                token: latest.token, environment: latest.environment,
+                credential: nil, generation: generation)
+        case .relay:
+            deliverViaRelay(token: latest.token, environment: latest.environment,
+                generation: generation)
+        case .none:
+            return
+        }
+    }
+
+    /// The socket write, bound to the connection generation it was judged under.
+    /// A re-pair or a handshake replacing the socket inside the hop bumps the
+    /// generation, and a delivery judged against an older one is dropped rather
+    /// than landing on a daemon it was never eligible for.
+    private func sendRegistration(
+        token: String, environment: String, credential: String?, generation: Int
+    ) {
         Task {
-            guard connection.generation == generation, pushEligible else { return }
+            // The token check is not redundant with `applyRelayOutcome`'s: a hop
+            // separates them, and an APNs token change inside it would otherwise
+            // send a credential bound to a token that is no longer current. The
+            // direct path passes `credential == nil` and a token that cannot go
+            // stale mid-hop the same way, but the guard is uniform and cheap.
+            guard connection.generation == generation, pushEligible,
+                latestPushToken?.token == token
+            else { return }
             #if DEBUG
-                onPushDeliveryAttempted?(latest.token)
+                onPushDeliveryAttempted?(token)
             #endif
             do {
                 try await connection.send(
-                    .registerPush(token: latest.token, environment: latest.environment))
+                    .registerPush(
+                        token: token, environment: environment, relayCredential: credential))
             } catch {
                 pushFailure = error.localizedDescription
             }
+        }
+    }
+
+    /// Acquire (reuse, rebind, or freshly enroll) the relay credential for this
+    /// token, then register it — but only if it still belongs on the connection
+    /// and the token that asked for it. The enrollment await is where a
+    /// relay→direct switch or an APNs token change can slip in; the recheck in
+    /// `applyRelayOutcome` is what keeps a stale relay result from registering
+    /// over the current token.
+    private func deliverViaRelay(token: String, environment: String, generation: Int) {
+        let daemonEnvironment = connection.helloAck?.pushEnvironment
+        if relayPushState != .ready { relayPushState = .enrolling }
+        Task {
+            let outcome = await relayEnrollment.credential(
+                token: token, environment: environment, daemonEnvironment: daemonEnvironment)
+            applyRelayOutcome(outcome, forToken: token, generation: generation)
+        }
+    }
+
+    /// The one place a relay outcome becomes UI state and, when it should, a
+    /// registration. The guard is the single-flight's downstream twin: it rejects
+    /// a result whose connection moved, whose eligibility lapsed, or whose token
+    /// is no longer current, so a late credential is remembered (it is already
+    /// stored) but never registered against the wrong tuple.
+    private func applyRelayOutcome(
+        _ outcome: RelayEnrollment.Outcome, forToken token: String, generation: Int
+    ) {
+        guard connection.generation == generation, pushEligible,
+            pushMode == .relay, latestPushToken?.token == token
+        else {
+            if case .ready = outcome { relayPushState = .ready }
+            return
+        }
+        switch outcome {
+        case .ready(let credential):
+            relayPushState = .ready
+            sendRegistration(
+                token: credential.token, environment: credential.environment,
+                credential: credential.credential, generation: generation)
+        case .unsupported:
+            relayPushState = .unsupported
+        case .tokenInvalid:
+            // The relay retired this APNs token. Drop it and ask Apple for a new
+            // one; the fresh token enrolls itself when it arrives.
+            relayPushState = .idle
+            latestPushToken = nil
+            pushRegistrar.registerForRemoteNotifications()
+        case .failed(let reason):
+            relayPushState = .failed(reason)
+        case .superseded:
+            // A newer request owns the binding now; this result is inert. Leave
+            // the state to whatever that newer request sets.
+            break
         }
     }
 
@@ -339,6 +467,69 @@ final class AppModel {
             pushRegistrar.requestAndRegister()
         }
         deliverPushToken()
+    }
+
+    /// Foreground housekeeping for the relay path, debounced and backed off.
+    /// Re-reads notification authorization (so a Settings toggle takes effect
+    /// without a re-prompt) and checks the credential's standing with the relay.
+    /// Called on scene activation.
+    func foregroundPushCheck() {
+        reReadNotificationAuthorization()
+        foregroundRelayRefresh()
+    }
+
+    /// Deny-in-app, enable-in-Settings, return to the app: Settings gives no
+    /// callback, so on foreground the app re-reads the live authorization and, if
+    /// it is now granted but no token is in hand, registers for one **without**
+    /// prompting again. One launch, no second dialog.
+    private func reReadNotificationAuthorization() {
+        guard pushEligible, latestPushToken == nil else { return }
+        Task {
+            guard await pushAuthorizationStatus() == .authorized else { return }
+            pushRequestedThisLaunch = true
+            pushRegistrar.registerForRemoteNotifications()
+        }
+    }
+
+    /// Ask the relay what became of the stored credential and act on it: keep,
+    /// rotate via assertion, re-enroll, or surrender a retired token. At most
+    /// daily on success; a short backoff on failure. Runs on foreground *and*
+    /// once a relay handshake completes, so a cold launch that connects after
+    /// activation still gets its one check this session.
+    private func foregroundRelayRefresh() {
+        guard pushMode == .relay, pushEligible, let latest = latestPushToken,
+            !relayRefreshInFlight, Date() >= nextRelayRefreshAllowed
+        else { return }
+        // Claim the window before the await, so a second activation that lands
+        // mid-check does not fire an overlapping status GET.
+        relayRefreshInFlight = true
+        nextRelayRefreshAllowed = Date().addingTimeInterval(24 * 60 * 60)
+        let generation = connection.generation
+        Task {
+            let outcome = await relayEnrollment.refresh(
+                token: latest.token, environment: latest.environment)
+            applyRelayOutcome(outcome, forToken: latest.token, generation: generation)
+            // A failure earns a short retry rather than the full day.
+            switch outcome {
+            case .ready, .unsupported, .superseded: break
+            case .failed, .tokenInvalid:
+                nextRelayRefreshAllowed = Date().addingTimeInterval(5 * 60)
+            }
+            relayRefreshInFlight = false
+        }
+    }
+
+    /// "Reset notification registration." Forgets the local relay binding and
+    /// re-drives the flow from scratch on the current connection: a fresh key, a
+    /// fresh attestation, a fresh credential. The stored App Attest key is
+    /// discarded, so this is the in-app equivalent of the plan's `reenroll`.
+    func resetNotificationRegistration() {
+        Task {
+            await relayEnrollment.reset()
+            relayPushState = .idle
+            nextRelayRefreshAllowed = .distantPast
+            deliverPushToken()
+        }
     }
 
     /// Where a tapped notification lands.
@@ -511,6 +702,7 @@ final class AppModel {
                     diff, parsed: UnifiedDiff.parse(diff.unified), fetchedAt: Date())
             }
             applyCachedFixture()
+            applyPushStateFixture()
             // Link health is measured from when a frame last *arrived*, so a
             // fixture run needs frames to keep arriving or the link correctly
             // goes stale mid-test and disables every action.
@@ -561,6 +753,31 @@ final class AppModel {
             // already passed — the render harness is photographing the earned
             // state, not the launch that leads to it.
             fleetCacheRestoredAt = .distantPast
+        }
+
+        /// Test seam: **`-CC_PUSH_STATE enrolling|failed|unsupported|ready`** puts
+        /// the connection in relay mode and pins the enrollment state, so the push
+        /// test-button ladder and the reset action can be photographed. A relay
+        /// enrollment cannot be arranged in a render pass — it needs App Attest
+        /// hardware and a live relay — so the state is staged, exactly as the
+        /// cached-fleet and snapshot seams stage theirs.
+        private func applyPushStateFixture() {
+            guard let raw = UserDefaults.standard.string(forKey: "CC_PUSH_STATE") else { return }
+            connection.injectForTesting(
+                .helloAck(
+                    HelloAck(
+                        protocolVersion: 1, protocolMinor: 14, serverTime: "",
+                        capabilities: Capabilities(
+                            pushRelay: true, extra: ["test_push": .bool(true)]),
+                        deviceToken: nil, deviceID: "render-device", deviceName: "iPhone",
+                        pushEnvironment: "production")))
+            switch raw {
+            case "enrolling": relayPushState = .enrolling
+            case "failed": relayPushState = .failed("The relay could not be reached.")
+            case "unsupported": relayPushState = .unsupported
+            case "ready": relayPushState = .ready
+            default: break
+            }
         }
     #endif
 
@@ -805,6 +1022,7 @@ final class AppModel {
             refreshFleet()
             startTicking()
             startFleetRefresh()
+            foregroundPushCheck()
         case .background, .inactive:
             flushCache()
             tickTask?.cancel()

@@ -267,7 +267,7 @@ enum Fixtures {
     /// follows it for that reason. The release sample fleet does not use
     /// this ack; see `sampleHelloAckJSON`.
     private static let helloAckJSON = """
-        {"type":"hello_ack","protocol_version":1,"protocol_minor":13,\
+        {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
         "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
@@ -287,7 +287,7 @@ enum Fixtures {
     /// is answered in sample vocabulary, not hidden — and `diff` is true
     /// because the sample preloads its own.
     private static let sampleHelloAckJSON = """
-        {"type":"hello_ack","protocol_version":1,"protocol_minor":13,\
+        {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
         "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":false,\

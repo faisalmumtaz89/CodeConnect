@@ -12,6 +12,18 @@
 	     fields and enrollment records named by the privacy policy at
 	     codeconnect.sh/privacy - the same claims, kept honest together.
 
+	     Two data types are declared, both transmitted only to that relay and
+	     only when relay-backed notifications are enabled. The APNs token is a
+	     device-level identifier the relay needs to address this phone, so it is
+	     declared as Device ID. The App Attest enrollment record - a verified
+	     public key and receipt, an assertion counter, token and credential
+	     hashes, status and timestamps - has no personal-data category on Apple's
+	     list; it is content-free security metadata bound to a token, not a name,
+	     and is declared as Other Data. Both are used solely for app
+	     functionality (delivering notifications), are not linked to a user
+	     identity because there is no account, and are never used for tracking -
+	     matching the privacy policy exactly.
+
 	     The single declared API is UserDefaults, used only for the app's own
 	     state (settings, cache keying, install identity). CA92.1 is the
 	     "information accessible only to the app itself" reason. Nothing else
@@ -24,7 +36,32 @@
 	<key>NSPrivacyTrackingDomains</key>
 	<array/>
 	<key>NSPrivacyCollectedDataTypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherDataTypes</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>

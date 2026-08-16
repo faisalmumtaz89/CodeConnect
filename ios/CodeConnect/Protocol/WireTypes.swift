@@ -56,6 +56,23 @@ enum Wire {
 
 // MARK: - Scalars
 
+/// How this connection's daemon delivers push, normalized from the wire's two
+/// raw flags. Computed once per handshake by `Capabilities.pushMode` and read
+/// everywhere a push decision is made, so `push` and `pushRelay` are never
+/// consulted directly outside that one property.
+///
+/// - `direct`: the daemon holds its own APNs key and sends straight to Apple; a
+///   plain token registration is all it needs, and the relay is never contacted.
+/// - `relay`: the daemon sends through the CodeConnect relay, which requires an
+///   App Attest-enrolled credential bound to this phone's `(token, environment)`.
+/// - `none`: this connection does not send push (off, or a bootstrap/static
+///   connection that has no device row).
+enum PushMode: Equatable, Sendable {
+    case none
+    case direct
+    case relay
+}
+
 enum EventSource: String, Codable, Sendable, Hashable {
     case hook, transcript, daemon, pty
 
@@ -360,6 +377,12 @@ struct Capabilities: Codable, Sendable, Hashable {
     let sendText: Bool
     let capture: Bool
     let push: Bool
+    /// A minor-14 relay daemon advertises this instead of `push`: it sends
+    /// through the CodeConnect relay, which needs an enrolled credential the
+    /// legacy token-only flow cannot supply. A relay daemon advertises `push =
+    /// false` on purpose so an older app never prompts and registers a
+    /// credential-less token. See `pushMode`.
+    let pushRelay: Bool
     let tls: Bool
     /// Exactly what arrived, unknown keys included.
     let advertised: [String: JSONValue]
@@ -372,6 +395,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         sendText: Bool = false,
         capture: Bool = false,
         push: Bool = false,
+        pushRelay: Bool = false,
         tls: Bool = false,
         extra: [String: JSONValue] = [:]
     ) {
@@ -382,6 +406,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         self.sendText = sendText
         self.capture = capture
         self.push = push
+        self.pushRelay = pushRelay
         self.tls = tls
         var map = extra
         map["can_approve_reliably"] = .bool(canApproveReliably)
@@ -391,6 +416,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         map["send_text"] = .bool(sendText)
         map["capture"] = .bool(capture)
         map["push"] = .bool(push)
+        map["push_relay"] = .bool(pushRelay)
         map["tls"] = .bool(tls)
         advertised = map
     }
@@ -406,6 +432,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         sendText = raw["send_text"]?.boolValue ?? false
         capture = raw["capture"]?.boolValue ?? false
         push = raw["push"]?.boolValue ?? false
+        pushRelay = raw["push_relay"]?.boolValue ?? false
         tls = raw["tls"]?.boolValue ?? false
     }
 
@@ -450,6 +477,17 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// `test_push` is answerable — distinct from `push`, which a minor-6 daemon
     /// advertises without understanding the test request.
     var testsPush: Bool { advertises(["test_push"]) }
+    /// The one push decision the rest of the app reads, normalized from the two
+    /// raw flags with **direct precedence**: a daemon that somehow advertised
+    /// both is a direct-key daemon, and the direct path needs no relay
+    /// credential. Every push gate — eligibility, registration, the test button,
+    /// the trust-screen row — keys off this, never off `push` or `pushRelay`
+    /// alone, so the two flags cannot disagree anywhere downstream.
+    var pushMode: PushMode {
+        if push { return .direct }
+        if pushRelay { return .relay }
+        return .none
+    }
     /// This particular connection is encrypted — a different fact from `tls`,
     /// which only says the listener *holds* a certificate. The daemon accepts
     /// both schemes on one port during the migration, so the phone is entitled
@@ -900,7 +938,14 @@ enum ClientMessage: Sendable {
     /// "Push me here." Sent whenever Apple issues a token, not only at
     /// handshake: permission can be granted mid-session and the token is
     /// reissued on reinstall and on restore-from-backup.
-    case registerPush(token: String, environment: String)
+    ///
+    /// `relayCredential` is the App Attest-issued bearer, present only for a
+    /// relay daemon and only once enrollment has minted it for this exact
+    /// `(token, environment)`. Absent for a direct-key daemon, which the relay
+    /// path never touches — a `nil` here is the wire's `relay_credential` key
+    /// being omitted entirely, so an old daemon that never learned the key is
+    /// unaffected.
+    case registerPush(token: String, environment: String, relayCredential: String?)
     /// Open a live terminal on a hosted session. Minor 13.
     ///
     /// By uid, like every other session-scoped message: a tmux name is reused,
@@ -932,6 +977,7 @@ extension ClientMessage: Encodable {
         case sessionUID = "session_uid"
         case afterSeq = "after_seq"
         case environment
+        case relayCredential = "relay_credential"
         case requestID = "request_id"
         case payloadHash = "payload_hash"
         case decision
@@ -1019,10 +1065,15 @@ extension ClientMessage: Encodable {
             try c.encode("capture", forKey: .type)
             try c.encode(session, forKey: .sessionID)
             try c.encodeIfPresent(lines, forKey: .lines)
-        case .registerPush(let token, let environment):
+        case .registerPush(let token, let environment, let relayCredential):
             try c.encode("register_push", forKey: .type)
             try c.encode(token, forKey: .token)
             try c.encode(environment, forKey: .environment)
+            // Omitted, never null, when absent: an old daemon's `deny_unknown`
+            // is not in play here, but a missing key is what "direct, no
+            // credential" means on the wire, and a present-but-null would read
+            // as "relay, credential lost".
+            try c.encodeIfPresent(relayCredential, forKey: .relayCredential)
         case .terminalAttach(
             let attachmentID, let sessionUID, let cols, let rows, let outputCredit):
             try c.encode("terminal_attach", forKey: .type)
@@ -1073,6 +1124,14 @@ struct HelloAck: Sendable, Hashable {
     /// What `codeconnect devices` lists this phone as, and what `codeconnect revoke` takes. May
     /// differ from the requested name when that one was taken.
     var deviceName: String?
+    /// The daemon's current authoritative APNs environment for this device's
+    /// registered token, absent when no token is registered. Minor 14. The relay
+    /// binding is the single authority for a token's environment (§4); a relay
+    /// send against the wrong advisory environment is corrected downstream and
+    /// the daemon CAS-persists the truth, then reports it here. The app compares
+    /// this to its cached tuple on every handshake and **persists a difference
+    /// rather than resending its stale value** — the daemon→app correction path.
+    var pushEnvironment: String?
 }
 
 /// What became of a `delete_session`.
@@ -1148,6 +1207,12 @@ enum TestPushResult: Decodable, Sendable, Hashable {
     case pushUnconfigured
     case notPairedDevice
     case noRegisteredToken
+    /// The relay refused the daemon's bearer for this token — expired, revoked,
+    /// below the generation floor, or bound to a different token. The token
+    /// itself is intact; the phone must re-enroll to mint a fresh credential.
+    /// Distinct from `noRegisteredToken`, which means the Mac holds no token at
+    /// all. Minor 14.
+    case credentialInvalid
     case rateLimited(retryAfterSecs: UInt32)
     case failed(reason: String)
     case unknown(status: String)
@@ -1168,6 +1233,7 @@ enum TestPushResult: Decodable, Sendable, Hashable {
         case "push_unconfigured": self = .pushUnconfigured
         case "not_paired_device": self = .notPairedDevice
         case "no_registered_token": self = .noRegisteredToken
+        case "credential_invalid": self = .credentialInvalid
         case "rate_limited":
             self = .rateLimited(
                 retryAfterSecs: try c.decodeIfPresent(UInt32.self, forKey: .retryAfterSecs) ?? 30)
@@ -1283,6 +1349,7 @@ extension ServerMessage: Decodable {
         case deviceID = "device_id"
         case sessionUID = "session_uid"
         case deviceName = "device_name"
+        case pushEnvironment = "push_environment"
         case sessions
         case event
         case requestID = "request_id"
@@ -1313,7 +1380,8 @@ extension ServerMessage: Decodable {
                         ?? Capabilities(),
                     deviceToken: try c.decodeIfPresent(String.self, forKey: .deviceToken),
                     deviceID: try c.decodeIfPresent(String.self, forKey: .deviceID),
-                    deviceName: try c.decodeIfPresent(String.self, forKey: .deviceName)))
+                    deviceName: try c.decodeIfPresent(String.self, forKey: .deviceName),
+                    pushEnvironment: try c.decodeIfPresent(String.self, forKey: .pushEnvironment)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
         case "sessions":

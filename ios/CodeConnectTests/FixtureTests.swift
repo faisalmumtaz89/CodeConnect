@@ -12,7 +12,7 @@ final class FixtureTests: XCTestCase {
     /// fixture's `hello_ack` is a literal, so this is the one place that says
     /// out loud which daemon it is pretending to be, and raising the Mac's
     /// minor without raising this one is what the assertion below catches.
-    private let currentProtocolMinor: UInt32 = 13
+    private let currentProtocolMinor: UInt32 = 14
 
     func testEveryFixtureFrameDecodes() {
         let frames = Fixtures.frames()

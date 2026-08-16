@@ -9,5 +9,13 @@
 	     registers, because the daemon cannot tell from the token itself. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- App Attest. Like aps-environment, `development` here attests against
+	     Apple's sandbox App Attest servers, and a TestFlight or App Store build is
+	     re-signed to `production` automatically. The relay verifies the matching
+	     AAGUID per namespace, so the two stay paired: a development build enrolls
+	     on the sandbox namespace, a distribution build on production. Requires the
+	     App Attest capability on the App ID in the Apple Developer portal. -->
+	<key>com.apple.developer.devicecheck.appattest-environment</key>
+	<string>development</string>
 </dict>
 </plist>
