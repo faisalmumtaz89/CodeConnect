@@ -1097,11 +1097,13 @@ fails the suite instead of failing silently in production.
   dropped, and a test reports the real failure. Recovery needs no restart. The
   alternative — selecting the stub because one request failed — would suppress
   every registration until somebody noticed.
-* **Relay mode has no phone half yet.** The daemon stores a relay credential and
-  presents it on every send, but nothing on the iPhone obtains one: App Attest
-  enrolment is the next phase. Until it ships, a relay-mode daemon is reachable
-  only with a credential seeded by hand, and a phone that registers without one
-  is refused with a reason rather than filed as a device that will never ring.
+* **Relay mode needs a phone that has enrolled.** The daemon stores a relay
+  credential and presents it on every send; the credential is minted on the
+  phone, which attests to the relay with App Attest and hands the daemon the
+  opaque bearer over the paired socket. A registration carrying no credential is
+  refused with a reason rather than filed as a device that will never ring — so a
+  phone whose App Attest is unsupported, or which has not yet enrolled, gets no
+  relay push, and the direct-key override stays available on that Mac.
 * **A certificate from Tailscale depends on the tailnet.** `tailscale cert`
   needs HTTPS Certificates enabled for the tailnet, and issues only for this
   node's MagicDNS name. Without it the daemon serves `ws://` and says so; a

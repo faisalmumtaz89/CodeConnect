@@ -1,9 +1,29 @@
 # CodeConnect Push Gateway: Architecture and Phased Implementation Plan
 
-**Status:** Proposed  
+**Status:** Implemented. Phases 0–3 complete and codex-approved; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is complete; the Phase 4 operational items (seven-day soak, alerting, periodic drills) remain to run — see [Implementation status](#implementation-status).  
 **Baseline:** repository HEAD `c2ffdf2`  
 **Target scale:** 1,000–10,000 users  
 **Decision:** Add a small CodeConnect-operated push relay as the default customer path. Keep direct APNs delivery as an explicit developer override.
+
+## Implementation status
+
+Recorded 2026-08-17. This section is the empirical status of the plan below; the numbered sections describe the design and remain the specification. The wire protocol is major 1, minor **14** (`mac/protocol/src/lib.rs`).
+
+**Phases 0–3 — complete, codex-approved.**
+
+- **Phase 0 (privacy truth):** `site/privacy.md`, `site/support.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`, and the Mac/iOS READMEs distinguish direct from relay-backed notifications and carry the relay data inventory and retention. `ios/CodeConnect/PrivacyInfo.xcprivacy` declares the relay enrollment record.
+- **Phase 1 (relay service):** `mac/push-core` and `mac/push-relay` build and test; `ops/push-relay` holds the Render deployment assets. App Attest verification, the generic-only payload (`payload.rs`, title always `CodeConnect`), hashes-only SQLite state, rate limits, the `send`/`enrollment` kill switches, and encrypted backup/restore are implemented.
+- **Phase 2 (daemon + minor 14):** `PushMode::{Off, Direct, Relay}` (`mac/ccd/src/apns.rs`), `push_enabled` (default `true`), `mac/ccd/src/relay_sender.rs` with its content-free DTO, the `devices.push_credential` migration, and the minor-14 protocol fields are implemented; the shared push queue is reused across direct and relay transports.
+- **Phase 3 (iOS App Attest):** `ios/CodeConnect/Net/RelayEnrollment.swift`, `Store/RelayCredential.swift`, the App Attest entitlement, `PushMode` normalization with direct precedence, and foreground credential recovery are implemented.
+
+**Proven end-to-end on real hardware.**
+
+- Development device, **sandbox**: real App Attest → relay → sandbox APNs → device (banner shown, Apple receipt returned).
+- TestFlight, **production**: real App Attest → relay → production APNs → device (the daemon logged registration for production notifications).
+
+**Relay deployment.** Live at `codeconnect-push-relay.onrender.com` (Render, single always-on instance), configured for production: production and sandbox APNs enabled, enrollment enabled, App Attest bound to the configured App ID.
+
+**Acceptance gates.** Gates 1–4 (Phases 1–3) are met, as is the Phase-4 documentation gate. The remaining Phase-4 items are operational and **pending**: the seven-day soak, the alerting setup, and the periodic drills (APNs-key rotation, credential-generation reset, kill switches, database restore, TLS renewal, rollback). The staged rollout order in §6 is annotated with what is done and what remains.
 
 ## 1. Verified baseline
 
@@ -653,14 +673,16 @@ The container build context is `mac/` so workspace manifests and path dependenci
 
 #### Rollout order
 
-1. Land corrected privacy disclosures.
-2. Deploy the relay dark with enrollment and send kill switches available.
-3. Complete sandbox and TestFlight soak.
-4. Publish the iOS app with App Attest and minor-14 understanding first.
-5. Confirm the app release and relay backend form a complete path.
-6. Release the minor-14 daemon with default relay mode.
-7. Enable production sends and watch acceptance, rejection, auth, rate-limit, and latency metrics.
-8. Keep direct-key override operational throughout.
+This is the operational rollout plan of record. Status is marked per step as of 2026-08-17 — **DONE** where proven, **PENDING** where it remains to execute.
+
+1. Land corrected privacy disclosures. — **DONE** (`site/privacy.md`, `site/support.md`, `ios/CodeConnect/PrivacyInfo.xcprivacy`, and the doc set).
+2. Deploy the relay dark with enrollment and send kill switches available. — **DONE** (live on Render; `RELAY_ENROLLMENT_ENABLED` and `RELAY_SEND_ENABLED` kill switches present).
+3. Complete sandbox and TestFlight soak. — **PARTIAL**: sandbox and TestFlight delivery are proven on real hardware; the seven-day production soak is **PENDING**.
+4. Publish the iOS app with App Attest and minor-14 understanding first. — **PENDING** (App Store release).
+5. Confirm the app release and relay backend form a complete path. — **PENDING** (follows step 4).
+6. Release the minor-14 daemon with default relay mode. — **PENDING** (public daemon release).
+7. Enable production sends and watch acceptance, rejection, auth, rate-limit, and latency metrics. — **PENDING** (metrics watch begins at production enablement).
+8. Keep direct-key override operational throughout. — **DONE and ongoing** (`PushMode::Direct` takes precedence; the direct-key path is unchanged).
 
 #### Deliberately not built
 
