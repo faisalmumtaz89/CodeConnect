@@ -756,8 +756,10 @@ phone telling the daemon where to send a notification; `>= 7` adds
 `delete_session`; `>= 8` through `>= 10` cover the diff, the composer and the
 native slash-command adapters; `>= 11` adds `SessionSummary.project_label` —
 the daemon resolving what a run is *called* (the last component of its working
-directory), so that every surface that names a run, including a notification
-the phone cannot compose for itself, uses one string; `>= 13` adds the live
+directory), so that every surface that names a run, including a **direct**
+notification the phone cannot compose for itself, uses one string (relay
+notifications, introduced at minor 14, deliberately carry no project label and
+are titled `CodeConnect`); `>= 13` adds the live
 terminal; `>= 14` adds relay-backed push — the `push_relay` capability,
 `register_push.relay_credential`, the `credential_invalid` test result, and
 `hello_ack.push_environment`, which is the daemon's authoritative APNs

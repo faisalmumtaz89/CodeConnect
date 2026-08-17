@@ -343,8 +343,10 @@ sends the attestation to the daemon and the daemon never mints a credential.
 **direct precedence**, and every push UI and flow check reads that mode rather
 than raw `capabilities.push`. A **direct**-key daemon makes no relay request at
 all. On foreground, debounced, the app rechecks the credential and acts on the
-relay's status — keep it, mint a replacement by assertion, re-enroll a fresh key,
-or (`token_invalid`) drop the cached tuple and register with APNs again. A device
+relay's status: `active` keeps the bearer; `reissue` asks the relay to mint a
+replacement after an App Attest assertion; `reenroll` — including a bearer below
+the generation floor — performs fresh App Attest enrollment with a new key;
+`token_invalid` drops the cached tuple and registers with APNs again. A device
 whose App Attest is unsupported keeps every other app feature and simply receives
 no relay push. `hello_ack.push_environment` is the daemon's authoritative APNs
 environment for the registered token; the app persists a correction rather than

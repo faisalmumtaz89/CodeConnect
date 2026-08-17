@@ -209,11 +209,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     reader: nobody has said what this project is. A client says so rather
 ///     than falling back to the tmux name, which is a reused counter.
 ///     Additive; an older client ignores the field and an older daemon omits it.
-///     The notification now names that project and nothing else: the title is
-///     the label (or `CodeConnect` when there is none), and the body is one of
-///     four canned sentences chosen by the hook's kind — or `{n} agents need
-///     you` once more than one session is blocked. The tool name and the
-///     risk class it used to carry are gone.
+///     The **direct** notification names that project, but only while it speaks
+///     for a single run: with no other run blocked the title is the triggering
+///     run's label; with exactly one run blocked it is that sole blocked run's
+///     label; with more than one blocked the project label is deliberately
+///     suppressed — the title is `CodeConnect` and the body is `{n} agents need
+///     you`. A single-run title with no label is `CodeConnect` too, and each
+///     single-run body is one of four canned sentences chosen by the hook's
+///     kind. The tool name and the risk class it used to carry are gone. (The
+///     relay notification added at minor 14 deliberately carries no project
+///     label and is titled `CodeConnect`.)
 ///     A tap opens the phone's decision list when an approval rang, and the
 ///     fleet otherwise — the list, never a particular card. The payload carries
 ///     no routing, session, request or device identifier, only which of four
@@ -227,8 +232,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     answers. A client may *add* to it where a screen has to tell two runs in
 ///     one project apart; it may not replace it. A run that changes directory
 ///     while a card is open takes that card with it: every writer of a run's
-///     `cwd` relabels the cards it is holding, so a doorbell names the project
-///     the run is in when it rings, which is the project the app is showing.
+///     `cwd` relabels the cards it is holding, so a single-run doorbell names the
+///     project the run is in when it rings, which is the project the app is
+///     showing (a fleet doorbell, with more than one run blocked, is titled
+///     `CodeConnect` and names no project).
 ///
 ///     **One bound, stated rather than implied.** A card takes its run's name
 ///     when it is filed, and filing is not atomic with the relabel: a card
@@ -240,10 +247,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     event log, and the cost of the alternative is paid by every hook.
 ///   * `14` — a daemon with **no Apple key of its own** can ring a phone. The
 ///     key cannot be shipped to a customer's Mac, so a CodeConnect-operated
-///     relay holds it: the daemon hands over a closed event document — which of
-///     four kinds rang, how many runs are blocked, the device's token and an
-///     opaque credential — and the relay composes a generic alert and talks to
-///     Apple. Every decision about *whether* to ring stays on the Mac. Four
+///     relay holds it: the daemon hands over a closed event document — the
+///     schema, the device's token and its environment, and either which of four
+///     kinds rang with how many runs are blocked or the fixed test variant —
+///     with the opaque credential riding only in the `Authorization` header,
+///     never in the body; the relay composes a generic alert titled
+///     `CodeConnect`, carrying no project label, and talks to Apple. Every
+///     decision about *whether* to ring stays on the Mac. Four
 ///     additions, and a client written against minor 13 needs none of them:
 ///       - [`ws::Capabilities::push_relay`] — this daemon sends through the
 ///         relay. **One-hot with the legacy `push`,** which from here means
@@ -259,10 +269,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         on every send; it never mints one, and never sees the attestation
 ///         that authorised it.
 ///       - [`ws::TestPushResult::CredentialInvalid`] — the relay refused the
-///         credential. Distinct from `no_registered_token`, and the distinction
-///         is the whole point: the APNs token is still good, so a client that
-///         read this as a dead token would throw away a working registration
-///         instead of renewing a bearer.
+///         credential. Distinct from `no_registered_token`: what the relay
+///         refused is the bearer, not the APNs registration, so a client must
+///         not clear the token on this alone. It is not proof the token is good
+///         either — a bearer bound to another token returns it, and so does a
+///         binding the relay already retired on an APNs `410`. The repair is to
+///         renew the bearer, not to throw away a token that may still be live.
 ///       - `hello_ack.push_environment` — the daemon's authoritative APNs
 ///         environment for this device's registered token, absent when no token
 ///         is registered. The relay's binding is the single authority for a

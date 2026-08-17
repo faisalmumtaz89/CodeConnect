@@ -729,22 +729,31 @@ pub enum TestPushResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         apns_id: Option<String>,
     },
-    /// The daemon has no APNs key configured; the sender is the logging stub.
+    /// Push mode is `Off`, so the sender is the logging stub — push was
+    /// disabled, a requested direct configuration was partial or its key
+    /// unreadable, or the relay HTTPS client could not be constructed. (No APNs
+    /// key on its own selects relay mode, not this.)
     PushUnconfigured,
     /// This connection authenticated with the static bootstrap token, so there
     /// is no device row — and no token — to send to.
     NotPairedDevice,
-    /// The device exists but has never registered an APNs token (notifications
-    /// were never enabled, or registration has not completed yet).
+    /// No complete push registration: either no token is stored (notifications
+    /// were never enabled, or registration has not completed yet), or relay mode
+    /// found a stored token without its relay credential — an incomplete tuple,
+    /// so nothing was sent and nothing was refused.
     NoRegisteredToken,
     /// The relay refused the credential registered with this token.
     ///
-    /// **Not a dead token.** The APNs registration is untouched and still
-    /// correct; what expired, was rotated, or was invalidated is the bearer
-    /// that authorises the relay to send on its behalf. A client that treated
-    /// this as `no_registered_token` would discard a working token and make the
-    /// phone ask Apple for another; the repair is to obtain a fresh credential
-    /// and register again.
+    /// **Not proof the token is dead — so a client must not clear the token on
+    /// this alone.** What the relay rejected is the bearer, not the APNs
+    /// registration: the bearer may be unknown, rotated or revoked, below the
+    /// generation floor, or outside the active attestation namespace (active
+    /// bearers do not expire on a clock). But it is not proof the token is
+    /// *alive* either — the same answer comes back for a bearer bound to a
+    /// different token, and for a binding the relay already retired on an APNs
+    /// `410`. A client that treated this as `no_registered_token` would discard a
+    /// token that may still be good; the repair is to renew the bearer and
+    /// register again, letting normal status recheck the token.
     CredentialInvalid,
     RateLimited {
         retry_after_secs: u32,

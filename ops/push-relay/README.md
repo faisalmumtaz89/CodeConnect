@@ -12,7 +12,7 @@ database restore — are in [`docs/push-gateway.md`](../../docs/push-gateway.md)
 | --- | --- |
 | Runtime | Docker |
 | Repository | this repository |
-| Branch | `push-gateway` until the relay lands on `main` |
+| Branch | `main` |
 | Dockerfile path | `./ops/push-relay/Dockerfile` |
 | Docker build context | `./mac` |
 | Auto-deploy | **off** |
@@ -54,6 +54,7 @@ image build may depend on one.
 | `/etc/secrets/generation-floor` | decimal integer, the minimum credential generation |
 | `/etc/secrets/backup-key` | 32 bytes, hex encoded, encrypts the SQLite online backup |
 | `/etc/secrets/ip-pepper` | HMAC key for the daily-rotating IP rate-limit keys |
+| `/etc/secrets/backup-s3-secret-key` | S3 secret access key for the encrypted-backup upload target (production) |
 
 The container runs as a non-root user in group 1000, which is what Render
 documents as the group that can read these files.
@@ -78,14 +79,18 @@ relay can be run locally against a directory that is not `/etc/secrets`.
 | `RELAY_APNS_PRODUCTION_TOPIC` | production APNs topic |
 | `RELAY_SEND_ENABLED` | kill switch for outbound pushes |
 | `RELAY_ENROLLMENT_ENABLED` | kill switch for new enrollment, independent of sends |
-| `RELAY_BACKUP_TARGET` | for example `file:///var/data/backups` |
+| `RELAY_BACKUP_TARGET` | `s3://bucket[/prefix]` in production; `file:///path` (for example `file:///var/data/backups`) for local development |
+| `RELAY_BACKUP_S3_ENDPOINT` | S3-compatible endpoint URL for the backup target |
+| `RELAY_BACKUP_S3_REGION` | S3 region for the backup target (defaults to `us-east-1`) |
+| `RELAY_BACKUP_S3_ACCESS_KEY_ID` | S3 access key ID for the backup target |
 | `RELAY_BACKUP_RETENTION_DAYS` | backup retention |
-| `RELAY_GIT_SHA` | the deployed commit, reported by the metrics endpoint |
+| `RELAY_GIT_SHA` | the deployed commit, reported by the `/readyz` endpoint and the startup log |
 | `RELAY_APNS_SANDBOX_KEY_FILE` | overrides `/etc/secrets/apns-sandbox.p8` |
 | `RELAY_APNS_PRODUCTION_KEY_FILE` | overrides `/etc/secrets/apns-production.p8` |
 | `RELAY_GENERATION_FLOOR_FILE` | overrides `/etc/secrets/generation-floor` |
 | `RELAY_BACKUP_KEY_FILE` | overrides `/etc/secrets/backup-key` |
 | `RELAY_IP_PEPPER_FILE` | overrides `/etc/secrets/ip-pepper` |
+| `RELAY_BACKUP_S3_SECRET_KEY_FILE` | overrides `/etc/secrets/backup-s3-secret-key` |
 
 ## Keys-absent state
 
@@ -116,15 +121,15 @@ but the deploy-on-push and pull-request preview features are unavailable until
 someone grants Render access to the repository in the dashboard. Nothing here
 depends on them.
 
-## Unverified until the first deploy
+## Proven on Render
 
 Render documents the Dockerfile path and the build context as independent
 settings, but does not document whether the Dockerfile may live outside the
-context. `docker build -f ops/push-relay/Dockerfile mac/` is valid Docker and
-is proven by the `Relay` workflow on every push; the Render combination is not
-proven until a deploy runs. If Render rejects it, move the build context to the
-repository root and add a root `.dockerignore`.
+context. `docker build -f ops/push-relay/Dockerfile mac/` is valid Docker,
+is proven by the `Relay` workflow on every push, and is now proven on Render
+too: the relay builds and runs there from this Dockerfile path and this build
+context. Were Render ever to reject the combination, the fallback is to move
+the build context to the repository root and add a root `.dockerignore`.
 
-Render also does not document the ownership of a mounted disk, so confirm on
-the first deploy that the non-root user can create the database under
-`/var/data`.
+The mounted disk's ownership is likewise settled: the non-root user creates and
+writes the database under `/var/data` on the running instance.

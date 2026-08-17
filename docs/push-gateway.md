@@ -1,7 +1,7 @@
 # CodeConnect Push Gateway: Architecture and Phased Implementation Plan
 
 **Status:** Implemented. Phases 0–3 complete and codex-approved; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is drafted; the Phase 4 rollout and operational items remain — see [Implementation status](#implementation-status) and the annotated rollout order in §6 for exactly which steps are done and which are pending.  
-**Baseline:** repository HEAD `c2ffdf2`  
+**Baseline commit:** `c2ffdf2` (the verified pre-implementation baseline in §1, not current HEAD)  
 **Target scale:** 1,000–10,000 users  
 **Decision:** Add a small CodeConnect-operated push relay as the default customer path. Keep direct APNs delivery as an explicit developer override.
 
@@ -12,14 +12,14 @@ Recorded 2026-08-17. This section is the empirical status of the plan below; the
 **Phases 0–3 — complete, codex-approved.**
 
 - **Phase 0 (privacy truth):** `site/privacy.md`, `site/support.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`, and the Mac/iOS READMEs distinguish direct from relay-backed notifications and carry the relay data inventory and retention. `ios/CodeConnect/PrivacyInfo.xcprivacy` declares the relay enrollment record.
-- **Phase 1 (relay service):** `mac/push-core` and `mac/push-relay` build and test; `ops/push-relay` holds the Render deployment assets. App Attest verification, the generic-only payload (`payload.rs`, title always `CodeConnect`), hashes-only SQLite state, rate limits, the `send`/`enrollment` kill switches, and encrypted backup/restore are implemented.
+- **Phase 1 (relay service):** `mac/push-core` and `mac/push-relay` build and test; `ops/push-relay` holds the Render deployment assets. App Attest verification, the generic-only payload (`payload.rs`, title always `CodeConnect`), hash-only storage for APNs tokens, bearer credentials, App Attest key IDs and challenges (other content-free fields — public keys, receipts, environments, counters, bundle metadata, status/reasons, timestamps — stored in clear), rate limits, the `send`/`enrollment` kill switches, and encrypted backup generation with tested restore primitives are implemented (operator restore tooling and the restore drill remain Phase 4).
 - **Phase 2 (daemon + minor 14):** `PushMode::{Off, Direct, Relay}` (`mac/ccd/src/apns.rs`), `push_enabled` (default `true`), `mac/ccd/src/relay_sender.rs` with its content-free DTO, the `devices.push_credential` migration, and the minor-14 protocol fields are implemented; the shared push queue is reused across direct and relay transports.
 - **Phase 3 (iOS App Attest):** `ios/CodeConnect/Net/RelayEnrollment.swift`, `Store/RelayCredential.swift`, the App Attest entitlement, `PushMode` normalization with direct precedence, and foreground credential recovery are implemented.
 
 **Proven end-to-end on real hardware.**
 
 - Development device, **sandbox**: real App Attest → relay → sandbox APNs → device (banner shown, Apple receipt returned).
-- TestFlight, **production**: real App Attest → relay → production APNs → device (the daemon logged registration for production notifications).
+- TestFlight, **production**: real App Attest → relay → production APNs. Enrollment and daemon registration are proven by the recorded registration log; the owner confirmed on-device delivery — a banner appeared on the TestFlight build — though no APNs receipt (`apns_id`) was captured.
 
 **Relay deployment.** Live at `codeconnect-push-relay.onrender.com` (Render, single always-on instance), configured for production: production and sandbox APNs enabled, enrollment enabled, App Attest bound to the configured App ID.
 
@@ -29,7 +29,7 @@ Recorded 2026-08-17. This section is the empirical status of the plan below; the
 
 The existing implementation is a strong single-Mac APNs sender, but it cannot serve App Store customers because the APNs provider key cannot be distributed to customer Macs.
 
-Verified at the current repository HEAD:
+Verified at baseline commit `c2ffdf2`:
 
 - `mac/ccd/src/apns_sender.rs` is a complete raw HTTP/2 APNs sender. It creates ES256 provider tokens through `mac/ccd/src/apns_token.rs`, posts to `/3/device/{token}`, sets alert push type, priority 10, collapse IDs, and uses per-device serial queues.
 - The provider JWT is cached for 40 minutes. Apple rejects provider tokens older than one hour.
@@ -48,7 +48,7 @@ Verified at the current repository HEAD:
 - There are four payload kinds—`approval`, `input`, `done`, and `idle`—but more than four call paths can produce them. The separate `PermissionRequest` path can also admit an approval.
 - The current title is the selected project label when one is available, not simply “single blocked run”; it falls back to `CodeConnect` when no unambiguous label exists.
 - `session_uid` is retained for local logging but is not serialized into APNs payloads.
-- The current wire protocol is major 1, minor 13.
+- At that baseline, the wire protocol was major 1, minor 13.
 
 These properties should be preserved rather than reimplemented.
 
@@ -58,7 +58,7 @@ These properties should be preserved rather than reimplemented.
 flowchart LR
     App[iOS app] -- "App Attest enrollment over HTTPS" --> Relay[CodeConnect push relay]
     App -- "token + environment + opaque credential\npaired authenticated WebSocket" --> Daemon[ccd on the user's Mac]
-    Daemon -- "credential + token + fixed event DTO\nHTTPS" --> Relay
+    Daemon -- "bearer credential in Authorization + token + environment + fixed event DTO over HTTPS" --> Relay
     Relay -- "generic APNs alert\nHTTP/2 + ES256" --> APNs[Apple APNs]
     APNs --> App
 ```
@@ -73,7 +73,7 @@ The trust boundary is intentionally narrow:
 
 ### Decision 1: App Attest is the launch authentication foundation
 
-Perform App Attest for each fresh enrollment or re-enrollment — normally once per installation, and again after a re-enrollment, assertion recovery, or reset — to authorize issuance of an opaque relay credential, never per push. Use App Attest assertions only for sensitive lifecycle operations such as token rebinding, credential rotation, and revocation. Do not use assertions per push—the customer daemon cannot access the phone’s App Attest private key.
+Fresh attestation occurs only for enrollment or re-enrollment — initial install, reset, reinstall or key loss, an unknown binding, or below-floor recovery — to authorize issuance of an opaque relay credential, never per push. Rebind and reissue use App Attest assertions, not fresh attestation; neither occurs per push. Use App Attest assertions only for sensitive lifecycle operations such as token rebinding, credential rotation, and revocation. Do not use assertions per push—the customer daemon cannot access the phone’s App Attest private key.
 
 Apple describes App Attest as a hardware-backed key certified as belonging to a legitimate instance of the app, with server challenges and assertions for replay protection. App Attest keys survive app updates but not reinstall, device migration, or backup restoration. [Apple: establishing app integrity](https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity), [Apple: server-side validation](https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server).
 
@@ -97,9 +97,9 @@ App Attest is not a user identity and does not prove cryptographically that an A
 - A changed token requires an App Attest assertion and a replacement credential.
 - A reinstall or missing App Attest key requires a new key and fresh attestation, even if an old Keychain credential survived.
 - Active credentials do not expire on a short schedule. Silent expiry would make the first important notification after a long quiet period fail while the app is closed.
-- Active bindings remain until assertion-authorized rotation/deletion, APNs `410`, replacement enrollment, or emergency generation invalidation.
+- Active bindings remain until assertion-authorized rebind/rotation/deletion, APNs `410`, or replacement enrollment. Raising the generation floor invalidates the bearer but does not terminate or prune its active row; the relay refuses authorization and foreground status returns `reenroll`, and fresh enrollment for the same token supersedes that row.
 
-Per-Mac credentials would make lost-Mac revocation more precise, but require a credential inventory, per-Mac identities at the relay, redistribution, and substantially more UI/state. At launch, a shared phone credential is the correct simplification. A security-sensitive lost-Mac action rotates the shared credential and requires the app to redistribute it to remaining Macs as they reconnect. Clearing one daemon’s local tuple is named “disable push on this Mac,” not “revoke credential.”
+Per-Mac credentials would make lost-Mac revocation more precise, but require a credential inventory, per-Mac identities at the relay, redistribution, and substantially more UI/state. At launch, a shared phone credential is the correct simplification. The implemented lost-Mac path is **Reset notification registration** on the phone: it performs fresh App Attest enrollment, atomically supersedes the shared bearer, and redistributes the replacement on the current and subsequent authenticated Mac connections. `push_enabled = false` stops one daemon’s sends but leaves its stored tuple in place; there is no per-Mac revoke/clear control and no `relayctl` rotation or deletion command.
 
 #### App Attest verification
 
@@ -131,7 +131,7 @@ Initial server-side limits:
 - Rate keys use the token binding, not the credential, so rotation cannot reset quotas.
 - `429` includes `Retry-After`; neither daemon nor relay retries it automatically.
 
-IP rate keys use a daily rotating server-side HMAC and expire within 24 hours. Raw IPs, authorization headers, tokens, and request bodies must not appear in application or reverse-proxy logs. Limits are operational settings on the service, not daemon configuration; increase them only after observing legitimate 429s.
+IP rate keys use a daily rotating server-side HMAC and expire within 24 hours. Raw IPs, authorization headers, tokens, and request bodies must not appear in application or reverse-proxy logs. Limits are compile-time constants in the relay’s `ratelimit.rs`, not daemon configuration and not runtime-adjustable settings; changing a cap requires a reviewed code change and a pinned relay redeploy.
 
 ### Decision 2: Generic-only relay payload
 
@@ -166,7 +166,7 @@ The public statement should say:
 
 > When relay-backed notifications are enabled, your daemon sends CodeConnect’s push relay only the APNs token and environment, an opaque token-bound credential, one of four fixed event kinds, a blocked-run count, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content; it builds a generic notification and forwards it to Apple.
 
-The adjacent paragraph should disclose that enrollment sends an App Attest proof and that the relay retains the verified public key and receipt, assertion counter, token and credential hashes, status, and timestamps.
+The adjacent paragraph should disclose that enrollment sends an App Attest attestation (key ID, challenge, token, and environment) and that the relay retains content-free relay state and short-lived operational records: the verified public key and receipt, an assertion counter and its trust state, a hash of the App Attest key ID, the attestation environment, the attested bundle version, the validation category, the APNs environment, the credential generation, the APNs token and credential hashes, the binding status and any terminal reason, timestamps, internal row relationships, expiring challenge hashes, and opaque rate buckets.
 
 Retention policy:
 
@@ -175,7 +175,7 @@ Retention policy:
 - Active binding, App Attest public key/receipt, and counter: until explicit lifecycle termination.
 - Revoked/terminal binding records: 30 days, then deleted.
 - Redacted diagnostic logs: 7 days.
-- Aggregate metrics without identifiers: 30 days.
+- Aggregate metrics without identifiers: exposed as cumulative in-memory counters that reset on process restart, not retained in a store; any retention of scraped samples is a Phase-4 external-monitoring requirement, not a relay behavior.
 - Rotating IP rate buckets: at most 24 hours.
 - Encrypted backups: 30 days; deletion may therefore take up to 30 additional days to disappear from backups.
 
@@ -304,7 +304,7 @@ Launch behavior remains best-effort:
 - One explicit opposite-environment attempt remains for `BadDeviceToken`, bounded by the attestation pairing: a development-attested binding may address sandbox only, so the retry exists only for production-attested bindings — and is therefore inert on a development-namespace relay.
 - APNs 410 invalidates the token binding.
 - APNs 429/5xx and relay outages are logged/dropped for ordinary pushes and reported for tests.
-- Credential 401/403 preserves the APNs token and triggers credential recovery; it is not misclassified as an unregistered phone.
+- Credential 401/403 preserves the APNs token and is not misclassified as an unregistered phone. An ordinary send only logs and drops it; a test surfaces `credential_invalid`; recovery itself happens later, when a foreground status check or reset re-establishes the credential.
 
 ### Decision 5: Precise registration and trust chain
 
@@ -339,16 +339,16 @@ The status bearer is read-only. It cannot rebind, revoke, reset generations, ext
 | Asset | Stored at | Compromise impact |
 |---|---|---|
 | App Attest private key | Apple-managed hardware-backed storage | Can authorize lifecycle operations for that installation if the phone is compromised; never exportable in the normal model. |
-| App Attest key ID | iPhone Keychain; relay metadata | Not secret by itself. Loss on the phone requires fresh enrollment. |
+| App Attest key ID | iPhone Keychain; only its hash in relay SQLite | Not secret by itself. Loss on the phone requires fresh enrollment. |
 | Relay bearer credential | iPhone ThisDeviceOnly Keychain and paired daemon SQLite | With the matching token, permits only fixed generic notifications to that phone within limits. Rotation invalidates every Mac holding the shared credential. |
-| APNs token/environment | iPhone/APNs and daemon SQLite; transient at relay | Routing identifier, not provider authority. Token alone cannot use the relay. |
+| APNs token / environment | iPhone/APNs and daemon SQLite; at the relay the raw token is transient and only its hash is retained, while the APNs environment is retained in relay SQLite | Routing identifier, not provider authority. Token alone cannot use the relay. |
 | Credential/token hashes | Relay SQLite and encrypted backups | Database-only compromise does not reveal the high-entropy bearer or token needed to push. |
 | App Attest public key, receipt, counter, status, timestamps | Relay SQLite | Reveals installation/security metadata but cannot create assertions. |
 | Topic-specific APNs `.p8` key | Relay secret mount only | Runtime compromise can send notifications for that app topic/environment. It cannot retrieve conversation content. |
 | Pairing credential | Existing phone Keychain and daemon pairing store | Existing, broader risk: compromise may permit access to the daemon’s session API. It is never sent to the relay. |
 | Bootstrap credential | Existing Mac configuration | Cannot register push because `RegisterPush` remains paired-device-only. |
 | Relay TLS key | TLS terminator/secret store | Could permit service impersonation if the surrounding host/DNS boundary is also compromised. |
-| Relay runtime | Memory while requests are active | Can observe raw tokens, credentials, kind/count, timing, and source IP in flight and can abuse the APNs topic key. It cannot expose project or conversation content because none is transmitted or stored. |
+| Relay runtime | Memory while requests are active | Can observe raw tokens, credentials, environment, kind/count or the test marker, timing, and source IP in flight and can abuse the APNs topic key. It cannot expose project or conversation content because none is transmitted or stored. |
 
 A relay runtime compromise can generate malicious notification text with the stolen APNs key; no server design can prevent that after key compromise. The important containment is that the relay has no conversation or project data to leak and the APNs key is scoped to one topic and environment.
 
@@ -502,7 +502,7 @@ No phase starts until the preceding acceptance gate passes.
 
 - Extracted APNs JWT, request/header, environment, and status-classification code.
 - Generic relay payload composer with golden fixtures.
-- App Attest challenge, enrollment, assertion, status, rotation, and deletion endpoints.
+- App Attest challenge, enrollment, assertion (supporting rebind/rotate/delete operations), and status routes. The shipped app uses rebind/rotate recovery; no app or operator deletion control exists.
 - SQLite schema for attested installations, bindings, challenges, counters, tombstones, and rate buckets.
 - Credential/token hashing and secret-redaction types.
 - Persistent library-managed HTTP/2 APNs client.
@@ -510,7 +510,7 @@ No phase starts until the preceding acceptance gate passes.
 - Per-token in-flight serialization.
 - Fixed DTO validation and abuse limits.
 - `send_enabled`, `enrollment_enabled`, and minimum-credential-generation operational kill switches.
-- Liveness/readiness endpoints and redacted metrics, including deployed git SHA.
+- Liveness/readiness endpoints, with readiness reporting the deployed git SHA, plus redacted metrics.
 - Local-only `relayctl seed-sandbox-binding` for a development phone.
 
 Linux CI is scoped rather than running the Mac-specific workspace indiscriminately:
@@ -657,7 +657,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 - Deny-in-app, enable-in-Settings, foreground, and register flow works in one launch.
 - `PrivacyInfo.xcprivacy` declares the relay enrollment data under App Store collection definitions (the record is transmitted off-device to a developer-operated service), and the declaration matches the privacy policy exactly.
 - Physical development-device sandbox App Attest and APNs delivery passes.
-- TestFlight production App Attest and production APNs delivery passes.
+- TestFlight production App Attest enrollment and daemon registration pass; the owner confirmed on-device delivery (a banner appeared on the TestFlight build), though no APNs receipt (`apns_id`) was captured.
 - Token rotation, reinstall, missing App Attest key, relay credential invalidation, relay outage, and multiple paired Macs are exercised.
 - An environment correction survives an app reconnect and a push from a second paired Mac — the app persists the corrected tuple rather than resending its cached one.
 - Notification test results and tap routing remain correct.
@@ -677,7 +677,7 @@ This is the operational rollout plan of record. Status is marked per step as of 
 
 1. Land corrected privacy disclosures. — **DONE** (`site/privacy.md`, `site/support.md`, `ios/CodeConnect/PrivacyInfo.xcprivacy`, and the doc set).
 2. Deploy the relay dark with enrollment and send kill switches available. — **DONE** (live on Render; `RELAY_ENROLLMENT_ENABLED` and `RELAY_SEND_ENABLED` kill switches present).
-3. Complete sandbox and TestFlight soak. — **PARTIAL**: sandbox and TestFlight delivery are proven on real hardware; the seven-day production soak is **PENDING**.
+3. Complete sandbox and TestFlight soak. — **PARTIAL**: sandbox delivery is proven with an Apple receipt, and TestFlight production delivery was owner-confirmed on-device (a banner appeared, no `apns_id` captured); the seven-day production soak is **PENDING**.
 4. Publish the iOS app with App Attest and minor-14 understanding first. — **PENDING** (App Store release).
 5. Confirm the app release and relay backend form a complete path. — **PENDING** (follows step 4).
 6. Release the minor-14 daemon with default relay mode. — **PENDING** (public daemon release).
@@ -737,12 +737,10 @@ Sandbox and production rotate independently.
 
 ### Credential incident or lost Mac
 
-- “Disable push on this Mac” clears only that daemon’s tuple.
-- A lost or compromised Mac requires assertion-authorized rotation of the shared phone credential.
-- Revoke the old bearer atomically.
-- Send the replacement to the currently connected Mac and remaining Macs as they reconnect.
-- For broad compromise, raise the minimum credential generation and let foreground status drive assertion-based reissue.
-- If the relay no longer knows the App Attest key, require fresh attestation.
+- The implemented recovery is **Reset notification registration** on the phone: it performs fresh App Attest enrollment, atomically supersedes the shared bearer, and redistributes the replacement to the currently connected Mac and remaining Macs as they reconnect.
+- `push_enabled = false` (“disable push on this Mac”) stops one daemon’s sends but leaves its stored tuple in place; there is no per-Mac revoke/clear control and no `relayctl` rotation or deletion command.
+- For broad compromise, raise the minimum credential generation floor; a bearer below the floor is refused authorization (the active row is not pruned or terminalized), and foreground status returns `reenroll`, so every phone re-enrolls with a fresh App Attest key.
+- If the relay no longer knows the App Attest key, fresh attestation is required.
 
 ### APNs `410 Unregistered`
 
@@ -754,9 +752,8 @@ Sandbox and production rotate independently.
 
 ### Abuse event
 
-- Inspect aggregate token-binding, invalid-auth, and IP-bucket metrics without exposing raw identifiers.
-- Lower per-binding or global caps if necessary.
-- Disable one binding or all sends without disabling enrollment.
+- Inspect the aggregate `/metrics` counters — `rate_limited`, `invalid_auth`, and `invalid_auth_limited` — and redacted request logs; these are totals, not per-binding or per-IP-bucket series.
+- Disable all sends with `RELAY_SEND_ENABLED`; per-binding disable/delete is not implemented. Changing a cap requires a reviewed code change and pinned relay redeploy — the caps are compile-time constants in `ratelimit.rs`, not runtime settings.
 - Preserve evidence only under the documented retention policy.
 - Do not add arbitrary payload inspection because arbitrary payloads are impossible by schema.
 
@@ -764,12 +761,14 @@ Sandbox and production rotate independently.
 
 **A restore fails closed: it must never resurrect authority that was revoked after the snapshot.**
 
-- Restore the latest encrypted SQLite online backup — never a platform disk snapshot of the database.
-- Bump the **generation floor** — a monotonic integer stored outside the database, in a Render secret file. Every bearer credential records the generation it was minted under, and the relay refuses any bearer below the floor. Bumping it invalidates every restored bearer at once, so a credential revoked after the snapshot cannot come back to life; every phone re-enrolls through App Attest on next contact via `reenroll`.
-- Expire all restored replay state: outstanding challenges are dropped, and assertion counters are treated as untrusted until the next successful assertion re-establishes them.
+**Status:** encrypted backup generation and the tested restore primitives (`backup::Job::latest`, `open_sealed`) are implemented and exercised by the fail-closed restore test. The operator restore tooling and the operational restore drill remain **Phase 4 / PENDING**: `relayctl` only seeds a sandbox binding, and no shipped command retrieves, decrypts, and installs a backup, clears challenges, or resets counter trust. The steps below are the intended procedure, pending that tooling or exact commands. The one operator control that is shipped and load-bearing here is the generation-floor bump (a value in a secret file, outside the database).
+
+- Restore the latest encrypted SQLite online backup — never a platform disk snapshot of the database. **PENDING**: no shipped command installs a decrypted backup; the restore path exists as library/test primitives only.
+- Bump the **generation floor** — a monotonic integer stored outside the database, in a Render secret file. Every bearer credential records the generation it was minted under, and the relay refuses any bearer below the floor. Bumping it invalidates every restored bearer at once, so a credential revoked after the snapshot cannot come back to life; every phone re-enrolls through App Attest on next contact via `reenroll`. (This step is implemented — the floor is read from the secret file; a below-floor bearer is refused authorization while its active row is left in place, not pruned.)
+- Expire all restored replay state: outstanding challenges should be dropped, and assertion counters treated as untrusted until the next successful assertion re-establishes them. **PENDING**: no shipped restore code clears challenges or resets counter trust on restore; today the generation-floor bump is what makes a restore safe.
 - The app generates a new App Attest key and performs fresh attestation; it does not attempt to re-attest a lost server record with an unavailable attestation object.
 - Confirm permissions, ownership, migrations, key loading, and a sandbox smoke test before reopening production sends.
-- **Restore drill, tested before launch and after any schema change:** revoke a credential, take a backup from *before* the revocation, restore it, and prove the revoked credential is refused.
+- **Restore drill (PENDING operator tooling; exercised today only as an automated test):** revoke a credential, take a backup from *before* the revocation, restore it, and prove the revoked credential is refused.
 
 ### TLS, host, and release maintenance
 
