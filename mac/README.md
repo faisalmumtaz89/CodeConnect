@@ -1098,9 +1098,10 @@ fails the suite instead of failing silently in production.
   alternative — selecting the stub because one request failed — would suppress
   every registration until somebody noticed.
 * **Relay mode needs a phone that has enrolled.** The daemon stores a relay
-  credential and presents it on every send; the credential is minted on the
-  phone, which attests to the relay with App Attest and hands the daemon the
-  opaque bearer over the paired socket. A registration carrying no credential is
+  credential and presents it on every send; the relay mints that credential after
+  it verifies the phone's App Attest, and the phone stores the opaque bearer it
+  receives and hands it to the daemon over the paired socket. A registration
+  carrying no credential is
   refused with a reason rather than filed as a device that will never ring — so a
   phone whose App Attest is unsupported, or which has not yet enrolled, gets no
   relay push, and the direct-key override stays available on that Mac.

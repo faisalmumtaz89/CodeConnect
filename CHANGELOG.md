@@ -17,8 +17,9 @@ Apple push key of its own — the case for every App Store customer.
   conversation content. See the [privacy policy](site/privacy.md).
 - **App Attest enrollment.** The iPhone proves it is a genuine copy of the app
   with Apple's App Attest to obtain the relay credential, which lives — with the
-  App Attest key ID — in `ThisDeviceOnly` Keychain storage. Enrollment happens
-  once per install, after pairing, not per push.
+  App Attest key ID — in `ThisDeviceOnly` Keychain storage. App Attest runs for
+  enrollment or re-enrollment after pairing — normally once per install, and
+  again after a reset or credential recovery — never per push.
 - **Direct-key override, unchanged.** A Mac configured with its own APNs key
   (`apns_key_path`, `apns_key_id`, `apns_team_id`, `apns_topic`) talks straight
   to Apple and keeps the project-labelled payload. This override always takes

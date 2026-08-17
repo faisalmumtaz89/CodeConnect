@@ -1,6 +1,6 @@
 # CodeConnect Push Gateway: Architecture and Phased Implementation Plan
 
-**Status:** Implemented. Phases 0–3 complete and codex-approved; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is complete; the Phase 4 operational items (seven-day soak, alerting, periodic drills) remain to run — see [Implementation status](#implementation-status).  
+**Status:** Implemented. Phases 0–3 complete and codex-approved; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is drafted; the Phase 4 rollout and operational items remain — see [Implementation status](#implementation-status) and the annotated rollout order in §6 for exactly which steps are done and which are pending.  
 **Baseline:** repository HEAD `c2ffdf2`  
 **Target scale:** 1,000–10,000 users  
 **Decision:** Add a small CodeConnect-operated push relay as the default customer path. Keep direct APNs delivery as an explicit developer override.
@@ -23,7 +23,7 @@ Recorded 2026-08-17. This section is the empirical status of the plan below; the
 
 **Relay deployment.** Live at `codeconnect-push-relay.onrender.com` (Render, single always-on instance), configured for production: production and sandbox APNs enabled, enrollment enabled, App Attest bound to the configured App ID.
 
-**Acceptance gates.** Gates 1–4 (Phases 1–3) are met, as is the Phase-4 documentation gate. The remaining Phase-4 items are operational and **pending**: the seven-day soak, the alerting setup, and the periodic drills (APNs-key rotation, credential-generation reset, kill switches, database restore, TLS renewal, rollback). The staged rollout order in §6 is annotated with what is done and what remains.
+**Acceptance gates.** Gates 1–4 (Phases 1–3) are met. The Phase-4 documentation is drafted and under review — the Phase-4 gate is **not** claimed met here; it is met only once accepted. The rest of Phase 4 is the staged rollout and operations. The annotated rollout order in §6 carries the per-step status: **pending** there are App Store publication, confirmation that the app release and relay backend form a complete path, the public minor-14 daemon release, and the production metrics watch. The operational items still to run are the seven-day soak, the alerting setup, and the periodic drills (APNs-key rotation, credential-generation reset, kill switches, database restore, TLS renewal, rollback).
 
 ## 1. Verified baseline
 
@@ -73,7 +73,7 @@ The trust boundary is intentionally narrow:
 
 ### Decision 1: App Attest is the launch authentication foundation
 
-Use App Attest once per iOS installation to authorize issuance of an opaque relay credential. Use App Attest assertions only for sensitive lifecycle operations such as token rebinding, credential rotation, and revocation. Do not use assertions per push—the customer daemon cannot access the phone’s App Attest private key.
+Perform App Attest for each fresh enrollment or re-enrollment — normally once per installation, and again after a re-enrollment, assertion recovery, or reset — to authorize issuance of an opaque relay credential, never per push. Use App Attest assertions only for sensitive lifecycle operations such as token rebinding, credential rotation, and revocation. Do not use assertions per push—the customer daemon cannot access the phone’s App Attest private key.
 
 Apple describes App Attest as a hardware-backed key certified as belonging to a legitimate instance of the app, with server challenges and assertions for replay protection. App Attest keys survive app updates but not reinstall, device migration, or backup restoration. [Apple: establishing app integrity](https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity), [Apple: server-side validation](https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server).
 
@@ -213,7 +213,7 @@ Deploy one service instance as a **Render.com web service** (an always-on paid i
 - The APNs `.p8` keys and every other secret live in Render **secret files**, never in environment variables and never in the repository.
 - External health monitoring against the service's health endpoint, plus Render's own health checks.
 - Redacted structured metrics.
-- Separate logical sandbox and production endpoints, keys, and data namespaces. They may share the initial instance.
+- One relay endpoint serves both environments; the request carries the environment and the relay holds separate sandbox and production APNs keys, hosts, and data namespaces on the one instance.
 
 A Render starter instance is currently about $7/month and a 1 GB persistent disk about $0.25/month; compute plus monitoring should remain approximately **$8–15/month**. [Render pricing](https://render.com/pricing).
 
@@ -232,7 +232,7 @@ Selection order:
    - Valid → direct APNs sender.
    - Partial or invalid → disabled/logging with an actionable error.
    - Never silently fall back to the vendor relay after an explicit direct configuration error.
-3. No direct fields → relay sender using baked stable production/sandbox URLs.
+3. No direct fields → relay sender using the single baked relay URL (`codeconnect-push-relay.onrender.com`); the environment travels as a request field, not a separate host.
 
 Do not use the stale unused nested `config.apns` branch for new settings.
 
@@ -417,7 +417,7 @@ Rules:
 - Accepted response includes optional `apns_id` and the accepted environment.
 - Typed outcomes include `accepted`, `unregistered`, `credential_invalid`, `rate_limited`, `rejected`, and `unavailable`.
 - An accepted opposite-environment attempt atomically corrects the relay binding and returns that environment for daemon CAS persistence. Both the attempt and the persist are bounded by the attestation pairing above — an environment the binding's namespace forbids is refused as itself and can never be stored.
-- **The relay binding is the single authority for a token's APNs environment, and the environment in a push request is advisory.** The relay addresses APNs by the binding's environment regardless of the advisory value and returns the authoritative environment in every accepted response — a delivery is never refused for a stale advisory environment, which is what lets a second Mac that has not yet learned a correction still deliver, be corrected by the response, and CAS-persist the truth. The app's registration environment is a hint used only when a binding does not yet exist. Today the app resends its cached environment on every handshake (`AppModel.swift:298`); Phase 3 replaces that with persistence of `hello_ack.push_environment` (section 5) into the Keychain tuple, and the correction must be proven to survive a reconnect and a push from a second Mac.
+- **The relay binding is the single authority for a token's APNs environment, and the environment in a push request is advisory.** The relay addresses APNs by the binding's environment regardless of the advisory value and returns the authoritative environment in every accepted response — a delivery is never refused for a stale advisory environment, which is what lets a second Mac that has not yet learned a correction still deliver, be corrected by the response, and CAS-persist the truth. The app's registration environment is a hint used only when a binding does not yet exist. The app persists `hello_ack.push_environment` (section 5) into its Keychain tuple and compares it on every handshake, so a relay-side correction survives a reconnect and a push from a second Mac rather than being overwritten by a resent cached value.
 
 ## 5. CodeConnect protocol impact
 
