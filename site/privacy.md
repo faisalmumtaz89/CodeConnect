@@ -40,7 +40,7 @@ The **iPhone app** connects to:
 
 1. **Your own Mac** — directly, over the connection you configure.
 2. **Apple** — to receive push notifications, and for speech recognition where your language is not handled on-device. Both are Apple's services under Apple's policy.
-3. **CodeConnect's push relay** — only when enrolling for relay-backed notifications, when checking its credential status on returning to the foreground, and for credential-lifecycle changes afterwards (rotation, rebinding, or deletion): the app sends Apple's App Attest proof, or a read-only bearer for a status check, along with the token binding described above, and nothing else, ever.
+3. **CodeConnect's push relay** — only when enrolling for relay-backed notifications, when checking its credential status on returning to the foreground, and for credential-lifecycle changes afterwards (rotation or rebinding): the app sends Apple's App Attest proof, or a read-only bearer for a status check, along with the token binding described above, and nothing else, ever.
 
 The **Mac daemon and tools** connect to:
 
