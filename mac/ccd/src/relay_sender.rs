@@ -1415,13 +1415,12 @@ mod tests {
     /// reasoned about.
     #[tokio::test]
     async fn a_relay_that_refuses_the_connection_fails_honestly_and_promptly() {
-        // Bind and drop, so the port is one nothing is listening on.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let relay = HttpsRelay::at("127.0.0.1".into(), port).expect("the transport builds");
-        let started = std::time::Instant::now();
+        // Port 1 is privileged and unbound, so a loopback connect to it is
+        // refused at once and no concurrent test can bind it. A freed ephemeral
+        // port could instead be re-bound by another test between the drop and
+        // the connect, turning the refusal this test is about into a stalled
+        // handshake against a live socket.
+        let relay = HttpsRelay::at("127.0.0.1".into(), 1).expect("the transport builds");
         let err = tokio::time::timeout(
             DELIVERY_DEADLINE,
             relay.post("a-relay-bearer".into(), "{}".into()),
@@ -1429,10 +1428,19 @@ mod tests {
         .await
         .expect("it must fail well inside the delivery deadline")
         .expect_err("nothing is listening");
-        assert!(
-            started.elapsed() < CONNECT_TIMEOUT,
-            "a refused connection is immediate, not a timeout: {:?}",
-            started.elapsed()
+        // Fast *and* honest is one fact: the connection was refused, not timed
+        // out. The refusal arrives as an `io::Error` in the chain; a timeout
+        // would be a bare deadline with no such error, which is what an elapsed
+        // wall-clock bound was standing in for and could not tell apart under a
+        // loaded scheduler.
+        let refusal = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .map(std::io::Error::kind);
+        assert_eq!(
+            refusal,
+            Some(std::io::ErrorKind::ConnectionRefused),
+            "a refused connection is a refusal, not a timeout: {err:#}"
         );
         let reason = format!("{err:#}");
         assert!(

@@ -47,8 +47,27 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Both push transports reach a public endpoint — Apple's, or the relay's —
 /// whose certificate chains to a public root, so the system store is exactly
 /// right and vendoring a root set would be a second thing to keep current.
+#[cfg(not(test))]
 fn platform_roots() -> Vec<CertificateDer<'static>> {
     rustls_native_certs::load_native_certs().certs
+}
+
+/// The same, without the keychain, for tests.
+///
+/// No test here validates a peer certificate — the push transports the tests
+/// build are refused, faked, or never dialled — but reading the macOS trust
+/// store is slow under parallel test binaries and can return zero anchors under
+/// that contention, which would fail the transport build for a reason unrelated
+/// to anything a test asserts. One baked, self-signed anchor keeps the
+/// non-empty check in `outbound_h2` meaningful while trusting nothing on any
+/// wire.
+#[cfg(test)]
+fn platform_roots() -> Vec<CertificateDer<'static>> {
+    const TEST_ROOT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nMIIDSzCCAjOgAwIBAgIUA0tidaG7VZueXVcAyLLsPTYFNSkwDQYJKoZIhvcNAQEL\nBQAwNDEyMDAGA1UEAwwpY2NkIHRlc3Qgcm9vdCAobmV2ZXIgdHJ1c3RlZCBvbiBh\nbnkgd2lyZSkwIBcNMjYwODE3MDk1NDQyWhgPMjEyNjA3MjQwOTU0NDJaMDQxMjAw\nBgNVBAMMKWNjZCB0ZXN0IHJvb3QgKG5ldmVyIHRydXN0ZWQgb24gYW55IHdpcmUp\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAydM40NqlPuiuHdmmHeLq\nfXgC2WPY/WdZxVEhZVSL/Sw1eSamSjGMX83WhU3I8/8L/1W2F02vzIJ81OxtfAZr\nqpH9JqvlTTseluU54OVSnSwtqGo3ZvsKSzChtc4KJLcRa1BSAfwuMQXSawifSZtZ\ndzgI7UlsGf3S9B7+QMguvX2oJFtyQmSq1kmAXfWPaPmCDh6PdfoO9HjPf9RlYtU2\ntpkJtwbuy+SHHqzDZa4t3wPhsCl5Zog0AqPVTbPKipUWIGDyW5AOowNSWxibSC5z\nVvU/AB1sSI+evZ7UxbkfWJFbvdFE3fuk0xRTAUxYarRjIZEje6p568qnVH9qSg/m\nIwIDAQABo1MwUTAdBgNVHQ4EFgQUyqtYPQn5YnXvGxGarwOeK2h/dUAwHwYDVR0j\nBBgwFoAUyqtYPQn5YnXvGxGarwOeK2h/dUAwDwYDVR0TAQH/BAUwAwEB/zANBgkq\nhkiG9w0BAQsFAAOCAQEAdT/T/rP0mKeVSFmNzRJ0RuV+ygtC3fUvGfTSbes5VVq3\nCyaZH7jgDKgmsObCrGh3hKxLmQdnFP3pGWhjCmVWfWTtI5lfBpwe0wcpA6j9FY/R\nc2h8qSM3fdNPmWekp8JySOmFJENH3Y+C2RI6Z4nwidPLdmODpkrj1XeN7xSLA6on\nc0lhKOTQ+/iYbD4RSIJrtElAjV3/0kTUpCIKSOKrIu7MXDezBID0znWkNq+Np83H\nZCDUVqnCwdylZTtwio6T0jesV+vwOOJWANtcFcMgLvdQbL0xGUdUp1wByP/bqjAC\nt3JNEn/PGwUzoAZbo2V8Pp4l9ZJbcfA0P3Wd0g2M9A==\n-----END CERTIFICATE-----\n";
+    let mut reader = TEST_ROOT_PEM;
+    rustls_pemfile::certs(&mut reader)
+        .filter_map(Result::ok)
+        .collect()
 }
 
 /// An outbound TLS client that will negotiate HTTP/2, or the reason it cannot.
