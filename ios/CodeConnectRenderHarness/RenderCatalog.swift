@@ -638,6 +638,63 @@ enum RenderCatalog {
                     driver.element(containing: "daemon last spoke", in: app),
                     "the link-health sheet")
             }),
+
+        // **The relay push states, folded into the one test button.** A relay
+        // enrollment cannot happen in a render pass — no App Attest hardware, no
+        // live relay — so `-CC_PUSH_STATE` stages each one. The reset action is
+        // the anchor present in every relay state; the state's own sentence is
+        // the disabled-button reason, which the kit draws as visible warning
+        // text. AX5 is where a two-clause reason wraps, so both sizes matter.
+        RenderScenario(
+            name: "push-relay-enrolling",
+            purpose: "the test button while the relay credential is being minted",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "enrolling"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                // `isHittable`, not `exists`: the reason is below the fold at AX5
+                // and `exists` is true off-screen, which would photograph the top
+                // of the sheet instead of the state this scenario is here for.
+                try driver.scrollUntil(app, "the enrolling reason on screen") {
+                    driver.element(containing: "Enrolling this iPhone", in: app).isHittable
+                }
+            }),
+        RenderScenario(
+            name: "push-relay-failed",
+            purpose: "enrollment failed, said plainly, with the reset action offered",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "failed"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.scrollUntil(app, "the failure reason on screen") {
+                    driver.element(containing: "could not be reached", in: app).isHittable
+                }
+                try driver.require(
+                    app.buttons["Reset notification registration"].firstMatch,
+                    "the reset action")
+            }),
+        RenderScenario(
+            name: "push-relay-unsupported",
+            purpose: "an iPhone with no App Attest: the honest no-relay message, everything else kept",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "unsupported"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.scrollUntil(app, "the unsupported message on screen") {
+                    driver.element(containing: "App Attest", in: app).isHittable
+                }
+            }),
+        RenderScenario(
+            name: "push-relay-bootstrap",
+            purpose: "a relay daemon over a bootstrap connection: pairing required, no dead reset",
+            arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "bootstrap"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.scrollUntil(app, "the pairing-required message on screen") {
+                    driver.element(containing: "bootstrap connection", in: app).isHittable
+                }
+            }),
     ]
 
     /// The kit's own review surface, one render per page.

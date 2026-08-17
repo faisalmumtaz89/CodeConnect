@@ -32,8 +32,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use protocol::pairing::TAILSCALE_CANDIDATES;
 
@@ -41,6 +41,38 @@ use protocol::pairing::TAILSCALE_CANDIDATES;
 /// order. Generous, but bounded: a wedged subprocess must not wedge startup.
 const CERT_TIMEOUT: Duration = Duration::from_secs(90);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The platform trust store, for the connections this daemon *makes*.
+///
+/// Both push transports reach a public endpoint — Apple's, or the relay's —
+/// whose certificate chains to a public root, so the system store is exactly
+/// right and vendoring a root set would be a second thing to keep current.
+fn platform_roots() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+/// An outbound TLS client that will negotiate HTTP/2, or the reason it cannot.
+///
+/// **ALPN is required here, not an optimisation.** Both endpoints this daemon
+/// dials serve HTTP/2 and decide the protocol from ALPN. Without the token the
+/// handshake completes, the server offers HTTP/1.1, and the h2 handshake then
+/// fails on a connection that looked perfectly healthy — a failure that reads
+/// as a network fault and is not one.
+///
+/// `what` names the peer, so a machine with no usable trust store says which
+/// connection it cannot make rather than that something went wrong.
+pub fn outbound_h2(what: &str) -> Result<TlsConnector> {
+    let mut roots = RootCertStore::empty();
+    let (added, _ignored) = roots.add_parsable_certificates(platform_roots());
+    if added == 0 {
+        bail!("no trust anchors available for the {what} connection");
+    }
+    let mut config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(TlsConnector::from(Arc::new(config)))
+}
 
 pub fn tailscale_bin() -> Option<PathBuf> {
     TAILSCALE_CANDIDATES

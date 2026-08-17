@@ -42,7 +42,7 @@ That's the whole setup. Claude Code itself behaves exactly as it did before, and
 ```
 iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daemon, launchd)
       ▲                                                       │
-      └── APNs (a doorbell: the project and why) ───────────────┘
+      └── push (a doorbell: direct APNs, or the content-free relay) ──┘
                                                                │ unix socket
                                                  codeconnect claude ────┘  (tmux-hosted session)
 ```
@@ -108,6 +108,7 @@ Two things are worth knowing before the daemon comes back up.
 - [`mac/README.md`](mac/README.md) — the daemon in depth: session and prompt identity, durability, pairing, TLS, configuration, and the chaos soak
 - [`ios/README.md`](ios/README.md) — the app: honesty rules, test seams, the render harness, and the design system
 - [`SECURITY.md`](SECURITY.md) — trust boundaries, including exactly what a stolen phone token can do
+- [`docs/push-gateway.md`](docs/push-gateway.md) — the push relay: architecture, the privacy contract, and the operational runbook (§7)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — house rules, each one paid for by a bug
 
 ## Repo layout

@@ -37,12 +37,23 @@ final class PushRegistration: NSObject {
             let granted = await requestAuthorization()
             onAuthorization?(granted)
             guard granted else { return }
-            let delegate = TokenDelegate { [weak self] token, environment in
+            registerForRemoteNotifications()
+        }
+    }
+
+    /// Register for a token **without** prompting — for the case where the user
+    /// denied in-app and later switched notifications on in Settings. Settings
+    /// gives no callback, so the app re-reads authorization on foreground and,
+    /// finding it granted with no token in hand, asks Apple for one directly. A
+    /// second `requestAuthorization` here would either no-op or re-prompt; this
+    /// path does neither.
+    func registerForRemoteNotifications() {
+        if delegate == nil {
+            delegate = TokenDelegate { [weak self] token, environment in
                 self?.onToken?(token, environment)
             }
-            self.delegate = delegate
-            UIApplication.shared.registerForRemoteNotifications()
         }
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     /// The current setting, re-read rather than remembered: the user can change

@@ -283,6 +283,16 @@ pub enum ClientMessage {
         /// — says which.
         #[serde(default)]
         environment: Option<String>,
+        /// The opaque bearer the relay issued for this `(token, environment)`,
+        /// for a daemon advertising `push_relay`. Absent from a direct-key
+        /// registration, which needs no third party.
+        ///
+        /// It travels with the token rather than in `hello` because it is
+        /// *about* the token: a reissued token earns a fresh credential, and a
+        /// daemon that mixed a new token with an old bearer would present a
+        /// pair the relay has no binding for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_credential: Option<crate::secret::Redacted>,
     },
 
     /// Open a live terminal on the session named by `session_uid`. `cols`/
@@ -356,6 +366,16 @@ pub enum ServerMessage {
         /// when that name was already taken.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_name: Option<String>,
+        /// The APNs environment the daemon currently holds for **this device's**
+        /// registered token, absent when it has none.
+        ///
+        /// The daemon is downstream of the authority here: a relay binding
+        /// decides which host a token lives at and corrects the daemon on an
+        /// accepted send. A phone that resends the environment it first cached
+        /// would undo that correction on every handshake, so it compares this
+        /// against its own copy and persists the difference instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push_environment: Option<String>,
     },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -482,8 +502,16 @@ pub struct Capabilities {
     /// send pushes without understanding the test request.
     #[serde(default)]
     pub test_push: bool,
-    /// APNs wired to a real key. False while the sender is the logging stub.
+    /// **Direct** APNs, wired to a real key on this Mac. False while the sender
+    /// is the logging stub — and false in relay mode, which is not an omission:
+    /// a client predating `push_relay` reads only this flag, and a true here
+    /// would send it to collect a token it has no credential for.
     pub push: bool,
+    /// The daemon sends through the CodeConnect push relay, so a registration
+    /// must carry `relay_credential` as well as the token. One-hot with `push`;
+    /// a client seeing both true takes `push` and registers directly.
+    #[serde(default)]
+    pub push_relay: bool,
     /// The listener holds a `tailscale cert` and accepts `wss://`. Says nothing
     /// about *this* connection — see `tls_active`.
     pub tls: bool,
@@ -709,6 +737,15 @@ pub enum TestPushResult {
     /// The device exists but has never registered an APNs token (notifications
     /// were never enabled, or registration has not completed yet).
     NoRegisteredToken,
+    /// The relay refused the credential registered with this token.
+    ///
+    /// **Not a dead token.** The APNs registration is untouched and still
+    /// correct; what expired, was rotated, or was invalidated is the bearer
+    /// that authorises the relay to send on its behalf. A client that treated
+    /// this as `no_registered_token` would discard a working token and make the
+    /// phone ask Apple for another; the repair is to obtain a fresh credential
+    /// and register again.
+    CredentialInvalid,
     RateLimited {
         retry_after_secs: u32,
     },
@@ -945,9 +982,14 @@ mod tests {
             device_token: None,
             device_id: None,
             device_name: None,
+            push_environment: None,
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
+        assert!(
+            !encoded.contains("push_environment"),
+            "a daemon holding no token for this device claims no environment: {encoded}"
+        );
         assert!(
             encoded.contains(&format!("\"protocol_minor\":{}", crate::PROTOCOL_MINOR)),
             "{encoded}"
@@ -1015,10 +1057,16 @@ mod tests {
             "the live terminal — `terminal_attach` … over the paired connection, gated \
              by the `terminal_pty` capability — is minor 13"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 14,
+            "relay-backed push — the `push_relay` capability, \
+             `register_push.relay_credential`, the `credential_invalid` test result \
+             and `hello_ack.push_environment` — is minor 14"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 13);
+        assert_eq!(crate::PROTOCOL_MINOR, 14);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1109,6 +1157,10 @@ mod tests {
                 serde_json::json!({"status": "no_registered_token"}),
             ),
             (
+                TestPushResult::CredentialInvalid,
+                serde_json::json!({"status": "credential_invalid"}),
+            ),
+            (
                 TestPushResult::RateLimited {
                     retry_after_secs: 12,
                 },
@@ -1131,6 +1183,97 @@ mod tests {
         .unwrap();
         assert_eq!(reply["type"], "test_push_result");
         assert_eq!(reply["request_id"], "tp-1");
+    }
+
+    /// **Minor 14 is additive in both directions**, which is what the
+    /// compatibility matrix in `docs/push-gateway.md` §5 turns on: a daemon that
+    /// predates relay push says nothing about it and must read as "direct or
+    /// nothing", and a registration carrying a credential must decode on a
+    /// daemon that has no idea what one is.
+    #[test]
+    fn relay_push_is_absent_rather_than_false_on_an_older_peer() {
+        // An ack from a direct-key daemon on minor 13: `push` is true and there
+        // is no `push_relay` key at all. The phone must not read the silence as
+        // an offer.
+        let direct = r#"{"type":"hello_ack","protocol_version":1,"protocol_minor":13,
+            "server_time":"t","capabilities":{"can_approve_reliably":true,
+            "fail_mode":"fail_open","answer_path":"send_keys","hold_secs":0,
+            "send_text":true,"capture":true,"push":true,"test_push":true,"tls":false}}"#;
+        match serde_json::from_str::<ServerMessage>(direct).unwrap() {
+            ServerMessage::HelloAck {
+                capabilities,
+                push_environment,
+                ..
+            } => {
+                assert!(capabilities.push, "a minor-13 direct daemon still says so");
+                assert!(
+                    !capabilities.push_relay,
+                    "absent must read as no relay, never as an offer"
+                );
+                assert_eq!(
+                    push_environment, None,
+                    "a daemon that cannot report an environment reports none"
+                );
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        // The same message from a relay daemon, and the one-hot rule the phone
+        // resolves it with.
+        let relay = direct.replace(r#""push":true"#, r#""push":false,"push_relay":true"#);
+        match serde_json::from_str::<ServerMessage>(&relay).unwrap() {
+            ServerMessage::HelloAck { capabilities, .. } => {
+                assert!(!capabilities.push);
+                assert!(capabilities.push_relay);
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        // A minor-13 registration — no credential — decodes unchanged, which is
+        // what lets a new daemon in direct mode accept an older phone.
+        let legacy: ClientMessage = serde_json::from_str(
+            r#"{"type":"register_push","token":"aabb","environment":"production"}"#,
+        )
+        .unwrap();
+        match legacy {
+            ClientMessage::RegisterPush {
+                relay_credential, ..
+            } => assert_eq!(relay_credential, None),
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        // And a minor-14 registration is exactly the same document plus one
+        // optional key, so an older daemon ignores it rather than failing.
+        let carried = serde_json::to_value(ClientMessage::RegisterPush {
+            token: "aabb".into(),
+            environment: Some("production".into()),
+            relay_credential: Some("opaque".into()),
+        })
+        .unwrap();
+        assert_eq!(carried["type"], "register_push");
+        assert_eq!(carried["relay_credential"], "opaque");
+
+        // **And the message cannot print the bearer it carries.** Every message
+        // here derives `Debug`; a bare `String` would reach a log the first time
+        // anybody wrote `{message:?}` in a parse-error branch or an error
+        // context, without a line anywhere that looks like it logs a secret.
+        let carried: ClientMessage = serde_json::from_value(carried.clone()).unwrap();
+        let rendered = format!("{carried:?}");
+        assert!(
+            !rendered.contains("opaque"),
+            "a registration must not print its credential: {rendered}"
+        );
+        assert!(rendered.contains("aabb"), "the token still prints");
+
+        // Absent, not null: a daemon reading `relay_credential` as present-and-
+        // empty would refuse a direct registration that is perfectly valid.
+        let direct_registration = serde_json::to_value(ClientMessage::RegisterPush {
+            token: "aabb".into(),
+            environment: Some("production".into()),
+            relay_credential: None,
+        })
+        .unwrap();
+        assert!(direct_registration.get("relay_credential").is_none());
     }
 
     #[test]
@@ -1182,6 +1325,7 @@ mod tests {
                 assert!(!capabilities.prompt_identity);
                 assert!(!capabilities.delete_session);
                 assert!(!capabilities.test_push);
+                assert!(!capabilities.push_relay);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -1310,6 +1454,7 @@ mod tests {
             delete_session: true,
             test_push: true,
             push: false,
+            push_relay: false,
             tls: true,
             tls_active: true,
             diff: true,

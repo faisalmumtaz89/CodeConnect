@@ -6,9 +6,27 @@
 	     uploads whose binaries use "required reason" APIs without a matching
 	     entry here (ITMS-91053).
 
-	     The app collects nothing and tracks nothing: there is no CodeConnect
-	     server, no account, and no analytics - the same claims the privacy
-	     policy at codeconnect.sh/privacy makes, kept honest together.
+	     The app collects nothing about the user's work and tracks nothing:
+	     no account and no analytics. The one CodeConnect-operated service is
+	     the push relay, which receives only the content-free notification
+	     fields and enrollment records named by the privacy policy at
+	     codeconnect.sh/privacy - the same claims, kept honest together.
+
+	     Two data types are declared, both transmitted only to that relay and
+	     only when relay-backed notifications are enabled. The APNs token is a
+	     device-level identifier the relay needs to address this phone, so it is
+	     declared as Device ID. The App Attest enrollment record - a verified
+	     public key and receipt, an assertion counter, token and credential
+	     hashes, status and timestamps - has no personal-data category on Apple's
+	     list; it is content-free security metadata bound to that token, and is
+	     declared as Other Data. Both are used solely for app functionality
+	     (delivering notifications) and are never used for tracking. Both are
+	     marked LINKED: Apple defines linkage through the user's account, device,
+	     OR other details, and although there is no account, the APNs token is a
+	     device-level identifier and the enrollment record is joined to its token
+	     binding - so the honest declaration is linked at the device level. This
+	     matches the privacy policy, which states the record is bound to a push
+	     token and retained per the fixed schedule.
 
 	     The single declared API is UserDefaults, used only for the app's own
 	     state (settings, cache keying, install identity). CA92.1 is the
@@ -22,7 +40,32 @@
 	<key>NSPrivacyTrackingDomains</key>
 	<array/>
 	<key>NSPrivacyCollectedDataTypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherDataTypes</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>

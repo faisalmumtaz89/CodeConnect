@@ -29,6 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use protocol::event::{Event, EventKind, Source};
+use protocol::secret::Redacted;
 use protocol::ws::{
     AnswerPath, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
 };
@@ -613,7 +614,29 @@ where
                                 if tls_active { "wss" } else { "ws" },
                                 describe(&ack),
                             );
-                            send(&mut sink, &hello_ack(&daemon, ack, tls_active, private_transport)).await?;
+                            match hello_ack(&daemon, ack, tls_active, private_transport).await {
+                                Ok(ack) => send(&mut sink, &ack).await?,
+                                // The ack could not be built truthfully — the
+                                // one read it makes failed, and a `None` in its
+                                // place would tell the phone something false
+                                // about its own registration. Close honestly
+                                // rather than hand it that; the phone reconnects
+                                // and a transient fault is gone by the retry.
+                                Err(err) => {
+                                    crate::log_error!("ws: could not build hello_ack: {err:#}");
+                                    send(
+                                        &mut sink,
+                                        &ServerMessage::Error {
+                                            code: "handshake_failed".into(),
+                                            message: "the daemon could not read the state this \
+                                                      handshake must report; reconnect to retry"
+                                                .into(),
+                                        },
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                            }
                         }
                         _ => {
                             send(&mut sink, &ServerMessage::Error {
@@ -1021,7 +1044,11 @@ where
         // A second hello is harmless; treat it as a no-op rather than an error.
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
-        ClientMessage::RegisterPush { token, environment } => {
+        ClientMessage::RegisterPush {
+            token,
+            environment,
+            relay_credential,
+        } => {
             // Normalised on the way in, so the column only ever holds one of
             // two spellings and a later reader cannot be surprised by "prod".
             let environment = crate::apns_sender::ApnsEnvironment::parse(
@@ -1046,7 +1073,31 @@ where
                 .await?;
                 return Ok(());
             };
-            match daemon.register_push(device_id, &token, &environment).await {
+            // **The mode decides what a registration must carry**, and a
+            // registration that cannot be acted on is refused rather than
+            // stored: a row the daemon will never send to is a phone waiting
+            // for a notification nobody is going to try to deliver.
+            let (token, credential) =
+                match validated_registration(daemon.push.mode(), &token, relay_credential.as_ref())
+                {
+                    Ok(accepted) => accepted,
+                    Err(refusal) => {
+                        crate::log_warn!("push: refusing registration from {device_id}: {refusal}");
+                        send(
+                            sink,
+                            &ServerMessage::Error {
+                                code: "push_registration_failed".into(),
+                                message: refusal,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+            match daemon
+                .register_push(device_id, &token, &environment, credential.as_ref())
+                .await
+            {
                 Ok(()) => crate::log_info!(
                     "push: device {device_id} registered for {environment} notifications"
                 ),
@@ -1152,7 +1203,12 @@ where
             // Every branch answers the request it was asked — same contract as
             // `delete_session`: a phone holding a spinner can only be released
             // by a result carrying its own correlation id.
-            let result = if !daemon.push.is_live() {
+            // **Configured, not reachable.** A relay that is down at this
+            // instant is still the delivery path this daemon has, and answering
+            // `push_unconfigured` would tell the phone to stop offering the
+            // button that is the only way to find out when it comes back. The
+            // send below reports the real failure.
+            let result = if !daemon.push.mode().is_configured() {
                 protocol::ws::TestPushResult::PushUnconfigured
             } else if let Some(device) = device_id {
                 match daemon.test_push_gate(device).await {
@@ -1168,6 +1224,18 @@ where
                         }
                         Ok(crate::apns::TestDelivery::NoToken) => {
                             protocol::ws::TestPushResult::NoRegisteredToken
+                        }
+                        // **Not a dead token.** The registration is intact and
+                        // the repair is a fresh bearer, so the phone must not
+                        // be told to go and ask Apple for another token.
+                        Ok(crate::apns::TestDelivery::CredentialInvalid) => {
+                            protocol::ws::TestPushResult::CredentialInvalid
+                        }
+                        // The relay's own budget, reported with the wait it
+                        // named — distinct from the daemon's 30-second floor
+                        // above, which is this Mac refusing its own user.
+                        Ok(crate::apns::TestDelivery::RateLimited { retry_after_secs }) => {
+                            protocol::ws::TestPushResult::RateLimited { retry_after_secs }
                         }
                         Ok(crate::apns::TestDelivery::Failed(reason)) => {
                             protocol::ws::TestPushResult::Failed { reason }
@@ -2236,12 +2304,23 @@ async fn next_input_ack(
 }
 
 /// Build the ack, attaching the new credentials when this hello was a pairing.
-fn hello_ack(
+///
+/// **Fallible on purpose.** The one read it makes — the device's authoritative
+/// push environment — is a fact the phone persists over its own cached copy, so
+/// there is no safe way to guess it: a read that fails cannot be reported as
+/// `None`, because `None` is the positive claim "no token is registered" and a
+/// phone that believed it would discard a live registration. When the read
+/// cannot be substantiated the whole ack fails and the caller closes the
+/// connection honestly; the phone reconnects, and a transient database fault is
+/// gone by the retry. A freshly paired device is the one case that never reads:
+/// its row was just created with no token, so `None` there is the truth and not
+/// a collapsed error.
+async fn hello_ack(
     daemon: &Arc<Daemon>,
     outcome: AuthOutcome,
     tls_active: bool,
     private_transport: bool,
-) -> ServerMessage {
+) -> Result<ServerMessage> {
     let (device_token, device_id, device_name) = match outcome {
         AuthOutcome::Paired {
             device_id,
@@ -2265,7 +2344,32 @@ fn hello_ack(
     // an operator's cleartext LAN would be a regression on that, whatever the
     // rest of the protocol is willing to cross it.
     let terminal_allowed = device_id.is_some() && private_transport;
-    ServerMessage::HelloAck {
+    // **What the daemon holds, not what the phone last said.** A relay binding
+    // is the authority for a token's APNs environment and corrects the daemon
+    // on an accepted send; a phone that went on resending the value it first
+    // cached would undo that correction on every handshake. Absent when this
+    // device has no token registered, and absent for a connection with no
+    // device row at all — there is nothing to report about nobody.
+    let push_environment = match (device_id.as_deref(), device_token.is_some()) {
+        // A freshly paired device: its row was created moments ago with no
+        // token, so absence is the truth and no read is needed. Reading here
+        // would also mean a database fault could sink a handshake that has
+        // already minted a token the phone has not yet received.
+        (Some(_), true) => None,
+        // A reconnecting device: absence is a claim about its row that must be
+        // read, never guessed. A failed read fails the ack — see the note on
+        // this function — rather than fabricating "no token".
+        (Some(device), false) => daemon
+            .db
+            .push_environment_for(device.to_string())
+            .await
+            .with_context(|| {
+                format!("reading the push environment for {device} to build hello_ack")
+            })?,
+        // The static bootstrap connection has no device row to report on.
+        (None, _) => None,
+    };
+    Ok(ServerMessage::HelloAck {
         protocol_version: protocol::PROTOCOL_VERSION,
         protocol_minor: protocol::PROTOCOL_MINOR,
         server_time: protocol::time::now_rfc3339(),
@@ -2273,7 +2377,8 @@ fn hello_ack(
         device_token,
         device_id,
         device_name,
-    }
+        push_environment,
+    })
 }
 
 /// Has this connection's device been revoked since it said hello?
@@ -2535,7 +2640,53 @@ fn marker(session_uid: &str, session_id: &str, payload: serde_json::Value) -> Ev
     }
 }
 
+/// What this daemon will store for a registration, or the reason it will not.
+///
+/// `Ok` carries the whole of what belongs in the row: the token as it will be
+/// stored — normalised here, so no caller can file a spelling the relay would
+/// meter as a second binding — and the credential to keep beside it.
+///
+/// **The mode is the rule.** Relay mode has no way to send without a bearer, so
+/// a credential-less registration is refused rather than filed: storing it would
+/// leave a phone believing notifications were coming and a daemon unable to
+/// send one, and nothing on either side would say so until somebody pressed the
+/// test button. Direct mode is the mirror image — it needs no third party, and
+/// a credential offered to it is discarded rather than written down, because a
+/// bearer this Mac will never present is a secret kept for no reason. Off
+/// refuses both: a registration that cannot be acted on is not a registration.
+fn validated_registration(
+    mode: crate::apns::PushMode,
+    token: &str,
+    relay_credential: Option<&Redacted>,
+) -> Result<(String, Option<Redacted>), String> {
+    let token = crate::apns::normalize_device_token(token).map_err(|err| format!("{err}"))?;
+    match mode {
+        crate::apns::PushMode::Off => {
+            Err("push is not configured on this Mac, so there is nowhere to register".into())
+        }
+        crate::apns::PushMode::Direct => Ok((token, None)),
+        crate::apns::PushMode::Relay => {
+            let credential = relay_credential.ok_or_else(|| {
+                "this daemon sends through the push relay and needs a relay credential \
+                 alongside the token"
+                    .to_string()
+            })?;
+            // Validated on its exposed bytes and re-wrapped, so the raw bearer
+            // lives only inside `checked_credential` and never as a bare
+            // `String` a later edit could log. The check normalises nothing —
+            // the relay minted it — so the value stored is the value sent.
+            crate::apns::checked_credential(credential.expose()).map_err(|err| format!("{err}"))?;
+            Ok((token, Some(credential.clone())))
+        }
+    }
+}
+
 fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) -> Capabilities {
+    // **One transport, named once.** `push` and `push_relay` are one-hot and
+    // both are read off the mode rather than off a predicate: a phone has to
+    // choose between registering a bare token and enrolling for a credential,
+    // and two flags derived independently could tell it to do both or neither.
+    let mode = daemon.push.mode();
     Capabilities {
         // True: an answer reaches the agent either as a hook return or as
         // keystrokes into the live prompt, and a refused injection is reported
@@ -2549,8 +2700,9 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         delete_session: true,
         // Same liveness as `push`, but its own flag: a minor-6 daemon can send
         // pushes without understanding the test request, and the phone must be
-        // able to tell those apart without version arithmetic.
-        test_push: daemon.push.is_live(),
+        // able to tell those apart without version arithmetic. True in relay
+        // mode as well, because a test is exactly how a relay path is proven.
+        test_push: mode.is_configured(),
         // The hook emits nothing when we are unreachable, so a dead daemon is
         // indistinguishable from no daemon.
         fail_mode: "fail_open".into(),
@@ -2562,7 +2714,12 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         hold_secs: daemon.config.hold_ms / 1000,
         send_text: true,
         capture: true,
-        push: daemon.push.is_live(),
+        // **Direct only, and false in relay mode on purpose.** A client that
+        // predates `push_relay` reads this flag alone; a true here would send
+        // it to ask for notification permission and register a token with no
+        // credential attached, and every relayed send would be refused.
+        push: mode == crate::apns::PushMode::Direct,
+        push_relay: mode == crate::apns::PushMode::Relay,
         // What the listener holds, not what this connection used.
         tls: daemon.endpoint.tls,
         tls_active,
@@ -2877,6 +3034,9 @@ mod tests {
         addr: SocketAddr,
         daemon: Arc<Daemon>,
         token: Arc<String>,
+        /// The same database the daemon writes, so a test can read what a
+        /// registration actually stored rather than what it hoped it did.
+        store: Arc<crate::store::Store>,
         /// The accept loop, ended when the test that started it is over.
         ///
         /// It used to be spawned and forgotten, which leaks the listener's
@@ -2896,7 +3056,17 @@ mod tests {
     }
 
     async fn live_server(config: protocol::config::Config) -> (LiveServer, String) {
-        let (daemon, device_id) = daemon_with_a_device_and(config);
+        live_server_pushing(config, Arc::new(crate::apns::LoggingPushSender::new())).await
+    }
+
+    /// The same listener, over a daemon whose push is whatever the test needs it
+    /// to be — the mode is what every capability and registration rule below
+    /// turns on.
+    async fn live_server_pushing(
+        config: protocol::config::Config,
+        push: Arc<dyn crate::apns::PushSender>,
+    ) -> (LiveServer, String) {
+        let (daemon, device_id, store, _path) = daemon_with_a_device_pushing(config, push);
         // Bound here rather than inside `serve` so the test learns the port.
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -2915,6 +3085,7 @@ mod tests {
                 addr,
                 daemon,
                 token,
+                store,
                 accepting,
             },
             device_id,
@@ -3016,7 +3187,15 @@ mod tests {
         }
     }
 
-    fn daemon_with_a_device_and(config: protocol::config::Config) -> (Arc<Daemon>, String) {
+    fn daemon_with_a_device_pushing(
+        config: protocol::config::Config,
+        push: Arc<dyn crate::apns::PushSender>,
+    ) -> (
+        Arc<Daemon>,
+        String,
+        Arc<crate::store::Store>,
+        std::path::PathBuf,
+    ) {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
             "ccd-ws-live-{}-{}-{}.db",
@@ -3041,8 +3220,8 @@ mod tests {
         Box::leak(Box::new(transcript_rx));
         let daemon = Daemon::new(
             config,
-            store,
-            Arc::new(crate::apns::LoggingPushSender::new()),
+            Arc::clone(&store),
+            push,
             crate::state::Endpoint {
                 host: "test.ts.net".into(),
                 port: 8787,
@@ -3050,7 +3229,347 @@ mod tests {
             },
             transcript_tx,
         );
-        (daemon, device_id)
+        (daemon, device_id, store, path)
+    }
+
+    // ------------------------------------------- the push compatibility matrix
+
+    /// A sender that is nothing but a mode. Every rule below is decided by the
+    /// mode alone, so a fake that has one is a complete stand-in — and one that
+    /// could also deliver would let a test pass for the wrong reason.
+    struct ModeSender(crate::apns::PushMode);
+
+    impl crate::apns::PushSender for ModeSender {
+        fn send(&self, _hint: &crate::apns::PushHint, _excluded: &[String]) {}
+        fn mode(&self) -> crate::apns::PushMode {
+            self.0
+        }
+    }
+
+    async fn server_in(mode: crate::apns::PushMode) -> (LiveServer, String) {
+        live_server_pushing(
+            protocol::config::Config::default(),
+            Arc::new(ModeSender(mode)),
+        )
+        .await
+    }
+
+    /// Send one `register_push` and return whatever came back, or `None` when
+    /// the daemon accepted it silently — registration is idempotent and
+    /// deliberately unacknowledged, so silence is the success case.
+    async fn register(
+        socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        document: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        socket
+            .send(Message::Text(document.to_string()))
+            .await
+            .unwrap();
+        next_json_within(socket, Duration::from_millis(400)).await
+    }
+
+    fn registration(token: &str, credential: Option<&str>) -> serde_json::Value {
+        let mut document = serde_json::json!({
+            "type": "register_push",
+            "token": token,
+            "environment": "production",
+        });
+        if let Some(credential) = credential {
+            document["relay_credential"] = credential.into();
+        }
+        document
+    }
+
+    const A_TOKEN: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+
+    /// **The capability table, one-hot in every mode.**
+    ///
+    /// `push` and `push_relay` answer different questions — "register a bare
+    /// token" and "enrol for a credential first" — and a phone that saw both
+    /// would do one of them wrongly. The row that carries the compatibility
+    /// story is relay's `push = false`: a client that predates minor 14 reads
+    /// only that flag, and reading `true` would send it to register a token
+    /// with no bearer, producing a device that never rings and says nothing.
+    #[tokio::test]
+    async fn the_push_capabilities_are_one_hot_and_honest_in_every_mode() {
+        for (mode, push, relay, test) in [
+            (crate::apns::PushMode::Direct, true, false, true),
+            (crate::apns::PushMode::Relay, false, true, true),
+            (crate::apns::PushMode::Off, false, false, false),
+        ] {
+            let (server, _device) = server_in(mode).await;
+            let (_socket, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+            assert_eq!(ack["type"], "hello_ack", "{mode:?}");
+            assert_eq!(ack["protocol_minor"], protocol::PROTOCOL_MINOR, "{mode:?}");
+            let capabilities = &ack["capabilities"];
+            assert_eq!(capabilities["push"], push, "push in {mode:?}");
+            assert_eq!(capabilities["push_relay"], relay, "push_relay in {mode:?}");
+            assert_eq!(capabilities["test_push"], test, "test_push in {mode:?}");
+            assert!(
+                !(capabilities["push"].as_bool().unwrap()
+                    && capabilities["push_relay"].as_bool().unwrap()),
+                "the two flags are never both true"
+            );
+        }
+    }
+
+    /// A relay daemon has no way to send without a bearer, so a registration
+    /// that carries none is refused with a reason rather than filed — the row
+    /// would be a phone waiting for a notification nobody will attempt.
+    #[tokio::test]
+    async fn a_relay_daemon_refuses_a_registration_that_carries_no_credential() {
+        let (server, _device) = server_in(crate::apns::PushMode::Relay).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let refusal = register(&mut socket, registration(A_TOKEN, None))
+            .await
+            .expect("a refusal the phone can act on, not silence");
+        assert_eq!(refusal["type"], "error");
+        assert_eq!(refusal["code"], "push_registration_failed");
+        assert!(
+            refusal["message"]
+                .as_str()
+                .unwrap()
+                .contains("relay credential"),
+            "the message must name what is missing: {refusal}"
+        );
+        assert!(
+            server.store.push_targets().unwrap().is_empty(),
+            "nothing may be stored for a registration that was refused"
+        );
+    }
+
+    /// The same daemon accepts the whole tuple, and stores it whole.
+    #[tokio::test]
+    async fn a_relay_daemon_stores_the_tuple_a_current_app_sends() {
+        let (server, device) = server_in(crate::apns::PushMode::Relay).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert!(
+            register(&mut socket, registration(A_TOKEN, Some("a-relay-bearer")))
+                .await
+                .is_none(),
+            "an accepted registration is answered with silence, by design"
+        );
+        let stored = server.store.push_targets().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].device_id, device);
+        assert_eq!(stored[0].token, A_TOKEN);
+        assert_eq!(stored[0].environment, "production");
+        assert_eq!(
+            stored[0].credential.as_ref().map(|c| c.expose()),
+            Some("a-relay-bearer")
+        );
+    }
+
+    /// **A direct daemon accepts the registration an older phone sends** — that
+    /// is the whole of the "old app, new daemon" row — and does not write down a
+    /// bearer it will never present, even when one is offered.
+    #[tokio::test]
+    async fn a_direct_daemon_takes_the_token_alone_and_keeps_no_bearer() {
+        let (server, _device) = server_in(crate::apns::PushMode::Direct).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert!(register(&mut socket, registration(A_TOKEN, None))
+            .await
+            .is_none());
+        let stored = server.store.push_targets().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].credential, None);
+
+        assert!(
+            register(&mut socket, registration(A_TOKEN, Some("offered-anyway")))
+                .await
+                .is_none()
+        );
+        let stored = server.store.push_targets().unwrap();
+        assert_eq!(
+            stored[0].credential, None,
+            "a bearer this Mac will never present is a secret kept for no reason"
+        );
+    }
+
+    /// Off refuses both shapes. A registration that cannot be acted on is not a
+    /// registration, and storing one would leave the phone believing otherwise.
+    #[tokio::test]
+    async fn a_daemon_with_push_off_refuses_a_registration_rather_than_filing_one() {
+        let (server, _device) = server_in(crate::apns::PushMode::Off).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        for credential in [None, Some("a-relay-bearer")] {
+            let refusal = register(&mut socket, registration(A_TOKEN, credential))
+                .await
+                .expect("a refusal, not silence");
+            assert_eq!(refusal["code"], "push_registration_failed");
+        }
+        assert!(server.store.push_targets().unwrap().is_empty());
+    }
+
+    /// **The bootstrap token has no device row, in any mode.** A push token
+    /// belongs to a row so that revoking the device stops its notifications;
+    /// accepting one here would create a stream nothing could switch off.
+    #[tokio::test]
+    async fn a_bootstrap_connection_can_never_register_a_push_token() {
+        for mode in [
+            crate::apns::PushMode::Direct,
+            crate::apns::PushMode::Relay,
+            crate::apns::PushMode::Off,
+        ] {
+            let (server, _device) = server_in(mode).await;
+            // No device token: the harness falls back to the static one.
+            let (mut socket, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+            assert!(
+                ack["device_id"].is_null(),
+                "a static connection has no device row: {ack}"
+            );
+            let refusal = register(&mut socket, registration(A_TOKEN, Some("a-relay-bearer")))
+                .await
+                .expect("a refusal, not silence");
+            assert_eq!(refusal["code"], "no_device", "{mode:?}");
+            assert!(server.store.push_targets().unwrap().is_empty());
+        }
+    }
+
+    /// A token that is not a token is refused before it is stored, so the relay
+    /// meters one binding per phone rather than one per spelling — and so a row
+    /// can never hold something no sender could address.
+    #[tokio::test]
+    async fn a_malformed_token_is_refused_rather_than_stored() {
+        let (server, _device) = server_in(crate::apns::PushMode::Relay).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        for bad in [
+            "",
+            "aabb",
+            "not-hex-at-all-not-hex-at-all-not-hex",
+            &"a".repeat(600),
+        ] {
+            let refusal = register(&mut socket, registration(bad, Some("bearer")))
+                .await
+                .expect("a refusal, not silence");
+            assert_eq!(refusal["code"], "push_registration_failed", "{bad:?}");
+        }
+        assert!(server.store.push_targets().unwrap().is_empty());
+    }
+
+    /// **The handshake reports the environment the daemon holds**, which is how
+    /// a relay-side correction reaches a phone that would otherwise go on
+    /// resending the value it first cached. Absent before there is a token to
+    /// have an environment for.
+    #[tokio::test]
+    async fn the_handshake_carries_the_environment_the_daemon_holds() {
+        let (server, _device) = server_in(crate::apns::PushMode::Relay).await;
+        let (mut socket, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert!(
+            ack.get("push_environment").is_none(),
+            "a daemon holding no token for this device claims no environment: {ack}"
+        );
+
+        assert!(
+            register(&mut socket, registration(A_TOKEN, Some("a-relay-bearer")))
+                .await
+                .is_none()
+        );
+
+        let (_socket, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["push_environment"], "production");
+
+        // The relay corrects the binding; the next handshake carries the
+        // correction rather than the value the phone first sent. The credential
+        // is the one this device registered with, so the CAS matches the row.
+        server
+            .store
+            .set_push_environment(&device_of(&ack), A_TOKEN, Some("a-relay-bearer"), "sandbox")
+            .unwrap();
+        let (_socket, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(
+            ack["push_environment"], "sandbox",
+            "the daemon reports what it holds, not what it was told"
+        );
+    }
+
+    fn device_of(ack: &serde_json::Value) -> String {
+        ack["device_id"]
+            .as_str()
+            .expect("a paired ack names the device")
+            .to_string()
+    }
+
+    /// **A read the handshake cannot make is a failed handshake, never a false
+    /// `None`.** Absence of `push_environment` is the positive claim "no token
+    /// registered", which a phone persists over its own cached tuple — so a
+    /// database fault that was reported as absence would make a phone with a
+    /// live registration discard it. When the read cannot be substantiated the
+    /// ack fails and the connection closes; the phone reconnects.
+    ///
+    /// The reproduction drops the one column the read needs, which the auth
+    /// path does not touch — so authentication still succeeds and the failure is
+    /// isolated to exactly the read under test. A reconnect must error rather
+    /// than answer with an ack whose `push_environment` is a fabricated `None`,
+    /// and a fresh pair must still ack `None` without reading.
+    #[tokio::test]
+    async fn a_failed_environment_read_fails_the_handshake_rather_than_faking_absence() {
+        let (daemon, device_id, store, path) = daemon_with_a_device_pushing(
+            protocol::config::Config::default(),
+            Arc::new(ModeSender(crate::apns::PushMode::Relay)),
+        );
+        // A live relay registration for the reconnecting device.
+        store
+            .set_push_token(&device_id, A_TOKEN, "production", Some("a-relay-bearer"))
+            .unwrap();
+
+        // Break the one read `hello_ack` makes, and nothing the auth path uses:
+        // `device_by_token_hash` selects no push column, so a reconnect still
+        // authenticates and the failure lands on `push_environment_for` alone.
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("ALTER TABLE devices DROP COLUMN push_environment", [])
+            .expect("SQLite drops the column the read needs");
+        drop(raw);
+
+        let reconnect = || {
+            AuthOutcome::Device(Box::new(crate::store::DeviceRow {
+                device_id: device_id.clone(),
+                name: "iPhone".into(),
+                created_at: protocol::time::now_rfc3339(),
+                last_seen_at: None,
+                revoked_at: None,
+            }))
+        };
+        let result = hello_ack(&daemon, reconnect(), true, true).await;
+        assert!(
+            result.is_err(),
+            "a read it could not make must fail the ack, not fabricate absence: {result:?}"
+        );
+
+        // And a *fresh pair* never makes the read at all — its row is new and
+        // has no token — so it still succeeds with a truthful `None` even while
+        // the column is gone. This is what proves the fix distinguishes "known
+        // absent" from "could not read" rather than blanket-failing.
+        let fresh = AuthOutcome::Paired {
+            device_id: "newly-paired".into(),
+            device_name: "iPad".into(),
+            token: "a-fresh-device-token".into(),
+        };
+        match hello_ack(&daemon, fresh, true, true).await {
+            Ok(ServerMessage::HelloAck {
+                push_environment, ..
+            }) => assert_eq!(
+                push_environment, None,
+                "a device just created has no token, so absence here is the truth"
+            ),
+            other => panic!("a fresh pair reads nothing and must still ack: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -6694,8 +7213,8 @@ mod tests {
     /// `ws_allow_plaintext` row is the one that used to be wrong — the listener
     /// admitted the connection, so `terminal_allowed` said yes, and `tls_active`
     /// was never consulted at all.
-    #[test]
-    fn the_terminal_capability_is_offered_only_over_a_private_transport() {
+    #[tokio::test]
+    async fn the_terminal_capability_is_offered_only_over_a_private_transport() {
         let (daemon, _device) = daemon_with_a_device();
         let paired = || {
             AuthOutcome::Device(Box::new(crate::store::DeviceRow {
@@ -6706,32 +7225,39 @@ mod tests {
                 revoked_at: None,
             }))
         };
-        let offered =
-            |tls_active: bool, trust: PlaintextTrust, outcome: AuthOutcome| match hello_ack(
-                &daemon,
-                outcome,
-                tls_active,
-                tls_active || trust.is_private(),
-            ) {
-                ServerMessage::HelloAck { capabilities, .. } => capabilities.terminal_pty,
-                other => panic!("hello_ack must answer an ack, got {other:?}"),
-            };
+        let offered = |tls_active: bool, trust: PlaintextTrust, outcome: AuthOutcome| {
+            let daemon = Arc::clone(&daemon);
+            async move {
+                match hello_ack(
+                    &daemon,
+                    outcome,
+                    tls_active,
+                    tls_active || trust.is_private(),
+                )
+                .await
+                .expect("this device reads cleanly, so the ack builds")
+                {
+                    ServerMessage::HelloAck { capabilities, .. } => capabilities.terminal_pty,
+                    other => panic!("hello_ack must answer an ack, got {other:?}"),
+                }
+            }
+        };
 
         assert!(
-            offered(false, PlaintextTrust::TrustedPath, paired()),
+            offered(false, PlaintextTrust::TrustedPath, paired()).await,
             "loopback and this Mac's tailnet address are private already"
         );
         assert!(
-            offered(true, PlaintextTrust::RequireTls, paired()),
+            offered(true, PlaintextTrust::RequireTls, paired()).await,
             "and so is wss, on any listener"
         );
         assert!(
-            !offered(false, PlaintextTrust::OperatorAllowed, paired()),
+            !offered(false, PlaintextTrust::OperatorAllowed, paired()).await,
             "ws_allow_plaintext admits the connection; it does not make the LAN \
              private, and a terminal is shell-equivalent authority"
         );
         assert!(
-            !offered(true, PlaintextTrust::TrustedPath, AuthOutcome::Static),
+            !offered(true, PlaintextTrust::TrustedPath, AuthOutcome::Static).await,
             "and the static bootstrap token never gets one, encrypted or not"
         );
     }

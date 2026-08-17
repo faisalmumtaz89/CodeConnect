@@ -8,7 +8,6 @@
 
 mod apns;
 mod apns_sender;
-mod apns_token;
 mod catalog;
 mod db;
 #[cfg(test)]
@@ -21,6 +20,8 @@ mod log;
 mod logrotate;
 mod project_label;
 mod push_gate;
+mod push_queue;
+mod relay_sender;
 mod secret;
 mod state;
 mod store;
@@ -71,7 +72,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(&protocol::db_path())?);
     let token = Arc::new(load_or_create_token(&protocol::token_path())?);
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
-    let push = crate::apns_sender::build(&config, Arc::clone(&store));
+    let push = crate::apns::build(&config, Arc::clone(&store));
 
     let plan = resolve_bind(&config).await;
     let bind = plan.bind;

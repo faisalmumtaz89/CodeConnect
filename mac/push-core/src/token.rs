@@ -139,10 +139,11 @@ impl ProviderToken {
     }
 }
 
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
 /// Base64url **without padding**, which is what JWT requires. Padded output is
 /// accepted by some verifiers and rejected by Apple's.
 fn b64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -173,6 +174,98 @@ fn escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider token over a key minted in this process. Checking one in
+    /// would be a private key in the repository, and Apple's `.p8` is the one
+    /// secret this crate exists to hold.
+    fn provider() -> ProviderToken {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        ProviderToken::from_pkcs8(
+            pkcs8.as_ref(),
+            ApnsIdentity {
+                key_id: "KEYIDABCDE".to_string(),
+                team_id: "TEAMIDWXYZ".to_string(),
+                topic: "com.example.app".to_string(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn at(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    /// Base64url back to bytes, so the assertions below are about the documents
+    /// Apple parses rather than about the strings this module printed.
+    fn decode(text: &str) -> Vec<u8> {
+        let mut bits = 0u32;
+        let mut held = 0u32;
+        let mut out = Vec::new();
+        for character in text.bytes() {
+            let value = ALPHABET
+                .iter()
+                .position(|entry| *entry == character)
+                .unwrap_or_else(|| panic!("{text} is not base64url"));
+            bits = (bits << 6) | value as u32;
+            held += 6;
+            if held >= 8 {
+                held -= 8;
+                out.push((bits >> held) as u8);
+            }
+        }
+        out
+    }
+
+    /// **The cache is what this module is for.** Apple refuses a provider token
+    /// minted more often than once every twenty minutes with a `429
+    /// TooManyProviderTokenUpdates`, which arrives looking exactly like a rate
+    /// limit on the pushes — so minting per push fails under the load the relay
+    /// exists to carry, and only under that load.
+    #[test]
+    fn one_token_serves_every_push_until_it_approaches_apples_hour() {
+        let token = provider();
+        let minted = 1_800_000_000;
+
+        let first = token.bearer_at(at(minted)).unwrap();
+        assert_eq!(
+            token.bearer_at(at(minted + 39 * 60)).unwrap(),
+            first,
+            "a token minted 39 minutes ago is the token Apple still accepts"
+        );
+
+        let renewed = token.bearer_at(at(minted + 41 * 60)).unwrap();
+        assert_ne!(
+            renewed, first,
+            "a token approaching the hour is replaced before Apple refuses it"
+        );
+        // And the replacement is now the one being reused.
+        assert_eq!(token.bearer_at(at(minted + 41 * 60 + 60)).unwrap(), renewed);
+    }
+
+    /// The three things Apple checks and answers about with a `403` that names
+    /// none of them.
+    #[test]
+    fn the_token_is_an_es256_jwt_whose_signature_is_the_fixed_width_pair() {
+        let issued = 1_800_000_000;
+        let token = provider().bearer_at(at(issued)).unwrap();
+
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "{token}");
+        assert_eq!(
+            decode(parts[0]),
+            br#"{"alg":"ES256","kid":"KEYIDABCDE"}"#.to_vec()
+        );
+        // `iat` is seconds since the epoch, not an age: Apple measures it
+        // against its own clock and refuses anything over an hour old.
+        assert_eq!(
+            decode(parts[1]),
+            format!(r#"{{"iss":"TEAMIDWXYZ","iat":{issued}}}"#).into_bytes()
+        );
+        // 64 bytes of `r||s`. The ASN.1 form of the same signature is about
+        // seventy bytes and is refused by Apple without explanation.
+        assert_eq!(decode(parts[2]).len(), 64);
+    }
 
     #[test]
     fn base64url_is_unpadded_and_uses_the_url_alphabet() {

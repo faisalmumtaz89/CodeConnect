@@ -4128,11 +4128,18 @@ impl Daemon {
     /// rows it was taken from are told to the sender here. Their queues hold
     /// work for a token they no longer own, and their workers would otherwise
     /// wait on a phone that has already come back under another name.
+    ///
+    /// **The three values are one fact.** A relay credential authorises sending
+    /// to *this* token and no other, so it is written with the token in a single
+    /// transaction: a rotation that landed the new token beside the old bearer
+    /// would present the relay a pair it has no binding for, and every push
+    /// would be refused as a credential failure that no repair could fix.
     pub async fn register_push(
         &self,
         device_id: &str,
         token: &str,
         environment: &str,
+        credential: Option<&protocol::secret::Redacted>,
     ) -> Result<()> {
         let displaced = self
             .db
@@ -4140,6 +4147,7 @@ impl Daemon {
                 device_id.to_string(),
                 token.to_string(),
                 environment.to_string(),
+                credential.cloned(),
             )
             .await?;
         for previous in displaced {
@@ -6787,7 +6795,7 @@ mod tests {
         let second = pair(&daemon).await;
 
         daemon
-            .register_push(&first, "tok-shared", "production")
+            .register_push(&first, "tok-shared", "production", None)
             .await
             .unwrap();
         assert!(
@@ -6796,7 +6804,7 @@ mod tests {
         );
 
         daemon
-            .register_push(&second, "tok-shared", "production")
+            .register_push(&second, "tok-shared", "production", None)
             .await
             .unwrap();
         assert_eq!(

@@ -78,7 +78,7 @@ SQLite in WAL mode — one writer, a small reader pool, and all database work of
 
 Transport is a WebSocket bound to the Tailscale interface: `wss://` when the tailnet can issue a certificate, `ws://` on the tailnet alone otherwise. Every connection presents a per-device token issued at pairing, and revoking a device closes its open sockets rather than waiting for a reconnect.
 
-Push notifications ring when a run needs a human, and when one finishes a turn. The alert names the project, and says why it rang unless several runs are holding decisions at once — then it says how many, and carries no command text, paths, diffs, tool name, risk class or identifier — a push tells the phone to reconnect and ask the log what is true. Tapping one opens the decision list when an approval rang, and the fleet otherwise — the list, never a particular card, because the payload names none.
+Push notifications ring when a run needs a human, and when one finishes a turn. Sent directly (a daemon holding its own APNs key), the alert names the project and says why it rang unless several runs are holding decisions at once — then it says how many; sent through the relay, the title is the fixed word `CodeConnect` and the project name never leaves the Mac. Either way it carries no command text, paths, diffs, tool name, risk class or identifier — a push tells the phone to reconnect and ask the log what is true. Tapping one opens the decision list when an approval rang, and the fleet otherwise — the list, never a particular card, because the payload names none.
 
 ## Adding another agent
 

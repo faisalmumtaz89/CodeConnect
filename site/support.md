@@ -1,6 +1,6 @@
 # CodeConnect Support
 
-CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. There is no server in between: the app talks directly to the daemon on your Mac, and your sessions never leave your own devices.
+CodeConnect lets you monitor and control the coding agents running on your own computer — approve permission prompts, watch live sessions, review diffs, and take over in a full terminal, from your iPhone. Your sessions travel directly between the app and the daemon on your Mac — no server in between — and never leave your own devices; the one CodeConnect-operated service is a content-free push relay, described in the privacy policy.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ Your phone now shows every session the daemon supervises. When an agent asks for
 ## Frequently asked
 
 **Does my code ever leave my devices?**
-No. There is no CodeConnect server. Sessions travel directly from your Mac to your phone; the one thing that passes through Apple is the push notification, whose fixed, minimal shape is described in the [privacy policy](https://codeconnect.sh/privacy).
+No. Sessions travel directly from your Mac to your phone and never touch a CodeConnect server. The one exception is the push notification: it passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first, which receives only a fixed handful of content-free fields. Both shapes are described exactly in the [privacy policy](https://codeconnect.sh/privacy).
 
 **Is Tailscale required?**
 No. Any network path from phone to Mac works — same Wi-Fi, or any private network you operate. Tailscale is simply a common choice.

@@ -399,9 +399,23 @@ Three things behave differently on a Mac that has been running for a while.
   daemon did not launch — have `tmux_session` and `tmux_socket` cleared, because
   empty is the honest answer for a process this daemon cannot locate; a location
   a newer build recorded there does not survive the trip down. And
-  `user_version` is stamped with this build's number. Nothing here ever reads it
-  back, so an older daemon opens a newer database, never compares the two, and
-  leaves its own number behind.
+  `user_version` is stamped with this build's number.
+
+  **The push tuple is the one exception to "an added column survives a
+  rollback untouched," and deliberately so.** `(push_token, push_environment,
+  push_credential)` must move together — the relay checks the credential
+  against the token in one request — and a rollback breaks exactly that
+  coupling: an older build updates the token in place and leaves a credential
+  minted for the token before it, so the way back up would read a pair the
+  relay refuses on every push. So `user_version` *is* read at open now, once, to
+  tell an upgrade from a restart, and on the upgrade a one-shot pass clears any
+  credential whose token pairing cannot be proven current (the phone
+  re-registers the whole tuple) and clears the whole tuple off any row a prior
+  build revoked without clearing it. It is gated on the version transition
+  rather than run every boot precisely because it clears a credential that is
+  usually valid: repeating it every start would re-register relay push for ever.
+  The column still survives the trip down whole; what the upgrade repairs is the
+  *coherence* of the three values, not the presence of the column.
 
 ## The LaunchAgent
 
@@ -721,9 +735,13 @@ gate then refuses.
 ## What the phone can ask for
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
-`session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `send_text`,
-`capture`, `delete_session` and `test_push` so the app disables affordances it
-does not see advertised instead of failing at tap time.
+`session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
+`send_text`, `capture`, `delete_session` and `test_push` so the app disables
+affordances it does not see advertised instead of failing at tap time. `push`
+and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
+to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
+registration must carry a relay credential as well as a token, and neither means
+push is off.
 `hello_ack.protocol_minor` is the additive feature level: `>= 1` means
 `TurnComplete`, `get_diff`, pairing and `risk_class` are all present; `>= 2`
 means every session and event carries a `session_uid`, every message that names
@@ -739,8 +757,12 @@ phone telling the daemon where to send a notification; `>= 7` adds
 native slash-command adapters; `>= 11` adds `SessionSummary.project_label` —
 the daemon resolving what a run is *called* (the last component of its working
 directory), so that every surface that names a run, including a notification
-the phone cannot compose for itself, uses one string. See
-`protocol/src/lib.rs` for the authoritative ledger.
+the phone cannot compose for itself, uses one string; `>= 13` adds the live
+terminal; `>= 14` adds relay-backed push — the `push_relay` capability,
+`register_push.relay_credential`, the `credential_invalid` test result, and
+`hello_ack.push_environment`, which is the daemon's authoritative APNs
+environment for that device's token and the path a relay-side correction takes
+back to the phone. See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
@@ -1060,8 +1082,29 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
-* **APNs is a logging stub** until a `.p8` key exists; `hello_ack` advertises
-  `push: false` so the phone can tell "not configured" from "failed".
+* **Which transport carries a push is decided at boot, from the config file
+  alone.** `push_enabled: false` is off. Any one of `apns_key_path`,
+  `apns_key_id`, `apns_team_id` or `apns_topic` is a request for direct
+  delivery, and then all four are required and the key must load — a partial or
+  unreadable set is off with an error, never a silent move to the relay. None of
+  the four is the ordinary case and selects the CodeConnect relay, which holds
+  the key that cannot be shipped to a customer's Mac. `hello_ack` advertises
+  `push` or `push_relay` accordingly, so the phone can tell "not configured"
+  from "failed" and direct from relay.
+* **A relay that is unreachable is not a relay that is unconfigured.** Nothing
+  probes the network at boot: the capability, the registration path and the test
+  button all stay live, ordinary sends fail inside the 45-second bound and are
+  dropped, and a test reports the real failure. Recovery needs no restart. The
+  alternative — selecting the stub because one request failed — would suppress
+  every registration until somebody noticed.
+* **Relay mode needs a phone that has enrolled.** The daemon stores a relay
+  credential and presents it on every send; the relay mints that credential after
+  it verifies the phone's App Attest, and the phone stores the opaque bearer it
+  receives and hands it to the daemon over the paired socket. A registration
+  carrying no credential is
+  refused with a reason rather than filed as a device that will never ring — so a
+  phone whose App Attest is unsupported, or which has not yet enrolled, gets no
+  relay push, and the direct-key override stays available on that Mac.
 * **A certificate from Tailscale depends on the tailnet.** `tailscale cert`
   needs HTTPS Certificates enabled for the tailnet, and issues only for this
   node's MagicDNS name. Without it the daemon serves `ws://` and says so; a

@@ -327,6 +327,29 @@ MagicDNS name.
 `capabilities.tls` ("the daemon holds a certificate") and `capabilities.tls_active`
 ("this connection is encrypted") are different facts and are shown separately.
 
+## Relay-backed push (App Attest)
+
+When the paired daemon advertises `push_relay` (protocol minor 14), the phone
+earns a relay credential before it can be rung by a Mac that holds no Apple push
+key of its own. `RelayEnrollment` does it lazily — only after a relay-capable
+handshake and an APNs token, single-flight per `(token hash, environment)`. It
+attests to the relay with App Attest, receives an opaque bearer, and stores the
+bearer and the App Attest key ID in the iOS Keychain, `ThisDeviceOnly`
+(`Store/RelayCredential.swift`). The credential then rides `register_push`'s
+`relay_credential` to the daemon over the same paired socket; the phone never
+sends the attestation to the daemon and the daemon never mints a credential.
+
+`PushMode` (`none` / `direct` / `relay`) is normalized from the capabilities with
+**direct precedence**, and every push UI and flow check reads that mode rather
+than raw `capabilities.push`. A **direct**-key daemon makes no relay request at
+all. On foreground, debounced, the app rechecks the credential and acts on the
+relay's status — keep it, mint a replacement by assertion, re-enroll a fresh key,
+or (`token_invalid`) drop the cached tuple and register with APNs again. A device
+whose App Attest is unsupported keeps every other app feature and simply receives
+no relay push. `hello_ack.push_environment` is the daemon's authoritative APNs
+environment for the registered token; the app persists a correction rather than
+resending its cached value.
+
 ## Not built yet
 
 Live Activities are not implemented.

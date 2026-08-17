@@ -435,6 +435,7 @@ fn capabilities() -> Capabilities {
         delete_session: false,
         test_push: false,
         push: false,
+        push_relay: false,
         tls: false,
         tls_active: false,
         diff: true,
@@ -461,6 +462,9 @@ fn hello_ack() -> ServerMessage {
         device_token: None,
         device_id: None,
         device_name: Some(DEVICE_NAME.into()),
+        // No push of any kind, so there is no token and no environment to have
+        // an opinion about.
+        push_environment: None,
     }
 }
 
@@ -753,6 +757,7 @@ mod tests {
         for withheld in [
             "terminal_pty",
             "push",
+            "push_relay",
             "test_push",
             "delete_session",
             "capture",
