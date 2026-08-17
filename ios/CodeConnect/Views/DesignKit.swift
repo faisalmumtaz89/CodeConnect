@@ -615,9 +615,32 @@ extension CC {
             size: 17, lineHeight: 22, weight: .semibold, tracking: 0,
             design: .default, relativeTo: .headline, documentedColor: CC.text.primary)
 
-        /// 16/22 regular. The reading size.
+        /// 16/22 regular. The reading size for chrome and controls.
         static let body = CCTextStyle(
             size: 16, lineHeight: 22, weight: .regular, tracking: 0,
+            design: .default, relativeTo: .body, documentedColor: CC.text.primary)
+
+        /// 18/25 regular, uncapped. **Agent reading prose — that alone.**
+        ///
+        /// A point larger and a line taller than `body`, on its own token so the
+        /// timeline's reading lane can grow without dragging `body`'s other
+        /// callers — the composer, fact rows, buttons, onboarding — up with it,
+        /// which would make body copy larger than a headline everywhere else.
+        /// Uncapped on purpose: this is the one run a reader enlarged the type to
+        /// read, so it must keep growing to AX5 rather than meet a ceiling.
+        static let reading = CCTextStyle(
+            size: 18, lineHeight: 25, weight: .regular, tracking: 0,
+            design: .default, relativeTo: .body, documentedColor: CC.text.primary)
+
+        /// 18/25 **semibold**, uncapped. **A heading inside agent reading prose.**
+        ///
+        /// The same size and leading as `reading`, heavier only — because a
+        /// heading set at `headline` (17) would render *smaller* than the 18pt
+        /// prose beneath it, inverting the hierarchy. It rides the same `.body`
+        /// ramp as `reading`, so the two scale in lockstep and the heading is
+        /// never smaller than the prose it titles, at any Dynamic Type step.
+        static let readingHeading = CCTextStyle(
+            size: 18, lineHeight: 25, weight: .semibold, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
         /// 15/20 regular. Subtitles and secondary prose.
