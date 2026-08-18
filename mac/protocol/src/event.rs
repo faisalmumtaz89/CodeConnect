@@ -19,6 +19,15 @@ pub enum Source {
     Transcript,
     /// The daemon itself (resync markers, approval resolutions, link state).
     Daemon,
+    /// The Codex app-server notification stream — structured, first-hand, the
+    /// single authoritative observation of a Codex session, exactly as
+    /// [`Source::Hook`] is for Claude. A Codex session's every timeline fact
+    /// carries this source, so the dedup key `(session_uid, source,
+    /// source_event_id)` is a clean per-session namespace that can never collide
+    /// with a Claude fact (different source *and* different `session_uid`). Its
+    /// `source_event_id`s are thread-namespaced (D4) so a thread switch inside one
+    /// session cannot alias two threads' item ids.
+    Codex,
     /// tmux capture-pane snapshot. Presence checks only, never semantics.
     Pty,
     /// A persisted source string this build does not recognise — a fact written
@@ -43,6 +52,11 @@ impl Source {
         match self {
             Source::Hook => 3,
             Source::Daemon => 3,
+            // First-hand structured stream — the highest trust, on a par with a
+            // Claude hook. Nothing else observes a Codex session, so this ranking
+            // only ever guards against a corrupt/unknown source (trust 0) losing
+            // to the real one; it never competes with a Claude source.
+            Source::Codex => 3,
             Source::Transcript => 2,
             Source::Pty => 1,
             Source::Unknown => 0,
@@ -54,6 +68,7 @@ impl Source {
             Source::Hook => "hook",
             Source::Transcript => "transcript",
             Source::Daemon => "daemon",
+            Source::Codex => "codex",
             Source::Pty => "pty",
             Source::Unknown => "unknown",
         }

@@ -3283,6 +3283,7 @@ fn parse_source(value: &str) -> Source {
         "hook" => Source::Hook,
         "transcript" => Source::Transcript,
         "daemon" => Source::Daemon,
+        "codex" => Source::Codex,
         "pty" => Source::Pty,
         // An unrecognised persisted source — a fact written by a newer daemon,
         // read back after a rollback — is the lowest trust there is, never the
