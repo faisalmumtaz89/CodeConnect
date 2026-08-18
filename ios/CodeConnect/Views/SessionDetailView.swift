@@ -460,6 +460,14 @@ struct SessionDetailView: View {
                     + "CodeConnect’s timeline will stay here.")
         }
         .sheet(item: $openApproval) { approval in
+            // `openApproval` is only the sheet's IDENTITY (and a last-known
+            // display). `DecisionCardView` re-derives the authoritative, live
+            // card from `AppModel.liveApproval(...)` on every render, so a
+            // crash-recovery rebuild, a resolution, or the session leaving the
+            // fleet all reach the open sheet: the outcome wins the banner and the
+            // action bar disables, or — with no live backing at all — the card
+            // shows a non-actionable "no longer available" state. It can never
+            // present a frozen actionable snapshot.
             DecisionCardSheet(approval: approval)
                 .environment(model)
         }

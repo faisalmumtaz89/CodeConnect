@@ -729,6 +729,9 @@ mod tests {
                 lifecycle: protocol::event::Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();
@@ -834,6 +837,9 @@ mod tests {
             lifecycle,
             created_at: "t".into(),
             updated_at: "t".into(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
         };
         use protocol::event::Lifecycle;
         let (tails, final_reads) = tails_to_resume(vec![

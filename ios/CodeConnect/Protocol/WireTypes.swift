@@ -73,12 +73,42 @@ enum PushMode: Equatable, Sendable {
     case relay
 }
 
-enum EventSource: String, Codable, Sendable, Hashable {
+/// Where an event came from — a *provenance*, so an unrecognised source must
+/// never inherit the trusted `.daemon` label. `.daemon` used to be the
+/// fallback, which meant a newer daemon's source this build had never heard of
+/// was silently attributed to the daemon itself. Modelled on `AnswerPath`: a
+/// tagged single-value string with the unknown retained in its own case.
+enum EventSource: Sendable, Hashable {
     case hook, transcript, daemon, pty
+    /// A source a newer daemon knows about and this build does not. Retained
+    /// rather than coerced, so nothing reads it as the trusted `.daemon`.
+    case unknown(String)
 
+    var rawValue: String {
+        switch self {
+        case .hook: return "hook"
+        case .transcript: return "transcript"
+        case .daemon: return "daemon"
+        case .pty: return "pty"
+        case .unknown(let raw): return raw
+        }
+    }
+}
+
+extension EventSource: Codable {
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        self = EventSource(rawValue: raw) ?? .daemon
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "hook": self = .hook
+        case "transcript": self = .transcript
+        case "daemon": self = .daemon
+        case "pty": self = .pty
+        case let other: self = .unknown(other)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -115,13 +145,52 @@ enum ResolvedBy: String, Codable, Sendable, Hashable {
     }
 }
 
-enum AnswerPath: String, Codable, Sendable, Hashable {
-    case hookReturn = "hook_return"
-    case sendKeys = "send_keys"
+/// How an answer was actually applied — an *actuation claim*, so an unknown
+/// wire value must never collapse into one this build would read as "we typed
+/// it". `.sendKeys` used to be the fallback, which meant a newer daemon's path
+/// this build had never heard of was silently reported as keystrokes it never
+/// sent. Modelled on `AnswerDecision`: a tagged single-value string, with the
+/// unknown retained in its own case rather than folded into a known one.
+enum AnswerPath: Sendable, Hashable {
+    case hookReturn
+    case sendKeys
+    /// A path a newer daemon knows about and this build does not. Never claims
+    /// an actuation: a reader asking "did we type this?" must treat it as *not*
+    /// `send_keys`, because this build cannot vouch for how the answer landed.
+    case unknown(String)
 
+    var rawValue: String {
+        switch self {
+        case .hookReturn: return "hook_return"
+        case .sendKeys: return "send_keys"
+        case .unknown(let raw): return raw
+        }
+    }
+
+    /// Build from a wire string outside a decoder — used by `Capabilities`,
+    /// which reads `answer_path` out of its verbatim map. An unrecognised value
+    /// is retained, never coerced to `.sendKeys`.
+    init(wire raw: String) {
+        switch raw {
+        case "hook_return": self = .hookReturn
+        case "send_keys": self = .sendKeys
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+extension AnswerPath: Codable {
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        self = AnswerPath(rawValue: raw) ?? .sendKeys
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "hook_return": self = .hookReturn
+        case "send_keys": self = .sendKeys
+        case let other: self = .unknown(other)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -427,7 +496,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         canApproveReliably = raw["can_approve_reliably"]?.boolValue ?? false
         failMode = raw["fail_mode"]?.stringValue ?? "unknown"
         answerPath =
-            raw["answer_path"]?.stringValue.flatMap(AnswerPath.init(rawValue:)) ?? .sendKeys
+            raw["answer_path"]?.stringValue.map(AnswerPath.init(wire:)) ?? .sendKeys
         holdSecs = (raw["hold_secs"]?.intValue).map { UInt64(max(0, $0)) } ?? 0
         sendText = raw["send_text"]?.boolValue ?? false
         capture = raw["capture"]?.boolValue ?? false
@@ -519,6 +588,10 @@ enum AnswerDecision: Sendable, Hashable {
     case deny
     /// Pick the nth option exactly as Claude numbered it (1-based).
     case option(index: UInt32)
+    /// Pick an option by its stable id rather than its ordinal — the agent-seam
+    /// shape, where Codex names options by id (`"acceptWithExecpolicyAmendment"`)
+    /// rather than position. Additive to `option`.
+    case optionId(String)
     case text(String)
     /// A decision kind a newer daemon knows about and this build does not.
     /// Never sent — only received, inside a recorded outcome. Throwing here
@@ -529,7 +602,10 @@ enum AnswerDecision: Sendable, Hashable {
 }
 
 extension AnswerDecision: Codable {
-    private enum CodingKeys: String, CodingKey { case type, index, text }
+    private enum CodingKeys: String, CodingKey {
+        case type, index, text
+        case optionId = "option_id"
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -537,6 +613,7 @@ extension AnswerDecision: Codable {
         case "allow": self = .allow
         case "deny": self = .deny
         case "option": self = .option(index: try c.decode(UInt32.self, forKey: .index))
+        case "option_id": self = .optionId(try c.decode(String.self, forKey: .optionId))
         case "text": self = .text(try c.decode(String.self, forKey: .text))
         case let other: self = .unrecognised(other)
         }
@@ -552,6 +629,9 @@ extension AnswerDecision: Codable {
         case .option(let index):
             try c.encode("option", forKey: .type)
             try c.encode(index, forKey: .index)
+        case .optionId(let id):
+            try c.encode("option_id", forKey: .type)
+            try c.encode(id, forKey: .optionId)
         case .text(let text):
             try c.encode("text", forKey: .type)
             try c.encode(text, forKey: .text)
@@ -565,6 +645,7 @@ extension AnswerDecision: Codable {
         case .allow: return "Allowed"
         case .deny: return "Denied"
         case .option(let index): return "Chose option \(index)"
+        case .optionId(let id): return "Chose option \(id)"
         case .text: return "Replied with text"
         case .unrecognised(let raw): return "Answered (\(raw))"
         }
@@ -586,6 +667,11 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     /// answer — the local-resolution path, where all it truly knows is that the
     /// prompt is gone. The UI must not state an inferred decision as fact.
     let inferred: Bool
+    /// True when the daemon could not establish whether the answer landed at
+    /// all — the agent-seam case, parallel to `inferred` but weaker: `inferred`
+    /// still asserts the prompt is gone, this asserts nothing about the write.
+    /// Absent ⇒ false, mirroring the Rust `#[serde(default)]` bool.
+    let indeterminate: Bool
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -596,11 +682,13 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         case resolvedAt = "resolved_at"
         case detail
         case inferred
+        case indeterminate
     }
 
     init(
         requestID: String, sessionID: String, decision: AnswerDecision, resolvedBy: ResolvedBy,
-        appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool
+        appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool,
+        indeterminate: Bool = false
     ) {
         self.requestID = requestID
         self.sessionID = sessionID
@@ -610,6 +698,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         self.resolvedAt = resolvedAt
         self.detail = detail
         self.inferred = inferred
+        self.indeterminate = indeterminate
     }
 
     init(from decoder: Decoder) throws {
@@ -622,6 +711,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         resolvedAt = try c.decode(String.self, forKey: .resolvedAt)
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
         inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
+        indeterminate = try c.decodeIfPresent(Bool.self, forKey: .indeterminate) ?? false
     }
 
     var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
@@ -679,6 +769,114 @@ extension AnswerResult: Codable {
         case .rejected(let reason):
             try c.encode("rejected", forKey: .status)
             try c.encode(reason, forKey: .reason)
+        }
+    }
+}
+
+// MARK: - Codex resolution envelope
+
+/// Who a Codex prompt was resolved by. Decode-only, and an unrecognised actor
+/// is retained rather than coerced: nothing here may guess who acted.
+enum ResolutionActor: Decodable, Sendable, Hashable {
+    case phone, local
+    /// An actor a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "phone": self = .phone
+        case "local": self = .local
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// Why a Codex prompt was cleared without an answer. `turnAborted` is
+/// load-bearing — it is how the app learns the turn itself went away — so it
+/// must decode and be retained, never folded into the unknown fallback.
+enum ClearCause: Decodable, Sendable, Hashable {
+    case turnAborted, turnCompleted, superseded
+    /// A cause a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "turn_aborted": self = .turnAborted
+        case "turn_completed": self = .turnCompleted
+        case "superseded": self = .superseded
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// How far a write got before the daemon lost sight of it, on the
+/// `status:"unknown"` path. Each value is a strictly weaker claim than the
+/// last, and an unrecognised stage is retained rather than assumed to be any
+/// of them.
+enum WriteStage: Decodable, Sendable, Hashable {
+    case claimedNotEnqueued, brokerIngressAccepted, upstreamWriteUnconfirmed
+    /// A stage a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "claimed_not_enqueued": self = .claimedNotEnqueued
+        case "broker_ingress_accepted": self = .brokerIngressAccepted
+        case "upstream_write_unconfirmed": self = .upstreamWriteUnconfirmed
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// What became of a Codex approval prompt at the agent seam, internally tagged
+/// by `status`. **Decode-only** — nothing in the app sends one — and an
+/// unrecognised status is kept in its own `unrecognisedStatus` case so a daemon
+/// ahead of this build never collapses into `timeout` or any other real
+/// outcome. Nothing renders these yet; they only need to decode and retain.
+enum CodexResolution: Decodable, Sendable, Hashable {
+    /// The prompt was answered. `decision` is omitted when the daemon recorded
+    /// no decision alongside the actor.
+    case answered(by: ResolutionActor, decision: AnswerDecision?)
+    /// The prompt went away without an answer. `cause` says why.
+    case cleared(cause: ClearCause)
+    /// The prompt aged out.
+    case timeout
+    /// The wire's own `status:"unknown"` — the daemon attempted a write and
+    /// could not confirm it. Distinct from an unrecognised status word.
+    case unknown(
+        attemptedBy: ResolutionActor, attemptedDecision: AnswerDecision?, writeStage: WriteStage,
+        cause: String)
+    /// A `status` word this build has never seen, retained verbatim. Kept apart
+    /// from every real outcome so a future status can never be read as one.
+    case unrecognisedStatus(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, by, decision, cause
+        case attemptedBy = "attempted_by"
+        case attemptedDecision = "attempted_decision"
+        case writeStage = "write_stage"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "answered":
+            self = .answered(
+                by: try c.decode(ResolutionActor.self, forKey: .by),
+                decision: try c.decodeIfPresent(AnswerDecision.self, forKey: .decision))
+        case "cleared":
+            self = .cleared(cause: try c.decode(ClearCause.self, forKey: .cause))
+        case "timeout":
+            self = .timeout
+        case "unknown":
+            self = .unknown(
+                attemptedBy: try c.decode(ResolutionActor.self, forKey: .attemptedBy),
+                attemptedDecision: try c.decodeIfPresent(
+                    AnswerDecision.self, forKey: .attemptedDecision),
+                writeStage: try c.decode(WriteStage.self, forKey: .writeStage),
+                cause: try c.decode(String.self, forKey: .cause))
+        case let other:
+            self = .unrecognisedStatus(other)
         }
     }
 }

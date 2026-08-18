@@ -11,6 +11,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The exact Codex CLI versions this build was verified against.
+///
+/// **Compiled in, never configuration** (A-review requirement). Codex's
+/// app-server protocol is experimental — 95 stable / 133 experimental methods on
+/// a version that moves — so the guarantee CodeConnect can make is only for the
+/// builds it was actually tested against. Letting a config file widen this set
+/// would let an operator point the daemon at an unvetted protocol; the pin ships
+/// with the code that was tested against it. Extend it only alongside the
+/// vendored schema bundle and the fixtures that re-prove the channel.
+pub const CODEX_PINNED_VERSIONS: &[&str] = &["0.147.0"];
+
+/// True when a resolved Codex version is one this build was verified against.
+/// The launcher refuses an unpinned binary before spawning anything.
+pub fn is_pinned_codex_version(version: &str) -> bool {
+    CODEX_PINNED_VERSIONS.contains(&version)
+}
+
 fn default_ws_port() -> u16 {
     8787
 }
@@ -376,6 +393,19 @@ pub struct Config {
     /// Explicit path to the real `claude` binary (launchd has no shell PATH).
     pub claude_bin: Option<String>,
 
+    /// Explicit path to the real `codex` binary, resolved the same way
+    /// `claude_bin` is. Flat beside `claude_bin` rather than nested under an
+    /// agent map: there are two agents, and one field each reads more plainly
+    /// than a structure that would invite a third the code cannot yet host.
+    ///
+    /// The *version* allowlist is deliberately **not** here — it is compiled in
+    /// ([`CODEX_PINNED_VERSIONS`]). A config file that could widen the set of
+    /// Codex builds this daemon trusts would be a way to point it at an
+    /// unvetted protocol; the pin travels with the code that was tested against
+    /// it, and nothing else moves it.
+    #[serde(default)]
+    pub codex_bin: Option<String>,
+
     /// Cap on each of the daemon's own launchd logs. One previous generation is
     /// kept alongside, so the ceiling is twice this per stream.
     ///
@@ -517,6 +547,7 @@ impl Default for Config {
             git_bin: None,
             fsevents: true,
             claude_bin: None,
+            codex_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
             tmux_history_limit: default_tmux_history_limit(),

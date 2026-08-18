@@ -114,7 +114,7 @@ struct ResolutionBanner: View {
     private var tone: CCTone {
         switch attempt {
         case .applied: return .success
-        case .duplicate, .answeredAtKeyboard: return .warning
+        case .indeterminate, .duplicate, .answeredAtKeyboard: return .warning
         case .staleCard, .rejected, .failed: return .danger
         }
     }
@@ -122,6 +122,7 @@ struct ResolutionBanner: View {
     private var symbol: String {
         switch attempt {
         case .applied: return "checkmark.circle.fill"
+        case .indeterminate: return "questionmark.circle.fill"
         case .duplicate: return "doc.on.doc"
         case .answeredAtKeyboard: return "keyboard"
         case .staleCard: return "clock.badge.exclamationmark"
@@ -129,10 +130,17 @@ struct ResolutionBanner: View {
         }
     }
 
-    /// The `micro` label. Short, because the component uppercases it.
-    private var classification: String {
+    private var classification: String { Self.classificationLabel(for: attempt) }
+    private var headline: String { Self.headline(for: attempt) }
+    private var provenance: String? { Self.provenance(for: attempt) }
+
+    /// The `micro` label. Short, because the component uppercases it. Static
+    /// and pure so the copy can be asserted without standing up a `View`.
+    static func classificationLabel(for attempt: AnswerAttempt) -> String {
         switch attempt {
         case .applied: return "Confirmed"
+        // Never "Confirmed": the daemon did not confirm this one landed.
+        case .indeterminate: return "Unconfirmed"
         case .duplicate: return "Duplicate"
         case .answeredAtKeyboard: return "Not answered here"
         case .staleCard: return "Out of date"
@@ -143,10 +151,15 @@ struct ResolutionBanner: View {
 
     /// The sentence. Sentence case, verbatim, and never uppercased — an
     /// outcome a reader has to decode from `ALLOWED — CONFIRMED BY THE DAEMON`
-    /// is an outcome they skim.
-    private var headline: String {
+    /// is an outcome they skim. Static and pure for the same reason as above.
+    static func headline(for attempt: AnswerAttempt) -> String {
         switch attempt {
         case .applied(let outcome): return "\(outcome.decisionLabel), confirmed by the daemon"
+        // The one honesty this case exists to protect: the daemon accepted the
+        // answer but could not confirm it reached the agent, so this must never
+        // read as confirmed/applied.
+        case .indeterminate(let outcome):
+            return "\(outcome.decisionLabel), but the daemon couldn’t confirm it landed"
         case .duplicate: return "Already answered"
         case .answeredAtKeyboard: return "Answered at the keyboard"
         case .staleCard: return "This card is out of date"
@@ -155,11 +168,31 @@ struct ResolutionBanner: View {
         }
     }
 
-    private var provenance: String? {
+    /// How an answer was *applied*, in the daemon's terms — never a claim this
+    /// build cannot support. An `AnswerPath.unknown` is a path this build has
+    /// never heard of, so it is described as unrecognised rather than asserted
+    /// to be keystrokes or a hook return we cannot vouch for.
+    static func actuationPhrase(for path: AnswerPath) -> String {
+        switch path {
+        case .sendKeys: return "typed at the TTY"
+        case .hookReturn: return "returned to the hook"
+        case .unknown: return "applied in a way this app doesn’t recognise"
+        }
+    }
+
+    static func provenance(for attempt: AnswerAttempt) -> String? {
         switch attempt {
         case .applied(let outcome):
-            let via = outcome.appliedVia == .sendKeys ? "typed at the TTY" : "returned to the hook"
-            return [via, outcome.detail].compactMap { $0 }.joined(separator: " · ")
+            return [actuationPhrase(for: outcome.appliedVia), outcome.detail]
+                .compactMap { $0 }.joined(separator: " · ")
+        // Never the `actuationPhrase` — that would claim the answer was "typed at
+        // the TTY" or "returned to the hook", the exact positive actuation the
+        // daemon could not confirm. The provenance states the uncertainty instead.
+        case .indeterminate(let outcome):
+            return [
+                "The daemon accepted this but never confirmed it reached the agent.",
+                outcome.detail,
+            ].compactMap { $0 }.joined(separator: " · ")
         case .duplicate(let outcome, let stale):
             let original =
                 "Original outcome: \(outcome.decisionLabel) \(outcome.resolvedBy == .phone ? "from a phone" : "at the Mac"), \(outcome.resolvedAt)."

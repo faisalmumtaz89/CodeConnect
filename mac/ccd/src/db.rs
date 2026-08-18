@@ -348,6 +348,23 @@ impl Db {
             .await
     }
 
+    pub async fn set_device_features(
+        &self,
+        device_id: String,
+        features_json: Option<String>,
+        epoch: String,
+    ) -> Result<()> {
+        self.run(move |store| {
+            store.set_device_features(&device_id, features_json.as_deref(), &epoch)
+        })
+        .await
+    }
+
+    pub async fn invalidate_device_features(&self, current_epoch: String) -> Result<u64> {
+        self.run(move |store| store.invalidate_device_features(&current_epoch))
+            .await
+    }
+
     pub async fn revoke_device(&self, device_id: String, at: String) -> Result<bool> {
         self.run(move |store| store.revoke_device(&device_id, &at))
             .await
@@ -397,6 +414,9 @@ mod tests {
                 lifecycle: Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();

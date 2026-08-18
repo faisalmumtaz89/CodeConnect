@@ -27,6 +27,23 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub enum ClientFrame {
     Hook(HookPost),
     Register(RegisterSession),
+    /// **Pre-`Register` support negotiation.** A supervisor asks, on the same
+    /// connection and *before* it registers, whether this daemon can host its
+    /// agent — so it can withhold `Register` (and retry with backoff) rather than
+    /// introduce a session a rolled-back daemon would mishandle. The daemon
+    /// answers [`DaemonFrame::SupportedAgents`].
+    ///
+    /// Defined at the agent seam (minor 15); the negotiation *flow* that consumes
+    /// it lands with the Codex launcher. A Claude supervisor has no reason to
+    /// send it — absence still means Claude, which every daemon supports.
+    NegotiateSupport {
+        /// The agent the supervisor intends to register.
+        #[serde(default)]
+        agent: crate::agent::AgentKind,
+        /// The resolved agent version, when known, for the daemon's own pin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_version: Option<String>,
+    },
     SupervisorResponse {
         id: String,
         result: SupervisorResult,
@@ -161,6 +178,16 @@ pub enum DaemonFrame {
     Ack,
     Error {
         message: String,
+    },
+    /// The daemon's answer to [`ClientFrame::NegotiateSupport`]: the agents it
+    /// can actually host, and whether the asked-for agent is among them. A
+    /// supervisor that finds its agent absent withholds `Register` and retries.
+    /// `supported` is the specific verdict for the negotiated agent, so the
+    /// supervisor need not re-derive it from the list (and an unknown agent is
+    /// unambiguously `false`).
+    SupportedAgents {
+        supported_agents: Vec<crate::agent::AgentKind>,
+        supported: bool,
     },
     SupervisorRequest {
         id: String,
@@ -334,7 +361,7 @@ pub struct HookPost {
     pub wait: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterSession {
     pub session_id: String,
     /// Minted by `codeconnect claude` at spawn. Optional only so a supervisor left over
@@ -347,6 +374,33 @@ pub struct RegisterSession {
     pub supervisor_pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_bin: Option<String>,
+    /// Which agent this supervisor is hosting. Absent — from a supervisor left
+    /// over from a build predating the agent seam — decodes as
+    /// [`crate::agent::AgentKind::Claude`], which is exactly what it is. An
+    /// **unrecognised** name never decodes as Claude; the daemon fails closed on
+    /// it (no adoption, no actuation).
+    #[serde(default)]
+    pub agent: crate::agent::AgentKind,
+    /// The resolved binary this session was launched with, agent-general.
+    /// [`claude_bin`](Self::claude_bin) is retained beside it for a daemon
+    /// predating the seam; a new supervisor sets both for Claude and this alone
+    /// for another agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_bin: Option<String>,
+    /// The Codex thread this session is attached to, when the agent is Codex.
+    /// Absent for Claude. Opaque — carried for identity, never parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+    /// The runtime socket the Codex broker exposes to ccd. Absent for Claude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_socket: Option<String>,
+    /// The monotonic thread **generation** (visit) this registration speaks for
+    /// (D4). The daemon adopts a registration only when this is not older than a
+    /// generation it already holds, so a stale supervisor frame can never
+    /// overwrite newer adapter state. Absent for Claude, whose sessions have no
+    /// generations, which is why the guard is inert on the Claude path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_generation: Option<u64>,
     pub started_at: String,
     /// What this supervisor is able to honour, as [`crate::PROTOCOL_MINOR`].
     ///
@@ -777,6 +831,76 @@ impl PromptPresence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A supervisor predating the agent seam sends no `agent`; a daemon must
+    /// read it as Claude and never fail. A new supervisor's Codex fields must
+    /// round-trip, and an old daemon (which ignores unknown keys) still decodes
+    /// the frame to a Claude-shaped registration.
+    #[test]
+    fn a_registration_without_an_agent_is_claude() {
+        use crate::agent::AgentKind;
+        let legacy: RegisterSession = serde_json::from_str(
+            r#"{"session_id":"cc-1","tmux_session":"cc-1","tmux_socket":"codeconnect",
+                "cwd":"/tmp","supervisor_pid":42,"started_at":"t"}"#,
+        )
+        .expect("a pre-seam registration still decodes");
+        assert_eq!(legacy.agent, AgentKind::Claude);
+        assert_eq!(legacy.agent_bin, None);
+        assert_eq!(legacy.codex_thread_id, None);
+        assert_eq!(legacy.codex_generation, None);
+
+        let codex = RegisterSession {
+            agent: AgentKind::Codex,
+            agent_bin: Some("/opt/codex".into()),
+            codex_thread_id: Some("th_1".into()),
+            codex_socket: Some("/run/ccd.sock".into()),
+            codex_generation: Some(3),
+            ..legacy
+        };
+        let s = serde_json::to_string(&codex).unwrap();
+        assert!(s.contains(r#""agent":"codex""#), "{s}");
+        assert_eq!(serde_json::from_str::<RegisterSession>(&s).unwrap(), codex);
+    }
+
+    /// The pre-`Register` negotiation pair round-trips, and an absent agent in a
+    /// query is Claude — the agent every daemon supports.
+    #[test]
+    fn support_negotiation_frames_round_trip() {
+        use crate::agent::AgentKind;
+        let query = ClientFrame::NegotiateSupport {
+            agent: AgentKind::Codex,
+            agent_version: Some("0.147.0".into()),
+        };
+        let s = serde_json::to_string(&query).unwrap();
+        assert!(s.contains(r#""type":"negotiate_support""#), "{s}");
+        match serde_json::from_str::<ClientFrame>(&s).unwrap() {
+            ClientFrame::NegotiateSupport {
+                agent,
+                agent_version,
+            } => {
+                assert_eq!(agent, AgentKind::Codex);
+                assert_eq!(agent_version.as_deref(), Some("0.147.0"));
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
+        // Absent agent in a query decodes as Claude.
+        let bare: ClientFrame = serde_json::from_str(r#"{"type":"negotiate_support"}"#).unwrap();
+        assert!(matches!(
+            bare,
+            ClientFrame::NegotiateSupport {
+                agent: AgentKind::Claude,
+                ..
+            }
+        ));
+
+        let reply = DaemonFrame::SupportedAgents {
+            supported_agents: vec![AgentKind::Claude],
+            supported: false,
+        };
+        let s = serde_json::to_string(&reply).unwrap();
+        assert!(s.contains(r#""type":"supported_agents""#), "{s}");
+        let _: DaemonFrame = serde_json::from_str(&s).unwrap();
+    }
 
     /// Every pane in `fixtures/panes/composer/`: real `capture-pane -p -J`
     /// output from sessions that were taking keys, across every permission

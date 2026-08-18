@@ -66,6 +66,24 @@ pub fn send_text_hash(session_ref: &str, text: &str, submit: bool) -> String {
     sha256_hex(material.as_bytes())
 }
 
+/// Identity of one `interrupt` mutation: which session's which turn is aborted.
+///
+/// The same length-prefixed, domain-tagged shape as [`send_text_hash`], for the
+/// same reason: a retry with the same `request_id` but a different target turn
+/// must be recognised as a *different* mutation and refused, not silently
+/// treated as a replay that aborts the wrong turn. There is no submit flag —
+/// aborting is not staged.
+pub fn interrupt_hash(session_ref: &str, turn_id: &str) -> String {
+    let mut material = String::from("codeconnect.interrupt.v1");
+    for field in [session_ref, turn_id] {
+        material.push('\n');
+        material.push_str(&field.len().to_string());
+        material.push(':');
+        material.push_str(field);
+    }
+    sha256_hex(material.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +152,23 @@ mod tests {
         assert_ne!(base, send_text_hash("cc-1", "rm -rf /", true));
         assert_ne!(base, send_text_hash("cc-2", "deploy to prod", true));
         assert_ne!(base, send_text_hash("cc-1", "deploy to prod", false));
+    }
+
+    #[test]
+    fn interrupt_hash_binds_session_and_turn() {
+        let base = interrupt_hash("cc-1", "turn-7");
+        assert_eq!(base, interrupt_hash("cc-1", "turn-7"));
+        // A different turn or session is a different mutation, never a replay.
+        assert_ne!(base, interrupt_hash("cc-1", "turn-8"));
+        assert_ne!(base, interrupt_hash("cc-2", "turn-7"));
+        // Distinct domain tag: it can never equal a send_text hash.
+        assert_ne!(base, send_text_hash("cc-1", "turn-7", true));
+        // Separator-safe: a turn id containing a newline cannot impersonate a
+        // different (session, turn).
+        assert_ne!(
+            interrupt_hash("cc-1", "a\nb"),
+            interrupt_hash("cc-1\na", "b")
+        );
     }
 
     #[test]

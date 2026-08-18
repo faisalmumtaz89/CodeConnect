@@ -222,6 +222,25 @@ where
     match message {
         // A second hello is harmless; treat it as a no-op rather than an error.
         ClientMessage::Hello { .. } => {}
+        // The demo daemon hosts scripted Claude runs only; interrupt is a Codex
+        // operation and is refused honestly rather than dropped.
+        ClientMessage::Interrupt {
+            session_id,
+            request_id,
+            ..
+        } => {
+            send(
+                sink,
+                &ServerMessage::InterruptResult {
+                    session_id,
+                    request_id,
+                    result: protocol::ws::InterruptResult::Rejected {
+                        reason: "the demo daemon hosts Claude sessions only".into(),
+                    },
+                },
+            )
+            .await?
+        }
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
         ClientMessage::Sessions => {
             send(
@@ -448,6 +467,10 @@ fn capabilities() -> Capabilities {
         command_catalog: false,
         slash_composer_recovery: false,
         terminal_pty: false,
+        // Omitted while it would only name the Claude floor — same as ccd, so the
+        // demo does not make a phone render a diagnostic capability row that
+        // means nothing yet. An empty list is skipped on the wire.
+        supported_agents: Vec::new(),
     }
 }
 

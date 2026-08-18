@@ -207,6 +207,21 @@ async fn read_loop(
                 *registered = Some(registration);
                 let _ = tx.send(DaemonFrame::Ack).await;
             }
+            // Pre-`Register` support negotiation. The daemon answers honestly
+            // with the agents it can host and the specific verdict for the asked
+            // agent. The negotiation *flow* (a supervisor withholding `Register`
+            // on a `false`) lands with the Codex launcher; a Claude supervisor
+            // has no reason to ask, and Claude is always supported.
+            ClientFrame::NegotiateSupport { agent, .. } => {
+                let supported_agents = daemon.supported_agents();
+                let supported = supported_agents.contains(&agent);
+                let _ = tx
+                    .send(DaemonFrame::SupportedAgents {
+                        supported_agents,
+                        supported,
+                    })
+                    .await;
+            }
             ClientFrame::SupervisorResponse { id, result } => {
                 let responder = inflight
                     .lock()

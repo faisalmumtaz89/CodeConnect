@@ -21,6 +21,17 @@ pub enum Source {
     Daemon,
     /// tmux capture-pane snapshot. Presence checks only, never semantics.
     Pty,
+    /// A persisted source string this build does not recognise — a fact written
+    /// by a newer daemon and read back by an older one. It carries the **lowest**
+    /// trust so it can never win dedup against a real hook or transcript fact:
+    /// the alternative, which shipped, decoded an unknown source as
+    /// [`Source::Daemon`] (trust 3) and let corrupt or future provenance
+    /// impersonate the most trusted source there is.
+    ///
+    /// The daemon never *creates* this — it only arises decoding storage — so it
+    /// has no first-hand meaning to preserve, and unlike
+    /// [`crate::agent::AgentKind::Unsupported`] it keeps no original string.
+    Unknown,
 }
 
 impl Source {
@@ -34,6 +45,7 @@ impl Source {
             Source::Daemon => 3,
             Source::Transcript => 2,
             Source::Pty => 1,
+            Source::Unknown => 0,
         }
     }
 
@@ -43,6 +55,7 @@ impl Source {
             Source::Transcript => "transcript",
             Source::Daemon => "daemon",
             Source::Pty => "pty",
+            Source::Unknown => "unknown",
         }
     }
 }
@@ -305,6 +318,18 @@ pub struct SessionSummary {
     ///
     #[serde(default)]
     pub project_label: String,
+    /// Which agent this run hosts. Absent — from any daemon predating the agent
+    /// seam — decodes as [`crate::agent::AgentKind::Claude`], which is exactly
+    /// what every such run is. This per-session fact is authoritative: a client
+    /// scopes what it offers to the agent named here, and falls back to
+    /// connection-global behaviour only when it is Claude.
+    #[serde(default)]
+    pub agent: crate::agent::AgentKind,
+    /// The Codex thread this run is attached to, when the agent is Codex. Absent
+    /// for Claude and for any daemon predating the seam. Opaque to the client —
+    /// carried for correlation and rendering, never parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -417,6 +442,8 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
             blocked_on: Vec::new(),
+            agent: crate::agent::AgentKind::Claude,
+            codex_thread_id: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);
@@ -431,6 +458,48 @@ mod tests {
     fn trust_ranks_hook_above_transcript_above_pty() {
         assert!(Source::Hook.trust() > Source::Transcript.trust());
         assert!(Source::Transcript.trust() > Source::Pty.trust());
+    }
+
+    #[test]
+    fn an_unknown_source_carries_the_lowest_trust() {
+        // The property the store's decode relies on: an unrecognised persisted
+        // source can never out-rank a real fact, so it never wins dedup — and in
+        // particular it is not the trusted Daemon it used to decode as.
+        assert_eq!(Source::Unknown.trust(), 0);
+        assert!(Source::Unknown.trust() < Source::Pty.trust());
+        assert!(Source::Unknown.trust() < Source::Daemon.trust());
+        assert_eq!(Source::Unknown.as_str(), "unknown");
+    }
+
+    /// A daemon predating the agent seam sends no `agent`, and every run it
+    /// hosts is Claude. Absent must decode as Claude, and a Codex summary must
+    /// round-trip its agent and thread id.
+    #[test]
+    fn a_summary_without_an_agent_decodes_as_claude() {
+        use crate::agent::AgentKind;
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "tmux_session": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "t",
+            "updated_at": "t"
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(decoded.agent, AgentKind::Claude);
+        assert_eq!(decoded.codex_thread_id, None);
+
+        let codex = SessionSummary {
+            agent: AgentKind::Codex,
+            codex_thread_id: Some("th_1".into()),
+            ..decoded
+        };
+        let s = serde_json::to_string(&codex).unwrap();
+        assert!(s.contains("\"agent\":\"codex\""), "{s}");
+        assert_eq!(codex, serde_json::from_str::<SessionSummary>(&s).unwrap());
     }
 
     #[test]

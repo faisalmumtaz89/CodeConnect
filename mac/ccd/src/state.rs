@@ -198,6 +198,68 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+    /// Fail-closed record of Codex push eligibility for this run — see
+    /// [`CodexPushGuard`]. Written when a device feature write cannot be trusted
+    /// or startup invalidation fails; read by the push projection (Phase 2).
+    pub codex_push_guard: CodexPushGuard,
+}
+
+/// Session-scoped, fail-closed record of which devices' persisted feature sets
+/// may be trusted for a Codex push this run.
+///
+/// It exists to close the two windows a purely DB-backed eligibility leaves
+/// open: a device feature **write that failed** (a stale same-epoch Codex set
+/// could otherwise stay eligible until the next restart), and a **startup
+/// invalidation that failed** (leaving every device's eligibility unproven). In
+/// both cases the DB alone cannot be trusted, so this out-of-band record forces
+/// Claude-only until a device successfully re-advertises. The push projection
+/// consumes [`device_features_trusted`](CodexPushGuard::device_features_trusted)
+/// in Phase 2; the setters are live now so a failure is never silently ignored.
+#[derive(Default)]
+pub struct CodexPushGuard {
+    all_untrusted: std::sync::atomic::AtomicBool,
+    untrusted_devices: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl CodexPushGuard {
+    /// Startup invalidation failed: no device's persisted feature set can be
+    /// trusted for a Codex push this run.
+    pub fn distrust_all(&self) {
+        self.all_untrusted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A device's feature write failed and a stale set may survive: it is not
+    /// Codex-eligible this run until it re-advertises successfully.
+    pub fn distrust_device(&self, device_id: &str) {
+        self.untrusted_devices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(device_id.to_string());
+    }
+
+    /// A successful (re-)advertisement clears a device's distrust.
+    pub fn retrust_device(&self, device_id: &str) {
+        self.untrusted_devices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(device_id);
+    }
+
+    /// True when this device's persisted feature set may be trusted for a Codex
+    /// push. Consumed by the push projection in Phase 2; until then only the
+    /// setters run, so a failure is recorded rather than lost.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn device_features_trusted(&self, device_id: &str) -> bool {
+        if self.all_untrusted.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        !self
+            .untrusted_devices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(device_id)
+    }
 }
 
 /// How a `hello` was (or was not) authenticated.
@@ -357,6 +419,11 @@ pub struct SupervisorHandle {
     /// reports 0 and silently ignores the prompt fingerprint, so the daemon
     /// refuses to actuate a permission prompt through it.
     protocol_minor: u32,
+    /// The Codex thread **generation** (visit) this handle was registered at, if
+    /// any (D4). `None` for Claude, whose sessions have no generations. It is the
+    /// high-water mark the adoption guard compares against, so a stale supervisor
+    /// frame can never overwrite newer adapter state.
+    codex_generation: Option<u64>,
 }
 
 /// Owns one entry in a supervisor's in-flight map for as long as the request is
@@ -715,6 +782,18 @@ fn snapshot_command(text: &str) -> bool {
     rest[name.len()..].trim().is_empty() && matches!(name.as_str(), "status" | "usage" | "cost")
 }
 
+/// This daemon run's **feature epoch** — a value unique to the process, so a
+/// stored device feature set is trusted only when it was confirmed during this
+/// run. A restarted daemon is a new process with a new epoch, which is why
+/// [`recover`](Daemon::recover) can invalidate every stale set to Claude-only:
+/// an old daemon that only bumped `last_seen_at` across a rollback cannot leave
+/// Codex eligibility standing until the device re-advertises it. Process id plus
+/// start time, so two runs never share one.
+pub fn feature_epoch() -> &'static str {
+    static EPOCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(|| format!("{}-{}", std::process::id(), protocol::time::now_unix_ms()))
+}
+
 impl Daemon {
     pub fn new(
         config: Config,
@@ -744,7 +823,16 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
+            codex_push_guard: CodexPushGuard::default(),
         })
+    }
+
+    /// The agents this daemon can actually host, in one place so the WS
+    /// capabilities and the IPC support negotiation can never disagree. It stays
+    /// exactly `[Claude]` until Codex actuation ships — the daemon must not
+    /// advertise an agent it cannot yet drive — and Claude is always the floor.
+    pub fn supported_agents(&self) -> Vec<protocol::agent::AgentKind> {
+        vec![protocol::agent::AgentKind::Claude]
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -763,6 +851,35 @@ impl Daemon {
     ///    recorded as a terminal *indeterminate* result, and never retried.
     pub async fn recover(&self) {
         let now = protocol::time::now_rfc3339();
+
+        // Fail-closed after a rollback: invalidate every device feature set not
+        // confirmed under this run's epoch to Claude-only. A phone re-advertises
+        // its set on the next hello/registration, so this costs nothing in the
+        // steady state and closes the window where a stale set could survive a
+        // daemon that only bumped `last_seen_at`.
+        match self
+            .db
+            .invalidate_device_features(feature_epoch().to_string())
+            .await
+        {
+            Ok(0) => {}
+            Ok(cleared) => crate::log_info!(
+                "recovery: {cleared} device feature set(s) predate this daemon run; \
+                 reset to Claude-only until re-advertised"
+            ),
+            Err(err) => {
+                // Fail closed: if stale sets could not be invalidated, no device's
+                // persisted eligibility can be trusted this run. The push
+                // projection treats every device as Claude-only until it
+                // successfully re-advertises, rather than continuing on
+                // possibly-stale eligibility.
+                crate::log_error!(
+                    "recovery: could not invalidate device features; treating all devices as \
+                     Claude-only this run: {err:#}"
+                );
+                self.codex_push_guard.distrust_all();
+            }
+        }
 
         match self.db.unresolved_answer_claims().await {
             Ok(claims) if !claims.is_empty() => {
@@ -1948,6 +2065,17 @@ impl Daemon {
                 .map(|r| r.created_at.clone())
                 .unwrap_or_else(|| now.clone()),
             updated_at: now,
+            // A hook-driven upsert never changes which agent a run is: it
+            // preserves an existing row's agent (a Codex row is never demoted to
+            // Claude by a stray hook) and defaults a brand-new one to Claude,
+            // which every hook-adopted run is. Codex identity is COALESCE-kept by
+            // the upsert, so `None` here does not blank it.
+            agent: existing
+                .as_ref()
+                .map(|r| r.agent.clone())
+                .unwrap_or_default(),
+            codex_thread_id: None,
+            codex_socket: None,
         };
         if self.db.upsert_session(row.clone()).await? == crate::store::SessionUpsert::Tombstoned {
             // The uid was deliberately deleted while this hook was in flight.
@@ -2145,6 +2273,24 @@ impl Daemon {
             Err(reason) => return AnswerResult::Rejected { reason },
         };
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
+
+        // **A Codex-only decision on the Claude answer path — refused before any
+        // mutation.** `option_id` is an opaque Codex option with no keystroke
+        // representation, so this keystroke-answer path can never apply it. It is
+        // refused here, before the serialise gate and every claim, so it takes no
+        // responder, releases no held hook, writes no durable answer_claim,
+        // removes no card and appends no resolution — none of the actionable
+        // state changes the *late* `apply_decision` refusal (kept below as a
+        // backstop) would otherwise have already caused. Claude's
+        // allow/deny/option-index/text decisions do not reach this branch and are
+        // byte-identical.
+        if matches!(decision, AnswerDecision::OptionId { .. }) {
+            return AnswerResult::Rejected {
+                reason: "an option_id answer is for a Codex session; this is a Claude session, \
+                         so nothing was typed"
+                    .into(),
+            };
+        }
 
         // 0. Serialise on this one approval. Two taps arriving together used to
         //    make the second one a *rejection* ("already being applied"), which
@@ -2478,6 +2624,17 @@ impl Daemon {
             AnswerDecision::Deny => ("\u{1b}".to_string(), false),
             AnswerDecision::Option { index } => (index.to_string(), true),
             AnswerDecision::Text { text } => (text.clone(), true),
+            // An `option_id` decision is a Codex answer (an opaque server-offered
+            // option). It has no meaning at a Claude permission prompt — there is
+            // no keystroke that safely stands for it — so it is refused rather
+            // than guessed at. A Claude client never sends one.
+            AnswerDecision::OptionId { .. } => {
+                return Actuation::Refused(
+                    "an option_id answer is for a Codex session; this is a Claude session, \
+                     so nothing was typed"
+                        .into(),
+                );
+            }
         };
 
         let answers_the_prompt = !matches!(decision, AnswerDecision::Text { .. });
@@ -3061,6 +3218,71 @@ impl Daemon {
             }
         };
 
+        // **Fail closed on the agent, before any write or install.** A daemon
+        // only hosts what it can actually drive; the authoritative list is
+        // `supported_agents()`, never a property of the value. Any registration
+        // for an agent not on that list — Codex before its launch path ships, or
+        // any unrecognised name — is refused here, persisting nothing and
+        // installing nothing. In this phase the list is `[Claude]`, so this
+        // rejects **all** Codex/unknown registration, which is what keeps the
+        // shared-`sessions`-table and the generation-adoption paths dormant until
+        // a real Codex producer and its agent-scoped isolation land in Phase 2.
+        if !self.supported_agents().contains(&info.agent) {
+            anyhow::bail!(
+                "refusing to register {}: agent {:?} is not supported by this daemon",
+                info.session_id,
+                info.agent.as_str()
+            );
+        }
+
+        // **Identity guard, keyed off the validated agent — never field
+        // presence.** A Claude registration that carries Codex-only identity
+        // (a generation, thread id or socket) is internally inconsistent, so it
+        // is refused rather than have those fields silently activate the Codex
+        // generation guard below. This is what stops a Claude frame smuggling a
+        // generation into a path that is meant for Codex alone.
+        if info.agent.is_claude()
+            && (info.codex_generation.is_some()
+                || info.codex_thread_id.is_some()
+                || info.codex_socket.is_some())
+        {
+            anyhow::bail!(
+                "refusing to register {}: a Claude registration carried Codex identity fields",
+                info.session_id
+            );
+        }
+
+        // **Stale generation is rejected BEFORE any persistent mutation (D4).**
+        // The upsert and the card relabel below are persistent writes, so the
+        // accept/reject decision — including this generation check — must come
+        // first: a rejected frame must mutate nothing. Only a validated Codex
+        // agent's generation participates (a Claude frame carrying one was
+        // already refused above), so the Claude path never reaches this and is
+        // byte-identical. This reads the in-memory high-water only; **the
+        // structural generation-completeness and the durable high-water that
+        // makes this atomic across a restart are the binding Phase-2
+        // pre-exposure gate (plan amendment A5)** — not built here, because
+        // fail-closed registration makes the whole branch unreachable in Phase 1.
+        if matches!(info.agent, protocol::agent::AgentKind::Codex) {
+            if let Some(incoming) = info.codex_generation {
+                let current = {
+                    let inner = self.inner.lock().await;
+                    inner
+                        .supervisors
+                        .get(&uid)
+                        .and_then(|handle| handle.codex_generation)
+                };
+                if let Some(current) = current {
+                    if incoming < current {
+                        anyhow::bail!(
+                            "ignoring registration for {uid} at generation {incoming}; \
+                             generation {current} is already adopted"
+                        );
+                    }
+                }
+            }
+        }
+
         let wrote = self
             .db
             .upsert_session(SessionRow {
@@ -3077,6 +3299,12 @@ impl Daemon {
                     .map(|r| r.created_at.clone())
                     .unwrap_or_else(|| info.started_at.clone()),
                 updated_at: now,
+                // The registration is the authority on which agent this run is.
+                // Absent ⇒ Claude; an unrecognised name is preserved and fails
+                // closed downstream. Codex identity is carried through verbatim.
+                agent: info.agent.clone(),
+                codex_thread_id: info.codex_thread_id.clone(),
+                codex_socket: info.codex_socket.clone(),
             })
             .await?;
         // **The supervisor is a cwd writer too.** A run that reconnects from a
@@ -3097,6 +3325,9 @@ impl Daemon {
         let session = SessionKey::new(uid, info.session_id.clone());
         let epoch = {
             let mut inner = self.inner.lock().await;
+            // The generation was accepted before any write (above); this block
+            // only installs the handle carrying it. Making the compare and the
+            // install one atomic step across a restart is the Phase-2 gate (A5).
             inner.next_epoch += 1;
             let epoch = inner.next_epoch;
             inner.supervisors.insert(
@@ -3108,6 +3339,7 @@ impl Daemon {
                     epoch,
                     protocol_minor: info.protocol_minor,
                     claude_bin: info.claude_bin.clone(),
+                    codex_generation: info.codex_generation,
                 },
             );
             inner
@@ -3433,6 +3665,10 @@ impl Daemon {
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 blocked_on,
+                // The per-session agent fact the client scopes its offerings to.
+                // Claude for every row today; the seam carries it either way.
+                agent: row.agent,
+                codex_thread_id: row.codex_thread_id,
             });
         }
         Ok(out)
@@ -5177,6 +5413,11 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
                 },
@@ -5207,6 +5448,11 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: Some(claude_bin.display().to_string()),
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                 },
@@ -5631,6 +5877,11 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
                 },
@@ -6210,6 +6461,187 @@ mod tests {
         );
     }
 
+    /// **A Codex-only `option_id` answer is refused EARLY, before any mutation**
+    /// (the defect: the old refusal ran only in `apply_decision`, after the
+    /// generic path had already claimed the entry, taken the held hook responder,
+    /// and written a durable answer_claim). In hold mode the held hook must stay
+    /// held — not released, not advanced to the local `ask` — no answer_claim is
+    /// written, no resolution is appended, the card remains, and a subsequent
+    /// legitimate `allow` still resolves through the same held hook.
+    #[tokio::test]
+    async fn an_option_id_answer_is_refused_before_it_claims_or_releases_the_held_hook() {
+        let daemon = daemon_with(Config {
+            hold_ms: 5_000,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        register(&daemon, "cc-1", Some(uid)).await;
+
+        // Raise a PermissionRequest with `wait: true` so the hook is genuinely
+        // held on its responder (hold mode). It blocks until we answer.
+        let tool_input = json!({ "command": "git status" });
+        let request_id = format!(
+            "pr-p1-{}",
+            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
+        );
+        let hook = {
+            let daemon = Arc::clone(&daemon);
+            let tool_input = tool_input.clone();
+            tokio::spawn(async move {
+                daemon
+                    .handle_hook(HookPost {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(uid.to_string()),
+                        event: "PermissionRequest".into(),
+                        payload: json!({
+                            "hook_event_name": "PermissionRequest",
+                            "cwd": "/tmp",
+                            "prompt_id": "p1",
+                            "tool_name": "Bash",
+                            "tool_input": tool_input,
+                        }),
+                        wait: true,
+                    })
+                    .await
+            })
+        };
+
+        // Wait until the held pending exists with its responder installed.
+        let id = (uid.to_string(), request_id.clone());
+        let mut ready = false;
+        for _ in 0..80 {
+            if daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .get(&id)
+                .is_some_and(|entry| entry.responder.is_some())
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ready, "the held pending never appeared");
+
+        let hash = protocol::hash::approval_payload_hash("Bash", &tool_input);
+
+        // The Codex-only decision is refused, and touches nothing.
+        assert!(matches!(
+            daemon
+                .answer(
+                    &request_id,
+                    &hash,
+                    AnswerDecision::OptionId {
+                        option_id: "acceptForSession".into()
+                    },
+                    Some("cc-1"),
+                )
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+
+        {
+            let inner = daemon.inner.lock().await;
+            let entry = inner.pending.get(&id).expect("the card must remain");
+            assert!(!entry.claimed, "the entry must not be claimed");
+            assert!(
+                entry.responder.is_some(),
+                "the held hook must NOT be released by a refused option_id"
+            );
+        }
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "a refused option_id must write no durable answer_claim"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 1000)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::ApprovalResolved),
+            "a refused option_id must append no resolution"
+        );
+
+        // A real Claude decision still resolves through the SAME held hook.
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .await
+        {
+            AnswerResult::Applied { outcome } => {
+                assert_eq!(outcome.applied_via, AnswerPath::HookReturn, "{outcome:?}");
+            }
+            other => panic!("the allow must apply via the held hook; got {other:?}"),
+        }
+        // The held hook unblocked with an allow — proving the responder survived
+        // the refused option_id and was still there for the real answer.
+        let decision = hook.await.unwrap();
+        assert_eq!(
+            decision.decision,
+            protocol::hook::Decision::Allow,
+            "the held hook returned {decision:?}"
+        );
+    }
+
+    /// The send-keys variant (`hold_ms == 0`, no held hook): an `option_id`
+    /// answer is refused before any claim, writes no durable answer_claim,
+    /// appends no resolution, and leaves the card in place — the same early gate,
+    /// on the path where there is no responder to release.
+    #[tokio::test]
+    async fn an_option_id_answer_in_send_keys_mode_claims_and_resolves_nothing() {
+        let daemon = test_daemon(); // hold_ms == 0
+        let uid = TEST_UID;
+        register(&daemon, "cc-1", Some(uid)).await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "git status").await;
+        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
+
+        assert!(matches!(
+            daemon
+                .answer(
+                    &request_id,
+                    &hash,
+                    AnswerDecision::OptionId {
+                        option_id: "accept".into()
+                    },
+                    Some("cc-1"),
+                )
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "no durable claim"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 1000)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::ApprovalResolved),
+            "no resolution"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), request_id.clone())),
+            "the card remains"
+        );
+    }
+
     // ------------------------------------------------------- hook mapping
 
     #[tokio::test]
@@ -6417,6 +6849,9 @@ mod tests {
                 lifecycle,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();
@@ -6742,6 +7177,11 @@ mod tests {
                     cwd: "/srv/dev/after".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                 },
@@ -7378,6 +7818,9 @@ mod tests {
             lifecycle: Lifecycle::Live,
             created_at: protocol::time::now_rfc3339(),
             updated_at: protocol::time::now_rfc3339(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
         };
         daemon.store.upsert_session(&row).unwrap().assert_present();
         row.session_uid = "01KYZ5E56X0D1RT7ZVRYK1ZEF8".into();
@@ -7518,6 +7961,11 @@ mod tests {
                     cwd: "/tmp".into(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                 },
@@ -7537,6 +7985,170 @@ mod tests {
         assert!(
             daemon.store.get_session(uid).unwrap().is_none(),
             "and no resurrected row"
+        );
+    }
+
+    /// Build and submit a registration with a chosen agent and Codex identity,
+    /// returning the raw result so a test can assert it was refused.
+    async fn try_register(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        agent: protocol::agent::AgentKind,
+        codex_generation: Option<u64>,
+        codex_thread_id: Option<String>,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent,
+                    agent_bin: None,
+                    codex_thread_id,
+                    codex_socket: None,
+                    codex_generation,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **Fail closed on an unsupported agent (Finding 1).** A registration for
+    /// any agent the daemon does not support — Codex before its launch path
+    /// ships, an unrecognised name, or a present empty string — is refused, and
+    /// nothing is persisted or installed. Absence still means Claude and works.
+    #[tokio::test]
+    async fn a_registration_for_an_unsupported_agent_is_refused_with_no_trace() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+
+        for (uid, agent) in [
+            ("01K1B3XQ8ZC0DE5FGH7JKMNP01", AgentKind::Codex),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP02",
+                AgentKind::Unsupported("gemini".into()),
+            ),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP03",
+                AgentKind::Unsupported(String::new()),
+            ),
+        ] {
+            assert!(protocol::uid::is_well_formed(uid), "{uid}");
+            let refused = try_register(&daemon, uid, agent.clone(), None, None).await;
+            assert!(refused.is_err(), "{agent:?} must be refused");
+            let inner = daemon.inner.lock().await;
+            assert!(
+                !inner.supervisors.contains_key(uid),
+                "{agent:?} left a supervisor handle"
+            );
+            drop(inner);
+            assert!(
+                daemon.store.get_session(uid).unwrap().is_none(),
+                "{agent:?} left a session row"
+            );
+        }
+
+        // Absence ⇒ Claude, which is supported, so an ordinary registration still
+        // succeeds and installs.
+        let claude_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(
+            try_register(&daemon, claude_uid, AgentKind::Claude, None, None)
+                .await
+                .is_ok(),
+            "a Claude registration must still succeed"
+        );
+        assert!(daemon.store.get_session(claude_uid).unwrap().is_some());
+    }
+
+    /// **Identity guard (Finding 2).** A Claude registration that carries any
+    /// Codex-only identity field is internally inconsistent and refused, so those
+    /// fields can never smuggle a generation into the Codex-only adoption path.
+    #[tokio::test]
+    async fn a_claude_registration_carrying_codex_identity_is_refused() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let with_generation = try_register(&daemon, uid, AgentKind::Claude, Some(3), None).await;
+        assert!(
+            with_generation.is_err(),
+            "Claude + codex_generation must be refused"
+        );
+        let with_thread =
+            try_register(&daemon, uid, AgentKind::Claude, None, Some("th_1".into())).await;
+        assert!(
+            with_thread.is_err(),
+            "Claude + codex_thread_id must be refused"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "an inconsistent Claude frame must leave no row"
+        );
+    }
+
+    /// A normal Claude registration is unaffected by the generation machinery:
+    /// it carries no generation, never enters the Codex-only branch, and still
+    /// installs a live supervisor exactly as before.
+    #[tokio::test]
+    async fn a_plain_claude_registration_still_installs_unchanged() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .is_ok());
+        let inner = daemon.inner.lock().await;
+        assert!(
+            inner.supervisors.contains_key(uid),
+            "a Claude supervisor is installed as always"
+        );
+    }
+
+    /// The Codex push guard's fail-closed semantics: a distrusted device (a
+    /// failed write) is ineligible until it re-advertises; `distrust_all` (a
+    /// failed startup invalidation) makes every device ineligible for the run.
+    #[test]
+    fn the_codex_push_guard_fails_closed() {
+        let guard = CodexPushGuard::default();
+        assert!(guard.device_features_trusted("dev-1"), "trusted by default");
+        guard.distrust_device("dev-1");
+        assert!(!guard.device_features_trusted("dev-1"));
+        assert!(guard.device_features_trusted("dev-2"), "others unaffected");
+        guard.retrust_device("dev-1");
+        assert!(
+            guard.device_features_trusted("dev-1"),
+            "a good write re-trusts"
+        );
+        guard.distrust_all();
+        assert!(!guard.device_features_trusted("dev-1"));
+        assert!(
+            !guard.device_features_trusted("dev-2"),
+            "distrust_all is total"
+        );
+    }
+
+    /// **Startup fails closed (Finding 2e).** If startup invalidation cannot run
+    /// (the device store is broken), recovery marks all devices Codex-ineligible
+    /// for the run rather than continuing on possibly-stale eligibility.
+    #[tokio::test]
+    async fn a_failed_startup_invalidation_distrusts_all_device_features() {
+        let daemon = test_daemon();
+        daemon.store.break_device_lookups_for_tests();
+        daemon.recover().await;
+        assert!(
+            !daemon
+                .codex_push_guard
+                .device_features_trusted("any-device"),
+            "a failed startup invalidation must fail closed for every device"
         );
     }
 
@@ -9065,6 +9677,9 @@ mod tests {
                     lifecycle: Lifecycle::Live,
                     created_at: now.clone(),
                     updated_at: now,
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
                 })
                 .unwrap()
                 .assert_present();
@@ -9208,6 +9823,11 @@ mod tests {
                     cwd: "/tmp".into(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                 },

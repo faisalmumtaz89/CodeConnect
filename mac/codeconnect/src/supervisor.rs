@@ -1263,6 +1263,16 @@ fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSessio
         cwd: args.cwd.clone(),
         supervisor_pid: std::process::id(),
         claude_bin: args.claude_bin.clone(),
+        // The agent this supervisor hosts. Phase 1 only ever launches Claude, so
+        // this is Claude, and `agent_bin` mirrors `claude_bin`; the fields are
+        // present so a daemon on the agent seam records the run's agent from the
+        // registration rather than inferring it. A Codex supervisor sets these
+        // when its launch path lands.
+        agent: protocol::agent::AgentKind::Claude,
+        agent_bin: args.claude_bin.clone(),
+        codex_thread_id: None,
+        codex_socket: None,
+        codex_generation: None,
         started_at: started_at.to_string(),
         // What this build can honour. The daemon uses it to decide whether an
         // approval may be actuated through us at all: a supervisor that

@@ -1773,6 +1773,9 @@ mod tests {
                 lifecycle: Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();

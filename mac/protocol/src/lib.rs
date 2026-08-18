@@ -18,7 +18,9 @@
 
 use std::path::PathBuf;
 
+pub mod agent;
 pub mod build_identity;
+pub mod composite_id;
 pub mod config;
 pub mod event;
 pub mod fsperm;
@@ -281,7 +283,47 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         token's environment and corrects the daemon on an accepted send;
 ///         this is how that correction reaches the phone, which persists it
 ///         rather than resending the value it first cached.
-pub const PROTOCOL_MINOR: u32 = 14;
+///   * `15` — **the agent seam.** Everything here is additive and a client
+///     written against minor 14 needs none of it; it is the wire, storage and
+///     config groundwork for a second agent (Codex) whose *behaviour* lands in
+///     later work. A Claude session is byte-identical to minor 14 — the point
+///     of the number is that a peer can now *say* Codex without a Claude peer
+///     having to understand it.
+///       - [`agent::AgentKind`] (`claude` | `codex` | a preserved
+///         `Unsupported` name). Absent decodes as Claude; an **unrecognised**
+///         name never does — it fails closed. It rides
+///         [`ipc::RegisterSession::agent`], [`event::SessionSummary::agent`],
+///         and the session storage row.
+///       - additive [`ipc::RegisterSession`] fields — `agent`, `agent_bin`,
+///         `codex_thread_id`, `codex_socket`, `codex_generation` — all
+///         tolerated-absent by an older daemon, and a pre-`Register`
+///         support-negotiation pair ([`ipc::ClientFrame::NegotiateSupport`] /
+///         [`ipc::DaemonFrame::SupportedAgents`]). The daemon adopts a
+///         registration only when its `codex_generation` is not older than one
+///         it already holds, so a stale supervisor frame cannot overwrite newer
+///         adapter state.
+///       - [`ws::Capabilities::supported_agents`] (the daemon's honest list —
+///         `["claude"]` until Codex actuation ships), [`ws::ClientFeatures`] on
+///         the [`ws::ClientMessage::Hello`] and [`ws::ClientMessage::RegisterPush`]
+///         frames (a client that advertises no agents is Claude-only), and a
+///         per-session [`event::SessionSummary::agent`] fact. A per-session fact
+///         is authoritative; a missing one falls back to connection-global
+///         **only for Claude**, and Codex or an unknown agent fails closed.
+///       - the [`ws::CodexResolution`] envelope (a *separate* discriminated
+///         type, so Claude's [`ws::AnswerOutcome`]/[`ws::AnswerResult`] stay
+///         byte-identical), an additive opaque [`ws::AnswerDecision::OptionId`]
+///         variant, and an [`ws::ClientMessage::Interrupt`] operation
+///         (**defined, refused daemon-side** until steering ships).
+///       - the [`composite_id`] wire-id codec: a versioned, type-tagged,
+///         length-bounded base64url encoding of `(session_uid, thread_id,
+///         server_request_id, generation)`, opaque to the phone's request-id
+///         correlation.
+///
+///     Device feature sets are persisted with a daemon-version epoch and
+///     replaced on every authenticated hello; a set not confirmed under the
+///     current epoch is invalidated to Claude-only at startup, so a rollback
+///     cannot resurrect stale Codex eligibility.
+pub const PROTOCOL_MINOR: u32 = 15;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

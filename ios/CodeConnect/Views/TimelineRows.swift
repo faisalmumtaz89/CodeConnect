@@ -577,7 +577,7 @@ struct ApprovalRow: View {
     /// the fleet's rows use.
     private var headerLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-            Text(approval.isPending ? "NEEDS YOU" : "RESOLVED")
+            Text(Self.headerTitle(for: approval))
                 .ccType(CC.type.micro.weight(.semibold))
                 .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -644,7 +644,7 @@ struct ApprovalRow: View {
     @ViewBuilder
     private func resolvedFooter(_ outcome: AnswerOutcome) -> some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-            Text(resolutionText(outcome))
+            Text(Self.resolutionText(for: outcome))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -656,7 +656,20 @@ struct ApprovalRow: View {
         }
     }
 
-    private func resolutionText(_ outcome: AnswerOutcome) -> String {
+    /// The persisted approval row's header word. Pending is "NEEDS YOU";
+    /// otherwise the row carries a recorded outcome, and an `indeterminate` one —
+    /// which the daemon could not confirm reached the agent — reads "UNCONFIRMED",
+    /// never the definitive "RESOLVED". Static and pure so the string is testable
+    /// off the real `ApprovalItem` the builder produces, without rendering the row.
+    static func headerTitle(for approval: ApprovalItem) -> String {
+        guard let outcome = approval.outcome else { return "NEEDS YOU" }
+        return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
+    }
+
+    static func resolutionText(for outcome: AnswerOutcome) -> String {
+        // The daemon accepted the answer but never confirmed it reached the
+        // agent, so the footer must not state a decision or an actor as fact.
+        if outcome.indeterminate { return "Answer not confirmed" }
         // An inferred decision is the daemon noticing the prompt is gone, not
         // watching an answer happen. Rendering it as "Allowed" would put a fact
         // on screen that nobody observed.
@@ -671,9 +684,17 @@ struct ApprovalRow: View {
         return "\(outcome.decision.label) \(who)"
     }
 
+    /// The spoken label for a row carrying a recorded outcome. An unconfirmed
+    /// outcome is announced as such — never "Resolved approval", which would
+    /// speak a confirmation VoiceOver users cannot see is false.
+    static func resolvedAccessibilityLabel(for outcome: AnswerOutcome, toolName: String) -> String {
+        let lead = outcome.indeterminate ? "Unconfirmed approval" : "Resolved approval"
+        return "\(lead). \(resolutionText(for: outcome)). \(toolName)."
+    }
+
     private var accessibilityLabel: String {
         if let outcome = approval.outcome {
-            return "Resolved approval. \(resolutionText(outcome)). \(approval.card.toolName)."
+            return Self.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
         }
         return
             "Pending approval, risk \(risk.label), \(approval.card.toolName), waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"

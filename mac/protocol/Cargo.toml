@@ -11,3 +11,7 @@ libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# The composite wire-id codec emits/parses base64url. Already a workspace
+# dependency (the terminal carrier uses it); shared here so the id is one
+# well-tested alphabet rather than a second hand-rolled one.
+base64 = { workspace = true }

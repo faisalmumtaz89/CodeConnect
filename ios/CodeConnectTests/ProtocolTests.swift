@@ -757,3 +757,235 @@ final class ComposerTemplateTests: XCTestCase {
              "Use a simpler approach"])
     }
 }
+
+
+/// The agent-seam decode-safety wire (PROTOCOL_MINOR 15): the single rule under
+/// all of it is that an unknown wire value never becomes an *actuation claim* —
+/// a build ahead of this one must never be read as "we typed it", "the daemon
+/// said so", or any real outcome. Pinned against JSON written by hand from the
+/// Rust protocol crate, never round-tripped through this app's own encoders.
+@MainActor
+final class AgentSeamDecodeSafetyTests: XCTestCase {
+
+    private func decodeServer(_ json: String) throws -> ServerMessage {
+        try JSONDecoder().decode(ServerMessage.self, from: Data(json.utf8))
+    }
+
+    private func decodeOutcome(_ json: String) throws -> AnswerOutcome {
+        try JSONDecoder().decode(AnswerOutcome.self, from: Data(json.utf8))
+    }
+
+    private func decodeResolution(_ json: String) throws -> CodexResolution {
+        try JSONDecoder().decode(CodexResolution.self, from: Data(json.utf8))
+    }
+
+    // MARK: applied_via (AnswerPath)
+
+    /// The bug this whole phase exists to close: an `applied_via` a newer daemon
+    /// invented used to decode to `.sendKeys`, so the app claimed it had typed
+    /// keystrokes it never sent. It must now land in its own `.unknown` case and
+    /// read as *not* `send_keys`.
+    func testUnknownAppliedViaIsNotClaimedAsSendKeys() throws {
+        let message = try decodeServer(
+            """
+            {"type":"answer_result","request_id":"toolu_1","result":{"status":"applied",
+             "outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},
+               "resolved_by":"local","applied_via":"future_path",
+               "resolved_at":"2026-08-18T09:00:00.000Z"}}}
+            """)
+        guard case .answerResult(_, .applied(let outcome)) = message else {
+            return XCTFail("wrong result")
+        }
+        XCTAssertNotEqual(
+            outcome.appliedVia, .sendKeys,
+            "an unknown path must never be read as keystrokes this build sent")
+        guard case .unknown(let raw) = outcome.appliedVia else {
+            return XCTFail("unknown applied_via must land in its own case, got \(outcome.appliedVia)")
+        }
+        XCTAssertEqual(raw, "future_path")
+    }
+
+    func testKnownAppliedViaValuesStillDecode() throws {
+        let hook = try decodeOutcome(
+            """
+            {"request_id":"r","session_id":"s","decision":{"type":"allow"},
+             "resolved_by":"phone","applied_via":"hook_return","resolved_at":"t"}
+            """)
+        XCTAssertEqual(hook.appliedVia, .hookReturn)
+
+        let keys = try decodeOutcome(
+            """
+            {"request_id":"r","session_id":"s","decision":{"type":"allow"},
+             "resolved_by":"phone","applied_via":"send_keys","resolved_at":"t"}
+            """)
+        XCTAssertEqual(keys.appliedVia, .sendKeys)
+    }
+
+    // MARK: source (EventSource)
+
+    /// An unrecognised `source` must not inherit the trusted `daemon`
+    /// provenance — it lands in its own `.unknown` case.
+    func testUnknownEventSourceIsNotClaimedAsDaemon() throws {
+        let message = try decodeServer(
+            """
+            {"type":"event","event":{"seq":7,"session_id":"cc-1","ts":"t","kind":"notification",
+             "source":"agent_bridge","payload":{}}}
+            """)
+        guard case .event(let event) = message else { return XCTFail("wrong message") }
+        XCTAssertNotEqual(event.source, .daemon, "an unknown source must not claim daemon trust")
+        guard case .unknown(let raw) = event.source else {
+            return XCTFail("unknown source must land in its own case, got \(event.source)")
+        }
+        XCTAssertEqual(raw, "agent_bridge")
+    }
+
+    func testKnownEventSourcesStillDecode() throws {
+        for (word, expected): (String, EventSource) in [
+            ("hook", .hook), ("transcript", .transcript), ("daemon", .daemon), ("pty", .pty),
+        ] {
+            let message = try decodeServer(
+                """
+                {"type":"event","event":{"seq":1,"session_id":"cc-1","ts":"t","kind":"notification",
+                 "source":"\(word)","payload":{}}}
+                """)
+            guard case .event(let event) = message else { return XCTFail("wrong message") }
+            XCTAssertEqual(event.source, expected)
+        }
+    }
+
+    // MARK: indeterminate (AnswerOutcome)
+
+    func testIndeterminateDecodesAndDefaultsToFalseWhenAbsent() throws {
+        let present = try decodeOutcome(
+            """
+            {"request_id":"r","session_id":"s","decision":{"type":"allow"},
+             "resolved_by":"local","applied_via":"send_keys","resolved_at":"t","indeterminate":true}
+            """)
+        XCTAssertTrue(present.indeterminate)
+
+        let absent = try decodeOutcome(
+            """
+            {"request_id":"r","session_id":"s","decision":{"type":"allow"},
+             "resolved_by":"local","applied_via":"send_keys","resolved_at":"t"}
+            """)
+        XCTAssertFalse(absent.indeterminate, "an absent indeterminate is false, never present")
+    }
+
+    // MARK: option_id (AnswerDecision)
+
+    /// The agent-seam decision shape: an option named by id, not ordinal. It
+    /// decodes to its own case and round-trips back to the same bytes.
+    func testOptionIdDecodesAndRoundTrips() throws {
+        let json = #"{"type":"option_id","option_id":"acceptWithExecpolicyAmendment"}"#
+        let decision = try JSONDecoder().decode(AnswerDecision.self, from: Data(json.utf8))
+        guard case .optionId(let id) = decision else {
+            return XCTFail("expected .optionId, got \(decision)")
+        }
+        XCTAssertEqual(id, "acceptWithExecpolicyAmendment")
+
+        let reencoded = try JSONDecoder().decode(
+            JSONValue.self, from: try JSONEncoder().encode(decision))
+        let expected = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
+        XCTAssertEqual(reencoded, expected, "option_id must encode back to the same JSON")
+    }
+
+    /// The pre-existing decision shapes keep working byte-identically.
+    func testKnownDecisionShapesStillDecode() throws {
+        func decode(_ json: String) throws -> AnswerDecision {
+            try JSONDecoder().decode(AnswerDecision.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try decode(#"{"type":"allow"}"#), .allow)
+        XCTAssertEqual(try decode(#"{"type":"deny"}"#), .deny)
+        XCTAssertEqual(try decode(#"{"type":"option","index":2}"#), .option(index: 2))
+        XCTAssertEqual(try decode(#"{"type":"text","text":"hi"}"#), .text("hi"))
+        XCTAssertEqual(try decode(#"{"type":"future"}"#), .unrecognised("future"))
+    }
+
+    // MARK: CodexResolution envelope
+
+    func testAnsweredByPhoneWithADecision() throws {
+        let resolution = try decodeResolution(
+            #"{"status":"answered","by":"phone","decision":{"type":"allow"}}"#)
+        guard case .answered(let by, let decision) = resolution else {
+            return XCTFail("expected .answered, got \(resolution)")
+        }
+        XCTAssertEqual(by, .phone)
+        XCTAssertEqual(decision, .allow)
+    }
+
+    func testAnsweredByLocalWithoutADecision() throws {
+        let resolution = try decodeResolution(#"{"status":"answered","by":"local"}"#)
+        guard case .answered(let by, let decision) = resolution else {
+            return XCTFail("expected .answered, got \(resolution)")
+        }
+        XCTAssertEqual(by, .local)
+        XCTAssertNil(decision, "an omitted decision stays nil")
+    }
+
+    /// `turn_aborted` is load-bearing and must decode to its own retained case,
+    /// never the unknown fallback.
+    func testClearedTurnAbortedIsRetained() throws {
+        let resolution = try decodeResolution(#"{"status":"cleared","cause":"turn_aborted"}"#)
+        guard case .cleared(let cause) = resolution else {
+            return XCTFail("expected .cleared, got \(resolution)")
+        }
+        XCTAssertEqual(cause, .turnAborted, "turn_aborted must be retained, not folded into unknown")
+    }
+
+    func testClearedSuperseded() throws {
+        let resolution = try decodeResolution(#"{"status":"cleared","cause":"superseded"}"#)
+        guard case .cleared(.superseded) = resolution else {
+            return XCTFail("expected .cleared(.superseded), got \(resolution)")
+        }
+    }
+
+    func testTimeout() throws {
+        XCTAssertEqual(try decodeResolution(#"{"status":"timeout"}"#), .timeout)
+    }
+
+    func testUnknownWriteStageEnvelope() throws {
+        let resolution = try decodeResolution(
+            """
+            {"status":"unknown","attempted_by":"phone",
+             "attempted_decision":{"type":"deny"},
+             "write_stage":"upstream_write_unconfirmed","cause":"broker timed out"}
+            """)
+        guard
+            case .unknown(let attemptedBy, let attemptedDecision, let writeStage, let cause) =
+                resolution
+        else { return XCTFail("expected .unknown, got \(resolution)") }
+        XCTAssertEqual(attemptedBy, .phone)
+        XCTAssertEqual(attemptedDecision, .deny)
+        XCTAssertEqual(writeStage, .upstreamWriteUnconfirmed)
+        XCTAssertEqual(cause, "broker timed out")
+    }
+
+    /// A `status` word this build has never seen stays in its own case — it is
+    /// never read as `timeout` or any other real outcome.
+    func testUnrecognisedStatusIsRetainedApartFromEveryOutcome() throws {
+        let resolution = try decodeResolution(#"{"status":"teleported"}"#)
+        guard case .unrecognisedStatus(let raw) = resolution else {
+            return XCTFail("expected .unrecognisedStatus, got \(resolution)")
+        }
+        XCTAssertEqual(raw, "teleported")
+        XCTAssertNotEqual(resolution, .timeout, "an unknown status is not a timeout")
+    }
+
+    // MARK: forward-compat
+
+    /// An old client decoding a new summary is already safe: JSONDecoder ignores
+    /// keys it was not told about, so a future `agent` field changes nothing.
+    func testSessionSummaryIgnoresAnUnexpectedAgentKey() throws {
+        let summary = try JSONDecoder().decode(
+            SessionSummary.self,
+            from: Data(
+                """
+                {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+                 "lifecycle":"live","link":"attached","last_seq":3,
+                 "created_at":"t","updated_at":"t","agent":"codex"}
+                """.utf8))
+        XCTAssertEqual(summary.sessionUID, "u-1")
+        XCTAssertEqual(summary.lifecycle, .live)
+        XCTAssertEqual(summary.link, .attached)
+    }
+}

@@ -332,23 +332,34 @@ fn explain_retired(retired: RetiredCommand) -> ! {
     std::process::exit(RETIRED_EXIT_CODE);
 }
 
-fn start_claude(passthrough: &[String]) -> Result<()> {
-    let config = Config::load();
-    let claude_bin = resolve_claude_bin(&config)?;
-    let cwd = std::env::current_dir().context("reading the current directory")?;
-    let cwd = cwd.to_string_lossy().to_string();
+/// The agent-varying pieces of a launch: the resolved binary, the exact argv and
+/// env the tmux session runs. Built by an agent-specific planner so the pieces
+/// that differ between agents live in one place. The `claude` planner reproduces
+/// byte-for-byte what shipped — proven by the launcher test and the fixture
+/// replay — and it is the only planner today; another agent's launch path lands
+/// with that agent, not before.
+struct AgentLaunchPlan {
+    /// The resolved agent binary, passed on to the supervisor.
+    binary: PathBuf,
+    /// argv[0] is the binary; the rest is agent flags plus the caller's passthrough.
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+}
 
-    let session_id = tmux::next_session_name()?;
-    // Minted here, once, before anything else knows the session exists. The
-    // tmux name is reused as soon as this session exits; this is not, and it is
-    // what the event log, the tail cursor and the answers ledger are keyed by.
-    let session_uid = protocol::uid::new().context("minting a session uid")?;
-    let plan = settings::write_for_session(&session_id, &session_uid, &config)?;
-
+/// The exact argv and env a Claude session runs — a **pure** function, so the
+/// byte-identical guarantee is testable without touching the filesystem or tmux.
+/// Any change here changes what `claude` itself sees; the launcher test pins it.
+fn claude_argv_and_env(
+    binary: &std::path::Path,
+    settings_path: &std::path::Path,
+    session_id: &str,
+    session_uid: &str,
+    passthrough: &[String],
+) -> (Vec<String>, Vec<(String, String)>) {
     let mut argv = vec![
-        claude_bin.to_string_lossy().to_string(),
+        binary.to_string_lossy().to_string(),
         "--settings".to_string(),
-        plan.path.to_string_lossy().to_string(),
+        settings_path.to_string_lossy().to_string(),
     ];
     argv.extend(passthrough.iter().cloned());
 
@@ -365,22 +376,88 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
             "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
             "1".to_string(),
         ),
-        (protocol::ENV_SESSION.to_string(), session_id.clone()),
-        (protocol::ENV_SESSION_UID.to_string(), session_uid.clone()),
+        (protocol::ENV_SESSION.to_string(), session_id.to_string()),
+        (
+            protocol::ENV_SESSION_UID.to_string(),
+            session_uid.to_string(),
+        ),
     ];
+    (argv, env)
+}
+
+/// Plan a Claude launch around an **already-resolved** binary: write the
+/// control-plane settings document and assemble the byte-identical argv/env. The
+/// binary is resolved separately and first (see `start_agent`), so a missing
+/// binary fails before any session state exists — the pre-seam ordering.
+fn plan_claude_launch(
+    config: &Config,
+    binary: &std::path::Path,
+    session_id: &str,
+    session_uid: &str,
+    passthrough: &[String],
+) -> Result<AgentLaunchPlan> {
+    let settings = settings::write_for_session(session_id, session_uid, config)?;
+    let (argv, env) =
+        claude_argv_and_env(binary, &settings.path, session_id, session_uid, passthrough);
+    Ok(AgentLaunchPlan {
+        binary: binary.to_path_buf(),
+        argv,
+        env,
+    })
+}
+
+fn start_claude(passthrough: &[String]) -> Result<()> {
+    start_agent(protocol::agent::AgentKind::Claude, passthrough)
+}
+
+/// Launch an agent session: mint the identity, plan the agent-varying pieces,
+/// create the tmux session, and hand ownership to the supervisor. Everything
+/// outside the plan — the identity, the tmux session, the advisories, the
+/// attach — is agent-agnostic; the plan is where an agent differs. Only Claude
+/// has a planner today; any other agent is refused before anything is spawned.
+fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Result<()> {
+    let config = Config::load();
+
+    // **Binary first.** Resolving the agent's executable is the first thing that
+    // can fail, and it must fail before a tmux name is taken or a session
+    // identity minted — exactly as the pre-seam launcher did, so a missing
+    // binary surfaces the same way it always has. This is the agent-varying
+    // binary-resolution step; a non-Claude agent is refused here, before any
+    // state exists.
+    let binary = match &agent {
+        protocol::agent::AgentKind::Claude => resolve_claude_bin(&config)?,
+        other => bail!("{} sessions cannot be launched yet", other.as_str()),
+    };
+
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let cwd = cwd.to_string_lossy().to_string();
+
+    let session_id = tmux::next_session_name()?;
+    // Minted here, once, before anything else knows the session exists. The
+    // tmux name is reused as soon as this session exits; this is not, and it is
+    // what the event log, the tail cursor and the answers ledger are keyed by.
+    let session_uid = protocol::uid::new().context("minting a session uid")?;
+
+    let plan = match &agent {
+        protocol::agent::AgentKind::Claude => {
+            plan_claude_launch(&config, &binary, &session_id, &session_uid, passthrough)?
+        }
+        // Unreachable: a non-Claude agent already bailed at binary resolution.
+        other => bail!("{} sessions cannot be launched yet", other.as_str()),
+    };
 
     tmux::new_session(
         &session_id,
         &cwd,
-        &env,
-        &argv,
+        &plan.env,
+        &plan.argv,
         tmux::terminal_size(),
         config.tmux_status,
         config.tmux_history_limit,
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
 
-    spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
+    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary)?;
 
     // After the session and supervisor exist, before the alternate screen:
     // the hold below delays only the *display*, never the session it is
@@ -897,6 +974,61 @@ fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The launcher byte-identical gate.** The agent-parameterised launcher
+    /// must leave the `claude` argv and env exactly as they shipped. This pins
+    /// the pure builder both planners flow through, so a refactor that reorders a
+    /// flag, drops an env var, or slips an agent-specific argument into the Claude
+    /// path fails here rather than in a session that behaves subtly differently.
+    #[test]
+    fn the_claude_argv_and_env_are_byte_identical() {
+        let (argv, env) = claude_argv_and_env(
+            std::path::Path::new("/usr/local/bin/claude"),
+            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/settings.json"),
+            "cc-1",
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            &[
+                "--resume".to_string(),
+                "--permission-mode".to_string(),
+                "default".to_string(),
+            ],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "/usr/local/bin/claude",
+                "--settings",
+                "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
+                "--resume",
+                "--permission-mode",
+                "default",
+            ]
+        );
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
+                    "1".to_string()
+                ),
+                ("CODECONNECT_SESSION".to_string(), "cc-1".to_string()),
+                (
+                    "CODECONNECT_SESSION_UID".to_string(),
+                    "01K1B3XQ8ZC0DE5FGH7JKMNPQR".to_string()
+                ),
+            ]
+        );
+        // The passthrough is appended verbatim, in order, after the settings flag
+        // — never merged, deduplicated or reordered.
+        let (bare, _) = claude_argv_and_env(
+            std::path::Path::new("claude"),
+            std::path::Path::new("/s.json"),
+            "cc-2",
+            "UID",
+            &[],
+        );
+        assert_eq!(bare, vec!["claude", "--settings", "/s.json"]);
+    }
 
     /// Whether a bare command name resolves on this machine's `PATH`.
     ///

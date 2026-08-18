@@ -551,6 +551,7 @@ where
                             token: given,
                             pairing_code,
                             client_name,
+                            features,
                             ..
                         } => {
                             // Checked *before* the credential, and refused
@@ -614,6 +615,22 @@ where
                                 if tls_active { "wss" } else { "ws" },
                                 describe(&ack),
                             );
+                            // **Replace-on-hello, fail-closed — BEFORE the ack.**
+                            // An authenticated device's feature set is replaced
+                            // from this hello: present ⇒ recorded under this run's
+                            // epoch, absent ⇒ overwritten to Claude-only. Done
+                            // here, before the fallible ack build/send, so an ack
+                            // failure can never skip the replacement and leave a
+                            // stale Codex set eligible. The bootstrap token has no
+                            // device row, so it is skipped.
+                            if let Some(device_id) = device_id.as_deref() {
+                                persist_device_features_fail_closed(
+                                    &daemon,
+                                    device_id,
+                                    features.as_ref(),
+                                )
+                                .await;
+                            }
                             match hello_ack(&daemon, ack, tls_active, private_transport).await {
                                 Ok(ack) => send(&mut sink, &ack).await?,
                                 // The ack could not be built truthfully — the
@@ -1041,13 +1058,22 @@ where
     <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        // A second hello is harmless; treat it as a no-op rather than an error.
-        ClientMessage::Hello { .. } => {}
+        // A second hello does not re-authenticate, but it **does** replace the
+        // device's feature set, fail-closed — the same replace-on-hello rule as
+        // the first one. A client that stopped advertising Codex on a re-hello
+        // must lose eligibility, not keep a stale set because the frame was
+        // treated as a no-op.
+        ClientMessage::Hello { features, .. } => {
+            if let Some(device_id) = device_id {
+                persist_device_features_fail_closed(daemon, device_id, features.as_ref()).await;
+            }
+        }
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
         ClientMessage::RegisterPush {
             token,
             environment,
             relay_credential,
+            features,
         } => {
             // Normalised on the way in, so the column only ever holds one of
             // two spellings and a later reader cannot be surprised by "prod".
@@ -1083,6 +1109,10 @@ where
                     Ok(accepted) => accepted,
                     Err(refusal) => {
                         crate::log_warn!("push: refusing registration from {device_id}: {refusal}");
+                        // Fail closed: a refused registration must not leave a
+                        // stale Codex feature set eligible. Clear to Claude-only
+                        // before returning.
+                        persist_device_features_fail_closed(daemon, device_id, None).await;
                         send(
                             sink,
                             &ServerMessage::Error {
@@ -1098,11 +1128,22 @@ where
                 .register_push(device_id, &token, &environment, credential.as_ref())
                 .await
             {
-                Ok(()) => crate::log_info!(
-                    "push: device {device_id} registered for {environment} notifications"
-                ),
+                Ok(()) => {
+                    crate::log_info!(
+                        "push: device {device_id} registered for {environment} notifications"
+                    );
+                    // **Replace-on-registration, fail-closed.** Present ⇒ recorded
+                    // under this run's epoch; absent, an encode failure, or a
+                    // store failure ⇒ overwritten to Claude-only. A registration
+                    // that names no features can never leave stale Codex
+                    // eligibility standing.
+                    persist_device_features_fail_closed(daemon, device_id, features.as_ref()).await;
+                }
                 Err(err) => {
                     crate::log_error!("push: could not register {device_id}: {err:#}");
+                    // Fail closed: a failed token store must not leave a stale
+                    // Codex feature set eligible either.
+                    persist_device_features_fail_closed(daemon, device_id, None).await;
                     send(
                         sink,
                         &ServerMessage::Error {
@@ -1362,6 +1403,27 @@ where
         | ClientMessage::TerminalCredit { .. }
         | ClientMessage::TerminalDetach { .. } => {
             unreachable!("terminal messages are routed by handle_terminal, not handle_message")
+        }
+        // Interrupt is a Codex steering operation whose actuation lands in a
+        // later phase. It is **refused honestly** here, not dropped: the client
+        // that sent it gets a typed `Rejected` naming the reason, so a mutation
+        // result is never a silence. A Claude client never sends one.
+        ClientMessage::Interrupt {
+            session_id,
+            request_id,
+            ..
+        } => {
+            send(
+                sink,
+                &ServerMessage::InterruptResult {
+                    session_id,
+                    request_id,
+                    result: protocol::ws::InterruptResult::Rejected {
+                        reason: "interrupt is not supported yet".into(),
+                    },
+                },
+            )
+            .await?;
         }
     }
     Ok(())
@@ -2681,6 +2743,72 @@ fn validated_registration(
     }
 }
 
+/// Replace a device's persisted feature set from what a hello/registration
+/// advertised, **fail-closed**. `Some` records it under this run's epoch; `None`,
+/// an encoding failure, or a store failure clears it to Claude-only.
+///
+/// When the DB itself cannot be written the guard is the backstop: a set that
+/// failed is retried as a clear (so a broken write never leaves stale Codex
+/// eligibility standing), and if even the clear cannot be written the device is
+/// marked **untrusted** in [`Daemon::codex_push_guard`] — so the push projection
+/// treats it as Claude-only this run rather than trusting a possibly-stale
+/// same-epoch set until the next restart. A successful write re-trusts it.
+async fn persist_device_features_fail_closed(
+    daemon: &Arc<Daemon>,
+    device_id: &str,
+    features: Option<&protocol::ws::ClientFeatures>,
+) {
+    let epoch = crate::state::feature_epoch();
+    // An encode failure is treated as absence: clear, never keep a stale set.
+    let json = match features {
+        Some(features) => match serde_json::to_string(features) {
+            Ok(json) => Some(json),
+            Err(err) => {
+                crate::log_error!(
+                    "push: could not encode features for {device_id}; clearing to Claude-only: {err:#}"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let clearing = json.is_none();
+    match daemon
+        .db
+        .set_device_features(device_id.to_string(), json, epoch.to_string())
+        .await
+    {
+        // The DB now holds the truth — either the advertised set, or Claude-only.
+        // Either way the device's persisted state is trustworthy again.
+        Ok(()) => daemon.codex_push_guard.retrust_device(device_id),
+        Err(err) => {
+            crate::log_error!("push: could not persist features for {device_id}: {err:#}");
+            if clearing {
+                // The clear itself failed: a prior same-epoch Codex set may
+                // survive, so this device is not Codex-eligible this run.
+                daemon.codex_push_guard.distrust_device(device_id);
+                return;
+            }
+            // The set failed; force a clear to Claude-only so no stale set is
+            // left standing. If that also fails, the device is untrusted.
+            match daemon
+                .db
+                .set_device_features(device_id.to_string(), None, epoch.to_string())
+                .await
+            {
+                Ok(()) => daemon.codex_push_guard.retrust_device(device_id),
+                Err(err) => {
+                    crate::log_error!(
+                        "push: could not clear features for {device_id} after a failed set; \
+                         marking it Codex-ineligible this run: {err:#}"
+                    );
+                    daemon.codex_push_guard.distrust_device(device_id);
+                }
+            }
+        }
+    }
+}
+
 fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) -> Capabilities {
     // **One transport, named once.** `push` and `push_relay` are one-hot and
     // both are read off the mode rather than off a predicate: a phone has to
@@ -2736,6 +2864,14 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // enforces the same rule independently, so a client that ignores this
         // capability still cannot open one.
         terminal_pty: terminal_allowed,
+        // **Omitted while it would only say "Claude".** Advertising the legacy
+        // floor to the phone adds a diagnostic row that means nothing yet and
+        // that a shipped phone would render. It is left empty here (and so
+        // skipped on the wire, keeping the ack byte-identical to minor 14); the
+        // daemon still knows its real set through `supported_agents()` for the
+        // IPC negotiation, and this field is populated for the phone in Phase 2
+        // when it names an agent the daemon can actually drive.
+        supported_agents: Vec::new(),
     }
 }
 
@@ -2918,6 +3054,66 @@ mod tests {
         let (daemon, _) = daemon_with_a_device();
         daemon.store.break_device_lookups_for_tests();
         assert!(!revoked(&daemon, None).await);
+    }
+
+    /// The replace-on-hello/registration helper: a present set is stored under
+    /// this run's epoch, and absence overwrites it to Claude-only. Probed via
+    /// `invalidate_device_features` (a set confirmed under the current epoch
+    /// survives a matching-epoch invalidation and is cleared by a mismatched one;
+    /// absence leaves nothing to clear).
+    #[tokio::test]
+    async fn the_feature_helper_replaces_a_set_and_absence_clears_it() {
+        let (daemon, device_id) = daemon_with_a_device();
+        let epoch = crate::state::feature_epoch();
+        let codex = protocol::ws::ClientFeatures {
+            agents: vec![protocol::agent::AgentKind::Codex],
+        };
+
+        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
+        assert!(daemon.codex_push_guard.device_features_trusted(&device_id));
+        // A set exists (a mismatched-epoch invalidation clears exactly one row).
+        assert_eq!(
+            daemon
+                .db
+                .invalidate_device_features("some-other-epoch".into())
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Re-set, then absence clears it: nothing is left for a later invalidation.
+        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
+        persist_device_features_fail_closed(&daemon, &device_id, None).await;
+        assert_eq!(
+            daemon
+                .db
+                .invalidate_device_features(epoch.to_string())
+                .await
+                .unwrap(),
+            0,
+            "absence cleared the set to Claude-only"
+        );
+    }
+
+    /// **Fail-closed on a write failure (Finding 2d).** When the device store is
+    /// broken so a clear cannot be written, the device is marked Codex-ineligible
+    /// in the guard rather than left trusting a possibly-stale same-epoch set.
+    #[tokio::test]
+    async fn a_failed_feature_clear_marks_the_device_codex_ineligible() {
+        let (daemon, device_id) = daemon_with_a_device();
+        let codex = protocol::ws::ClientFeatures {
+            agents: vec![protocol::agent::AgentKind::Codex],
+        };
+        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
+        assert!(daemon.codex_push_guard.device_features_trusted(&device_id));
+
+        // Break the store so the clear write fails, then try to clear.
+        daemon.store.break_device_lookups_for_tests();
+        persist_device_features_fail_closed(&daemon, &device_id, None).await;
+        assert!(
+            !daemon.codex_push_guard.device_features_trusted(&device_id),
+            "a device whose feature write failed must not stay Codex-eligible"
+        );
     }
 
     #[tokio::test]
@@ -3923,6 +4119,9 @@ mod tests {
                 lifecycle: Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .expect("the session row is written");
         // A freshly minted uid cannot be tombstoned, but the upsert says so

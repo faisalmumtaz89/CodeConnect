@@ -5,6 +5,11 @@ import SwiftUI
 /// What happened to an answer, in terms the UI can be honest about.
 enum AnswerAttempt: Sendable {
     case applied(AnswerOutcome)
+    /// The daemon accepted the answer but **cannot confirm it landed** —
+    /// `AnswerOutcome.indeterminate`. Kept apart from `.applied` so nothing ever
+    /// renders an unconfirmed answer as "confirmed by the daemon": a positive
+    /// actuation claim the daemon never made.
+    case indeterminate(AnswerOutcome)
     /// The ledger already had this request; carries the *original* outcome.
     case duplicate(outcome: AnswerOutcome, staleHash: Bool)
     /// The prompt was gone by the time the keystrokes were about to land —
@@ -16,9 +21,33 @@ enum AnswerAttempt: Sendable {
 
     var isTerminal: Bool {
         switch self {
-        case .applied, .duplicate, .answeredAtKeyboard: return true
+        case .applied, .indeterminate, .duplicate, .answeredAtKeyboard: return true
         case .staleCard, .rejected, .failed: return false
         }
+    }
+
+    /// Turn a daemon `AnswerResult.applied` outcome into the honest attempt.
+    ///
+    /// An `indeterminate` outcome means the daemon does not know whether the
+    /// answer reached the agent, so it must never become `.applied` — the case
+    /// the card renders as "confirmed". Pure and static precisely so this rule
+    /// can be tested without a live connection.
+    static func classify(applied outcome: AnswerOutcome) -> AnswerAttempt {
+        outcome.indeterminate ? .indeterminate(outcome) : .applied(outcome)
+    }
+
+    /// Turn a daemon `AnswerResult.duplicate` outcome into the honest attempt.
+    ///
+    /// **This is the real path an indeterminate outcome arrives on.** The daemon
+    /// records the outcome under `(session, request_id)` and *replays* it on any
+    /// later answer for the same key (`ccd/src/state.rs`), so a locally-resolved,
+    /// never-confirmed answer comes back as a `duplicate` carrying
+    /// `indeterminate: true`. Rendering that as "Already answered" with a
+    /// checkmark is the same false-confirmation this phase forbids, so an
+    /// indeterminate duplicate is reported as `.indeterminate`, never `.duplicate`.
+    static func classify(duplicate outcome: AnswerOutcome, staleHash: Bool) -> AnswerAttempt {
+        outcome.indeterminate
+            ? .indeterminate(outcome) : .duplicate(outcome: outcome, staleHash: staleHash)
     }
 }
 
@@ -1140,6 +1169,21 @@ final class AppModel {
 
     var deckCount: Int { deck.count }
 
+    /// The authoritative, LIVE approval for a card identity — the single resolver
+    /// every decision surface (the open sheet, the Deck cell, the card view)
+    /// derives from before offering an action or claiming an outcome.
+    ///
+    /// **`nil` means nothing live backs this card** — the session departed the
+    /// fleet (`forgetLocalState`), its log was reset/rewound, or the card left
+    /// the timeline. A `nil` here must render as a NON-actionable "no longer
+    /// available" state, never a frozen actionable snapshot: acting on, or
+    /// claiming an outcome for, a card no daemon would accept an answer for is
+    /// exactly the class this resolver exists to close. Routed by `sessionKey`
+    /// (the id's own prefix) so it is one timeline scan, not a fleet-wide one.
+    func liveApproval(sessionKey: String, id: String) -> ApprovalItem? {
+        states[sessionKey]?.approval(id: id)
+    }
+
     /// Working directories the daemon has reported, newest session first. The
     /// only evidence the app has for the Mac's account name.
     var sessionPaths: [String] {
@@ -1681,10 +1725,10 @@ final class AppModel {
             switch result {
             case .applied(let outcome):
                 refreshFleet()
-                return .applied(outcome)
+                return AnswerAttempt.classify(applied: outcome)
             case .duplicate(let outcome, let stale):
                 refreshFleet()
-                return .duplicate(outcome: outcome, staleHash: stale)
+                return AnswerAttempt.classify(duplicate: outcome, staleHash: stale)
             case .rejected(let reason):
                 refreshFleet()
                 return Self.classify(rejection: reason)

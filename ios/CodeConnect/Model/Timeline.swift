@@ -443,16 +443,30 @@ enum TimelineBuilder {
         approvals: [String: AnswerOutcome], turnEnd: UInt64
     ) -> ToolStatus {
         if let outcome { return outcome.status }
-        if let toolUseID, let answer = approvals[toolUseID] {
-            switch answer.decision {
-            case .deny: return .denied
-            // An unrecognised decision from a newer daemon is not evidence the
-            // call was blocked, so it falls through to the timing-based verdict
-            // rather than claiming a denial that may not have happened.
-            case .allow, .option, .text, .unrecognised: break
-            }
+        if let fromApproval = statusFromApproval(toolUseID: toolUseID, approvals: approvals) {
+            return fromApproval
         }
         return eventSeq < turnEnd ? .unresolved : .running
+    }
+
+    /// The tool status an approval *alone* justifies, or `nil` when it justifies
+    /// none and the timing verdict should stand. Internal (not private) and free
+    /// of the private `ToolOutcome` type so the honesty rule is unit-testable.
+    ///
+    /// An indeterminate answer is one the daemon could not confirm reached the
+    /// agent, so it is no evidence the call was blocked and must never stamp a
+    /// definitive `denied` — it falls through exactly as an unrecognised decision
+    /// does.
+    static func statusFromApproval(
+        toolUseID: String?, approvals: [String: AnswerOutcome]
+    ) -> ToolStatus? {
+        guard let toolUseID, let answer = approvals[toolUseID], !answer.indeterminate else {
+            return nil
+        }
+        switch answer.decision {
+        case .deny: return .denied
+        case .allow, .option, .optionId, .text, .unrecognised: return nil
+        }
     }
 
     // MARK: Notices

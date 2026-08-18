@@ -59,6 +59,7 @@ use std::sync::Mutex;
 const READERS: usize = 4;
 
 use anyhow::{Context, Result};
+use protocol::agent::AgentKind;
 use protocol::event::{Event, EventKind, Lifecycle, PendingEvent, SessionKey, Source};
 use protocol::pairing::DeviceSummary;
 use protocol::secret::Redacted;
@@ -117,6 +118,15 @@ pub struct SessionRow {
     pub lifecycle: Lifecycle,
     pub created_at: String,
     pub updated_at: String,
+    /// Which agent hosts this run. `Claude` for every legacy row and every row
+    /// this build writes today; the column defaults to `'claude'` in SQLite, so
+    /// a backfilled legacy row is Claude without a data repair. An unrecognised
+    /// stored value decodes to [`AgentKind::Unsupported`], never Claude.
+    pub agent: AgentKind,
+    /// Codex thread identity, `None` for Claude and for a pre-seam row.
+    pub codex_thread_id: Option<String>,
+    /// The Codex broker socket ccd reconnects to, `None` for Claude.
+    pub codex_socket: Option<String>,
 }
 
 impl SessionRow {
@@ -338,6 +348,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "pending_approvals",
     "answer_claims",
     "text_mutations",
+    "mutation_ledger",
     "tail_cursors",
 ];
 
@@ -369,6 +380,47 @@ pub enum TextClaim {
     /// The same request id carrying different material. Refused rather than
     /// conflated: an id is a retry key, not a licence to type something else.
     Conflict,
+}
+
+/// The immutable material a mutation was claimed with — enough to replay the
+/// **original** route on a retry, not just recognise it. Written once at claim
+/// and returned verbatim to a duplicate.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedMaterial {
+    pub thread_id: String,
+    pub generation: u64,
+    /// The snapshotted route: `"turn_start"` or `"turn_steer"`.
+    pub route: String,
+    pub target_turn_id: Option<String>,
+    pub claimed_hash: String,
+}
+
+/// What claiming a generalized [`mutation_ledger`](Store::claim_mutation) row
+/// found — the same taxonomy as [`TextClaim`], widened to any operation.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationClaim {
+    /// Nothing under this key: the caller now owns it and may actuate.
+    Claimed,
+    /// Already done. Replay the recorded outcome against the **claimed** route;
+    /// actuate nothing new.
+    Applied {
+        outcome: String,
+        claimed: ClaimedMaterial,
+    },
+    /// A claim nobody settled. Never retried automatically; the claimed material
+    /// is returned so recovery can reason about the original route.
+    Indeterminate {
+        started_at: String,
+        claimed: ClaimedMaterial,
+    },
+    /// The same `(operation_kind, session_uid, client_request_id)` carrying
+    /// different claimed material. Refused, never a second actuation.
+    Conflict,
+    /// The session was deleted while the request was in flight, so nothing was
+    /// claimed. Distinct from `Claimed`: there is nothing to actuate against.
+    NoSession,
 }
 
 impl Store {
@@ -726,8 +778,9 @@ impl Store {
         let changed = conn.execute(
             "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
                                   claude_session_id, transcript_path, lifecycle,
-                                  created_at, updated_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+                                  created_at, updated_at,
+                                  agent, codex_thread_id, codex_socket)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
              WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)
              ON CONFLICT(session_uid) DO UPDATE SET
                 session_id        = excluded.session_id,
@@ -739,7 +792,13 @@ impl Store {
                 claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
                 transcript_path   = COALESCE(excluded.transcript_path, sessions.transcript_path),
                 lifecycle         = excluded.lifecycle,
-                updated_at        = excluded.updated_at",
+                updated_at        = excluded.updated_at,
+                -- The agent is set by whoever introduces the run and is the
+                -- authority; the Codex identity columns are COALESCE-preserved so
+                -- a later heartbeat that does not carry them cannot blank them.
+                agent             = excluded.agent,
+                codex_thread_id   = COALESCE(excluded.codex_thread_id, sessions.codex_thread_id),
+                codex_socket      = COALESCE(excluded.codex_socket, sessions.codex_socket)",
             params![
                 row.session_uid,
                 row.session_id,
@@ -751,6 +810,9 @@ impl Store {
                 lifecycle_str(row.lifecycle),
                 row.created_at,
                 row.updated_at,
+                row.agent.as_str(),
+                row.codex_thread_id,
+                row.codex_socket,
             ],
         )?;
         // `INSERT ... SELECT ... WHERE NOT EXISTS` writes zero rows exactly when
@@ -788,7 +850,8 @@ impl Store {
         let row = conn
             .query_row(
                 "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
-                        claude_session_id, transcript_path, lifecycle, created_at, updated_at
+                        claude_session_id, transcript_path, lifecycle, created_at, updated_at,
+                        agent, codex_thread_id, codex_socket
                    FROM sessions WHERE session_uid = ?1",
                 params![session_uid],
                 session_row_from,
@@ -828,7 +891,8 @@ impl Store {
         let row = conn
             .query_row(
                 "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
-                        claude_session_id, transcript_path, lifecycle, created_at, updated_at
+                        claude_session_id, transcript_path, lifecycle, created_at, updated_at,
+                        agent, codex_thread_id, codex_socket
                    FROM sessions
                   WHERE session_id = ?1
                   ORDER BY created_at DESC, session_uid DESC
@@ -844,7 +908,8 @@ impl Store {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
-                    claude_session_id, transcript_path, lifecycle, created_at, updated_at
+                    claude_session_id, transcript_path, lifecycle, created_at, updated_at,
+                    agent, codex_thread_id, codex_socket
                FROM sessions ORDER BY created_at ASC, session_uid ASC",
         )?;
         let rows = stmt.query_map([], session_row_from)?;
@@ -1603,6 +1668,62 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a device's advertised feature set (its agent list, as JSON) under
+    /// the current daemon feature epoch. Called on every authenticated
+    /// registration that carries one, so the stored set is always the phone's
+    /// most recent word confirmed under this daemon's run.
+    /// Replace a device's feature set, **fail-closed**. `Some(json)` records the
+    /// set under `epoch`; `None` clears it to Claude-only. Every authenticated
+    /// hello and registration calls this, so absence (a client that advertised
+    /// nothing) *overwrites* any prior set rather than leaving stale Codex
+    /// eligibility standing — the caller passes `None` in exactly that case, and
+    /// also whenever encoding the set failed.
+    pub fn set_device_features(
+        &self,
+        device_id: &str,
+        features_json: Option<&str>,
+        epoch: &str,
+    ) -> Result<()> {
+        let conn = self.write();
+        match features_json {
+            Some(json) => conn.execute(
+                "UPDATE devices SET features = ?2, features_epoch = ?3 WHERE device_id = ?1",
+                params![device_id, json, epoch],
+            )?,
+            None => conn.execute(
+                "UPDATE devices SET features = NULL, features_epoch = NULL WHERE device_id = ?1",
+                params![device_id],
+            )?,
+        };
+        Ok(())
+    }
+
+    // The read side — projecting a device's confirmed feature set into a push
+    // authorization decision — lands with the push projection that consumes it
+    // (a later phase). Phase 1 only needs the write and the startup
+    // invalidation, both of which have live callers below and above.
+
+    /// Invalidate to Claude-only every device feature set not confirmed under
+    /// `current_epoch`. Run once at startup: a fresh epoch each run means a
+    /// device is Claude-only until it re-advertises, so an old daemon that only
+    /// bumped `last_seen_at` across a rollback cannot resurrect stale Codex
+    /// eligibility. Returns how many rows it cleared.
+    ///
+    /// The predicate clears any set that is **not positively confirmed under the
+    /// current epoch** — a mismatched epoch *and* the null-epoch case a
+    /// half-completed write could leave behind (`features` present but
+    /// `features_epoch` NULL). Only `features_epoch = current_epoch` survives.
+    pub fn invalidate_device_features(&self, current_epoch: &str) -> Result<u64> {
+        let conn = self.write();
+        let cleared = conn.execute(
+            "UPDATE devices SET features = NULL, features_epoch = NULL
+              WHERE features IS NOT NULL
+                AND (features_epoch IS NULL OR features_epoch <> ?1)",
+            params![current_epoch],
+        )?;
+        Ok(cleared as u64)
+    }
+
     pub fn list_devices(&self) -> Result<Vec<DeviceRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
@@ -1943,6 +2064,149 @@ impl Store {
         Ok(changed)
     }
 
+    // ---------------------------------------------------- generalized ledger
+    //
+    // The generalized mutation ledger, keyed `(operation_kind, session_uid,
+    // client_request_id)`. It is the same claim-before-write, lookup-then-
+    // conflict primitive as `claim_text_mutation`/`settle_text_mutation` above,
+    // widened so any Codex mutation (answer, compose, interrupt) shares one
+    // idempotency law. The Codex producers that call it land in a later phase;
+    // Phase 1 ships the schema and this primitive with its conflict semantics
+    // proven — hence `cfg_attr(not(test), allow(dead_code))`, the same idiom the
+    // store already uses for a primitive tested now and wired live later.
+
+    /// Take durable ownership of one mutation, or find out who already has.
+    ///
+    /// `claimed_hash` is the immutable claimed material — a hash over the full
+    /// authorization surface (route, target turn, the exact displayed option
+    /// set, cwd). A retry under the same key with a **different** hash is a
+    /// [`MutationClaim::Conflict`]: an id is a retry key, never a licence to
+    /// actuate something else. Read and insert share one immediate transaction,
+    /// so two deliveries replaying one id cannot both come back `Claimed`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_mutation(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+        claimed: &ClaimedMaterial,
+        now: &str,
+    ) -> Result<MutationClaim> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, Option<String>, String, ClaimedMaterial)> = tx
+            .query_row(
+                "SELECT claimed_hash, status, outcome, started_at,
+                        thread_id, generation, route, target_turn_id
+                   FROM mutation_ledger
+                  WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3",
+                params![operation_kind, session_uid, client_request_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        ClaimedMaterial {
+                            thread_id: row.get(4)?,
+                            generation: row.get::<_, i64>(5)? as u64,
+                            route: row.get(6)?,
+                            target_turn_id: row.get(7)?,
+                            claimed_hash: row.get(0)?,
+                        },
+                    ))
+                },
+            )
+            .optional()?;
+
+        let claim = match existing {
+            None => {
+                let inserted = tx.execute(
+                    // Same rule as `answers`/`text_mutations`: no new claim for a
+                    // session deleted while the request was in flight. The claimed
+                    // material is written once, here, and never updated.
+                    "INSERT INTO mutation_ledger(operation_kind, session_uid, client_request_id,
+                                                 claimed_hash, thread_id, generation, route,
+                                                 target_turn_id, status, outcome, started_at,
+                                                 settled_at)
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'applying', NULL, ?9, NULL
+                      WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?2)",
+                    params![
+                        operation_kind,
+                        session_uid,
+                        client_request_id,
+                        claimed.claimed_hash,
+                        claimed.thread_id,
+                        claimed.generation as i64,
+                        claimed.route,
+                        claimed.target_turn_id,
+                        now,
+                    ],
+                )?;
+                if inserted == 1 {
+                    MutationClaim::Claimed
+                } else {
+                    MutationClaim::NoSession
+                }
+            }
+            // Same key, different material: two different mutations, one id.
+            // Neither is actuated on a guess. The comparison is over the
+            // **explicit immutable fields** (thread_id, generation, route,
+            // target_turn_id) *and* the hash — belt and suspenders, so a changed
+            // route or target that somehow shared a hash is still a conflict, not
+            // a duplicate. `ClaimedMaterial`'s `Eq` covers every field including
+            // the hash.
+            Some((_, _, _, _, material)) if material != *claimed => MutationClaim::Conflict,
+            Some((_, status, outcome, started_at, material)) => match status.as_str() {
+                "done" => MutationClaim::Applied {
+                    outcome: outcome.unwrap_or_default(),
+                    claimed: material,
+                },
+                _ => MutationClaim::Indeterminate {
+                    started_at,
+                    claimed: material,
+                },
+            },
+        };
+        tx.commit()?;
+        Ok(claim)
+    }
+
+    /// Record a mutation's terminal outcome, so a later retry replays it verbatim
+    /// rather than actuating again.
+    ///
+    /// **First-terminal-wins over *any* terminal state.** Settlement is allowed
+    /// only from the non-terminal `'applying'` state, so it can never overwrite a
+    /// claim that already reached a terminal outcome — `'done'` **or**
+    /// `'indeterminate'` (which recovery writes for a claim it could not prove
+    /// landed). A second settle of a terminal claim writes nothing and reports it
+    /// did not win. Returns whether this call was the one that settled it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn settle_mutation(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+        outcome: &str,
+        settled_at: &str,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let updated = conn.execute(
+            "UPDATE mutation_ledger SET status = 'done', outcome = ?4, settled_at = ?5
+              WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3
+                AND status = 'applying'",
+            params![
+                operation_kind,
+                session_uid,
+                client_request_id,
+                outcome,
+                settled_at
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+
     pub fn load_cursor(&self, session_uid: &str) -> Result<Option<TailCursor>> {
         let conn = self.read();
         let cursor = conn
@@ -2146,7 +2410,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
             transcript_path   TEXT,
             lifecycle         TEXT NOT NULL,
             created_at        TEXT NOT NULL,
-            updated_at        TEXT NOT NULL
+            updated_at        TEXT NOT NULL,
+            -- The agent hosting this run. NOT NULL with a 'claude' default so a
+            -- legacy row a migration backfills, and every row written before the
+            -- agent seam, reads as Claude — which is exactly what it is. Decoded
+            -- through `AgentKind::from_str_lossy`, so an unrecognised value fails
+            -- closed rather than posing as Claude.
+            --
+            -- Phase 1 has no writer that sets this to anything but 'claude': the
+            -- column and the query discipline are the seam, and the agent-scoped
+            -- isolation of Codex durable rows lands when a Codex writer exists.
+            agent             TEXT NOT NULL DEFAULT 'claude',
+            -- Codex thread identity and broker socket. NULL for Claude and for
+            -- any row predating the seam.
+            codex_thread_id   TEXT,
+            codex_socket      TEXT
         );
 
         -- Resolving a legacy `cc-1` to the newest run under that name.
@@ -2235,6 +2513,43 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY(session_uid, request_id)
         );
 
+        -- The generalized mutation ledger. `text_mutations` above is the proven
+        -- shape for one operation (send_text); this is the same lookup-then-
+        -- conflict pattern widened to any Codex mutation (answer, compose,
+        -- interrupt) by keying on `operation_kind` as well. A retry is recognised
+        -- by `(operation_kind, session_uid, client_request_id)` and replays its
+        -- recorded outcome; a retry that reuses the id with *different* claimed
+        -- material is a conflict, never a second actuation. The claimed material
+        -- is a single hash over the full authorization surface (route, target
+        -- turn, the exact displayed option set, cwd) and is immutable once
+        -- written. Additive and agent-scoped by construction: only a Codex writer
+        -- ever inserts here, so a rolled-back daemon that does not know the table
+        -- neither reads nor mutates it.
+        CREATE TABLE IF NOT EXISTS mutation_ledger(
+            operation_kind    TEXT NOT NULL,
+            session_uid       TEXT NOT NULL,
+            client_request_id TEXT NOT NULL,
+            -- **Immutable claimed material.** Written once at claim and never
+            -- updated: on a retry the ledger replays *these*, so a compose that
+            -- was a turn/start is re-issued as a turn/start even if current state
+            -- would now route it as a steer. The hash covers the full
+            -- authorization surface; the columns are the material needed to
+            -- actually replay the original route.
+            claimed_hash      TEXT NOT NULL,
+            thread_id         TEXT NOT NULL,
+            generation        INTEGER NOT NULL,
+            -- 'turn_start' | 'turn_steer' — the snapshotted route.
+            route             TEXT NOT NULL,
+            target_turn_id    TEXT,
+            -- applying | done | indeterminate
+            status            TEXT NOT NULL,
+            -- The recorded terminal outcome, replayed verbatim on a duplicate.
+            outcome           TEXT,
+            started_at        TEXT NOT NULL,
+            settled_at        TEXT,
+            PRIMARY KEY(operation_kind, session_uid, client_request_id)
+        );
+
         CREATE TABLE IF NOT EXISTS tail_cursors(
             session_uid     TEXT PRIMARY KEY,
             path            TEXT    NOT NULL,
@@ -2306,7 +2621,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- the token in the same request, so a credential left behind by a
             -- rotation is refused for every push while the row still looks
             -- registered.
-            push_credential   TEXT
+            push_credential   TEXT,
+            -- The device's advertised feature set (its agent list) as JSON, and
+            -- the daemon-version epoch it was last confirmed under. Both null for
+            -- a device that never advertised features — which is Claude-only —
+            -- and for every row predating the agent seam. Replaced on every
+            -- authenticated registration; a set whose epoch does not match the
+            -- running daemon is invalidated to Claude-only at startup, so a
+            -- rollback that only bumped `last_seen_at` cannot resurrect stale
+            -- Codex eligibility.
+            features          TEXT,
+            features_epoch    TEXT
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS devices_name ON devices(name);
@@ -2337,6 +2662,20 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("devices", "push_token", "TEXT"),
     ("devices", "push_environment", "TEXT"),
     ("devices", "push_credential", "TEXT"),
+    // The agent seam (minor 15). Additive on both fresh (the CREATE TABLE above)
+    // and existing databases (these ALTERs). `agent` carries a default so a
+    // legacy row is backfilled to 'claude' by SQLite itself; the Codex identity
+    // columns are nullable. A rolled-back build simply never names these columns
+    // in its positional SELECTs, so they are invisible to it.
+    ("sessions", "agent", "TEXT NOT NULL DEFAULT 'claude'"),
+    ("sessions", "codex_thread_id", "TEXT"),
+    ("sessions", "codex_socket", "TEXT"),
+    // Per-device feature set and the daemon-version epoch it was last confirmed
+    // under. Both nullable: a device that never advertised features is
+    // Claude-only, and a set whose epoch does not match the running daemon is
+    // invalidated to Claude-only at startup (fail-closed after a rollback).
+    ("devices", "features", "TEXT"),
+    ("devices", "features_epoch", "TEXT"),
 ];
 
 /// Repair push tuples a rollback or a pre-tuple build could have left incoherent.
@@ -2896,6 +3235,18 @@ fn session_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         lifecycle: parse_lifecycle(&row.get::<_, String>(7)?),
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        // Positions 10..13 are the agent-seam columns, always selected last so an
+        // older build's 10-column positional SELECT never touches them. A NULL
+        // `agent` is true absence — a value neither the CREATE default nor a
+        // backfill produced — and decodes as Claude; a *present* value goes
+        // through `from_str_lossy`, so a present unrecognised string fails closed
+        // rather than being read as Claude.
+        agent: match row.get::<_, Option<String>>(10)? {
+            None => AgentKind::Claude,
+            Some(value) => AgentKind::from_str_lossy(&value),
+        },
+        codex_thread_id: row.get(11)?,
+        codex_socket: row.get(12)?,
     })
 }
 
@@ -2931,8 +3282,13 @@ fn parse_source(value: &str) -> Source {
     match value {
         "hook" => Source::Hook,
         "transcript" => Source::Transcript,
+        "daemon" => Source::Daemon,
         "pty" => Source::Pty,
-        _ => Source::Daemon,
+        // An unrecognised persisted source — a fact written by a newer daemon,
+        // read back after a rollback — is the lowest trust there is, never the
+        // trusted `Daemon` it used to become. A source it does not understand
+        // must not out-rank a real hook or transcript fact in dedup.
+        _ => Source::Unknown,
     }
 }
 
@@ -2976,6 +3332,395 @@ mod tests {
         event
     }
 
+    /// **The generalized ledger's conflict law** (Phase-1 gate): a retry under
+    /// the same `(operation_kind, session_uid, client_request_id)` with *changed*
+    /// claimed material is a conflict, never a second actuation; an unsettled
+    /// replay is indeterminate; a settled one replays its outcome; the operation
+    /// kind is part of the key.
+    #[test]
+    fn the_mutation_ledger_conflicts_on_changed_material_and_never_actuates_twice() {
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = protocol::time::now_rfc3339();
+
+        // The immutable material a compose was claimed with: it was a `turn_start`
+        // against thread T at generation 3, targeting no existing turn.
+        let material = |hash: &str| ClaimedMaterial {
+            thread_id: "th_T".into(),
+            generation: 3,
+            route: "turn_start".into(),
+            target_turn_id: None,
+            claimed_hash: hash.into(),
+        };
+
+        // First claim owns the id.
+        assert_eq!(
+            store
+                .claim_mutation("compose", &session.uid, "req-1", &material("hashA"), &now)
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+        // Same id, same material, still in flight: an unsettled replay is
+        // indeterminate — recognised as the same mutation, never re-run — and it
+        // returns the **claimed** material so recovery replays the original route.
+        match store
+            .claim_mutation("compose", &session.uid, "req-1", &material("hashA"), &now)
+            .unwrap()
+        {
+            MutationClaim::Indeterminate { claimed, .. } => {
+                assert_eq!(claimed, material("hashA"));
+                assert_eq!(claimed.route, "turn_start");
+            }
+            other => panic!("expected indeterminate, got {other:?}"),
+        }
+        // **Same id, different material ⇒ Conflict.** This is the actuation
+        // guard: a captured frame replayed with new claimed material can never
+        // ride an id the ledger already trusts.
+        assert_eq!(
+            store
+                .claim_mutation("compose", &session.uid, "req-1", &material("hashB"), &now)
+                .unwrap(),
+            MutationClaim::Conflict
+        );
+
+        // **First-terminal-wins settle.** The first settle records the outcome
+        // and reports it won; a second settle of the now-terminal claim writes
+        // nothing and reports it did not win — the recorded outcome is immutable.
+        assert!(
+            store
+                .settle_mutation("compose", &session.uid, "req-1", "turn_started", &now)
+                .unwrap(),
+            "the first settle wins"
+        );
+        assert!(
+            !store
+                .settle_mutation("compose", &session.uid, "req-1", "OVERWRITE", &now)
+                .unwrap(),
+            "a second settle of a terminal claim must not win"
+        );
+
+        // A same-material retry now replays the recorded outcome **and** the
+        // claimed route material — never actuating anew.
+        match store
+            .claim_mutation("compose", &session.uid, "req-1", &material("hashA"), &now)
+            .unwrap()
+        {
+            MutationClaim::Applied { outcome, claimed } => {
+                assert_eq!(outcome, "turn_started", "the first outcome is immutable");
+                assert_eq!(claimed, material("hashA"), "the original route replays");
+            }
+            other => panic!("expected applied, got {other:?}"),
+        }
+
+        // The operation kind is part of the key: the same session and id under a
+        // different kind is an independent claim, not a conflict.
+        assert_eq!(
+            store
+                .claim_mutation("interrupt", &session.uid, "req-1", &material("hashZ"), &now)
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+
+        // A claim for a session that does not exist writes nothing to actuate
+        // against — distinct from an owned claim.
+        assert_eq!(
+            store
+                .claim_mutation("interrupt", &uid("ZZ"), "req-9", &material("h"), &now)
+                .unwrap(),
+            MutationClaim::NoSession
+        );
+
+        // **A changed immutable field is a conflict even with the SAME hash.**
+        // A fresh claim, then a retry that keeps the hash but changes the route:
+        // the explicit-field comparison catches it — never a duplicate.
+        let steer = ClaimedMaterial {
+            route: "turn_steer".into(),
+            ..material("hashSame")
+        };
+        assert_eq!(
+            store
+                .claim_mutation(
+                    "compose",
+                    &session.uid,
+                    "req-2",
+                    &material("hashSame"),
+                    &now
+                )
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .claim_mutation("compose", &session.uid, "req-2", &steer, &now)
+                .unwrap(),
+            MutationClaim::Conflict,
+            "same hash, changed route ⇒ conflict, never a duplicate"
+        );
+
+        // **Settle is refused over ANY terminal state, not just `done`.** Force a
+        // claim into the terminal `indeterminate` state (what recovery writes)
+        // and prove a settle over it does not win and does not overwrite it.
+        store
+            .claim_mutation("interrupt", &session.uid, "req-3", &material("hashI"), &now)
+            .unwrap();
+        store
+            .write()
+            .execute(
+                "UPDATE mutation_ledger SET status = 'indeterminate'
+                  WHERE operation_kind='interrupt' AND session_uid=?1 AND client_request_id='req-3'",
+                params![session.uid],
+            )
+            .unwrap();
+        assert!(
+            !store
+                .settle_mutation("interrupt", &session.uid, "req-3", "aborted", &now)
+                .unwrap(),
+            "settle over a terminal `indeterminate` must not win"
+        );
+        let status: String = store
+            .read()
+            .query_row(
+                "SELECT status FROM mutation_ledger
+                  WHERE operation_kind='interrupt' AND session_uid=?1 AND client_request_id='req-3'",
+                params![session.uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "indeterminate", "the terminal outcome is immutable");
+    }
+
+    /// Device feature persistence and startup invalidation (Phase-1 gate). A set
+    /// is stored under this run's epoch; a set confirmed under a *different*
+    /// epoch is invalidated to Claude-only, so a rollback cannot resurrect stale
+    /// eligibility. A device that never advertised one stays featureless.
+    #[test]
+    fn device_features_persist_and_stale_ones_invalidate_to_claude_only() {
+        let (store, _p) = temp_store();
+        let now = protocol::time::now_rfc3339();
+        store
+            .insert_device("dev-1", "iPhone", "tok-hash", &now)
+            .unwrap();
+
+        // A fresh device is featureless (Claude-only): no epoch matches it.
+        assert_eq!(store.invalidate_device_features("epoch-A").unwrap(), 0);
+
+        let read_features = |store: &Store| -> (Option<String>, Option<String>) {
+            store
+                .read()
+                .query_row(
+                    "SELECT features, features_epoch FROM devices WHERE device_id = ?1",
+                    params!["dev-1"],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+
+        // Persist a Codex feature set under epoch A, and prove it was written.
+        store
+            .set_device_features("dev-1", Some(r#"{"agents":["claude","codex"]}"#), "epoch-A")
+            .unwrap();
+        assert_eq!(
+            read_features(&store).0.as_deref(),
+            Some(r#"{"agents":["claude","codex"]}"#)
+        );
+        assert_eq!(read_features(&store).1.as_deref(), Some("epoch-A"));
+
+        // **Absence clears (fail-closed).** A later registration/hello that names
+        // no features overwrites the set to Claude-only rather than leaving it.
+        store.set_device_features("dev-1", None, "epoch-A").unwrap();
+        assert_eq!(
+            read_features(&store),
+            (None, None),
+            "absence clears to Claude-only"
+        );
+
+        // Re-set, then prove startup invalidation: same epoch keeps, new epoch clears.
+        store
+            .set_device_features("dev-1", Some(r#"{"agents":["codex"]}"#), "epoch-A")
+            .unwrap();
+        assert_eq!(store.invalidate_device_features("epoch-A").unwrap(), 0);
+        assert_eq!(store.invalidate_device_features("epoch-B").unwrap(), 1);
+        assert_eq!(read_features(&store), (None, None), "stale epoch cleared");
+        // Idempotent: a second startup finds nothing left to clear.
+        assert_eq!(store.invalidate_device_features("epoch-B").unwrap(), 0);
+
+        // **Null-epoch is also invalidated.** A half-completed write could leave
+        // `features` present with a NULL epoch; startup must clear that too,
+        // because it is not positively confirmed under the current run.
+        store
+            .write()
+            .execute(
+                "UPDATE devices SET features = '{\"agents\":[\"codex\"]}', features_epoch = NULL
+                  WHERE device_id = 'dev-1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.invalidate_device_features("epoch-C").unwrap(),
+            1,
+            "a features-present, epoch-NULL row is not confirmed and must clear"
+        );
+        assert_eq!(read_features(&store), (None, None));
+    }
+
+    /// **Additive-column compatibility (new → old → new).**
+    ///
+    /// The invariant this asserts for Phase 1: the agent-seam columns are purely
+    /// additive, so a pre-seam positional reader/writer works unchanged and no
+    /// data is lost across a reopen. **Only Claude rows exist**, because the
+    /// daemon now fails closed on any non-Claude registration (see
+    /// `a_registration_for_an_unsupported_agent_is_refused_with_no_trace`) — a
+    /// Codex `sessions` row cannot be written in this phase at all.
+    ///
+    /// > **HARD PHASE-2 GATE — must land before the `codex` command is exposed.**
+    /// > The moment a real Codex writer exists, Codex durable state (sessions,
+    /// > pending, claims, mutations, cursors) must move into agent-scoped storage
+    /// > a legacy daemon never enumerates or mutates. A Codex row in the *shared*
+    /// > `sessions` table would be enumerated by a rolled-back old daemon (its
+    /// > positional `SELECT` returns every row, agent-agnostically). That is
+    /// > acceptable ONLY while no such row can exist. This test deliberately does
+    /// > **not** place a Codex row in the shared table, because in a correct build
+    /// > one cannot be there.
+    ///
+    /// The real old-binary run — which drives the ACTUAL v0.6.0 `ccd` through a
+    /// new → old → new rollback — is the harness at
+    /// `mac/ccd/tests/new-old-new-real.sh` (a shell script, not a `cargo test`,
+    /// because it builds a historical binary). This in-process test proves the
+    /// additive-column contract deterministically for CI; that harness proves it
+    /// against the real old binary.
+    #[test]
+    fn additive_columns_are_transparent_to_a_legacy_reader_and_lose_no_data() {
+        let (_p, path) = {
+            let (store, path) = temp_store();
+            // NEW daemon writes only Claude rows (the only kind Phase 1 permits)
+            // plus a device with a feature set.
+            store
+                .upsert_session(&session_row(&key("AA", "cc-1")))
+                .unwrap()
+                .assert_present();
+            let now = protocol::time::now_rfc3339();
+            store.insert_device("dev-1", "iPhone", "tok", &now).unwrap();
+            store
+                .set_device_features(
+                    "dev-1",
+                    Some(r#"{"agents":["claude","codex"]}"#),
+                    "epoch-NEW",
+                )
+                .unwrap();
+            drop(store);
+            ((), path)
+        };
+
+        // OLD daemon: the observable contract of a pre-seam binary.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            // (a) It reads sessions with the exact 10 legacy columns, never the
+            // agent-seam ones — the additive columns are invisible to it.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
+                            claude_session_id, transcript_path, lifecycle, created_at, updated_at
+                       FROM sessions ORDER BY session_id",
+                )
+                .unwrap();
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["cc-1"],
+                "a legacy reader enumerates its own columns"
+            );
+            drop(stmt);
+
+            // (b) It writes a session with only the 10 legacy columns; SQLite
+            // applies the 'claude' default, so a legacy writer's row is a Claude
+            // row exactly as a pre-seam one would have been.
+            conn.execute(
+                "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                      claude_session_id, transcript_path, lifecycle,
+                                      created_at, updated_at)
+                 VALUES(?1,'cc-2','cc-2','codeconnect','/tmp',NULL,NULL,'live','t','t')",
+                params![uid("CC")],
+            )
+            .unwrap();
+        }
+
+        // NEW daemon reopens: migration re-runs idempotently and every fact
+        // survives, with the legacy-written row backfilled to Claude.
+        let store = Store::open(&path).unwrap();
+        let by_name = |name: &str| {
+            store
+                .list_sessions()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.session_id == name)
+                .unwrap()
+        };
+        assert_eq!(by_name("cc-1").agent, AgentKind::Claude);
+        assert_eq!(
+            by_name("cc-2").agent,
+            AgentKind::Claude,
+            "a legacy write backfills to Claude, never NULL/unknown"
+        );
+
+        // The device set persists across the reopen and is invalidated to
+        // Claude-only under a fresh run epoch.
+        assert_eq!(
+            store.invalidate_device_features("epoch-CURRENT").unwrap(),
+            1
+        );
+        let features: Option<String> = store
+            .read()
+            .query_row(
+                "SELECT features FROM devices WHERE device_id = 'dev-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(features, None, "stale device eligibility invalidated");
+    }
+
+    /// An unrecognised persisted source never decodes to the trusted `Daemon`
+    /// (store.rs's former `_ => Source::Daemon`): it becomes the lowest-trust
+    /// `Unknown`, both at the decode boundary and end-to-end through a real read.
+    #[test]
+    fn an_unknown_persisted_source_never_decodes_as_trusted_daemon() {
+        assert_eq!(parse_source("future_source"), Source::Unknown);
+        assert_ne!(parse_source("future_source"), Source::Daemon);
+        assert_eq!(parse_source("future_source").trust(), 0);
+        // The known ones still decode as themselves.
+        assert_eq!(parse_source("hook"), Source::Hook);
+        assert_eq!(parse_source("daemon"), Source::Daemon);
+
+        // End-to-end: a raw event row with a source string this build does not
+        // know is read back as `Unknown`, not `Daemon`.
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        store
+            .write()
+            .execute(
+                "INSERT INTO events(session_uid, seq, session_id, ts, kind, payload, source)
+                 VALUES(?1, 1, ?2, 't', 'agent_message', '{}', 'future_source')",
+                params![session.uid, session.name],
+            )
+            .unwrap();
+        let events = store.events_after(&session.uid, 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, Source::Unknown);
+        assert_ne!(events[0].source, Source::Daemon);
+    }
+
     fn session_row(session: &SessionKey) -> SessionRow {
         let now = protocol::time::now_rfc3339();
         SessionRow {
@@ -2989,6 +3734,9 @@ mod tests {
             lifecycle: Lifecycle::Live,
             created_at: now.clone(),
             updated_at: now,
+            agent: AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
         }
     }
 
@@ -6055,10 +6803,16 @@ mod tests {
             for row in HOSTILE_DEVICES {
                 seed_retired_device(&conn, row);
             }
+            // Named columns, the way a legacy writer inserts: the agent-seam
+            // columns added at open take their defaults ('claude', NULL), so this
+            // row is a Claude row exactly as a pre-seam one would have been.
             conn.execute_batch(
-                "INSERT INTO sessions VALUES('uid-1','cc-1','codeconnect','/tmp/sock','/tmp/one',
-                                             'claude-uuid','/tmp/one.jsonl','live',
-                                             '2026-07-30T10:00:00.000Z','2026-07-30T11:00:00.000Z');
+                "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                      claude_session_id, transcript_path, lifecycle,
+                                      created_at, updated_at)
+                 VALUES('uid-1','cc-1','codeconnect','/tmp/sock','/tmp/one',
+                        'claude-uuid','/tmp/one.jsonl','live',
+                        '2026-07-30T10:00:00.000Z','2026-07-30T11:00:00.000Z');
                  INSERT INTO events VALUES('uid-1','cc-1',1,'2026-07-30T10:00:01.000Z','output',
                                            '{\"text\":\"hello\"}','hook','ev-1',NULL,NULL);",
             )

@@ -123,6 +123,36 @@ pub mod terminal_close {
     pub const SESSION_EXITED: &str = "session_exited";
 }
 
+/// What a client can understand, carried on `hello` and on `register_push`.
+///
+/// The one fact it holds today is which agents the client can render and drive.
+/// A client that sends none — or a daemon reading a frame that predates this
+/// field — is **Claude-only**: name resolution and push eligibility are scoped
+/// to `agents`, and an empty set is the honest, fail-closed floor. It is a
+/// struct rather than a bare `Vec` so a later feature is one additive field
+/// here, not a second parallel list on two messages.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientFeatures {
+    /// Agents this client can observe and act on. Absent/empty ⇒ Claude-only.
+    /// An unrecognised agent name round-trips as
+    /// [`crate::agent::AgentKind::Unsupported`] and grants nothing.
+    #[serde(default)]
+    pub agents: Vec<crate::agent::AgentKind>,
+}
+
+impl ClientFeatures {
+    /// True when the client advertised it can handle this agent. Claude-only is
+    /// the floor, so Claude is supported by a client that named it *or* that
+    /// named nothing at all (the legacy shape); every other agent must be
+    /// explicitly advertised.
+    pub fn supports(&self, agent: &crate::agent::AgentKind) -> bool {
+        if agent.is_claude() && self.agents.is_empty() {
+            return true;
+        }
+        self.agents.contains(agent)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -147,6 +177,13 @@ pub enum ClientMessage {
         client_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_name: Option<String>,
+        /// What this client can understand (its agent set today). Absent from a
+        /// client predating the agent seam, which is Claude-only — the daemon
+        /// scopes every session-named request on this connection to it. Carried
+        /// on `hello` because it is a property of the whole connection, not of
+        /// one request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<ClientFeatures>,
     },
     Sessions,
     /// `session_id` is a **session reference**: either a `session_uid` (exact,
@@ -293,6 +330,14 @@ pub enum ClientMessage {
         /// pair the relay has no binding for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relay_credential: Option<crate::secret::Redacted>,
+        /// What this device can be notified about (its agent set). Persisted with
+        /// a daemon-version epoch and **replaced on every registration**, so a
+        /// device that never sends it — or a daemon predating the field — is
+        /// Claude-only. It rides `register_push` rather than `hello` because push
+        /// eligibility is a property of the *device*, projected per device at
+        /// dequeue time, not of the live connection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<ClientFeatures>,
     },
 
     /// Open a live terminal on the session named by `session_uid`. `cols`/
@@ -334,6 +379,24 @@ pub enum ClientMessage {
     /// only the daemon's disposable viewing client goes.
     TerminalDetach {
         attachment_id: String,
+    },
+
+    /// Abort the running turn named by `turn_id` on a Codex session.
+    ///
+    /// A mutating operation, so it carries a ledger identity like every other:
+    /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
+    /// exact turn it was issued against, so a replay can never abort a *different*
+    /// turn the session has since moved on to. **Defined but not yet honoured**
+    /// — the daemon refuses it with a reason until steering ships (later phase);
+    /// a Claude client never sends it. Interrupt is bound to the exact `turn_id`
+    /// and the thread generation the daemon holds, never to a name.
+    Interrupt {
+        session_id: String,
+        request_id: String,
+        /// The turn to abort, as it was named when the card was shown.
+        turn_id: String,
+        /// [`crate::hash::interrupt_hash`] over `session_id`, `turn_id`.
+        payload_hash: String,
     },
 
     Ping,
@@ -469,7 +532,33 @@ pub enum ServerMessage {
         reason: String,
     },
 
+    /// The outcome of an [`ClientMessage::Interrupt`]. Typed like every other
+    /// mutation result so a retry replays a recorded outcome rather than
+    /// aborting twice. Until steering ships the daemon only ever sends
+    /// [`InterruptResult::Rejected`].
+    InterruptResult {
+        session_id: String,
+        request_id: String,
+        result: InterruptResult,
+    },
+
     Pong,
+}
+
+/// What became of an [`ClientMessage::Interrupt`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InterruptResult {
+    /// The turn reached its aborted boundary.
+    Aborted { turn_id: String },
+    /// This exact interrupt already ran; the turn was not aborted a second time.
+    Duplicate { turn_id: String },
+    /// Refused, with a reason — the only status the daemon sends until steering
+    /// ships (control link down, wrong agent, or the operation not yet honoured).
+    Rejected { reason: String },
+    /// Issued, outcome unknown — the daemon was killed between claiming the
+    /// interrupt and observing the turn terminate. Never retried automatically.
+    Indeterminate { reason: String },
 }
 
 /// Ceiling on a `diff` payload. A phone screen cannot use more, and an
@@ -565,6 +654,16 @@ pub struct Capabilities {
     /// See `terminal_close::NOT_AUTHORISED`.
     #[serde(default)]
     pub terminal_pty: bool,
+    /// The agents this daemon can actually host, named honestly. A client scopes
+    /// what it offers to this set and intersects it with its own
+    /// [`ClientFeatures`]. Empty — from any daemon predating the agent seam — is
+    /// read as `["claude"]`: Claude is the floor, and this list only ever *adds*
+    /// to it. **Omitted entirely while it would only name Claude** — an empty
+    /// list is skipped on the wire, so a daemon with nothing to add beyond the
+    /// floor sends no field at all and an older phone renders nothing new. It is
+    /// populated once the daemon can actually drive a second agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_agents: Vec<crate::agent::AgentKind>,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
@@ -592,6 +691,15 @@ pub enum AnswerDecision {
     /// Free-text takeover.
     Text {
         text: String,
+    },
+    /// Pick a server-offered option by its **opaque** id, for an agent whose
+    /// options are not a 1-based list (Codex's `availableDecisions`). The daemon
+    /// validates it against the exact option set it stored for the request and
+    /// the payload hash over that set — the id is never interpreted here. Additive
+    /// (minor 15): a Claude answer never uses it, so Claude's `AnswerDecision`
+    /// serialization is unchanged.
+    OptionId {
+        option_id: String,
     },
 }
 
@@ -640,6 +748,80 @@ pub struct AnswerOutcome {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Who resolved a Codex approval, when that is known. Upstream carries no
+/// provenance (A2: `serverRequest/resolved` is the same frame however it was
+/// answered), so this is derived from the broker's own winner disposition, never
+/// read off the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionActor {
+    /// The phone's claim won.
+    Phone,
+    /// Answered at the Mac's keyboard — the TUI beat the phone, or the phone
+    /// never claimed. Honest even when the specific decision is not known.
+    Local,
+}
+
+/// Why a Codex approval was cleared without being answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearCause {
+    /// A `turn/interrupt` retired the pending (A3).
+    TurnAborted,
+    /// The turn completed and took the pending with it.
+    TurnCompleted,
+    /// A thread switch retired the old visit's pending (D4).
+    Superseded,
+}
+
+/// How far a phone claim got before delivery became uncertain. Present only on
+/// [`CodexResolution::Unknown`] (D3): a claim recorded but not provably actuated
+/// is terminal evidence, never retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteStage {
+    /// Claimed durably, never enqueued upstream.
+    ClaimedNotEnqueued,
+    /// The broker accepted it at ingress; upstream acceptance unproven.
+    BrokerIngressAccepted,
+    /// Written toward the app-server; the write itself is unconfirmed.
+    UpstreamWriteUnconfirmed,
+}
+
+/// The terminal outcome of a Codex approval.
+///
+/// A **separate** discriminated type from [`AnswerOutcome`] on purpose: Codex's
+/// resolution taxonomy (four terminals, upstream-provenance-free) does not fit
+/// Claude's `decision + resolved_by + applied_via` shape, and forcing it in
+/// would have changed Claude's serialization. Claude's `AnswerOutcome` and
+/// `AnswerResult` are left byte-identical; this rides its own event. The
+/// `decision`, when present, may be an opaque [`AnswerDecision::OptionId`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CodexResolution {
+    /// Answered. `decision` is absent when only the winner is known and not the
+    /// choice (upstream resolution has no provenance, so a keyboard answer often
+    /// arrives as `answered{by: local}` with no decision).
+    Answered {
+        by: ResolutionActor,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<AnswerDecision>,
+    },
+    /// Cleared without an answer.
+    Cleared { cause: ClearCause },
+    /// No answer arrived in time.
+    Timeout,
+    /// A phone claim whose delivery could not be proven. Terminal, never retried.
+    Unknown {
+        attempted_by: ResolutionActor,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempted_decision: Option<AnswerDecision>,
+        write_stage: WriteStage,
+        /// Human-readable cause of the uncertainty, for the log and the card.
+        cause: String,
+    },
 }
 
 /// What the daemon knows about the installed Claude Code's slash commands.
@@ -926,11 +1108,14 @@ mod tests {
             pairing_code: None,
             client_id: None,
             client_name: Some("iPhone".into()),
+            features: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"type\":\"hello\""));
         assert!(!s.contains("client_id"));
         assert!(!s.contains("pairing_code"));
+        // A hello that names no features is Claude-only, and omits the field.
+        assert!(!s.contains("features"));
         let _: ClientMessage = serde_json::from_str(&s).unwrap();
     }
 
@@ -1072,10 +1257,17 @@ mod tests {
              `register_push.relay_credential`, the `credential_invalid` test result \
              and `hello_ack.push_environment` — is minor 14"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 15,
+            "the agent seam — `AgentKind`, `Capabilities.supported_agents`, the \
+             `hello`/`register_push` client feature set, `SessionSummary.agent`, the \
+             `CodexResolution` envelope, `AnswerDecision::OptionId`, the `interrupt` \
+             operation and the composite-id codec — is minor 15"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 14);
+        assert_eq!(crate::PROTOCOL_MINOR, 15);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1257,6 +1449,7 @@ mod tests {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: Some("opaque".into()),
+            features: None,
         })
         .unwrap();
         assert_eq!(carried["type"], "register_push");
@@ -1280,6 +1473,7 @@ mod tests {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: None,
+            features: None,
         })
         .unwrap();
         assert!(direct_registration.get("relay_credential").is_none());
@@ -1474,7 +1668,258 @@ mod tests {
             command_catalog: true,
             slash_composer_recovery: true,
             terminal_pty: true,
+            supported_agents: vec![crate::agent::AgentKind::Claude],
         }
+    }
+
+    /// **The Phase-1 byte-identical gate.** Adding the Codex resolution envelope
+    /// and the `option_id` decision variant must not have moved a single byte of
+    /// a Claude answer's serialization. These are the exact strings the shipped
+    /// client already decodes; if a field reorders, a key renames, or an
+    /// `option_id`/`codex` key leaks in, this fails.
+    #[test]
+    fn a_claude_answer_outcome_serializes_byte_for_byte_as_before() {
+        let outcome = AnswerOutcome {
+            request_id: "toolu_1".into(),
+            session_id: "cc-1".into(),
+            decision: AnswerDecision::Allow,
+            resolved_by: ResolvedBy::Phone,
+            applied_via: AnswerPath::SendKeys,
+            resolved_at: "2026-08-18T00:00:00.000Z".into(),
+            detail: None,
+            inferred: false,
+            indeterminate: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&outcome).unwrap(),
+            r#"{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}"#
+        );
+
+        let applied = AnswerResult::Applied { outcome };
+        assert_eq!(
+            serde_json::to_string(&applied).unwrap(),
+            r#"{"status":"applied","outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}}"#
+        );
+    }
+
+    /// The existing `AnswerDecision` variants must serialize exactly as before;
+    /// `option_id` is purely additive and a Claude answer never emits it.
+    #[test]
+    fn the_claude_decision_variants_are_unchanged_and_option_id_is_additive() {
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Allow).unwrap(),
+            r#"{"type":"allow"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Deny).unwrap(),
+            r#"{"type":"deny"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Option { index: 2 }).unwrap(),
+            r#"{"type":"option","index":2}"#
+        );
+        // The additive variant, and its round-trip.
+        let by_id = AnswerDecision::OptionId {
+            option_id: "acceptWithExecpolicyAmendment".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&by_id).unwrap(),
+            r#"{"type":"option_id","option_id":"acceptWithExecpolicyAmendment"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AnswerDecision>(
+                r#"{"type":"option_id","option_id":"acceptWithExecpolicyAmendment"}"#
+            )
+            .unwrap(),
+            by_id
+        );
+    }
+
+    #[test]
+    fn client_features_absent_is_claude_only() {
+        // A hello/register_push that names no features is the legacy shape:
+        // Claude-only, and Claude is supported by the empty set.
+        let empty = ClientFeatures::default();
+        assert!(empty.supports(&crate::agent::AgentKind::Claude));
+        assert!(!empty.supports(&crate::agent::AgentKind::Codex));
+        // Named agents: Claude must still be listed to be a member of a
+        // non-empty set, but the empty-set case is the only Claude-implicit one.
+        let codex_only = ClientFeatures {
+            agents: vec![crate::agent::AgentKind::Codex],
+        };
+        assert!(!codex_only.supports(&crate::agent::AgentKind::Claude));
+        assert!(codex_only.supports(&crate::agent::AgentKind::Codex));
+        // An unknown agent name is preserved through decode. It can only ever
+        // match itself (an agent this build cannot drive) — never Claude — so it
+        // grants nothing actionable while still round-tripping honestly.
+        let json = r#"{"agents":["codex","gemini"]}"#;
+        let decoded: ClientFeatures = serde_json::from_str(json).unwrap();
+        assert!(decoded.supports(&crate::agent::AgentKind::Codex));
+        assert!(!decoded.supports(&crate::agent::AgentKind::Claude));
+        assert!(decoded
+            .agents
+            .contains(&crate::agent::AgentKind::Unsupported("gemini".into())));
+    }
+
+    #[test]
+    fn capabilities_supported_agents_defaults_empty_for_an_older_daemon() {
+        // An ack from a daemon predating the seam omits the list; it decodes as
+        // empty, which a client reads as Claude-only.
+        let older = serde_json::json!({
+            "can_approve_reliably": true, "fail_mode": "fail_open",
+            "answer_path": "send_keys", "hold_secs": 0, "send_text": true,
+            "capture": true, "push": false, "tls": true
+        });
+        let caps: Capabilities = serde_json::from_value(older).expect("decodes");
+        assert!(caps.supported_agents.is_empty());
+
+        // An empty list is **omitted** on the wire — a daemon with nothing to add
+        // beyond the Claude floor sends no field, so an older phone renders no new
+        // diagnostic row. This is what the current daemon emits in Phase 1.
+        let mut floor = capabilities_fixture();
+        floor.supported_agents = Vec::new();
+        let s = serde_json::to_string(&floor).unwrap();
+        assert!(
+            !s.contains("supported_agents"),
+            "empty must be omitted: {s}"
+        );
+
+        // A non-empty list (Phase 2, once a second agent can be driven) serializes.
+        let s = serde_json::to_string(&capabilities_fixture()).unwrap();
+        assert!(s.contains(r#""supported_agents":["claude"]"#), "{s}");
+    }
+
+    #[test]
+    fn the_codex_resolution_envelope_round_trips_every_terminal() {
+        for value in [
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                }),
+            },
+            CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::TurnAborted,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::Superseded,
+            },
+            CodexResolution::Timeout,
+            CodexResolution::Unknown {
+                attempted_by: ResolutionActor::Phone,
+                attempted_decision: Some(AnswerDecision::Allow),
+                write_stage: WriteStage::UpstreamWriteUnconfirmed,
+                cause: "connection reset before ack".into(),
+            },
+        ] {
+            let s = serde_json::to_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<CodexResolution>(&s).unwrap(), value);
+        }
+        // Pin the wire strings the phone matches by hand.
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::TurnAborted
+            })
+            .unwrap(),
+            r#"{"status":"cleared","cause":"turn_aborted"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None
+            })
+            .unwrap(),
+            r#"{"status":"answered","by":"local"}"#
+        );
+    }
+
+    #[test]
+    fn the_interrupt_operation_round_trips() {
+        let msg = ClientMessage::Interrupt {
+            session_id: "cc-1".into(),
+            request_id: "r-1".into(),
+            turn_id: "turn-7".into(),
+            payload_hash: crate::hash::interrupt_hash("cc-1", "turn-7"),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains(r#""type":"interrupt""#), "{s}");
+        let _: ClientMessage = serde_json::from_str(&s).unwrap();
+        let result = ServerMessage::InterruptResult {
+            session_id: "cc-1".into(),
+            request_id: "r-1".into(),
+            result: InterruptResult::Rejected {
+                reason: "interrupt is not supported yet".into(),
+            },
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert!(s.contains(r#""status":"rejected""#), "{s}");
+    }
+
+    /// **The wire matrix, at the type level** (Phase-1 gate): a connection's
+    /// advertised-agent set scopes what may be delivered to it, and the daemon's
+    /// own `supported_agents` is intersected with it. A client that predates the
+    /// seam (no features) is Claude-only, so a Codex session's records are never
+    /// eligible for it; a Codex-aware client is. The per-connection *enforcement*
+    /// of this scoping is a later phase; this pins the primitive it will use.
+    #[test]
+    fn the_advertised_agent_set_scopes_what_a_connection_may_receive() {
+        use crate::agent::AgentKind;
+        // The effective set a connection may receive = the agents the daemon
+        // supports ∩ the agents the client advertised.
+        fn deliverable(daemon: &[AgentKind], client: &ClientFeatures, agent: &AgentKind) -> bool {
+            daemon.contains(agent) && client.supports(agent)
+        }
+        let daemon_supports = [AgentKind::Claude]; // Phase-1 daemon: Claude only.
+
+        // An old reader (no features ⇒ Claude-only): Claude records deliver,
+        // Codex records never do.
+        let old_reader = ClientFeatures::default();
+        assert!(deliverable(
+            &daemon_supports,
+            &old_reader,
+            &AgentKind::Claude
+        ));
+        assert!(!deliverable(
+            &daemon_supports,
+            &old_reader,
+            &AgentKind::Codex
+        ));
+
+        // A Codex-aware reader: Codex would be deliverable *once the daemon also
+        // supports it* — but not while the daemon is Claude-only, so the daemon's
+        // honesty is the backstop even for a client that asks for more.
+        let codex_reader = ClientFeatures {
+            agents: vec![AgentKind::Claude, AgentKind::Codex],
+        };
+        assert!(deliverable(
+            &daemon_supports,
+            &codex_reader,
+            &AgentKind::Claude
+        ));
+        assert!(
+            !deliverable(&daemon_supports, &codex_reader, &AgentKind::Codex),
+            "a daemon must not deliver an agent it does not support, even when asked"
+        );
+        assert!(deliverable(
+            &[AgentKind::Claude, AgentKind::Codex],
+            &codex_reader,
+            &AgentKind::Codex
+        ));
+
+        // An unknown advertised agent grants nothing actionable and is never
+        // Claude.
+        let unknown_reader = ClientFeatures {
+            agents: vec![AgentKind::Unsupported("gemini".into())],
+        };
+        assert!(!deliverable(
+            &daemon_supports,
+            &unknown_reader,
+            &AgentKind::Claude
+        ));
     }
 
     #[test]
