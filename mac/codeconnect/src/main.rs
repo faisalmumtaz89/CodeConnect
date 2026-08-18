@@ -9,6 +9,7 @@
 //! that installs the hooks, the environment fixes that keep transcripts alive,
 //! and a detached supervisor that connects out to `ccd`.
 
+mod codex;
 mod daemon;
 mod launchd;
 mod pair;
@@ -45,6 +46,9 @@ fn main() -> Result<()> {
 
     match command {
         "claude" => start_claude(rest),
+        // Gated: resolves the binary and parses argv, then refuses to launch
+        // until the wrapper and the Phase-2 pre-exposure gates land.
+        "codex" => codex::start(rest),
         "attach" => attach(rest),
         "ls" | "list" => list(),
         "sessions" => sessions::command(rest),
@@ -103,6 +107,7 @@ fn usage_text() -> &'static str {
 cc — CodeConnect shim
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
+  codeconnect codex [args…]       run codex in the private tmux server (not yet enabled)
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
   codeconnect ls                  list what tmux is running (works with ccd down)
   codeconnect sessions            list what the event log knows, with lifecycle
@@ -1637,6 +1642,7 @@ mod tests {
     /// about whether the flag scan reaches it.
     const LIVE_COMMANDS: &[&str] = &[
         "claude",
+        "codex",
         "attach",
         "ls",
         "list",
