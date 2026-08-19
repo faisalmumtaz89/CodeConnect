@@ -5,6 +5,7 @@
 //! the fake, "zero upstream bytes" is directly observable: the forbidden method is simply
 //! absent from `recorded`.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use codex_broker::relay::Broker;
 use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory};
-use codex_broker::LaunchFingerprint;
+use codex_broker::{LaunchFingerprint, COMMAND_EXEC_APPROVAL};
 
 // ---------------------------------------------------------------------------
 // Fake upstream + broker harness
@@ -26,7 +27,10 @@ use codex_broker::LaunchFingerprint;
 #[derive(Default)]
 struct FakeState {
     recorded: Mutex<Vec<String>>,
-    scripted: Mutex<Vec<Message>>,
+    /// One scripted s2c frame list **per upstream connection**, popped front-first as each
+    /// leg connects. This models the approval fanout: the same `serverRequest` is scripted
+    /// onto each leg's own upstream, so every leg observes (and registers) its own copy.
+    scripts: Mutex<VecDeque<Vec<Message>>>,
 }
 
 #[derive(Clone)]
@@ -37,7 +41,13 @@ struct FakeFactory {
 impl UpstreamFactory for FakeFactory {
     fn connect(&self) -> ConnectFuture {
         let recorded = Arc::clone(&self.inner);
-        let scripted: Vec<Message> = std::mem::take(&mut *self.inner.scripted.lock().unwrap());
+        let scripted: Vec<Message> = self
+            .inner
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
         Box::pin(async move {
             let (to_tx, mut to_rx) = tokio::sync::mpsc::channel::<Message>(64);
             let (from_tx, from_rx) = tokio::sync::mpsc::channel::<Message>(64);
@@ -76,9 +86,34 @@ struct Harness {
     tui_sock: String,
     ccd_sock: String,
     state: Arc<FakeState>,
+    /// Recorded audit-log lines (winner-provenance etc.). Empty unless the broker was
+    /// started with the event-recording variant.
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl Harness {
+    /// Script one s2c frame onto the **next** upstream connection to be established
+    /// (front-first). Push these in the order the legs will connect.
+    fn push_script(&self, frames: Vec<Message>) {
+        self.state.scripts.lock().unwrap().push_back(frames);
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
 }
 
 fn start_broker() -> Harness {
+    start_broker_inner(false)
+}
+
+/// Like [`start_broker`] but with the audit sink wired to a recording buffer, so a test
+/// can assert on emitted log lines (e.g. winner-provenance).
+fn start_broker_with_events() -> Harness {
+    start_broker_inner(true)
+}
+
+fn start_broker_inner(record_events: bool) -> Harness {
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
@@ -93,7 +128,14 @@ fn start_broker() -> Harness {
     let factory = FakeFactory {
         inner: Arc::clone(&state),
     };
-    let broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint(), factory);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint(), factory);
+    if record_events {
+        let sink = Arc::clone(&events);
+        broker = broker.with_event_sink(Arc::new(move |line: &str| {
+            sink.lock().unwrap().push(line.to_string());
+        }));
+    }
     tokio::spawn(async move {
         let _ = broker.serve().await;
     });
@@ -101,6 +143,7 @@ fn start_broker() -> Harness {
         tui_sock,
         ccd_sock,
         state,
+        events,
     }
 }
 
@@ -243,9 +286,9 @@ async fn ccd_resume_bound_to_session_thread() {
     let h = start_broker();
     // Script a thread/started so the broker observes and binds the thread id on the ccd
     // leg's s2c stream before the resume arrives.
-    h.state.scripted.lock().unwrap().push(Message::Text(
+    h.push_script(vec![Message::Text(
         r#"{"method":"thread/started","params":{"thread":{"id":"01a0-ours","path":"/x"}}}"#.into(),
-    ));
+    )]);
     let mut ccd = connect(&h.ccd_sock).await;
     // Drain the observed thread/started (guarantees binding happened).
     let started = ccd.next().await.unwrap().unwrap();
@@ -281,11 +324,7 @@ async fn s2c_passthrough_is_byte_exact() {
         r#"{{"method":"app/list/updated","params":{{"pad":"{}"}}}}"#,
         "Z".repeat(300_000)
     );
-    h.state
-        .scripted
-        .lock()
-        .unwrap()
-        .push(Message::Text(payload.clone()));
+    h.push_script(vec![Message::Text(payload.clone())]);
 
     let mut ws = connect(&h.tui_sock).await;
     let got = ws.next().await.unwrap().unwrap();
@@ -364,6 +403,388 @@ async fn reinitialization_closes_the_leg() {
         }
     };
     assert!(closed, "reinitialization must close the leg");
+}
+
+// ---------------------------------------------------------------------------
+// One-use response-capability fanout (2d-ii)
+//
+// An approval `serverRequest` is scripted onto each leg's own upstream (the fanout),
+// then c2s responses are driven. A refused/losing response is directly observable as
+// absent from the shared `recorded`, since it forwards zero upstream bytes.
+// ---------------------------------------------------------------------------
+
+/// An s2c approval `serverRequest`: a server→client request carrying a top-level id and a
+/// `params.threadId` (the shape captured in `fixtures/codex/*.jsonl`).
+fn approval(method: &str, thread: &str, id: i64) -> Message {
+    Message::Text(format!(
+        r#"{{"method":"{method}","id":{id},"params":{{"threadId":"{thread}","itemId":"x"}}}}"#
+    ))
+}
+
+/// A method-less response (approval answer) tagged so a winner is distinguishable from a
+/// losing sibling in `recorded`.
+fn answer(id: i64, tag: &str) -> Message {
+    Message::Text(format!(r#"{{"id":{id},"result":{{"by":"{tag}"}}}}"#))
+}
+
+/// Drain (and assert) the scripted approval frame off a leg, guaranteeing the broker has
+/// observed and registered the capability on that connection before responses are sent.
+async fn drain_approval(ws: &mut WebSocketStream<UnixStream>) {
+    let f = ws.next().await.unwrap().unwrap();
+    assert!(
+        f.to_text().unwrap().contains("requestApproval"),
+        "expected the scripted approval serverRequest",
+    );
+}
+
+const PERMISSIONS_APPROVAL: &str = "item/permissions/requestApproval";
+
+#[tokio::test]
+async fn fanout_phone_family_ccd_wins_tui_sibling_revoked() {
+    let h = start_broker_with_events();
+    // Same approval fans out onto both legs' upstreams (tui connects first, then ccd).
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // ccd answers first → its bytes forward.
+    ccd.send(answer(0, "ccd")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains(r#""by":"ccd""#), "ccd winner forwarded");
+
+    // The TUI sibling then answers the same id → revoked, zero upstream bytes.
+    tui.send(answer(0, "tui")).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(rec.len(), 1, "losing sibling forwards zero bytes");
+    assert!(!rec.iter().any(|m| m.contains(r#""by":"tui""#)));
+    // Winner-provenance is logged.
+    assert!(
+        h.events()
+            .iter()
+            .any(|e| e.contains("capability won: winner=Ccd")),
+        "winner-provenance = ccd, events: {:?}",
+        h.events()
+    );
+}
+
+#[tokio::test]
+async fn fanout_phone_family_tui_wins_ccd_sibling_revoked() {
+    let h = start_broker_with_events();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // TUI answers first → its bytes forward; ccd is then the losing sibling.
+    tui.send(answer(0, "tui")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains(r#""by":"tui""#), "tui winner forwarded");
+
+    ccd.send(answer(0, "ccd")).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(rec.len(), 1, "losing sibling forwards zero bytes");
+    assert!(!rec.iter().any(|m| m.contains(r#""by":"ccd""#)));
+    assert!(
+        h.events()
+            .iter()
+            .any(|e| e.contains("capability won: winner=Tui")),
+        "winner-provenance = tui, events: {:?}",
+        h.events()
+    );
+}
+
+#[tokio::test]
+async fn observe_only_family_refuses_ccd_authorizes_tui() {
+    let h = start_broker();
+    // A permissions approval grants ONLY the TUI (ccd can never answer it).
+    h.push_script(vec![approval(PERMISSIONS_APPROVAL, "th-P", 0)]);
+    h.push_script(vec![approval(PERMISSIONS_APPROVAL, "th-P", 0)]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // ccd answers → zero bytes (never granted).
+    ccd.send(answer(0, "ccd")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "ccd cannot answer an observe-only family",
+    );
+
+    // The TUI answer to the same request forwards.
+    tui.send(answer(0, "tui")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains(r#""by":"tui""#));
+}
+
+#[tokio::test]
+async fn unsolicited_response_forwards_zero_bytes() {
+    let h = start_broker();
+    // No serverRequest was ever observed on this leg.
+    let mut tui = connect(&h.tui_sock).await;
+    tui.send(answer(99, "ghost")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "an unsolicited response has no live capability",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_response_on_same_leg_is_one_use() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // First answer forwards; the second on the same leg is spent (one-use).
+    ccd.send(answer(0, "first")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains(r#""by":"first""#));
+
+    ccd.send(answer(0, "second")).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(rec.len(), 1, "duplicate answer forwards zero bytes");
+    assert!(!rec.iter().any(|m| m.contains(r#""by":"second""#)));
+}
+
+#[tokio::test]
+async fn per_thread_id_reuse_resolves_to_the_correct_slot() {
+    let h = start_broker();
+    // Both legs see the SAME bare id=0, but for DIFFERENT threads — the per-leg view
+    // disambiguates id→thread, so the two arbiter slots are independent and answering one
+    // leaves the other live.
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-B", 0)]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // TUI answers id=0 (thread A) and ccd answers id=0 (thread B): both forward, because
+    // they consume different slots — neither revokes the other.
+    tui.send(answer(0, "tui-A")).await.unwrap();
+    ccd.send(answer(0, "ccd-B")).await.unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert_eq!(rec.len(), 2, "two distinct threads' answers both forward");
+    assert!(rec.iter().any(|m| m.contains(r#""by":"tui-A""#)));
+    assert!(rec.iter().any(|m| m.contains(r#""by":"ccd-B""#)));
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone regressions (the CRITICAL bare-id ambiguity routes)
+//
+// Server-request ids are per-thread small ints reused from 0. A bare Response frame
+// carries no provenance, so the instant an id is observed twice on a leg the broker can
+// no longer prove which request a `{id}` response answers. Each bare id is a per-leg
+// 3-state (Unseen → Bound → Tombstoned): the first observation binds, ANY second
+// observation tombstones it permanently, and a Tombstoned/Unseen id cannot authorize —
+// so even the original binding becomes unanswerable (fail closed). These tests drive the
+// three alias routes (reverse alias, late/duplicate after reuse, losing sibling) end to
+// end through the fake upstream and assert ZERO forwarded bytes after a collision.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reverse_alias_original_unanswerable_after_collision() {
+    // THE CRITICAL CASE, end to end. One leg observes phone-capable id=0 for th-A, then
+    // reuses id=0 for th-B. The collision tombstones id=0, so th-A — never answered before
+    // the collision — is now unanswerable: an id=0 response forwards ZERO bytes.
+    let h = start_broker();
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await; // th-A binds id=0
+    drain_approval(&mut ccd).await; // th-B reuses id=0 ⇒ collision ⇒ tombstone
+
+    ccd.send(answer(0, "would-be-A")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "after a collision the original binding is unanswerable (zero bytes)",
+    );
+}
+
+#[tokio::test]
+async fn late_duplicate_after_same_id_reuse_forwards_zero_bytes() {
+    // One leg observes id=0 for th-A, then id=0 again for th-B (reuse). The reuse is a
+    // collision that tombstones id=0, so NO id=0 response forwards — neither the answer the
+    // attacker means for th-B nor a late one for th-A. (Under the old never-rebind form
+    // th-A stayed answerable once; that was the reverse-alias defect.)
+    let h = start_broker();
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await; // th-A
+    drain_approval(&mut ccd).await; // th-B reuse ⇒ tombstone
+
+    ccd.send(answer(0, "first")).await.unwrap();
+    ccd.send(answer(0, "stale")).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert!(
+        rec.is_empty(),
+        "every id=0 answer after a collision forwards zero bytes, got {rec:?}"
+    );
+}
+
+#[tokio::test]
+async fn losing_sibling_after_same_id_reuse_forwards_zero_bytes() {
+    // Fanout to both legs at id=0 (th-A), each leg ALSO reuses id=0 for th-B. On EACH leg
+    // the reuse is a collision that tombstones id=0, so neither leg can answer id=0 — no
+    // aliasing to th-A or th-B on either side.
+    let h = start_broker();
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+    ]);
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "ccd")).await.unwrap();
+    tui.send(answer(0, "tui")).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert!(
+        rec.is_empty(),
+        "both legs tombstoned id=0; no sibling forwards, got {rec:?}"
+    );
+}
+
+#[tokio::test]
+async fn observe_only_then_phone_same_bare_id_tombstones_both_legs() {
+    // A TUI-only permissions request at id=0, then a phone-family request reuses id=0, on
+    // both legs. The reuse is a collision that tombstones id=0, so BOTH ccd and the
+    // original tui answer forward zero bytes (no phone upgrade AND no original tui answer).
+    let h = start_broker();
+    h.push_script(vec![
+        approval(PERMISSIONS_APPROVAL, "th-P", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-C", 0),
+    ]);
+    h.push_script(vec![
+        approval(PERMISSIONS_APPROVAL, "th-P", 0),
+        approval(COMMAND_EXEC_APPROVAL, "th-C", 0),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "ccd")).await.unwrap();
+    tui.send(answer(0, "tui")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "a collision tombstones id=0 on both legs — no answer forwards",
+    );
+}
+
+#[tokio::test]
+async fn divergent_legs_same_bare_id_different_threads_are_independent() {
+    // The DIVERGENT-LEGS scenario, and why it is fail-closed under a PER-LEG tombstone.
+    // Two GENUINELY DIFFERENT approvals happen to share bare id=0: th-A on the tui leg,
+    // th-B on the ccd leg. Each leg observes its id=0 exactly ONCE, so each holds a clean
+    // Bound (no collision on either leg) and each is answerable on its own leg. Both
+    // forwarding is CORRECT — they are different approvals, not the same logical one. The
+    // same-logical-approval fanned to both legs is the arbiter's job (one winner), covered
+    // by the fanout tests. There is no under-refusal to produce here: a per-leg tombstone
+    // fires only on a same-leg reuse, which this scenario does not contain.
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-B", 0)]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    tui.send(answer(0, "tui-A")).await.unwrap();
+    ccd.send(answer(0, "ccd-B")).await.unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert_eq!(rec.len(), 2, "two distinct threads' answers both forward");
+    assert!(rec.iter().any(|m| m.contains(r#""by":"tui-A""#)));
+    assert!(rec.iter().any(|m| m.contains(r#""by":"ccd-B""#)));
+}
+
+#[tokio::test]
+async fn escaped_request_approval_method_is_observed_end_to_end() {
+    // An escaped method name defeats a raw substring guard but decodes to a real approval.
+    // The size-only observe gate parses it, so the capability IS registered and a matching
+    // response forwards — proving the escape is not silently skipped.
+    let h = start_broker();
+    // The final `l` of the method is JSON-escaped (l), so the raw bytes carry no literal
+    // "requestApproval" marker but decode to item/commandExecution/requestApproval. Built
+    // at runtime so the source has no fragile literal escape (`"\\u006c"` == `l`).
+    let escaped_method = format!(
+        "{}\\u006c",
+        &COMMAND_EXEC_APPROVAL[..COMMAND_EXEC_APPROVAL.len() - 1]
+    );
+    let escaped = Message::Text(format!(
+        r#"{{"method":"{escaped_method}","id":0,"params":{{"threadId":"th-A","itemId":"x"}}}}"#
+    ));
+    assert!(
+        !escaped.to_text().unwrap().contains("requestApproval"),
+        "the scripted frame must be genuinely escaped"
+    );
+    h.push_script(vec![escaped]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    // Byte-exact passthrough still delivers the frame (drain it, but it lacks the literal
+    // marker so we don't use drain_approval's assertion here).
+    let _ = ccd.next().await.unwrap().unwrap();
+
+    ccd.send(answer(0, "decoded")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(
+        rec.len(),
+        1,
+        "the escaped approval was decoded and registered"
+    );
+    assert!(rec[0].contains(r#""by":"decoded""#));
+}
+
+#[tokio::test]
+async fn duplicate_member_approval_frame_registers_no_capability() {
+    // An s2c approval frame with a duplicate `id` member is ambiguous (parser-differential)
+    // — it must not register a capability, so a response for it forwards zero bytes.
+    let h = start_broker();
+    h.push_script(vec![Message::Text(format!(
+        r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"id":1,"params":{{"threadId":"th-A","itemId":"x"}}}}"#
+    ))]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await; // byte-exact passthrough still delivers the frame
+
+    ccd.send(answer(0, "dup")).await.unwrap();
+    ccd.send(answer(1, "dup")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "a duplicate-member approval frame registers no capability",
+    );
 }
 
 // ---------------------------------------------------------------------------

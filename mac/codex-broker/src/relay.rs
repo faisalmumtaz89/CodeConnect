@@ -25,7 +25,7 @@ use crate::allowlist::Role;
 use crate::fingerprint::LaunchFingerprint;
 use crate::message::{Shape, WsPayload};
 use crate::refusal::{decide, Env, RelayAction};
-use crate::response_capability::{NoCapabilities, ResponseCapabilityRegistry};
+use crate::response_capability::{LegCapabilities, ResponseArbiter};
 use crate::session::SessionThreads;
 use crate::upstream::{ws_config, UpstreamFactory};
 
@@ -45,7 +45,10 @@ pub struct Broker<F: UpstreamFactory> {
 struct Ctx<F: UpstreamFactory> {
     fingerprint: LaunchFingerprint,
     factory: F,
-    caps: Arc<dyn ResponseCapabilityRegistry + Send + Sync>,
+    /// The shared one-use response-capability arbiter (fanout winner across all legs).
+    /// Each connection wraps it in its own [`LegCapabilities`] view; the arbiter itself
+    /// is session-wide so the first response to a fanned-out approval wins across legs.
+    arbiter: Arc<ResponseArbiter>,
     /// Session-scoped thread binding, shared across every connection: the s2c stream
     /// populates it (`thread/started`), the c2s resume path reads it.
     threads: SessionThreads,
@@ -53,8 +56,9 @@ struct Ctx<F: UpstreamFactory> {
 }
 
 impl<F: UpstreamFactory> Broker<F> {
-    /// Build a broker. The capability registry defaults to the fail-closed
-    /// [`NoCapabilities`] (the fanout registry is the switch sub-chunk's job).
+    /// Build a broker. The one-use response-capability fanout arbiter is installed and
+    /// fail-closed by construction: until a leg observes the soliciting `serverRequest`,
+    /// every method-less response forwards zero upstream bytes.
     pub fn new(
         tui_sock: impl Into<PathBuf>,
         ccd_sock: impl Into<PathBuf>,
@@ -67,7 +71,7 @@ impl<F: UpstreamFactory> Broker<F> {
             ctx: Arc::new(Ctx {
                 fingerprint,
                 factory,
-                caps: Arc::new(NoCapabilities),
+                arbiter: Arc::new(ResponseArbiter::new()),
                 threads: SessionThreads::new(),
                 log: Arc::new(|_| {}),
             }),
@@ -77,16 +81,6 @@ impl<F: UpstreamFactory> Broker<F> {
     /// Replace the audit-log sink.
     pub fn with_event_sink(mut self, sink: EventSink) -> Self {
         Arc::get_mut(&mut self.ctx).expect("no clones yet").log = sink;
-        self
-    }
-
-    /// SEAM: install the real one-use response-capability registry (switch/fanout
-    /// sub-chunk). Until then, method-less responses forward zero bytes.
-    pub fn with_capabilities(
-        mut self,
-        caps: Arc<dyn ResponseCapabilityRegistry + Send + Sync>,
-    ) -> Self {
-        Arc::get_mut(&mut self.ctx).expect("no clones yet").caps = caps;
         self
     }
 
@@ -133,16 +127,22 @@ async fn handle_connection<F: UpstreamFactory>(
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
     let mut up = ctx.factory.connect().await?;
     let mut seen_initialize = false;
+    // This leg's own view over the shared fanout arbiter: the s2c stream registers the
+    // one-use capabilities solicited on THIS connection, disambiguating a bare response
+    // id into its thread (upstream ids are per-thread integers, reused across threads).
+    let mut caps = LegCapabilities::new(Arc::clone(&ctx.arbiter), Arc::clone(&ctx.log));
 
     loop {
         tokio::select! {
             biased;
             // server -> client: byte-exact passthrough (classification is c2s-only), but
-            // observed to learn session-owned thread ids for resume binding.
+            // observed to learn session-owned thread ids (resume binding) and to register
+            // one-use response capabilities (approval fanout).
             outbound = up.from_upstream.recv() => match outbound {
                 Some(msg) => {
                     if let Message::Text(t) = &msg {
                         ctx.threads.observe_server_frame(t);
+                        caps.observe_server_frame(t);
                     }
                     ws.send(msg).await?
                 }
@@ -168,7 +168,7 @@ async fn handle_connection<F: UpstreamFactory>(
                         break;
                     }
                     Message::Text(text) => {
-                        if handle_text(role, &ctx, &mut ws, &up, &mut seen_initialize, text)
+                        if handle_text(role, &ctx, &caps, &mut ws, &up, &mut seen_initialize, text)
                             .await?
                         {
                             break; // hostile/close disposition
@@ -185,6 +185,7 @@ async fn handle_connection<F: UpstreamFactory>(
 async fn handle_text<F, S>(
     role: Role,
     ctx: &Arc<Ctx<F>>,
+    caps: &LegCapabilities,
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     up: &crate::upstream::UpstreamChannels,
     seen_initialize: &mut bool,
@@ -215,7 +216,7 @@ where
     let action = {
         let env = Env {
             fingerprint: &ctx.fingerprint,
-            capabilities: ctx.caps.as_ref(),
+            capabilities: caps,
             threads: &ctx.threads,
         };
         decide(role, &env, shape)

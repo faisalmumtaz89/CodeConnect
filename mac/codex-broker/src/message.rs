@@ -49,7 +49,7 @@ pub enum WsPayload {
 /// floats. A "usable" id is one of these two; anything else cannot be echoed into
 /// a schema-legal synthetic error, which is why an array/response refusal forwards
 /// zero bytes rather than answering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RequestId {
     Str(String),
     Int(i64),
@@ -64,7 +64,10 @@ impl RequestId {
         }
     }
 
-    fn from_value(v: &Value) -> Option<RequestId> {
+    /// Read a schema-legal id (string|int) from a JSON value, or `None` for null /
+    /// float / out-of-range. Also used by the response-capability registry to key a
+    /// server-request's id from the observed s2c `serverRequest` frame.
+    pub fn from_value(v: &Value) -> Option<RequestId> {
         if let Some(s) = v.as_str() {
             Some(RequestId::Str(s.to_string()))
         } else if let Some(n) = v.as_i64() {
@@ -219,6 +222,16 @@ fn parse_no_dup(s: &str) -> Result<Value, ParseError> {
             }
         }
     }
+}
+
+/// Parse an observed **server→client** frame with the same duplicate-member discipline
+/// the c2s classifier uses, for the capability/thread observers. Returns `None` — "do not
+/// trust this frame" — on a duplicate member (at any nesting), unparseable JSON, or
+/// trailing garbage, so an observer that consumes it fails closed (skips registration).
+/// The c2s path keeps [`classify_shape`]'s richer `Malformed` reasons; observers only need
+/// the trust/don't-trust bit.
+pub(crate) fn parse_no_dup_value(s: &str) -> Option<Value> {
+    parse_no_dup(s).ok()
 }
 
 const DUP_MARKER: &str = "codex-broker/duplicate-key";
@@ -415,6 +428,26 @@ mod tests {
             )),
             Shape::Malformed("duplicate JSON member")
         ));
+    }
+
+    #[test]
+    fn response_with_duplicate_top_level_members_is_malformed() {
+        // Finding 5: a method-less response with a duplicate id/result/error member is
+        // rejected by the NoDup parser (no Shape::Response, so refusal.rs never authorizes
+        // it). Confirms the c2s Response path already fails closed on duplicate members.
+        for s in [
+            r#"{"id":0,"id":1,"result":{"x":1}}"#,
+            r#"{"id":0,"result":{"a":1},"result":{"a":2}}"#,
+            r#"{"id":0,"error":{"code":-1},"error":{"code":-2}}"#,
+        ] {
+            assert!(
+                matches!(
+                    classify_shape(&text(s)),
+                    Shape::Malformed("duplicate JSON member")
+                ),
+                "{s}",
+            );
+        }
     }
 
     #[test]
