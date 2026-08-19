@@ -29,6 +29,7 @@ pub mod hook;
 pub mod ipc;
 pub mod pairing;
 pub mod proc;
+pub mod proc_identity;
 pub mod risk;
 pub mod secret;
 pub mod time;

@@ -20,6 +20,7 @@
 //! resurrecting — and that property is asserted below, against the real binary,
 //! because it is a promise about somebody else's program.
 
+use crate::proc_identity::{self, BirthIdentity, Liveness, ProcessIdentity};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -343,6 +344,16 @@ pub struct OwnedSession {
     pub server_start_time: i64,
     /// When this session was created; distinguishes a reused id.
     pub session_created: i64,
+    /// The tmux **server process's kernel birth identity** (`proc_identity`),
+    /// captured at resolve time from `server_pid`. This is what lets destructive
+    /// cleanup PROVE — via process identity, not socket reachability — whether
+    /// the exact server we resolved against is still alive (a `Killed` requires
+    /// it live + the uid absent) or provably dead (a `ServerGone`). A live tmux
+    /// server can drop and recreate its socket on `SIGUSR1` (man tmux), so a
+    /// socket error is never proof of death; the server's `(pid, birth)` is.
+    /// `None` only if the birth could not be read at resolve — a caller needing
+    /// the proof then fails closed.
+    pub server_birth: Option<BirthIdentity>,
 }
 
 /// Why a `session_uid` could not be turned into an attachable session.
@@ -497,16 +508,36 @@ fn is_session_id(value: &str) -> bool {
 /// turn arbitrary session text back into a parsed identity, and the two checks
 /// now agree on what a uid is instead of only one of them having an opinion.
 fn parse_epoch_line(line: &str) -> Option<(String, String, i64, i64, i64)> {
+    let (id, uid, created, pid, start) = parse_epoch_row_structural(line)?;
+    // Empty is a real answer (a session nobody stamped); anything else must be a
+    // stamp this codebase would be willing to act on, or the line is not read.
+    let uid_is_readable = uid.is_empty() || crate::uid::is_well_formed(&uid);
+    uid_is_readable.then_some((id, uid, created, pid, start))
+}
+
+/// The **structural** half of [`parse_epoch_line`]: exactly five space-separated
+/// fields, a valid `$N` id, and numeric created/pid/start. Returns the raw uid
+/// field **unvalidated** — it may be empty (unstamped), a well-formed stamp, or a
+/// garbage/unreadable one; matching is the caller's job.
+///
+/// This is the distinction Principle F (finding 11) turns on. `None` here means a
+/// **structurally broken** row — the wrong field count, a bad id, or a
+/// non-numeric field — which is truncation / an output cap / corruption, i.e.
+/// *proof of nothing*, and callers must fail closed on it. A structurally intact
+/// row whose uid merely isn't a readable stamp is **not** corruption: it is a
+/// real other session with an unreadable (or hand-crafted) stamp, and it must be
+/// *skipped by uid mismatch*, never allowed to collapse the whole census to
+/// "Unavailable" — otherwise an attacker could deny a victim their own resolve
+/// just by creating a session whose stamp is garbage (see the crafted-stamp
+/// test).
+fn parse_epoch_row_structural(line: &str) -> Option<(String, String, i64, i64, i64)> {
     let mut parts = line.split(' ');
     let id = parts.next()?;
     let uid = parts.next()?;
     let created = parts.next()?.parse().ok()?;
     let pid = parts.next()?.parse().ok()?;
     let start = parts.next()?.parse().ok()?;
-    // Empty is a real answer (a session nobody stamped); anything else must be a
-    // stamp this codebase would be willing to act on, or the line is not read.
-    let uid_is_readable = uid.is_empty() || crate::uid::is_well_formed(uid);
-    (parts.next().is_none() && is_session_id(id) && uid_is_readable)
+    (parts.next().is_none() && is_session_id(id))
         .then(|| (id.to_string(), uid.to_string(), created, pid, start))
 }
 
@@ -832,7 +863,10 @@ fn parse_client_line(line: &str) -> Option<(i32, &str)> {
     (parts.next().is_none() && is_session_id(session_id)).then_some((pid, session_id))
 }
 
-fn run_probe(bin: &Path, argv: &[String]) -> Result<(bool, String, String), String> {
+/// Run a bounded tmux probe. The fourth element of the tuple is **truncated** —
+/// the capture hit the byte cap and the output is a prefix (finding 3). Census
+/// callers that must not silently omit a row treat truncation as Unavailable.
+fn run_probe(bin: &Path, argv: &[String]) -> Result<(bool, String, String, bool), String> {
     match crate::proc::run_deadlined(
         Command::new(bin).args(argv).stdin(Stdio::null()),
         std::time::Duration::from_secs(1),
@@ -841,10 +875,12 @@ fn run_probe(bin: &Path, argv: &[String]) -> Result<(bool, String, String), Stri
             status,
             stdout,
             stderr,
+            truncated,
         }) => Ok((
             status.success(),
             String::from_utf8_lossy(&stdout).into_owned(),
             String::from_utf8_lossy(&stderr).into_owned(),
+            truncated,
         )),
         Ok(crate::proc::RunOutcome::TimedOut { waited }) => Err(format!(
             "tmux did not answer within {}ms",
@@ -869,24 +905,207 @@ pub fn resolve_owned_session(socket: &str, uid: &str) -> Result<OwnedSession, Re
     let bin = tmux_bin().ok_or_else(|| ResolveError::Unavailable("tmux not found".into()))?;
     let argv = list_sessions_epoch_argv(socket)
         .ok_or_else(|| ResolveError::Unavailable(format!("{socket:?} is not addressable")))?;
-    let (ok, stdout, stderr) = run_probe(&bin, &argv).map_err(ResolveError::Unavailable)?;
+    let (ok, stdout, stderr, truncated) =
+        run_probe(&bin, &argv).map_err(ResolveError::Unavailable)?;
+    let mut session = resolve_from_probe(socket, uid, ok, &stdout, &stderr, truncated)?;
+    // Capture the tmux SERVER process's kernel birth identity now, from the same
+    // `#{pid}` the census reported (verified against the local binary: `#{pid}`
+    // is the server process pid). **Fail closed** if it cannot be read (round-5
+    // finding 3): a resolved session without a proven server identity A is not a
+    // usable proof, so it is `Unavailable`, never a birth-less "success" that a
+    // liveness/attach check would read as `Live`.
+    match proc_identity::read_birth_identity(session.server_pid as i32) {
+        Some(birth) => {
+            session.server_birth = Some(birth);
+            Ok(session)
+        }
+        None => Err(ResolveError::Unavailable(
+            "could not read the tmux server's birth identity to prove server A".into(),
+        )),
+    }
+}
+
+/// The pure post-probe half of [`resolve_owned_session`], split out so the
+/// fail-closed handling of a failed probe, a **truncated** census (finding 3),
+/// and the row-level parse (finding 11) are all directly testable without a live
+/// server.
+fn resolve_from_probe(
+    socket: &str,
+    uid: &str,
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+    truncated: bool,
+) -> Result<OwnedSession, ResolveError> {
     if !ok {
         // No server / no sessions is "nothing hosts this uid", not an error.
-        return match classify_absence(&stderr) {
+        return match classify_absence(stderr) {
             SessionPresence::Gone => Err(ResolveError::NotHosted),
             other => Err(ResolveError::Unavailable(format!("{other:?}"))),
         };
     }
+    if truncated {
+        // The census was cut at the byte cap — a target or duplicate row may have
+        // been dropped at a boundary, so absence/uniqueness cannot be inferred
+        // (Principle F / finding 3). Proof of nothing ⇒ Unavailable, never a
+        // false NotHosted or a false unique claimant.
+        return Err(ResolveError::Unavailable(
+            "tmux session listing was truncated at the capture cap".into(),
+        ));
+    }
+    resolve_uid_from_rows(socket, uid, stdout)
+}
 
+/// A `list-sessions` census, carrying the identity of the **server that served
+/// it** so every conclusion can be bound to a proven server (findings 1–4). The
+/// binding is what makes "our uid is absent" or "the server is gone" a proof
+/// rather than an inference from socket reachability — which a `SIGUSR1`
+/// socket-recreate, or a *different* server rebinding the socket path, can fake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Census {
+    /// The listing ran (untruncated) and was served by the server whose process
+    /// id is `server_pid`; `presence` is the uid's status in its rows. A caller
+    /// that needs a *specific* server must still confirm `server_pid` + its birth
+    /// match the pinned identity (see [`census_served_by`]).
+    Served {
+        server_pid: i64,
+        presence: RowPresence,
+    },
+    /// No server answers the socket (a connection error / "no server running").
+    /// On its own this is **never** absence — it is only meaningful combined with
+    /// a *proven-dead* pinned server.
+    NoServer,
+    /// The listing could not be trusted: a probe error, a permission / lost-server
+    /// error, a truncated listing, or an empty one (a zero-session tmux server
+    /// exits, so an empty listing is a rare transient whose server id we cannot
+    /// read to bind). **Never** read as absence.
+    CannotTell(String),
+}
+
+/// The uid's status within a served census's rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowPresence {
+    Present(Box<OwnedSession>),
+    Absent,
+    Ambiguous(String),
+    Malformed(String),
+}
+
+/// The serving server's pid, read off any one parseable row (all rows on one
+/// server share `#{pid}`).
+fn census_server_pid(stdout: &str) -> Option<i64> {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|l| parse_epoch_row_structural(l).map(|(_, _, _, pid, _)| pid))
+}
+
+/// The pure classifier for a [`Census`] over a probe's `(ok, stderr, stdout,
+/// truncated)`. Split out so the socket-loss / truncation / empty-listing / row
+/// cases are directly testable.
+fn census_from_probe(
+    socket: &str,
+    uid: &str,
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+    truncated: bool,
+) -> Census {
+    if !ok {
+        return match classify_absence(stderr) {
+            // No server on the socket. NOT absence on its own (findings 1–2).
+            SessionPresence::Gone => Census::NoServer,
+            _ => Census::CannotTell(stderr.trim().to_string()),
+        };
+    }
+    if truncated {
+        return Census::CannotTell("the tmux listing was truncated".into());
+    }
+    let Some(server_pid) = census_server_pid(stdout) else {
+        return Census::CannotTell("the tmux listing was empty; server identity unknown".into());
+    };
+    let presence = match resolve_uid_from_rows(socket, uid, stdout) {
+        Ok(session) => RowPresence::Present(Box::new(session)),
+        Err(ResolveError::NotHosted) => RowPresence::Absent,
+        Err(ResolveError::IdentityMismatch(why)) => RowPresence::Ambiguous(why),
+        Err(ResolveError::Unavailable(why)) => RowPresence::Malformed(why),
+    };
+    Census::Served {
+        server_pid,
+        presence,
+    }
+}
+
+/// Run a bounded census of `uid` on `socket`.
+fn census(socket: &str, uid: &str) -> Census {
+    let Some(bin) = tmux_bin() else {
+        return Census::CannotTell("tmux not found".into());
+    };
+    let Some(argv) = list_sessions_epoch_argv(socket) else {
+        return Census::CannotTell(format!("{socket:?} is not addressable"));
+    };
+    match run_probe(&bin, &argv) {
+        Ok((ok, stdout, stderr, truncated)) => {
+            census_from_probe(socket, uid, ok, &stdout, &stderr, truncated)
+        }
+        Err(why) => Census::CannotTell(why),
+    }
+}
+
+/// Whether a served census was served by **exactly** the pinned server `expected`
+/// — its `#{pid}` equals `expected.pid` AND that pid's *current* kernel birth
+/// equals `expected.birth`. The birth read is compared fail-closed, so a pid that
+/// exited and was reused in the read gap (its birth now differs, or is
+/// unreadable) fails the match rather than letting `A`'s row be mixed with `B`'s
+/// identity (finding 4). Returns `false` for a `NoServer`/`CannotTell` census.
+fn census_served_by(census: &Census, expected: &ProcessIdentity) -> bool {
+    match census {
+        Census::Served { server_pid, .. } => {
+            *server_pid == expected.pid as i64
+                && proc_identity::read_birth_identity(*server_pid as i32) == Some(expected.birth)
+        }
+        _ => false,
+    }
+}
+
+/// Resolve `uid` out of a `list-sessions` census body (Principle F / finding 11).
+///
+/// Pure over the census text so the proof-or-Unknown contract is directly
+/// testable. The census is **proof-or-Unknown**: a non-blank row that does not
+/// parse is truncation / an output cap / corruption — **proof of nothing**, so
+/// it yields [`ResolveError::Unavailable`] ("cannot tell", caller retries),
+/// **never** an inferred `NotHosted`/absence. A clean census with no matching row
+/// is a real [`ResolveError::NotHosted`]; two matching rows are
+/// [`ResolveError::IdentityMismatch`] (never silently disambiguated).
+fn resolve_uid_from_rows(
+    socket: &str,
+    uid: &str,
+    stdout: &str,
+) -> Result<OwnedSession, ResolveError> {
     let mut found: Option<OwnedSession> = None;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         let Some((session_id, line_uid, session_created, server_pid, server_start_time)) =
-            parse_epoch_line(line)
+            parse_epoch_row_structural(line)
         else {
-            continue;
+            // A **structurally broken** non-blank row (wrong field count / bad id
+            // / non-numeric field) is truncation / an output cap / corruption —
+            // proof of nothing, never inferred absence (Principle F / finding
+            // 11). Refusing `Unavailable` here means a uid whose row was cut off
+            // reads as "cannot tell", so cleanup retries and the supervisor does
+            // not falsely declare its session gone, instead of silently skipping
+            // the row and reporting `NotHosted`. (A structurally *intact* row
+            // whose uid is merely unreadable is a real other session and falls
+            // through to the uid-mismatch skip below — it never collapses the
+            // census, so a garbage stamp cannot DoS a victim's resolve.)
+            return Err(ResolveError::Unavailable(format!(
+                "unparseable session row (truncated or capped output): {line:?}"
+            )));
         };
         // Identity and epoch came from the same atomic answer; no second probe,
-        // so no name-reassignment window between reading `$N` and the uid.
+        // so no name-reassignment window between reading `$N` and the uid. The
+        // requested `uid` is well-formed (checked by the caller), so a row whose
+        // uid is empty or a non-well-formed/garbage stamp can never equal it and
+        // is skipped here.
         if line_uid != uid {
             continue;
         }
@@ -897,6 +1116,9 @@ pub fn resolve_owned_session(socket: &str, uid: &str) -> Result<OwnedSession, Re
             server_pid,
             server_start_time,
             session_created,
+            // Filled by `resolve_owned_session` (a syscall it does not belong in
+            // this pure row parser); `None` here and in the census unit tests.
+            server_birth: None,
         };
         if found.is_some() {
             // Two live sessions claiming one uid: refuse rather than pick.
@@ -919,12 +1141,20 @@ pub fn reverify_owned_client(client_pid: i32, expected: &OwnedSession) -> Result
     // and attach can hand our `session_id` to a different session.
     let epoch_argv = list_sessions_epoch_argv(&expected.socket)
         .ok_or_else(|| ResolveError::Unavailable("socket not addressable".into()))?;
-    let (ok, stdout, stderr) = run_probe(&bin, &epoch_argv).map_err(ResolveError::Unavailable)?;
+    let (ok, stdout, stderr, truncated) =
+        run_probe(&bin, &epoch_argv).map_err(ResolveError::Unavailable)?;
     if !ok {
         return Err(ResolveError::IdentityMismatch(format!(
             "the session vanished before the attach was verified: {}",
             stderr.trim()
         )));
+    }
+    if truncated {
+        // A truncated listing could omit our row and make `still_there` falsely
+        // false — fail closed rather than declare the bind broken (finding 3).
+        return Err(ResolveError::Unavailable(
+            "tmux session listing was truncated while verifying the attach".into(),
+        ));
     }
     let still_there =
         stdout
@@ -943,14 +1173,38 @@ pub fn reverify_owned_client(client_pid: i32, expected: &OwnedSession) -> Result
         ));
     }
 
+    // Bind the server's PROCESS identity — and **fail closed** (round-5 finding
+    // 3): the attach is not verified without a proven server A. The pin's birth
+    // must be present AND still match the server pid's current kernel birth, so a
+    // pid the kernel reused for a different server that rebound the socket path
+    // cannot hand our `session_id` to a stranger. A healthy, unchanged server
+    // matches (happy path unaffected); a missing pin birth or a pid-reuse refuses.
+    let Some(expected_birth) = expected.server_birth else {
+        return Err(ResolveError::Unavailable(
+            "the session pin has no proven server birth; refusing to verify the attach".into(),
+        ));
+    };
+    if proc_identity::read_birth_identity(expected.server_pid as i32) != Some(expected_birth) {
+        return Err(ResolveError::IdentityMismatch(
+            "the tmux server's process identity changed during attach (pid reuse)".into(),
+        ));
+    }
+
     // And our client, by its own pid, must be on that exact session.
     let clients_argv = list_clients_argv(&expected.socket)
         .ok_or_else(|| ResolveError::Unavailable("socket not addressable".into()))?;
-    let (c_ok, c_out, _c_err) =
+    let (c_ok, c_out, _c_err, c_truncated) =
         run_probe(&bin, &clients_argv).map_err(ResolveError::Unavailable)?;
     if !c_ok {
         return Err(ResolveError::IdentityMismatch(
             "could not list clients".into(),
+        ));
+    }
+    if c_truncated {
+        // A truncated client listing could omit our client row and make the bind
+        // read as broken — fail closed (finding 3).
+        return Err(ResolveError::Unavailable(
+            "tmux client listing was truncated while verifying the attach".into(),
         ));
     }
     let on_session = c_out
@@ -963,6 +1217,422 @@ pub fn reverify_owned_client(client_pid: i32, expected: &OwnedSession) -> Result
         Err(ResolveError::IdentityMismatch(
             "our client is not attached to the resolved session".into(),
         ))
+    }
+}
+
+/// The argv for `kill-session` targeting an exact internal id (`$N`). The id is
+/// [`is_session_id`]-checked before it reaches here, so interpolating it into
+/// the `=`-anchored target is safe by construction.
+fn kill_session_id_argv(socket: &str, session_id: &str) -> Option<Vec<String>> {
+    let [flag, value] = server_args(socket)?;
+    Some(vec![
+        flag,
+        value,
+        "kill-session".to_string(),
+        "-t".to_string(),
+        session_id.to_string(),
+    ])
+}
+
+/// The outcome of a UID-guarded destructive tmux operation (kill / rollback).
+///
+/// The two facts D5/D7 turn on live here: **`Absent` is not `Unavailable`** (a
+/// server that cannot be reached is never proof the session is gone), and an
+/// **epoch change refuses** rather than acting on a possibly-reused id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    /// The internal id resolved from the uid was killed (or was already gone by
+    /// the time the kill landed — either way the session no longer exists).
+    Killed,
+    /// No live session carries the uid. After an *indeterminate* `new-session`,
+    /// the caller must read this as "not yet", not "done" (D7).
+    Absent,
+    /// The pinned server epoch no longer matches — a restart or id reuse — so
+    /// the operation refuses rather than risk killing a stranger.
+    EpochChanged,
+    /// The kill ran and the pinned tmux **server process is PROVEN dead** — its
+    /// `(pid, birth)` is `proc_identity`-`Gone` (findings 1+2), not merely a
+    /// socket that stopped answering (a live server recreates its socket on
+    /// `SIGUSR1`). Its session and the server are gone.
+    ///
+    /// Deliberately **not** [`CleanupOutcome::Killed`]: a restart in the
+    /// resolve→kill window could have made the kill a collateral hit on a
+    /// stranger's reused id, so we never claim a proven kill of *our* session. But
+    /// the cleanup *goal* is met — and, exactly like [`CleanupOutcome::EpochChanged`],
+    /// a dead server cannot host a late session, so a caller cleaning up (even
+    /// after an indeterminate `new-session`) treats this as done, not a retry.
+    ServerGone,
+    /// More than one live session claims the uid: refuse rather than pick.
+    Ambiguous(String),
+    /// tmux could not be run or answered indeterminately. **Never** absence.
+    Unavailable(String),
+}
+
+/// Destroy the one live session carrying `uid` (D5/D7 destructive contract),
+/// epoch-atomic per Principle C / findings 1–2.
+pub fn destroy_owned_session(
+    socket: &str,
+    uid: &str,
+    pin: Option<&OwnedSession>,
+) -> CleanupOutcome {
+    destroy_owned_session_hooked(socket, uid, pin, || {}, || {})
+}
+
+/// The implementation, with **two** test seams straddling the two irreducible
+/// windows tmux leaves open (it offers no atomic resolve-and-kill):
+///
+///   * `between_resolve_and_kill` runs before the pre-kill re-resolve, so a
+///     restart injected there is caught by that re-resolve — the outer window.
+///   * `after_reresolve_before_kill` runs *after* the pre-kill re-resolve and
+///     *before* the kill, exercising the true inner window that only the
+///     post-kill check can (partly) backstop (finding 2).
+///
+/// **Proof by process identity, not socket reachability (findings 1+2).** A live
+/// tmux server can drop and recreate its socket on `SIGUSR1` (man tmux), so a
+/// socket error is never proof the server died; and "kill-session can't find
+/// `$N`" is never proof our uid is gone (it may be at `$M` on the same server
+/// after a same-uid recreation). Both proofs therefore turn on the **server
+/// process's `(pid, birth)`** captured at resolve, checked with
+/// [`proc_identity::liveness`], plus a fresh **uid re-resolve**:
+///
+///   * `Killed` requires the pinned server process still **`Live`** *and* the uid
+///     now **absent** from a fresh re-resolve on it — proof the session we killed
+///     was ours. `kill-session`'s own stderr is not trusted for this.
+///   * `ServerGone` requires the pinned server process be **`Gone`**
+///     (proc-identity dead) — the ONLY valid basis. It is terminal (server gone ⇒
+///     no late session possible, as `EpochChanged` already reasons), but is not a
+///     proven `Killed`.
+///   * `Unknown` server liveness (the `SIGUSR1` socket-recreate case and any
+///     hiccup) is `Unavailable` — a retry, **never** `ServerGone`.
+///
+/// The only irreducible residual is a collateral kill of a stranger's reused
+/// `$N` in the sub-instruction inner window — reported as a non-success, never a
+/// false success.
+fn destroy_owned_session_hooked(
+    socket: &str,
+    uid: &str,
+    pin: Option<&OwnedSession>,
+    between_resolve_and_kill: impl FnOnce(),
+    after_reresolve_before_kill: impl FnOnce(),
+) -> CleanupOutcome {
+    // --- Establish server A: the identity EVERY conclusion binds to (round-5) ---
+    // With the persisted pin, A is the pin's server (pid + proven birth) and the
+    // target is the pin's `$N`: cleanup is bound to the EXACT server the launch
+    // created, never re-established from whoever owns the socket now — so a
+    // different server B rebinding the path cannot fake a proven absence. Without
+    // a pin (the late-host / never-created-a-session cases), A is established from
+    // the initial resolve.
+    let (server_a, target_session_id) =
+        match pin {
+            Some(p) => {
+                let Some(birth) = p.server_birth else {
+                    return CleanupOutcome::Unavailable(
+                        "the launch-record pin has no proven server birth; cannot bind A".into(),
+                    );
+                };
+                (
+                    ProcessIdentity {
+                        pid: p.server_pid as i32,
+                        birth,
+                    },
+                    p.session_id.clone(),
+                )
+            }
+            None => match census(socket, uid) {
+                Census::Served {
+                    server_pid,
+                    presence: RowPresence::Present(s),
+                } => {
+                    let Some(birth) = proc_identity::read_birth_identity(server_pid as i32) else {
+                        return CleanupOutcome::Unavailable(
+                            "could not read the serving server's birth to bind A".into(),
+                        );
+                    };
+                    (
+                        ProcessIdentity {
+                            pid: server_pid as i32,
+                            birth,
+                        },
+                        s.session_id,
+                    )
+                }
+                Census::Served {
+                    presence: RowPresence::Absent,
+                    ..
+                } => return CleanupOutcome::Absent,
+                Census::Served {
+                    presence: RowPresence::Ambiguous(why),
+                    ..
+                } => return CleanupOutcome::Ambiguous(why),
+                Census::Served {
+                    presence: RowPresence::Malformed(why),
+                    ..
+                } => return CleanupOutcome::Unavailable(why),
+                Census::NoServer => return CleanupOutcome::Unavailable(
+                    "no server answers the socket; cannot confirm our uid is absent (finding 1)"
+                        .into(),
+                ),
+                Census::CannotTell(why) => return CleanupOutcome::Unavailable(why),
+            },
+        };
+
+    let Some(bin) = tmux_bin() else {
+        return CleanupOutcome::Unavailable("tmux not found".into());
+    };
+    let Some(argv) = kill_session_id_argv(socket, &target_session_id) else {
+        return CleanupOutcome::Unavailable(format!("{socket:?} is not addressable"));
+    };
+
+    // Outer-window seam.
+    between_resolve_and_kill();
+
+    // --- Confirm our session is present on A, bound to A (Principle C) ---
+    match confirm_session_on_a(socket, uid, &server_a, &target_session_id) {
+        ConfirmA::Present => { /* our session on A: proceed to kill */ }
+        ConfirmA::Done(outcome) => return outcome,
+    }
+
+    // Inner-window seam.
+    after_reresolve_before_kill();
+
+    // Run the kill; its stderr is NOT trusted as proof (the identity proof is).
+    let _kill_result = run_probe(&bin, &argv);
+
+    // --- Post-kill proof, bound to A ---
+    // We just CONFIRMED our session on A and killed it, so we have positive
+    // knowledge here: A dying with no reachable server is our session gone
+    // (`ServerGone`, the benign single-session drain). A reachable successor
+    // carrying our uid is a survivor ⇒ retry.
+    match proc_identity::liveness(&server_a) {
+        Liveness::Alive => {
+            let post = census(socket, uid);
+            if !census_served_by(&post, &server_a) {
+                return CleanupOutcome::Unavailable(match post {
+                    Census::Served { .. } => {
+                        "the socket is now served by a different server; cannot confirm on A".into()
+                    }
+                    Census::NoServer => {
+                        "no server answers A after the kill (socket-recreate window); retry".into()
+                    }
+                    Census::CannotTell(why) => why,
+                });
+            }
+            match post {
+                Census::Served {
+                    presence: RowPresence::Absent,
+                    ..
+                } => CleanupOutcome::Killed,
+                Census::Served {
+                    presence: RowPresence::Present(_),
+                    ..
+                } => CleanupOutcome::Unavailable(
+                    "the uid still resolves on server A after the kill".into(),
+                ),
+                Census::Served {
+                    presence: RowPresence::Ambiguous(why),
+                    ..
+                } => CleanupOutcome::Ambiguous(why),
+                Census::Served {
+                    presence: RowPresence::Malformed(why),
+                    ..
+                } => CleanupOutcome::Unavailable(why),
+                _ => unreachable!("census_served_by guarantees a Served census here"),
+            }
+        }
+        Liveness::Gone => match census(socket, uid) {
+            // A dead + no reachable server: we killed our confirmed session on A
+            // and A drained ⇒ our session is gone (benign single-session drain).
+            Census::NoServer => CleanupOutcome::ServerGone,
+            Census::Served {
+                presence: RowPresence::Absent,
+                ..
+            } => CleanupOutcome::ServerGone,
+            // A successor carries our uid ⇒ NOT complete (survivor).
+            Census::Served {
+                presence: RowPresence::Present(_),
+                ..
+            } => CleanupOutcome::Unavailable(
+                "the pinned server is gone but a successor carries our uid; not complete".into(),
+            ),
+            Census::Served {
+                presence: RowPresence::Ambiguous(why),
+                ..
+            } => CleanupOutcome::Ambiguous(why),
+            Census::Served {
+                presence: RowPresence::Malformed(why),
+                ..
+            } => CleanupOutcome::Unavailable(why),
+            Census::CannotTell(why) => CleanupOutcome::Unavailable(why),
+        },
+        Liveness::Unknown => CleanupOutcome::Unavailable(
+            "the pinned tmux server process liveness is unknown after the kill".into(),
+        ),
+    }
+}
+
+/// The result of confirming our session is present on server A before the kill.
+enum ConfirmA {
+    /// Our session (the target `$N`) is present on A — proceed to kill.
+    Present,
+    /// A terminal or retry outcome: do not kill.
+    Done(CleanupOutcome),
+}
+
+/// Confirm, **bound to server A**, that the target session still carries our uid
+/// on A (round-5 findings 1/4). Refuses to kill on any uncertainty.
+fn confirm_session_on_a(
+    socket: &str,
+    uid: &str,
+    server_a: &ProcessIdentity,
+    target_session_id: &str,
+) -> ConfirmA {
+    let c = census(socket, uid);
+    if census_served_by(&c, server_a) {
+        return match c {
+            Census::Served {
+                presence: RowPresence::Present(s),
+                ..
+            } if s.session_id == target_session_id => ConfirmA::Present,
+            // Present on A but a DIFFERENT `$N` (recreated): our target is stale ⇒
+            // retry so the next pass re-resolves (never complete while it lives).
+            Census::Served {
+                presence: RowPresence::Present(_),
+                ..
+            } => ConfirmA::Done(CleanupOutcome::Unavailable(
+                "the uid was recreated at a new session id on server A; retry".into(),
+            )),
+            // Proven absent ON A: our session is gone from the exact server it
+            // lived on. Terminal.
+            Census::Served {
+                presence: RowPresence::Absent,
+                ..
+            } => ConfirmA::Done(CleanupOutcome::Absent),
+            Census::Served {
+                presence: RowPresence::Ambiguous(why),
+                ..
+            } => ConfirmA::Done(CleanupOutcome::Ambiguous(why)),
+            Census::Served {
+                presence: RowPresence::Malformed(why),
+                ..
+            } => ConfirmA::Done(CleanupOutcome::Unavailable(why)),
+            _ => unreachable!("census_served_by guarantees a Served census"),
+        };
+    }
+    // The socket is NOT served by A. Whether our session is gone turns on A's
+    // process liveness — never on socket reachability.
+    match proc_identity::liveness(server_a) {
+        Liveness::Gone => {
+            // A is proven dead ⇒ our session (which lived on A) is gone. But a
+            // SUCCESSOR may carry a recreated session with our uid: complete only
+            // on a PROVEN absence everywhere; a survivor (reachable) is a retry,
+            // and a survivor in its socket-recreation window (unreachable ⇒
+            // NoServer) is ALSO a retry — never a false ServerGone (finding 4).
+            match census(socket, uid) {
+                Census::Served {
+                    presence: RowPresence::Absent,
+                    ..
+                } => ConfirmA::Done(CleanupOutcome::ServerGone),
+                Census::Served {
+                    presence: RowPresence::Present(_),
+                    ..
+                } => ConfirmA::Done(CleanupOutcome::Unavailable(
+                    "server A is gone but a reachable successor carries our uid; retry".into(),
+                )),
+                // A dead but no reachable server: we did NOT kill anything this
+                // pass, and a successor B may be in its socket-recreation window
+                // carrying our uid — cannot prove absence, so retry, never
+                // ServerGone (finding 4).
+                Census::NoServer => ConfirmA::Done(CleanupOutcome::Unavailable(
+                    "server A is gone but no server answers to prove our uid is absent; retry"
+                        .into(),
+                )),
+                Census::Served {
+                    presence: RowPresence::Ambiguous(why),
+                    ..
+                } => ConfirmA::Done(CleanupOutcome::Ambiguous(why)),
+                Census::Served {
+                    presence: RowPresence::Malformed(why),
+                    ..
+                } => ConfirmA::Done(CleanupOutcome::Unavailable(why)),
+                Census::CannotTell(why) => ConfirmA::Done(CleanupOutcome::Unavailable(why)),
+            }
+        }
+        // A is alive but the socket is answered by a different/absent server (a
+        // SIGUSR1 socket-recreate/rebind window), or we cannot tell: retry.
+        Liveness::Alive => ConfirmA::Done(CleanupOutcome::Unavailable(
+            "server A is alive but the socket is not served by A (recreate window); retry".into(),
+        )),
+        Liveness::Unknown => ConfirmA::Done(CleanupOutcome::Unavailable(
+            "server A's liveness is unknown; retry".into(),
+        )),
+    }
+}
+
+/// A UID-atomic liveness verdict for the supervisor's own session.
+///
+/// The distinction from a name-addressed `has-session` is the whole point: this
+/// resolves by *uid* and pins the epoch, so a session that died and had its
+/// `cc-N` name reused by a different run reads `Gone` (owner mismatch), not a
+/// false `Live`. A server that cannot be reached is `Unknown` — the supervisor
+/// must not tear a live session down on a probe hiccup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedLiveness {
+    Live,
+    Gone,
+    Unknown(String),
+}
+
+/// The supervisor's own-session liveness, bound to server identity A (round-5
+/// findings 2/3).
+///
+///   * **Socket loss is `Unknown`, never `Gone`** (finding 2): a `NoServer` /
+///     unreachable census must not become a durable session exit — a live server
+///     recreates its socket on `SIGUSR1`, and the supervisor must keep observing.
+///   * **`Live` fails closed** (finding 3): a session is `Live` only from a
+///     successful census whose serving server's **birth is provably readable**
+///     (and, when a pin is given, matches A). If the server's identity cannot be
+///     proven, that is `Unknown`, never `Live`.
+///   * The **healthy path stays `Live`**: a real live session on a reachable
+///     server with the uid present (birth proven, pin matching or absent) ⇒
+///     `Live`.
+///   * A successful census that lacks our uid is a proven `Gone`.
+pub fn owned_liveness(socket: &str, uid: &str, pin: Option<&OwnedSession>) -> OwnedLiveness {
+    match census(socket, uid) {
+        // Socket loss / no server: cannot tell. NEVER a durable Gone (finding 2).
+        Census::NoServer => OwnedLiveness::Unknown("no server answers the socket".into()),
+        Census::CannotTell(why) => OwnedLiveness::Unknown(why),
+        Census::Served {
+            server_pid,
+            presence,
+        } => match presence {
+            RowPresence::Present(session) => {
+                // Fail closed: prove the serving server's birth (finding 3).
+                let Some(birth) = proc_identity::read_birth_identity(server_pid as i32) else {
+                    return OwnedLiveness::Unknown(
+                        "could not read the serving server's birth; not proven Live".into(),
+                    );
+                };
+                // When pinned to A, the session + full server identity must match
+                // (session_id + pid + start_time + created + BIRTH): a same-second
+                // pid-reuse or a different server cannot masquerade as ours.
+                if let Some(pin) = pin {
+                    if session.session_id != pin.session_id
+                        || server_pid != pin.server_pid
+                        || session.server_start_time != pin.server_start_time
+                        || session.session_created != pin.session_created
+                        || Some(birth) != pin.server_birth
+                    {
+                        return OwnedLiveness::Gone;
+                    }
+                }
+                OwnedLiveness::Live
+            }
+            // A successful listing lacking our uid ⇒ proven gone.
+            RowPresence::Absent => OwnedLiveness::Gone,
+            // Two claimants / a malformed row is not evidence ours is alive.
+            RowPresence::Ambiguous(why) => OwnedLiveness::Unknown(why),
+            RowPresence::Malformed(why) => OwnedLiveness::Unknown(why),
+        },
     }
 }
 
@@ -2026,6 +2696,175 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The UID-atomic destructive contract against real tmux (D5/D7): a kill
+    /// resolves the internal id from the uid immediately before acting and
+    /// destroys only that id; a reused `cc-N` name never lets a stale uid's
+    /// cleanup capture the new run; an epoch pin from a dead server refuses; and
+    /// `owned_liveness` reports `Gone` when the name has been reused under it.
+    #[test]
+    fn destructive_ops_are_uid_atomic_against_real_tmux() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-destroy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let tmux = |args: &[&str]| {
+            std::process::Command::new(&bin)
+                .args(["-S", &sock, "-f", "/dev/null"])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let start = |name: &str, uid: &str| {
+            let out = tmux(&[
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-e",
+                &format!("{}={uid}", crate::ENV_SESSION_UID),
+                "--",
+                "/bin/sh",
+                "-c",
+                "while :; do sleep 1; done",
+            ]);
+            assert!(
+                out.status.success(),
+                "new-session {name} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        let uid_keep = crate::uid::new().unwrap();
+        let uid_a = crate::uid::new().unwrap();
+        let uid_b = crate::uid::new().unwrap();
+
+        // No server yet: destroy cannot PROVE absence without a server to confirm
+        // against (round-4 finding 1: a socket error is never a false `Absent`),
+        // so it is `Unavailable` — and it starts nothing.
+        assert!(matches!(
+            destroy_owned_session(&sock, &uid_a, None),
+            CleanupOutcome::Unavailable(_)
+        ));
+        assert!(
+            !dir.join("sock").exists(),
+            "cleanup must not start a server"
+        );
+
+        start("keep", &uid_keep);
+        start("cc-1", &uid_a);
+        let a = resolve_owned_session(&sock, &uid_a).expect("uid_a resolves");
+        assert_eq!(owned_liveness(&sock, &uid_a, Some(&a)), OwnedLiveness::Live);
+
+        // Name reuse *before* cleanup: kill cc-1's session out from under uid_a
+        // and start a new cc-1 carrying uid_b. Destroying uid_a must now be
+        // Absent (its session is gone) and must NOT touch uid_b's new session.
+        tmux(&["kill-session", "-t", "=cc-1"]);
+        start("cc-1", &uid_b);
+        assert_eq!(
+            destroy_owned_session(&sock, &uid_a, None),
+            CleanupOutcome::Absent
+        );
+        let b = resolve_owned_session(&sock, &uid_b).expect("uid_b's new cc-1 is untouched");
+        assert_ne!(b.session_id, a.session_id);
+        // uid_a's stale pin now reads Gone (owner mismatch under the reused name).
+        // This is the load-bearing name-reuse guard: the name is the same, the
+        // session is not, and the uid+epoch says so. (A stale-epoch destroy
+        // *refusal* across a genuine server restart is proven separately in
+        // `a_server_restart_inside_the_window_is_refused_by_the_epoch_pin`;
+        // within one server, tmux's 1-second `session_created` resolution cannot
+        // distinguish two same-second sessions, so that case is not asserted
+        // here where it would be flaky.)
+        assert_eq!(owned_liveness(&sock, &uid_a, Some(&a)), OwnedLiveness::Gone);
+
+        // Destroy uid_b for real, pinned to its own epoch: Killed, and gone.
+        assert_eq!(
+            destroy_owned_session(&sock, &uid_b, Some(&b)),
+            CleanupOutcome::Killed
+        );
+        assert_eq!(
+            resolve_owned_session(&sock, &uid_b),
+            Err(ResolveError::NotHosted)
+        );
+
+        tmux(&["kill-server"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tmux server restart inside the check/act window: `owned_liveness` and a
+    /// destroy pinned to the pre-restart epoch must not act on a same-id session
+    /// on the *new* server. Exercised by pinning to a resolved epoch, restarting
+    /// the server, and re-creating the same uid — the epoch pin refuses.
+    #[test]
+    fn a_server_restart_inside_the_window_is_refused_by_the_epoch_pin() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let tmux = |args: &[&str]| {
+            std::process::Command::new(&bin)
+                .args(["-S", &sock, "-f", "/dev/null"])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let start = |name: &str, uid: &str| {
+            assert!(tmux(&[
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-e",
+                &format!("{}={uid}", crate::ENV_SESSION_UID),
+                "--",
+                "/bin/sh",
+                "-c",
+                "while :; do sleep 1; done",
+            ])
+            .status
+            .success());
+        };
+        let uid = crate::uid::new().unwrap();
+        start("cc-1", &uid);
+        let pinned = resolve_owned_session(&sock, &uid).expect("resolves");
+
+        // Restart the whole server, then re-create the same uid/name. The new
+        // server has a different pid/start_time; the pinned epoch is stale.
+        tmux(&["kill-server"]);
+        start("cc-1", &uid);
+
+        // Liveness against the stale pin: Gone (different epoch), never a false Live.
+        assert_eq!(
+            owned_liveness(&sock, &uid, Some(&pinned)),
+            OwnedLiveness::Gone
+        );
+        // Destroy pinned to the stale A (round-5): the pinned server A is DEAD, but
+        // a reachable successor carries the uid ⇒ it must NOT kill the new run and
+        // must NOT complete — it retries (`Unavailable`), chasing the uid on the
+        // successor on the next pass. Never a false Killed/ServerGone.
+        let outcome = destroy_owned_session(&sock, &uid, Some(&pinned));
+        assert!(
+            matches!(outcome, CleanupOutcome::Unavailable(_)),
+            "a stale-A destroy over a live successor must retry, got {outcome:?}"
+        );
+        assert_ne!(outcome, CleanupOutcome::Killed);
+        assert_ne!(outcome, CleanupOutcome::ServerGone);
+        assert!(
+            resolve_owned_session(&sock, &uid).is_ok(),
+            "the refusal protected the new server's session"
+        );
+
+        tmux(&["kill-server"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The forgery attempted against real tmux, with the trailing newline that is
     /// the whole exploit, on a private throwaway server addressed by an absolute
     /// socket path and configured from `/dev/null` — never the operator's live
@@ -2199,6 +3038,586 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         );
 
         tmux(&["kill-server"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ----------------------------------------------------------------------
+    // Principle F: the census is proof-or-Unknown. A malformed/truncated/capped
+    // non-blank row must yield Unavailable ("cannot tell"), NEVER a false
+    // NotHosted/absence — proven directly against the pure row resolver.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn a_malformed_census_row_is_unavailable_never_a_false_absence() {
+        let uid = crate::uid::new().unwrap();
+        // A clean, matching row resolves.
+        let good = format!("$3 {uid} 100 200 300");
+        let ok = resolve_uid_from_rows("sock", &uid, &good).expect("a clean row resolves");
+        assert_eq!(ok.session_id, "$3");
+        assert_eq!(ok.server_pid, 200);
+
+        // A row for OUR uid that is truncated mid-record (the last two fields
+        // cut off, as an output cap would do) is Unavailable, NOT NotHosted —
+        // the whole point of Principle F.
+        let truncated = format!("$3 {uid} 100");
+        assert!(
+            matches!(
+                resolve_uid_from_rows("sock", &uid, &truncated),
+                Err(ResolveError::Unavailable(_))
+            ),
+            "a truncated row must be Unavailable, never NotHosted"
+        );
+
+        // A *structurally broken* non-blank row (non-numeric fields) is likewise
+        // Unavailable — proof of nothing, so absence cannot be inferred.
+        let garbage = "this is not a session record at all";
+        assert!(
+            matches!(
+                resolve_uid_from_rows("sock", &uid, garbage),
+                Err(ResolveError::Unavailable(_))
+            ),
+            "a corrupt row must be Unavailable, never NotHosted"
+        );
+
+        // But a *structurally intact* row whose uid is merely a garbage/unreadable
+        // stamp is a real other session — it is SKIPPED by uid mismatch, never
+        // collapses the census to Unavailable. This is the anti-forgery/anti-DoS
+        // property: an attacker cannot deny us our resolve by parking a session
+        // with a junk stamp. Here it means a clean NotHosted (no row is ours).
+        let junk_stamp = format!("$9 GARBAGESTAMP123 1 2 3\n$3 {uid} 100 200 300\n");
+        let resolved =
+            resolve_uid_from_rows("sock", &uid, &junk_stamp).expect("our row still resolves");
+        assert_eq!(
+            resolved.session_id, "$3",
+            "a junk-stamped neighbour must not hide our session"
+        );
+        let only_junk = "$9 GARBAGESTAMP123 1 2 3\n";
+        assert_eq!(
+            resolve_uid_from_rows("sock", &uid, only_junk),
+            Err(ResolveError::NotHosted),
+            "a junk-stamped session we don't own is a clean absence, not Unavailable"
+        );
+
+        // A clean census that simply has no row for our uid IS a real absence.
+        let other = crate::uid::new().unwrap();
+        let clean_other = format!("$4 {other} 1 2 3\n");
+        assert_eq!(
+            resolve_uid_from_rows("sock", &uid, &clean_other),
+            Err(ResolveError::NotHosted),
+            "a clean census with no matching row is a true NotHosted"
+        );
+
+        // Two rows claiming our uid refuse rather than pick.
+        let dup = format!("$5 {uid} 1 2 3\n$6 {uid} 4 5 6\n");
+        assert!(matches!(
+            resolve_uid_from_rows("sock", &uid, &dup),
+            Err(ResolveError::IdentityMismatch(_))
+        ));
+
+        // Blank lines are ignored (an empty census is a clean absence).
+        assert_eq!(
+            resolve_uid_from_rows("sock", &uid, "\n  \n"),
+            Err(ResolveError::NotHosted)
+        );
+    }
+
+    /// Finding 1/2 (census classification): a socket error is `NoServer`, a
+    /// truncated/empty/malformed listing is `CannotTell` — **never** a served
+    /// `Absent`. Only a successful, untruncated, non-empty listing yields a
+    /// `Served{Absent}`. So the post-kill `Killed`/`ServerGone` proofs can never be
+    /// faked by a socket error (a `SIGUSR1`-recreate `No such file`).
+    #[test]
+    fn census_never_reads_a_socket_error_as_a_served_absence() {
+        let uid = crate::uid::new().unwrap();
+        let other = crate::uid::new().unwrap();
+
+        // ok=false with a "no server" stderr ⇒ NoServer (not absence).
+        assert_eq!(
+            census_from_probe(
+                "sock",
+                &uid,
+                false,
+                "",
+                "no server running on /tmp/x",
+                false
+            ),
+            Census::NoServer
+        );
+        // ok=false with a permission/other error ⇒ CannotTell.
+        assert!(matches!(
+            census_from_probe("sock", &uid, false, "", "permission denied", false),
+            Census::CannotTell(_)
+        ));
+        // Truncated ⇒ CannotTell.
+        assert!(matches!(
+            census_from_probe("sock", &uid, true, &format!("$1 {other} 1 2 3\n"), "", true),
+            Census::CannotTell(_)
+        ));
+        // Empty successful listing ⇒ CannotTell (server id unknown; a zero-session
+        // server exits, so this is a rare transient we do not bind).
+        assert!(matches!(
+            census_from_probe("sock", &uid, true, "", "", false),
+            Census::CannotTell(_)
+        ));
+        // A successful, complete listing WITHOUT our uid ⇒ Served{Absent}, and it
+        // carries the serving server's pid so a caller can bind it.
+        assert_eq!(
+            census_from_probe(
+                "sock",
+                &uid,
+                true,
+                &format!("$1 {other} 1 200 3\n"),
+                "",
+                false
+            ),
+            Census::Served {
+                server_pid: 200,
+                presence: RowPresence::Absent
+            }
+        );
+        // A successful listing WITH our uid ⇒ Served{Present}.
+        assert!(matches!(
+            census_from_probe(
+                "sock",
+                &uid,
+                true,
+                &format!("$4 {uid} 9 250 7\n"),
+                "",
+                false
+            ),
+            Census::Served {
+                server_pid: 250,
+                presence: RowPresence::Present(_)
+            }
+        ));
+        // Two claimants ⇒ Served{Ambiguous}; a malformed row ⇒ Served{Malformed}.
+        assert!(matches!(
+            census_from_probe(
+                "sock",
+                &uid,
+                true,
+                &format!("$4 {uid} 1 200 3\n$5 {uid} 4 200 6\n"),
+                "",
+                false
+            ),
+            Census::Served {
+                presence: RowPresence::Ambiguous(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            census_from_probe("sock", &uid, true, "this is not a row", "", false),
+            Census::CannotTell(_)
+        ));
+    }
+
+    /// Finding 2/4/10: binding a census to a server identity A. A census is
+    /// "served by A" ONLY when its `#{pid}` equals A.pid AND that pid's CURRENT
+    /// kernel birth equals A.birth. So a **wrong endpoint** (a different server's
+    /// pid) and a **pid reuse** (same pid, different birth) both fail the bind —
+    /// they can never fake a proven absence/kill on A.
+    #[test]
+    fn census_served_by_requires_matching_pid_and_birth() {
+        let me = crate::proc_identity::current_identity().unwrap();
+        let uid = crate::uid::new().unwrap();
+        // A census whose serving pid IS ours, and we assert against our real
+        // identity ⇒ served by us.
+        let served_ours = census_from_probe(
+            "sock",
+            &uid,
+            true,
+            &format!("$1 {uid} 1 {} 3\n", me.pid),
+            "",
+            false,
+        );
+        assert!(
+            census_served_by(&served_ours, &me),
+            "our own pid+birth binds"
+        );
+
+        // Wrong endpoint: the census is served by a DIFFERENT pid than A ⇒ not
+        // served by A (never a proven absence on A).
+        let served_other = census_from_probe(
+            "sock",
+            &uid,
+            true,
+            &format!("$1 {uid} 1 999999 3\n"),
+            "",
+            false,
+        );
+        assert!(
+            !census_served_by(&served_other, &me),
+            "a different pid is not A"
+        );
+
+        // PID reuse: same pid as A, but A's recorded birth differs from the pid's
+        // CURRENT birth ⇒ not A (fail-closed against reuse in the read gap).
+        let mut reused = me;
+        reused.birth.start_usec ^= 0x5A5A;
+        assert!(
+            !census_served_by(&served_ours, &reused),
+            "a pid whose current birth differs from the pinned birth is not A"
+        );
+
+        // A NoServer / CannotTell census is never "served by A".
+        assert!(!census_served_by(&Census::NoServer, &me));
+        assert!(!census_served_by(&Census::CannotTell("x".into()), &me));
+    }
+
+    /// Principle C, the **outer** window (`pin: None`, the real custodian call): a
+    /// restart injected before the pre-kill re-resolve is caught by that
+    /// re-resolve and refused as `EpochChanged`, never a false `Killed`.
+    #[test]
+    fn a_restart_in_the_outer_window_is_refused_by_the_pre_kill_recheck() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let restart_and_recreate = restart_recreater(&bin, &sock);
+        let uid = crate::uid::new().unwrap();
+        start_session(&bin, &sock, "cc-1", &uid);
+
+        // Inject the restart in the OUTER seam (before the pre-kill re-confirm):
+        // the census is now served by a DIFFERENT server than A, so the destroy
+        // refuses to kill and returns `Unavailable` (retry) — NEVER a false
+        // `Killed` and never a `complete`. (For the custodian this means the next
+        // pass re-resolves and targets the new server's session.)
+        let uid_for_hook = uid.clone();
+        let outcome = destroy_owned_session_hooked(
+            &sock,
+            &uid,
+            None,
+            move || restart_and_recreate(&uid_for_hook),
+            || {},
+        );
+        assert!(
+            matches!(outcome, CleanupOutcome::Unavailable(_)),
+            "a restart before the pre-kill re-confirm must refuse (Unavailable), got {outcome:?}"
+        );
+        assert_ne!(outcome, CleanupOutcome::Killed);
+        assert!(
+            resolve_owned_session(&sock, &uid).is_ok(),
+            "the refusal protected the post-restart session"
+        );
+
+        kill_server(&bin, &sock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Principle C, the **inner** window and finding 1's core: a restart injected
+    /// AFTER the pre-kill re-resolve and BEFORE the kill exercises the post-kill
+    /// backstop. The kill may land on the restarted server's reused `$N` and even
+    /// drain it — but the outcome must **never** be `Killed`. It is a non-success
+    /// (`Ambiguous` when the server drained, `EpochChanged` when it survived on a
+    /// new epoch); a false success is impossible.
+    #[test]
+    fn a_restart_in_the_inner_window_is_never_reported_as_a_false_killed() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-inner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let uid = crate::uid::new().unwrap();
+        start_session(&bin, &sock, "cc-1", &uid);
+
+        // Inject the **$N→$M SURVIVOR** restart in the INNER seam (finding 2/10):
+        // kill server A, then bring up a fresh server B with `keep` sessions AND
+        // our uid recreated at a NEW `$N`. The stale kill lands on B's reused id,
+        // but B survives (keep holds it up) and STILL carries our uid. The
+        // post-kill proof: liveness(A) is Gone, but a census of B shows our uid
+        // PRESENT ⇒ this must be `Unavailable` (retry), never `ServerGone`/complete
+        // while a session bearing our uid provably lives.
+        let bin_hook = bin.clone();
+        let sock_hook = sock.clone();
+        let uid_hook = uid.clone();
+        let outcome = destroy_owned_session_hooked(
+            &sock,
+            &uid,
+            None,
+            || {},
+            move || {
+                kill_server(&bin_hook, &sock_hook);
+                // Fresh server B with two keep sessions ($0, $1) plus our uid at $2.
+                start_session(&bin_hook, &sock_hook, "keep-a", &crate::uid::new().unwrap());
+                start_session(&bin_hook, &sock_hook, "keep-b", &crate::uid::new().unwrap());
+                start_session(&bin_hook, &sock_hook, "cc-1", &uid_hook);
+            },
+        );
+        assert!(
+            matches!(outcome, CleanupOutcome::Unavailable(_)),
+            "a survivor bearing our uid on a successor server must NOT complete: {outcome:?}"
+        );
+        assert_ne!(
+            outcome,
+            CleanupOutcome::ServerGone,
+            "survivor lives ⇒ not ServerGone"
+        );
+        assert_ne!(outcome, CleanupOutcome::Killed);
+        // And our uid provably still resolves on B.
+        assert!(
+            resolve_owned_session(&sock, &uid).is_ok(),
+            "the survivor lives"
+        );
+
+        kill_server(&bin, &sock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- shared helpers for the window tests ---
+
+    fn start_session(bin: &std::path::Path, sock: &str, name: &str, uid: &str) {
+        assert!(std::process::Command::new(bin)
+            .args(["-S", sock, "-f", "/dev/null"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-e",
+                &format!("{}={uid}", crate::ENV_SESSION_UID),
+                "--",
+                "/bin/sh",
+                "-c",
+                "while :; do sleep 1; done",
+            ])
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn kill_server(bin: &std::path::Path, sock: &str) {
+        std::process::Command::new(bin)
+            .args(["-S", sock, "kill-server"])
+            .stdin(Stdio::null())
+            .output()
+            .ok();
+    }
+
+    /// A closure that kills the server and re-creates `cc-1` for a given uid on a
+    /// fresh server (a new epoch) — the worst case injected into a destroy seam.
+    fn restart_recreater(bin: &std::path::Path, sock: &str) -> impl Fn(&str) {
+        let bin = bin.to_path_buf();
+        let sock = sock.to_string();
+        move |uid: &str| {
+            kill_server(&bin, &sock);
+            start_session(&bin, &sock, "cc-1", uid);
+        }
+    }
+
+    /// Finding 3: a **truncated** census (the capture hit the byte cap and the
+    /// output is a prefix) is proof of nothing — it must be `Unavailable`, never a
+    /// false `NotHosted`/absence — even when the prefix we did receive is itself a
+    /// clean, complete set of rows that happens not to name our uid. Proven
+    /// through the pure `resolve_from_probe`, since a real >8 MiB tmux census is
+    /// not feasible in a unit test.
+    #[test]
+    fn a_truncated_census_is_unavailable_never_a_false_absence() {
+        let uid = crate::uid::new().unwrap();
+        let other = crate::uid::new().unwrap();
+        // A clean prefix that does NOT name our uid, but the listing was cut: we
+        // cannot conclude absence, because the dropped tail could have held it.
+        let clean_prefix = format!("$1 {other} 1 2 3\n");
+        assert!(
+            matches!(
+                resolve_from_probe("sock", &uid, true, &clean_prefix, "", true),
+                Err(ResolveError::Unavailable(_))
+            ),
+            "a truncated listing must be Unavailable, never NotHosted"
+        );
+        // The very same bytes, NOT truncated, ARE a clean absence.
+        assert_eq!(
+            resolve_from_probe("sock", &uid, true, &clean_prefix, "", false),
+            Err(ResolveError::NotHosted),
+            "the same complete listing is a true absence"
+        );
+        // A failed probe still classifies by stderr regardless of truncation.
+        assert_eq!(
+            resolve_from_probe("sock", &uid, false, "", "no server running", false),
+            Err(ResolveError::NotHosted)
+        );
+    }
+
+    /// Finding 9: the destroy/liveness pin must distinguish a same-uid session
+    /// recreated on the **same server** (same epoch), where only the internal
+    /// `$N` differs — the case a creation-time-only pin (1-second resolution)
+    /// could miss. A `keep` session holds the server up so the epoch is unchanged
+    /// across the kill+recreate; the old pin must then read `Gone`, and a destroy
+    /// pinned to it must refuse (`EpochChanged`), never act on the replacement.
+    #[test]
+    fn the_pin_distinguishes_a_same_epoch_recreation_by_session_id() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-pinid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+
+        let keep_uid = crate::uid::new().unwrap();
+        let uid = crate::uid::new().unwrap();
+        // `keep` keeps the server alive so the epoch survives the kill below.
+        start_session(&bin, &sock, "keep", &keep_uid);
+        start_session(&bin, &sock, "cc-1", &uid);
+        let pin = resolve_owned_session(&sock, &uid).expect("cc-1 resolves");
+
+        // Kill cc-1 and recreate it under the SAME uid on the SAME server (keep
+        // held it up), retrying until the replacement lands in the SAME `session_created`
+        // second as the original. Requiring equal `session_created` is the whole
+        // point of the hardening: it forces `session_id` to be the *only*
+        // discriminator, so a creation-time-only pin (the old impl) could not
+        // pass. Same-second recreation is the common case, so this converges fast.
+        let kill_cc1 = || {
+            std::process::Command::new(&bin)
+                .args([
+                    "-S",
+                    &sock,
+                    "-f",
+                    "/dev/null",
+                    "kill-session",
+                    "-t",
+                    "=cc-1",
+                ])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+        };
+        let mut replacement = None;
+        for _ in 0..50 {
+            kill_cc1();
+            start_session(&bin, &sock, "cc-1", &uid);
+            let r = resolve_owned_session(&sock, &uid).expect("the replacement resolves");
+            if r.session_created == pin.session_created {
+                replacement = Some(r);
+                break;
+            }
+        }
+        let replacement = replacement.expect(
+            "could not land a same-second recreation in 50 tries (needed to isolate session_id)",
+        );
+
+        // Same server epoch AND same session_created, different internal id: this
+        // is exactly the case a creation-time-only pin could not tell apart.
+        assert_eq!(
+            (replacement.server_pid, replacement.server_start_time),
+            (pin.server_pid, pin.server_start_time),
+            "the replacement is on the same server epoch (keep held it up)"
+        );
+        assert_eq!(
+            replacement.session_created, pin.session_created,
+            "the replacement shares the original's creation second (session_id is the only difference)"
+        );
+        assert_ne!(
+            replacement.session_id, pin.session_id,
+            "the replacement has a fresh internal id"
+        );
+
+        // The old pin includes `$N`, so it reads Gone…
+        assert_eq!(
+            owned_liveness(&sock, &uid, Some(&pin)),
+            OwnedLiveness::Gone,
+            "the old pin's session_id no longer matches — our session is gone"
+        );
+        // …and a destroy pinned to the old `$N` must NOT act on the replacement:
+        // A is alive (same server) but the uid is now at a different `$N`, so it
+        // retries (`Unavailable`) rather than kill the wrong id. Never a false
+        // Killed.
+        let outcome = destroy_owned_session(&sock, &uid, Some(&pin));
+        assert!(
+            matches!(outcome, CleanupOutcome::Unavailable(_)),
+            "a destroy pinned to a stale session_id must retry, got {outcome:?}"
+        );
+        assert_ne!(outcome, CleanupOutcome::Killed);
+        assert!(
+            resolve_owned_session(&sock, &uid).is_ok(),
+            "the replacement survived the pinned-destroy refusal"
+        );
+
+        kill_server(&bin, &sock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Round-5 finding 2: `owned_liveness` never turns socket loss into a durable
+    /// `Gone`. A reachable live session is `Live`; an UNREACHABLE socket (no
+    /// server / removed) is `Unknown` (keep observing); a successful listing
+    /// lacking our uid is a proven `Gone`.
+    #[test]
+    fn owned_liveness_socket_loss_is_unknown_not_gone() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-ol-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let uid = crate::uid::new().unwrap();
+
+        // Before any server: the socket is unreachable ⇒ Unknown (NOT Gone).
+        assert!(matches!(
+            owned_liveness(&sock, &uid, None),
+            OwnedLiveness::Unknown(_)
+        ));
+
+        // A real live session on a reachable server ⇒ Live (healthy path intact).
+        start_session(&bin, &sock, "cc-1", &uid);
+        assert_eq!(owned_liveness(&sock, &uid, None), OwnedLiveness::Live);
+
+        // Remove the socket file while the server is STILL ALIVE (a SIGUSR1-style
+        // socket loss): unreachable ⇒ Unknown, never a durable Gone.
+        std::fs::remove_file(&sock).ok();
+        assert!(matches!(
+            owned_liveness(&sock, &uid, None),
+            OwnedLiveness::Unknown(_)
+        ));
+
+        kill_server(&bin, &sock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Round-5 finding 4: after server A is proven dead, a successor B that
+    /// carries our uid but whose socket is in its recreation window (unreachable
+    /// ⇒ `NoServer`) must be `Unavailable`, never a false `ServerGone` — the
+    /// custodian keeps chasing the uid, it does not falsely complete.
+    #[test]
+    fn a_survivor_in_the_socket_recreation_window_is_not_servergone() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-bwin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let uid = crate::uid::new().unwrap();
+
+        // Server A carries our uid; pin A.
+        start_session(&bin, &sock, "cc-1", &uid);
+        let pin = resolve_owned_session(&sock, &uid).expect("A resolves");
+
+        // A dies; a successor B is brought up carrying our uid (keep holds it up).
+        kill_server(&bin, &sock);
+        start_session(&bin, &sock, "keep", &crate::uid::new().unwrap());
+        start_session(&bin, &sock, "cc-1", &uid);
+        // B is alive and carries our uid — but simulate B's socket-recreation
+        // window by removing the socket file (B keeps running, unreachable).
+        std::fs::remove_file(&sock).ok();
+
+        // Destroy pinned to the DEAD A: A is proc-gone, the socket is unreachable
+        // (B's recreation window). We cannot prove our uid is absent everywhere (B
+        // may carry it) ⇒ Unavailable, NEVER ServerGone.
+        let outcome = destroy_owned_session(&sock, &uid, Some(&pin));
+        assert!(
+            matches!(outcome, CleanupOutcome::Unavailable(_)),
+            "a survivor in its recreation window must be Unavailable, got {outcome:?}"
+        );
+        assert_ne!(outcome, CleanupOutcome::ServerGone);
+        assert_ne!(outcome, CleanupOutcome::Killed);
+
+        kill_server(&bin, &sock);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

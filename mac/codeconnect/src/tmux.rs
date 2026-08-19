@@ -116,6 +116,7 @@ fn run_tmux(command: &mut Command, deadline: Duration, what: &str) -> Result<Vec
             status,
             stdout,
             stderr,
+            ..
         }) => {
             if status.success() {
                 Ok(stdout)

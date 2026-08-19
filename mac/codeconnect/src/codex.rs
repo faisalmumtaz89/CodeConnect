@@ -1749,11 +1749,18 @@ mod tests {
     }
 
     fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
+        // A process-wide counter in the high bits guarantees two concurrent tests
+        // never collide on the same temp dir name — a nanosecond timestamp alone
+        // can repeat under load, letting one test's cleanup delete another's file.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos() as u64
+            .as_nanos() as u64;
+        (seq << 40) ^ nanos
     }
 
     fn cleanup(dir: &Path) {

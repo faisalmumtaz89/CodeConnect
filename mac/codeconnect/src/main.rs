@@ -10,7 +10,11 @@
 //! and a detached supervisor that connects out to `ccd`.
 
 mod codex;
+mod codex_coordinator;
+mod codex_custodian;
+mod codex_launch;
 mod daemon;
+mod exec_gate;
 mod launchd;
 mod pair;
 mod sessions;
@@ -59,6 +63,27 @@ fn main() -> Result<()> {
         "daemon" => launchd::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
+        // Hidden: the D6 inert exec gate. Spawned by a launch actor to bring a
+        // child up inertly; it either execs its target on GO or _exits without
+        // ever touching it. Machinery, never typed by a human.
+        "internal-exec-gate" => exec_gate::run_gate(rest),
+        // Hidden: a test-only gated target that fires the D6 readiness fence and
+        // touches a marker, so the exec-gate tests can fence `execve` on a real
+        // target-side effect. Machinery, never typed by a human.
+        "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
+        // Hidden: the D7 launch coordinator (the supervisor in launch mode).
+        // Spawned by the gated `codex` launcher before tmux exists; it owns the
+        // launch record and every forward mutation. Machinery.
+        "internal-codex-coordinator" => codex_coordinator::run_coordinator(rest),
+        // Hidden: the D7 launch custodian. Armed before `tmux new-session` with
+        // independent cleanup authority. Machinery.
+        "internal-codex-custodian" => codex_custodian::run_custodian(rest),
+        // Hidden: one bounded D7 recovery sweep (stale pendings → failed;
+        // failed+incomplete+dead-custodian → replacement custodian). Machinery.
+        "internal-codex-sweep" => codex_custodian::run_sweep(rest),
+        // Hidden: the D7 late-host preflight gate — validate the launch record +
+        // take a lease, or cleanup-only refuse. Machinery.
+        "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),

@@ -379,6 +379,7 @@ fn classify(outcome: std::io::Result<protocol::proc::RunOutcome>) -> TmuxAnswer 
             status,
             stdout,
             stderr,
+            ..
         }) => {
             if status.success() {
                 TmuxAnswer::Ok(String::from_utf8_lossy(&stdout).into_owned())
@@ -449,6 +450,7 @@ mod tests {
             status: std::process::ExitStatus::from_raw(code << 8),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
         })
     }
 

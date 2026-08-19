@@ -91,7 +91,7 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
                 let mut gone_streak = 0u32;
                 loop {
                     std::thread::sleep(LIVENESS_POLL);
-                    match tmux::session_presence(&tmux_session) {
+                    match probe_liveness(&tmux_session, log_session_uid.as_deref()) {
                         tmux::SessionPresence::Present => gone_streak = 0,
                         // We could not look. Emphatically not an exit — this is
                         // the case that used to be indistinguishable from one,
@@ -156,6 +156,31 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
         }
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(RECONNECT_MAX);
+    }
+}
+
+/// Liveness of this supervisor's own session.
+///
+/// When a well-formed `session_uid` is known, this resolves **by uid** on the
+/// private server (the UID-atomic primitive, `protocol::tmux::owned_liveness`):
+/// a `cc-N` name that a *different* run has since reused no longer resolves for
+/// our uid, so a name-reuse race reads `Gone` and the supervisor terminates its
+/// now-dead session — where the old name-addressed `has-session` would have seen
+/// the stranger under the reused name and reported `Present` indefinitely. For a
+/// healthy session both agree (`Live` ⇒ `Present`), and an unreachable server is
+/// `Unknown` either way, so Claude's observable behavior on the healthy path is
+/// **unchanged**; only the reuse race differs. A uid-less (legacy/adopted)
+/// session keeps the exact name-addressed check it always had.
+fn probe_liveness(tmux_session: &str, session_uid: Option<&str>) -> tmux::SessionPresence {
+    match session_uid {
+        Some(uid) if protocol::uid::is_well_formed(uid) => {
+            match protocol::tmux::owned_liveness(protocol::TMUX_SOCKET_NAME, uid, None) {
+                protocol::tmux::OwnedLiveness::Live => tmux::SessionPresence::Present,
+                protocol::tmux::OwnedLiveness::Gone => tmux::SessionPresence::Gone,
+                protocol::tmux::OwnedLiveness::Unknown(why) => tmux::SessionPresence::Unknown(why),
+            }
+        }
+        _ => tmux::session_presence(tmux_session),
     }
 }
 
@@ -1330,6 +1355,35 @@ mod tests {
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;
     use std::process::Command;
+
+    /// A uid-less or malformed-uid session keeps the exact name-addressed
+    /// liveness check it always had (Claude's legacy/adopted path is
+    /// byte-for-byte unchanged). The uid-atomic path's *mechanism* — a reused
+    /// `cc-N` name reading `Gone` for the old uid, and an epoch change refusing —
+    /// is proven against real tmux in `protocol::tmux`'s `owned_liveness` tests;
+    /// here we only pin that the fallback is chosen when no well-formed uid is
+    /// present, using a name that resolves to `Gone` on any server.
+    #[test]
+    fn probe_liveness_falls_back_to_the_name_check_without_a_wellformed_uid() {
+        let ghost = "cc-nonexistent-supervisor-probe";
+        // No uid: name-addressed check. On a machine with no such session this
+        // is Gone (or Unknown if tmux is unreachable) — never a panic, and
+        // identical to calling `session_presence` directly.
+        let via_helper = probe_liveness(ghost, None);
+        let via_name = tmux::session_presence(ghost);
+        assert_eq!(
+            std::mem::discriminant(&via_helper),
+            std::mem::discriminant(&via_name),
+            "uid-less probe must equal the plain name check"
+        );
+        // A malformed uid is not a routing tag, so it also falls back.
+        let via_bad_uid = probe_liveness(ghost, Some("not-a-ulid"));
+        assert_eq!(
+            std::mem::discriminant(&via_bad_uid),
+            std::mem::discriminant(&via_name),
+            "a malformed uid falls back to the name check"
+        );
+    }
 
     // ------------------------------------------------- actuation phases
     //
