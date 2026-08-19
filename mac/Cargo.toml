@@ -5,6 +5,7 @@ members = [
     "cc-hook",
     "ccd",
     "codeconnect",
+    "codex-broker",
     "demo-daemon",
     "push-core",
     "push-relay",
