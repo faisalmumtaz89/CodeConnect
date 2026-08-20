@@ -537,6 +537,13 @@ fn classify_short_cluster(shorts: &str) -> Token {
 /// and `codex --psp resume` dispatches Resume through a (known) hidden global
 /// flag. Unknown flags never reach this stage: they are refused up front by the
 /// allowlist, so they can neither ride through nor smuggle a subcommand.
+///
+/// **This is the crate's single source of truth for the grammar.** It has two
+/// callers: [`start`] (the user's `codeconnect codex` argv) and
+/// [`crate::codex_host::parse_host_args`] (the passthrough the coordinator hands
+/// the wrapper's TUI). The host deliberately reuses it rather than restating it —
+/// it does not trust its caller, and a second copy of the grammar could drift on
+/// which flags CodeConnect owns.
 pub fn validate_codex_argv(args: &[String]) -> Result<(), CodexRefusal> {
     let mut i = 0;
 

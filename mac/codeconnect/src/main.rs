@@ -12,6 +12,7 @@
 mod codex;
 mod codex_coordinator;
 mod codex_custodian;
+mod codex_host;
 mod codex_launch;
 mod daemon;
 mod exec_gate;
@@ -84,6 +85,11 @@ fn main() -> Result<()> {
         // Hidden: the D7 late-host preflight gate — validate the launch record +
         // take a lease, or cleanup-only refuse. Machinery.
         "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
+        // Hidden: the Codex session host (Phase 2e). Runs inside a tmux pane;
+        // launches the app-server, serves the broker in front of it, and spawns
+        // the interactive TUI against the broker. Machinery, never typed by a
+        // human — the coordinator spawns it (2e-2b).
+        "internal-codex-host" => codex_host::run_host(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),

@@ -260,12 +260,14 @@ name = "codeconnect"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "codex-broker",
  "libc",
  "protocol",
  "qrcode",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "toml",
 ]
 
