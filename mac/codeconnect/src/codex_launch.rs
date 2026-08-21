@@ -127,6 +127,22 @@ pub struct ChildEntry {
     pub nonce: String,
     #[serde(default)]
     pub argv_hash: String,
+    /// For a **host** child: the identity of the host that recorded it — i.e. the
+    /// lease holder at the time. `None` for the custodian, which the exec gate
+    /// records and which belongs to no lease.
+    ///
+    /// This is what lets a lease takeover **retire** the previous host's children
+    /// instead of deleting them. Deleting was the obvious move and it was wrong in
+    /// the one case that matters: the predecessor's children can still be running,
+    /// and those entries are the only identities by which anyone could stop them.
+    /// Removing the record to keep readiness honest would have destroyed the
+    /// cleanup evidence for exactly the processes most likely to be orphaned.
+    ///
+    /// So both properties are kept by scoping rather than pruning: readiness counts
+    /// only entries recorded by the CURRENT lease holder, while teardown consumes
+    /// every entry, retired ones included.
+    #[serde(default)]
+    pub recorded_by: Option<ProcessIdentity>,
 }
 
 /// A spawn the owner has fsynced its **intent** to make, before the child
@@ -243,6 +259,61 @@ pub struct LaunchRecord {
     /// cleanup/liveness to A instead of re-establishing it from the socket.
     #[serde(default)]
     pub server_a: Option<ServerA>,
+    /// The **disposable run dir** the coordinator chose for this launch's
+    /// `codex-host` — the directory the host creates, binds its three sockets
+    /// under, and removes on every exit path of its own.
+    ///
+    /// It is recorded here for the case the host's own sweep cannot cover: the
+    /// host never ran (the pane died before it got that far) or was SIGKILLed
+    /// mid-session, so nothing in-process is left to remove the directory. The
+    /// custodian reads this field and sweeps the path after it kills the session
+    /// ([`crate::codex_custodian`]). Written **before** `tmux new-session`, so a
+    /// coordinator that dies with tmux in flight still leaves the path findable.
+    ///
+    /// `None` on a launch that never reached the new-session step, and on records
+    /// written before this field existed (`serde(default)`).
+    #[serde(default)]
+    pub run_dir: Option<String>,
+    /// Whether a `codex-host` presenting this launch's nonce ever **reached the
+    /// admission gate** — set on arrival, whether it was then admitted or
+    /// refused, and never cleared.
+    ///
+    /// It answers one question the lease cannot, because the lease is current
+    /// state and this is history: *did the pane ever actually run?* That settles
+    /// the `new_session_indeterminate` guard. The flag means "tmux's answer was
+    /// never heard, so a session may still be coming" — but a host only exists
+    /// because a pane ran it, so a host at the gate is proof the session already
+    /// arrived.
+    ///
+    /// Deliberately set on **arrival** rather than on admission, because the case
+    /// that actually occurs is a refusal: a host whose launch already failed is
+    /// turned away and its pane dies, taking the session with it. Keying this on
+    /// admission would miss exactly that, and the custodian would then find an
+    /// absence it must refuse to believe and stay armed forever.
+    ///
+    /// Guarded by the nonce: only a host presenting THIS launch's nonce sets it,
+    /// so a stranger cannot retire another launch's safety rule.
+    #[serde(default)]
+    pub host_reached_gate: bool,
+    /// The identity of the host that reached the gate — written on ARRIVAL, before
+    /// the gate renders its verdict, and deliberately **never cleared**, unlike
+    /// [`Self::host_lease`] which `to_failed` drops.
+    ///
+    /// The lease answers "who holds this launch right now"; this answers "which
+    /// process was the host", and cleanup needs the second long after the first is
+    /// gone. It is what lets the custodian conclude a session is over when no
+    /// server A was ever persisted: the pane's command IS the host, so a host
+    /// proven dead means tmux has already reaped the pane and the session with it.
+    #[serde(default)]
+    pub host_identity: Option<ProcessIdentity>,
+    /// Whether a custodian ever positively observed this launch's session present.
+    ///
+    /// Durable rather than process-local: a custodian that dies and is replaced by
+    /// the sweep would otherwise forget, and the replacement — arriving after the
+    /// session is already gone — would be stuck refusing to believe an absence
+    /// that its predecessor had already explained. Written once, never cleared.
+    #[serde(default)]
+    pub session_observed: bool,
     pub children: Vec<ChildEntry>,
     pub created_ms: i64,
 }
@@ -591,6 +662,10 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         host_lease: None,
         pending_spawn: None,
         server_a: None,
+        run_dir: None,
+        host_reached_gate: false,
+        host_identity: None,
+        session_observed: false,
         children: Vec::new(),
         created_ms: new.created_ms,
     };
@@ -606,6 +681,356 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
 pub fn record_server_a(_lock: &LaunchLock, uid: &str, a: ServerA) -> Result<()> {
     let mut record = load(uid)?;
     record.server_a = Some(a);
+    store_atomic(uid, &record)
+}
+
+/// Append a child the **host** spawned — the app-server or the TUI — to the
+/// record, so cleanup can address it by a proven identity instead of a guess.
+///
+/// The same [`ChildEntry`] shape the D6 exec gate writes for the custodian, and
+/// for the same reason: `(pid, birth, pgid)` is the only thing this codebase will
+/// signal. A pid alone is a number the kernel may have handed to somebody else by
+/// the time cleanup runs; the birth identity is what makes it an identity.
+///
+/// **Fenced.** Only the host holding this launch's lease may append, and only
+/// while the launch is still `pending`. Without that, any process that could read
+/// the uid could add entries the custodian will later SIGKILL by pid — turning the
+/// cleanup path into a way to have arbitrary processes killed. The lease is
+/// already the thing that says which host owns this launch, so it is the thing
+/// asked here.
+///
+/// Idempotent per role: a repeated write for a role already recorded with the same
+/// identity is a no-op, so a retry cannot grow the list.
+pub fn record_host_child(
+    _lock: &LaunchLock,
+    uid: &str,
+    by: &ProcessIdentity,
+    mut entry: ChildEntry,
+) -> Result<()> {
+    let mut record = load(uid)?;
+    // The launch must still be live: a terminal record's children are history, and
+    // appending to it would hand the custodian identities it never authorised.
+    if record.state != LaunchState::Pending {
+        bail!(
+            "refusing to record {}: the launch is {:?}, not pending",
+            entry.role,
+            record.state
+        );
+    }
+    match &record.host_lease {
+        Some(lease) if &lease.identity == by => {}
+        Some(_) => bail!(
+            "refusing to record {}: the lease belongs to a different host",
+            entry.role
+        ),
+        None => bail!(
+            "refusing to record {}: no host holds this launch's lease",
+            entry.role
+        ),
+    }
+    // Stamped with the recording host, which is the lease holder verified above.
+    entry.recorded_by = Some(*by);
+    if record
+        .children
+        .iter()
+        .any(|c| c.role == entry.role && c.identity == entry.identity)
+    {
+        return Ok(());
+    }
+    record.children.push(entry);
+    store_atomic(uid, &record)
+}
+
+/// Note that a custodian positively observed this launch's session present.
+///
+/// Durable so a replacement custodian inherits the observation. Idempotent.
+pub fn note_session_observed(_lock: &LaunchLock, uid: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.session_observed {
+        return Ok(());
+    }
+    record.session_observed = true;
+    store_atomic(uid, &record)
+}
+
+/// The two roles a host spawns, which cleanup must be able to address.
+pub const HOST_CHILD_ROLES: [&str; 2] = ["app-server", "tui"];
+
+/// Whether BOTH host children are recorded **by the current lease holder**.
+///
+/// The coordinator asks this before committing `ready`: a session declared ready
+/// must be one whose processes cleanup can name. A host that could not record a
+/// child aborts, so in practice this is true by the time the legs are serving —
+/// asking anyway is what makes that a checked invariant rather than an assumption
+/// about ordering in another process.
+///
+/// Scoped to the live lease, because entries recorded by a **displaced** host are
+/// deliberately retained (see [`ChildEntry::recorded_by`]): they are still cleanup
+/// evidence, but they say nothing about whether the current host has come up, and
+/// counting them would let a successor's readiness be satisfied by its
+/// predecessor's processes.
+pub fn host_children_recorded(record: &LaunchRecord) -> bool {
+    let Some(lease) = record.host_lease.as_ref() else {
+        return false;
+    };
+    HOST_CHILD_ROLES.iter().all(|role| {
+        record
+            .children
+            .iter()
+            .any(|c| &c.role == role && c.recorded_by == Some(lease.identity))
+    })
+}
+
+/// The file the host writes inside its run dir, immediately after the exclusive
+/// `mkdir`, naming the launch the directory belongs to.
+pub const RUN_DIR_OWNER_FILE: &str = "owner";
+
+/// The marker's contents: uid and launch nonce, one per line.
+fn owner_marker_body(uid: &str, launch_nonce: &str) -> String {
+    format!("{uid}\n{launch_nonce}\n")
+}
+
+/// Write the run dir's ownership marker. `create_new`, 0600, once.
+///
+/// **Why a marker at all, when the name already encodes the launch.** The name
+/// does not identify anything: [`crate::codex_coordinator::choose_run_dir`]
+/// filters and truncates, so it is a many-to-one derivation, and two launches can
+/// land on one name. That leaves two holes a name-based check cannot see. A
+/// coordinator could accept host A's *serving sockets* as evidence for host B's
+/// lease and commit a false `ready`; and the custodian could delete a directory
+/// belonging to a different, live launch, because it deletes a **recorded name**
+/// that its own host may never have created — the path is recorded before the
+/// directory exists.
+///
+/// The marker closes both by making the directory self-identifying. It is written
+/// by the process that owns the directory, immediately after the `mkdir` that
+/// proved it fresh, so the two facts are inseparable: the `mkdir` is the adoption
+/// fence, and this file is the **deletion warrant** and the readiness binding.
+///
+/// `create_new` rather than a plain write: nothing may already be there, and if
+/// something is, that is not our directory and the launch must not proceed.
+pub fn write_owner_marker(run_dir: &std::path::Path, uid: &str, launch_nonce: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // Bound what a marker can contain, so a legitimate one can never reach the
+    // reader's size ceiling (see `MARKER_FIELD_MAX`). Also refuse a newline, which
+    // would forge a second field and make the two-line body ambiguous.
+    for (what, value) in [("uid", uid), ("launch nonce", launch_nonce)] {
+        if value.is_empty() || value.len() > MARKER_FIELD_MAX {
+            bail!(
+                "refusing to write an owner marker: the {what} is {} bytes, which must be \
+                 1..={MARKER_FIELD_MAX}",
+                value.len()
+            );
+        }
+        if value.contains('\n') {
+            bail!("refusing to write an owner marker: the {what} contains a newline");
+        }
+    }
+    let path = run_dir.join(RUN_DIR_OWNER_FILE);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("creating the run-dir owner marker {}", path.display()))?;
+    file.write_all(owner_marker_body(uid, launch_nonce).as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync of {}", path.display()))?;
+    // `OpenOptionsExt::mode` is a CREATION mode and the umask can only REMOVE bits
+    // from it — it never adds any. So the risk is not a permissive umask widening
+    // 0600; it is a restrictive one narrowing it, and more to the point the mode is
+    // only honoured when this call actually creates the file. Setting the mode
+    // explicitly afterwards makes 0600 the state of the file rather than a request
+    // made at creation time.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("hardening {} to 0600", path.display()))?;
+    Ok(())
+}
+
+/// What a run dir's ownership marker says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerVerdict {
+    /// Read successfully and it names this launch.
+    Ours,
+    /// Read successfully and it names a different launch, or the directory has no
+    /// marker at all. Someone else's, or never claimed — never ours to use or
+    /// delete.
+    Foreign,
+    /// Nothing is there to judge.
+    Absent,
+    /// The question could not be ANSWERED — a transient read error, a symlink at
+    /// the marker's name, an oversized file. Distinct from `Foreign` on purpose:
+    /// "I could not read it" is not "it belongs to someone else", and collapsing
+    /// the two would let one unlucky `EINTR` convince a coordinator that its own
+    /// run dir is a stranger's, or convince a custodian that it owes nothing on a
+    /// directory it is actually responsible for.
+    Unknown(String),
+}
+
+/// The most a marker may be. It holds a uid and a nonce; anything larger is not a
+/// marker this code wrote, and reading it unbounded would let a same-uid process
+/// hand the reader an endless file.
+///
+/// Read as `LIMIT + 1` so that hitting the ceiling is DETECTABLE. A plain
+/// `take(LIMIT)` reports EOF at the limit, which is indistinguishable from a file
+/// that simply ended — so an oversized file would be compared as if it were
+/// complete content, come out unequal, and be filed as `Foreign`. For the
+/// custodian that verdict means "not mine, nothing owed", i.e. a directory this
+/// launch owns abandoned on the strength of a truncated read.
+const MARKER_READ_LIMIT: u64 = 4096;
+
+/// The caps a marker's own fields must obey at WRITE time.
+///
+/// The read limit only helps if a legitimate marker can never approach it —
+/// otherwise "too big to be ours" and "ours" overlap, and the overflow rule would
+/// start rejecting real markers. A uid is a 26-character ULID and a nonce is 32
+/// hex characters; these caps are generous multiples of both, and they are checked
+/// when writing so the invariant is established rather than assumed.
+const MARKER_FIELD_MAX: usize = 128;
+
+/// Read `run_dir`'s ownership marker and say what it proves.
+///
+/// Opened with `O_NOFOLLOW` and read under [`MARKER_READ_LIMIT`]: the marker sits
+/// inside a directory other processes running as this uid can write to, so it is
+/// read as untrusted input — a symlink planted at its name must not redirect the
+/// read, and a large file must not be swallowed whole.
+pub fn run_dir_marker(run_dir: &std::path::Path, uid: &str, launch_nonce: &str) -> MarkerVerdict {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::symlink_metadata(run_dir) {
+        Ok(meta) if meta.is_dir() => {}
+        // A non-directory at the run dir's name is not a run dir at all.
+        Ok(_) => return MarkerVerdict::Foreign,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return MarkerVerdict::Absent,
+        Err(err) => return MarkerVerdict::Unknown(format!("stat of the run dir failed: {err}")),
+    }
+    let path = run_dir.join(RUN_DIR_OWNER_FILE);
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        // `O_NOFOLLOW` so a symlink at the marker's name cannot redirect the read,
+        // and `O_NONBLOCK` so a FIFO cannot make the OPEN itself block forever —
+        // opening a FIFO for reading waits for a writer, which would hang the
+        // custodian inside a cleanup pass with no deadline on it.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        // No marker in a directory that exists: claimed by nobody, or by something
+        // that is not us. Either way not ours.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return MarkerVerdict::Foreign,
+        // ELOOP from O_NOFOLLOW: a symlink is sitting where the marker should be.
+        // That is a planted file, but it is also not a READ we managed to do, so it
+        // is reported as unanswerable rather than as a foreign claim.
+        Err(err) => return MarkerVerdict::Unknown(format!("opening the marker failed: {err}")),
+    };
+    // Regular files only, established through the OPEN FD rather than the path, so
+    // the thing checked is the thing read. A FIFO, device or directory at that name
+    // is not a marker this code wrote — and it is also not a readable claim, so it
+    // is `Unknown` rather than `Foreign`: it says nothing about who owns the dir.
+    match file.metadata() {
+        Ok(meta) if meta.is_file() => {}
+        Ok(meta) => {
+            return MarkerVerdict::Unknown(format!(
+                "the marker is not a regular file ({:?})",
+                meta.file_type()
+            ))
+        }
+        Err(err) => return MarkerVerdict::Unknown(format!("stat of the marker failed: {err}")),
+    }
+    let mut body = Vec::new();
+    // LIMIT + 1: the extra byte exists solely so its arrival can be detected.
+    if let Err(err) = file.take(MARKER_READ_LIMIT + 1).read_to_end(&mut body) {
+        return MarkerVerdict::Unknown(format!("reading the marker failed: {err}"));
+    }
+    if body.len() as u64 > MARKER_READ_LIMIT {
+        // Overflow is UNKNOWN, never `Foreign`. A truncated read compared as if it
+        // were whole would disown a directory this launch owns.
+        return MarkerVerdict::Unknown(format!(
+            "the marker exceeds {MARKER_READ_LIMIT} bytes, so it could not be read whole"
+        ));
+    }
+    match String::from_utf8(body) {
+        Ok(body) if body == owner_marker_body(uid, launch_nonce) => MarkerVerdict::Ours,
+        // Read successfully, and it is not ours.
+        Ok(_) => MarkerVerdict::Foreign,
+        // Not text at all: unreadable as a claim, so unanswerable.
+        Err(_) => MarkerVerdict::Unknown("the marker is not valid UTF-8".into()),
+    }
+}
+
+/// Note that a host presenting `expected_nonce` reached the admission gate.
+///
+/// History, not state: written before the gate renders its verdict, because a
+/// **refused** host is exactly the case that matters — it is turned away and its
+/// pane dies, and this flag is then the only durable trace that the pane ran at
+/// all. Nonce-guarded so a host that does not belong to this launch cannot set
+/// it, and idempotent so the common path costs no write.
+///
+/// **Not best-effort.** An earlier contract said the caller must not fail
+/// admission over this, on the reasoning that a missing flag only makes the
+/// custodian more conservative. That is true in isolation and wrong in context:
+/// every refusal path below this call ends by DESTROYING the launch's session, so
+/// a host that arrived, was refused, and tore the session down without leaving
+/// this flag hands the custodian an absence it cannot explain — and, with no
+/// server A recorded, no way ever to conclude the session is over. The caller
+/// therefore fails closed, which costs a refused launch and nothing else, because
+/// this is written before anything has been created or destroyed.
+pub fn note_host_reached_gate(
+    _lock: &LaunchLock,
+    uid: &str,
+    expected_nonce: &str,
+    host: &ProcessIdentity,
+) -> Result<ArrivalNote> {
+    let mut record = load(uid)?;
+    if record.launch_nonce != expected_nonce {
+        // NOT recorded: this host does not belong to the launch the record
+        // describes, so its arrival cannot be written as that launch's evidence.
+        // The caller must not proceed to any destructive verdict on the strength
+        // of an arrival that was never durably noted.
+        return Ok(ArrivalNote::NonceMismatch);
+    }
+    if record.host_reached_gate && record.host_identity == Some(*host) {
+        return Ok(ArrivalNote::Recorded);
+    }
+    record.host_reached_gate = true;
+    // The IDENTITY lands here too, on arrival, not on successful admission.
+    //
+    // A refused host is exactly the case cleanup later has to reason about: its
+    // pane dies taking the session with it, and if no server A was ever persisted,
+    // this identity is the only durable thing left that can prove the session is
+    // over. Recording it only on admission would leave the refused, no-A launch
+    // with arrival evidence but nothing to prove death by — armed until reboot.
+    record.host_identity = Some(*host);
+    store_atomic(uid, &record)?;
+    Ok(ArrivalNote::Recorded)
+}
+
+/// Whether [`note_host_reached_gate`] durably recorded the arrival.
+///
+/// `NonceMismatch` means it deliberately did NOT: the presenting host does not
+/// belong to the launch the record describes, so no arrival evidence exists for
+/// the session this uid names. A caller holding a pane must park rather than
+/// proceed to any verdict whose refusal path destroys that session — destroying
+/// it here would recreate the evidence-less disappearance this flag prevents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrivalNote {
+    Recorded,
+    NonceMismatch,
+}
+
+/// Persist the **run dir** the coordinator chose for this launch's `codex-host`.
+///
+/// Durable-before-mutation (Principle B), exactly like
+/// [`mark_new_session_starting`] and for the same reason: the path is written and
+/// fsynced *before* `tmux new-session` puts a host in a pane, so a coordinator
+/// that dies with tmux in flight still leaves a record naming the directory the
+/// custodian must sweep. Recording it afterwards would leave the one window where
+/// a directory exists that nobody can name.
+pub fn record_run_dir(_lock: &LaunchLock, uid: &str, run_dir: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    record.run_dir = Some(run_dir.to_string());
     store_atomic(uid, &record)
 }
 
@@ -675,6 +1100,8 @@ pub fn cas_custodian_with_child(
         pgid,
         nonce: nonce.to_string(),
         argv_hash: argv_hash.to_string(),
+        // The custodian belongs to no host lease.
+        recorded_by: None,
     });
     record.pending_spawn = None;
     store_atomic(uid, &record)
@@ -956,6 +1383,14 @@ pub fn admit_host(
             ));
         }
     }
+    // A takeover RETIRES the previous host's children; it does not delete them.
+    // Retirement is implicit — the entries keep their `recorded_by`, which no
+    // longer matches the new lease, so `host_children_recorded` stops counting them
+    // while `teardown_children` still consumes them. See `ChildEntry::recorded_by`
+    // for why deleting would have thrown away the cleanup evidence for precisely
+    // the processes most likely to be orphaned.
+    //
+    // (`host_identity` was already written on arrival, before this verdict.)
     record.host_lease = Some(HostLease {
         identity: *host,
         pgid: host_pgid,
@@ -982,6 +1417,16 @@ pub enum SweepAction {
     /// `failed{cleanup:pending}` whose custodian is gone: the caller should
     /// spawn a replacement custodian to finish cleanup.
     NeedsReplacementCustodian { uid: String },
+    /// The record could not be **examined** this pass — its lock was held, or it
+    /// could not be read. Nothing was done to it and nothing is known about it.
+    ///
+    /// Reported rather than silently skipped, because "I looked and there was
+    /// nothing to do" and "I could not look" are the same empty result otherwise,
+    /// and the caller has no way to tell a completed sweep from a blind one. A
+    /// held lock is transient and expected (a host taking its admission lease
+    /// holds it for a moment), so the right response is another pass — but that
+    /// only happens if the caller is told.
+    Skipped { uid: String, why: String },
 }
 
 /// Whether a recorded identity is gone (a missing one counts as gone for sweep
@@ -1016,11 +1461,32 @@ pub fn recovery_sweep() -> Vec<SweepAction> {
         }
         // Take the lock per record; a live custodian holding it means the record
         // is owned — skip rather than block the sweep.
-        let Ok(Some(lock)) = LaunchLock::try_acquire(&uid) else {
-            continue;
+        let lock = match LaunchLock::try_acquire(&uid) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                actions.push(SweepAction::Skipped {
+                    uid,
+                    why: "the launch lock was held by another holder".into(),
+                });
+                continue;
+            }
+            Err(err) => {
+                actions.push(SweepAction::Skipped {
+                    uid,
+                    why: format!("the launch lock could not be taken: {err}"),
+                });
+                continue;
+            }
         };
-        let Ok(record) = load(&uid) else {
-            continue;
+        let record = match load(&uid) {
+            Ok(record) => record,
+            Err(err) => {
+                actions.push(SweepAction::Skipped {
+                    uid,
+                    why: format!("the record could not be read: {err}"),
+                });
+                continue;
+            }
         };
         match &record.state {
             LaunchState::Pending => {
@@ -1434,8 +1900,17 @@ mod tests {
         create_pending(&lock, new).unwrap();
         drop(lock);
         let actions = recovery_sweep();
-        assert!(actions.contains(&SweepAction::FailedStalePending { uid: "sw1".into() }));
-        assert!(actions.contains(&SweepAction::NeedsReplacementCustodian { uid: "sw1".into() }));
+        // Dump what the sweep actually decided: a bare `contains` failure cannot
+        // distinguish "it examined the record and declined" from "it never got to
+        // look" (a `Skipped`), which are different bugs.
+        assert!(
+            actions.contains(&SweepAction::FailedStalePending { uid: "sw1".into() }),
+            "the sweep should have failed the orphaned pending; it decided: {actions:?}"
+        );
+        assert!(
+            actions.contains(&SweepAction::NeedsReplacementCustodian { uid: "sw1".into() }),
+            "…and flagged a replacement custodian; it decided: {actions:?}"
+        );
         assert!(matches!(
             load("sw1").unwrap().state,
             LaunchState::Failed { .. }
@@ -1545,6 +2020,25 @@ mod tests {
             .unwrap(),
             Admission::Admitted
         );
+        // Host A records both of its children, as an admitted host does.
+        for role in HOST_CHILD_ROLES {
+            record_host_child(
+                &lock,
+                "lease1",
+                &host_a,
+                ChildEntry {
+                    role: role.to_string(),
+                    identity: fake_identity(0x3FFF_FF00),
+                    pgid: 0x3FFF_FF00,
+                    nonce: "cafef00d".into(),
+                    argv_hash: String::new(),
+                    recorded_by: None,
+                },
+            )
+            .unwrap();
+        }
+        assert!(host_children_recorded(&load("lease1").unwrap()));
+
         // …and since its identity is Gone, another host takes it over.
         let host_b = fake_identity(0x3FFF_FFF1);
         assert_eq!(
@@ -1558,6 +2052,60 @@ mod tests {
             )
             .unwrap(),
             Admission::Admitted
+        );
+
+        // THE TAKEOVER INVARIANT, both halves. Host B must not inherit host A's
+        // roles for READINESS, and host A's entries must SURVIVE for cleanup.
+        //
+        // The two pull in opposite directions and only scoping satisfies both.
+        // Counting the stale roles would let a successor's `ready` rest on evidence
+        // about a displaced host's processes; deleting them would throw away the
+        // only identities by which those very processes — the ones most likely to
+        // be orphaned, since their host was displaced — could ever be stopped.
+        let after = load("lease1").unwrap();
+        assert!(
+            !host_children_recorded(&after),
+            "a lease takeover must not leave the predecessor's roles satisfying readiness: {:?}",
+            after.children
+        );
+        for role in HOST_CHILD_ROLES {
+            let retired = after
+                .children
+                .iter()
+                .find(|c| c.role == role)
+                .unwrap_or_else(|| panic!("the predecessor's {role} entry must be RETAINED"));
+            assert_eq!(
+                retired.recorded_by,
+                Some(host_a),
+                "and must still name the host that recorded it, so cleanup can act on it"
+            );
+        }
+
+        // Once host B records its own roles, readiness is satisfied again — by B's
+        // entries, alongside A's retired ones.
+        for role in HOST_CHILD_ROLES {
+            record_host_child(
+                &lock,
+                "lease1",
+                &host_b,
+                ChildEntry {
+                    role: role.to_string(),
+                    identity: fake_identity(0x3FFF_FE00),
+                    pgid: 0x3FFF_FE00,
+                    nonce: "cafef00d".into(),
+                    argv_hash: String::new(),
+                    recorded_by: None,
+                },
+            )
+            .unwrap();
+        }
+        let after_b = load("lease1").unwrap();
+        assert!(host_children_recorded(&after_b));
+        assert_eq!(
+            after_b.children.len(),
+            5,
+            "custodian + A's two retired + B's two live: nothing was discarded: {:?}",
+            after_b.children
         );
 
         // Now install a LIVE incumbent (us): a different host must be refused —

@@ -884,6 +884,84 @@ fn kill_pid(pid: i32, signal: &str) {
         .status();
 }
 
+// ------------------------------------------------- the D7 admission the host runs
+//
+// Since 2e-2b the host presents itself to the D7 launch gate before it creates
+// anything: it takes an exclusive `host_lease` on a `pending` launch record, or
+// refuses and exits 75 having made nothing. That is a real gate, not a formality,
+// so a harness that drives the host directly has to give it a launch to belong to.
+//
+// This writes the minimum admissible record by hand rather than through
+// `codex_launch` (an integration test links the binary, not a library). The
+// coordinator and custodian slots are set to **this test process**, which is
+// genuinely alive, because admission requires both to be proven live — pointing
+// them at a fabricated pid would be refused, correctly.
+
+/// The launch identity a host harness presents to the gate.
+struct Launch {
+    home: PathBuf,
+    uid: String,
+    nonce: String,
+}
+
+impl Launch {
+    /// Write a fresh admissible `pending` record under a private
+    /// `CODECONNECT_HOME`, and return the identity to pass to the host.
+    fn admissible(tag: &str) -> Launch {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = short_tmp_path(&format!("{tag}home"));
+        let uid = format!("01JQXV9K7B{:016X}", nanos as u64);
+        let nonce = format!("{:016x}{:016x}", nanos as u64, std::process::id());
+        let me = protocol::proc_identity::current_identity().expect("read our own identity");
+        let boot = protocol::proc_identity::boot_identity().expect("read the boot identity");
+        let now = protocol::proc_identity::monotonic_now_nanos().expect("read the monotonic clock");
+        let identity = serde_json::json!({
+            "pid": me.pid,
+            "birth": { "start_sec": me.birth.start_sec, "start_usec": me.birth.start_usec },
+        });
+        let record = serde_json::json!({
+            "schema": 1,
+            "launch_nonce": nonce,
+            "uid": uid,
+            "session_name": "cc-host-harness",
+            // Both guardians are THIS process: alive, so admission's
+            // proven-live requirements are satisfied honestly.
+            "coordinator": identity,
+            "custodian": identity,
+            "boot": { "boot_sec": boot.boot_sec, "boot_usec": boot.boot_usec },
+            // Far enough out that a slow test machine cannot expire the launch
+            // mid-run, which would surface as a confusing admission refusal.
+            "deadline_monotonic_nanos": now + 600_000_000_000u64,
+            "state": "Pending",
+            "cleanup": "Pending",
+            "new_session_indeterminate": false,
+            "host_lease": serde_json::Value::Null,
+            "pending_spawn": serde_json::Value::Null,
+            "server_a": serde_json::Value::Null,
+            "run_dir": serde_json::Value::Null,
+            "children": [],
+            "created_ms": 0,
+        });
+        let dir = home.join("sessions").join(&uid);
+        std::fs::create_dir_all(&dir).expect("create the session dir");
+        std::fs::write(
+            dir.join("launch.json"),
+            serde_json::to_vec_pretty(&record).expect("serialize the record"),
+        )
+        .expect("write the launch record");
+        Launch { home, uid, nonce }
+    }
+}
+
+impl Drop for Launch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
 /// The host, spawned under a PTY via `script(1)` so the real codex TUI sees a tty.
 ///
 /// Its stdin is held open (never dropped) so an immediate stdin-EOF cannot kill
@@ -914,7 +992,7 @@ struct PtyHost {
 }
 
 impl PtyHost {
-    fn spawn(codeconnect: &str, codex: &Path, run: &str, home: &str) -> PtyHost {
+    fn spawn(codeconnect: &str, codex: &Path, run: &str, home: &str, launch: &Launch) -> PtyHost {
         use std::os::unix::process::CommandExt;
         // BSD `script`: `script [-q] file [command ...]` runs the command directly
         // (no shell) with a PTY as its stdio. `/dev/null` discards the typescript.
@@ -924,6 +1002,14 @@ impl PtyHost {
                 "/dev/null",
                 codeconnect,
                 "internal-codex-host",
+                // The D7 launch identity the host presents to the gate before it
+                // creates anything (2e-2b).
+                "--uid",
+                &launch.uid,
+                "--nonce",
+                &launch.nonce,
+                "--tmux-socket",
+                "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("codex path is utf-8"),
                 "--run-dir",
@@ -942,6 +1028,7 @@ impl PtyHost {
                 "true",
             ])
             .env("TERM", "xterm-256color")
+            .env("CODECONNECT_HOME", &launch.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1061,7 +1148,7 @@ fn tagged_pids_best_effort(tag: &str) -> Vec<i32> {
 
 /// Bring a live session up and return the PTY host once the broker has proven a
 /// real codex client attached through it. Shared by both live gates.
-fn live_session_up(codex: &Path, run: &HostRunDir, home: &ShortTmpDir) -> PtyHost {
+fn live_session_up(codex: &Path, run: &HostRunDir, home: &ShortTmpDir, launch: &Launch) -> PtyHost {
     let broker_log = run.join("broker.log");
     let as_stderr = run.join("appserver.stderr.log");
     for s in [
@@ -1074,7 +1161,7 @@ fn live_session_up(codex: &Path, run: &HostRunDir, home: &ShortTmpDir) -> PtyHos
 
     // The freshly built `codeconnect` binary this test crate was compiled against.
     let codeconnect = env!("CARGO_BIN_EXE_codeconnect");
-    let host = PtyHost::spawn(codeconnect, codex, run.as_str(), home.as_str());
+    let host = PtyHost::spawn(codeconnect, codex, run.as_str(), home.as_str(), launch);
 
     // The host launches `codex --remote unix://<tui.sock>`. `Tui: forward (...)`
     // appears in broker.log ONLY when a real client completed the WS-over-UDS
@@ -1107,7 +1194,8 @@ fn tui_attaches_through_broker_and_teardown_leaves_nothing() {
 
     let run = HostRunDir::new("run");
     let home = ShortTmpDir::new("home").expect("mk codex home");
-    let mut host = live_session_up(&codex, &run, &home);
+    let launch = Launch::admissible("live");
+    let mut host = live_session_up(&codex, &run, &home, &launch);
 
     println!(
         "CRUX PASS — a real codex client handshaked tui.sock and a request was forwarded \
@@ -1159,7 +1247,8 @@ fn live_app_server_death_is_session_fatal() {
 
     let run = HostRunDir::new("fatal");
     let home = ShortTmpDir::new("fatalhome").expect("mk codex home");
-    let mut host = live_session_up(&codex, &run, &home);
+    let launch = Launch::admissible("live");
+    let mut host = live_session_up(&codex, &run, &home, &launch);
     let tag = run.as_str().to_string();
 
     // The real app-server, identified by the `--listen unix://<run>/as.sock` it

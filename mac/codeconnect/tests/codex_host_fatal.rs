@@ -198,6 +198,84 @@ while True:
     path
 }
 
+// ------------------------------------------------- the D7 admission the host runs
+//
+// Since 2e-2b the host presents itself to the D7 launch gate before it creates
+// anything: it takes an exclusive `host_lease` on a `pending` launch record, or
+// refuses and exits 75 having made nothing. That is a real gate, not a formality,
+// so a harness that drives the host directly has to give it a launch to belong to.
+//
+// This writes the minimum admissible record by hand rather than through
+// `codex_launch` (an integration test links the binary, not a library). The
+// coordinator and custodian slots are set to **this test process**, which is
+// genuinely alive, because admission requires both to be proven live — pointing
+// them at a fabricated pid would be refused, correctly.
+
+/// The launch identity a host harness presents to the gate.
+struct Launch {
+    home: PathBuf,
+    uid: String,
+    nonce: String,
+}
+
+impl Launch {
+    /// Write a fresh admissible `pending` record under a private
+    /// `CODECONNECT_HOME`, and return the identity to pass to the host.
+    fn admissible(tag: &str) -> Launch {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = short_tmp_path(&format!("{tag}home"));
+        let uid = format!("01JQXV9K7B{:016X}", nanos as u64);
+        let nonce = format!("{:016x}{:016x}", nanos as u64, std::process::id());
+        let me = protocol::proc_identity::current_identity().expect("read our own identity");
+        let boot = protocol::proc_identity::boot_identity().expect("read the boot identity");
+        let now = protocol::proc_identity::monotonic_now_nanos().expect("read the monotonic clock");
+        let identity = serde_json::json!({
+            "pid": me.pid,
+            "birth": { "start_sec": me.birth.start_sec, "start_usec": me.birth.start_usec },
+        });
+        let record = serde_json::json!({
+            "schema": 1,
+            "launch_nonce": nonce,
+            "uid": uid,
+            "session_name": "cc-host-harness",
+            // Both guardians are THIS process: alive, so admission's
+            // proven-live requirements are satisfied honestly.
+            "coordinator": identity,
+            "custodian": identity,
+            "boot": { "boot_sec": boot.boot_sec, "boot_usec": boot.boot_usec },
+            // Far enough out that a slow test machine cannot expire the launch
+            // mid-run, which would surface as a confusing admission refusal.
+            "deadline_monotonic_nanos": now + 600_000_000_000u64,
+            "state": "Pending",
+            "cleanup": "Pending",
+            "new_session_indeterminate": false,
+            "host_lease": serde_json::Value::Null,
+            "pending_spawn": serde_json::Value::Null,
+            "server_a": serde_json::Value::Null,
+            "run_dir": serde_json::Value::Null,
+            "children": [],
+            "created_ms": 0,
+        });
+        let dir = home.join("sessions").join(&uid);
+        std::fs::create_dir_all(&dir).expect("create the session dir");
+        std::fs::write(
+            dir.join("launch.json"),
+            serde_json::to_vec_pretty(&record).expect("serialize the record"),
+        )
+        .expect("write the launch record");
+        Launch { home, uid, nonce }
+    }
+}
+
+impl Drop for Launch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
 /// The host under test, spawned directly (the fake TUI needs no tty).
 ///
 /// **Spawned into its own process group** (`process_group(0)`, so its pgid is its
@@ -246,11 +324,19 @@ enum LeaderState {
 impl Host {
     /// Spawn `internal-codex-host` with a complete charter. `run_dir` must NOT
     /// exist — the host creates and owns it.
-    fn spawn(codex: &Path, run_dir: &str, codex_home: &str) -> Host {
+    fn spawn(codex: &Path, run_dir: &str, codex_home: &str, launch: &Launch) -> Host {
         use std::os::unix::process::CommandExt;
         let child = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
             .args([
                 "internal-codex-host",
+                // The D7 launch identity the host presents to the gate before it
+                // creates anything (2e-2b).
+                "--uid",
+                &launch.uid,
+                "--nonce",
+                &launch.nonce,
+                "--tmux-socket",
+                "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("utf-8"),
                 "--run-dir",
@@ -266,6 +352,7 @@ impl Host {
                 "--hooks-enabled",
                 "true",
             ])
+            .env("CODECONNECT_HOME", &launch.home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -482,7 +569,8 @@ fn app_server_death_is_session_fatal() {
     );
     let fake = write_fake_codex(&fake_home.path, &python);
 
-    let mut host = Host::spawn(&fake, run.as_str(), codex_home.as_str());
+    let launch = Launch::admissible("fatal");
+    let mut host = Host::spawn(&fake, run.as_str(), codex_home.as_str(), &launch);
 
     // Bring-up is complete once the TUI has been spawned against tui.sock.
     let tui_marker = format!("--remote unix://{}/tui.sock", run.as_str());
@@ -583,9 +671,16 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
     std::fs::write(&fake, script).expect("write dying fake");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).expect("chmod");
 
+    let launch = Launch::admissible("direct");
     let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
         .args([
             "internal-codex-host",
+            "--uid",
+            &launch.uid,
+            "--nonce",
+            &launch.nonce,
+            "--tmux-socket",
+            "/tmp/cc-host-harness-no-server.sock",
             "--codex",
             fake.to_str().expect("utf-8"),
             "--run-dir",
@@ -601,6 +696,7 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
             "--hooks-enabled",
             "true",
         ])
+        .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
         .output()
         .expect("run the host");
@@ -660,7 +756,8 @@ fn signal_during_bringup_leaks_nothing() {
     std::fs::write(&fake, script).expect("write hanging fake");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).expect("chmod");
 
-    let mut host = Host::spawn(&fake, run.as_str(), codex_home.as_str());
+    let launch = Launch::admissible("fatal");
+    let mut host = Host::spawn(&fake, run.as_str(), codex_home.as_str(), &launch);
 
     // Wait until the app-server child exists — i.e. we are inside the bounded
     // socket wait, which is exactly the window a signal used to be able to orphan.
@@ -709,9 +806,16 @@ fn an_existing_run_dir_is_refused() {
     // so a path that does not even exist is the sharper probe.
     let fake = PathBuf::from("/nonexistent/codex");
 
+    let launch = Launch::admissible("direct");
     let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
         .args([
             "internal-codex-host",
+            "--uid",
+            &launch.uid,
+            "--nonce",
+            &launch.nonce,
+            "--tmux-socket",
+            "/tmp/cc-host-harness-no-server.sock",
             "--codex",
             fake.to_str().expect("utf-8"),
             "--run-dir",
@@ -727,6 +831,7 @@ fn an_existing_run_dir_is_refused() {
             "--hooks-enabled",
             "true",
         ])
+        .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
         .output()
         .expect("run the host");

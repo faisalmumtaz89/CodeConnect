@@ -39,10 +39,23 @@
 //! construction — a same-uid attacker can already `ptrace`, signal, or replace the
 //! binaries this host execs, so no filesystem check here would be a boundary
 //! against it. What the host actually relies on is: a **trusted parent path**
-//! (the caller passes a fresh path under its own 0700 session dir — the host does
-//! not validate the parent chain, which the coordinator (2e-2b) owns) plus a
-//! non-hostile same-uid environment. Within that premise, freshness is enforced by
-//! the host itself, and nothing else about the caller is trusted.
+//! (the host does not validate the parent chain, which the coordinator owns) plus
+//! a non-hostile same-uid environment. Within that premise, freshness is enforced
+//! by the host itself, and nothing else about the caller is trusted.
+//!
+//! 2e-2b settled what that parent chain actually is, and it is not what this
+//! paragraph originally assumed ("a fresh path under the caller's own 0700 session
+//! dir"). The coordinator passes a path directly under **`/tmp`**, which is
+//! world-writable and sticky, because a home-rooted run dir spends the `SUN_LEN`
+//! budget on the length of the user's home path
+//! ([`crate::codex_coordinator::RUN_DIR_PREFIX`] carries the full reasoning). So
+//! the parent chain is *not* private, and the exclusive `mkdir` below is
+//! correspondingly load-bearing rather than belt-and-braces: it is what turns a
+//! squatted name into a refused launch instead of an adopted directory. The
+//! coordinator additionally checks, before it reads any socket under that
+//! directory as bring-up evidence, that the directory is owned by this uid and is
+//! 0700 — a check this module cannot make for itself, since it only ever sees the
+//! directory it just created.
 //!
 //! **2. No fallible step runs between a spawn and the teardown guard.**
 //! Everything that can fail without a child — signal handlers, the log files, the
@@ -104,10 +117,15 @@
 //! tasks that ignored their cancellation point hang the process forever — after
 //! teardown had already honestly reported that it could not stop them.
 //!
-//! This chunk is STANDALONE: a new `internal-codex-host` subcommand, runnable and
-//! live-validated on its own. Wiring it into the coordinator/tmux and un-gating
-//! `codex` is the next chunk (2e-2b) — the gate, coordinator and custodian are
-//! untouched here.
+//! ## How this host is reached (2e-2b)
+//!
+//! The coordinator puts it in a tmux pane: `tmux new-session … -- <codeconnect>
+//! internal-codex-host --uid … --nonce … --tmux-socket … --codex … --run-dir …`.
+//! Before anything exists — no run dir, no sockets, no children — it presents
+//! itself to the D7 launch gate ([`crate::codex_custodian::late_host_admission`])
+//! and is admitted or refused; a refused host destroys its own uid's session and
+//! exits having created nothing. `codeconnect codex` itself is still GATED and
+//! refuses, so nothing but the tests reaches any of this yet.
 
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
@@ -128,7 +146,11 @@ use tokio::task::JoinHandle;
 /// macOS); binding a longer path fails `path must be shorter than SUN_LEN`. Every
 /// socket the host binds is asserted against this before use, so a long run dir
 /// fails loudly at bring-up rather than deep inside a bind.
-const SUN_LEN_LIMIT: usize = 104;
+///
+/// `pub(crate)` because the coordinator sizes the run dir it hands this host
+/// against the same number ([`crate::codex_coordinator::choose_run_dir`]); two
+/// copies of a kernel constant is one copy too many.
+pub(crate) const SUN_LEN_LIMIT: usize = 104;
 
 /// Bounded budget for waiting on a child's socket / the broker's listeners.
 const BRINGUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -172,6 +194,46 @@ const STDERR_EXCERPT_LIMIT: usize = 4096;
 /// caller is the coordinator and every one of these means "this pane did not run".
 const EX_HOST_FATAL: i32 = 70;
 
+/// The lock budget for writing a spawned child's identity into the record.
+///
+/// Short on purpose: it is the only stretchable part of the spawn→record window,
+/// during which a SIGKILLed host would leave an unrecorded live child.
+///
+/// **Why the D6 exec gate is not used here**, which would close the window at the
+/// root by spawning inert and releasing only after the identity is durable — it
+/// is the right shape and it does not fit these two children:
+///
+///   1. the gate hardcodes `stdin/stdout/stderr` to `/dev/null`, and the target
+///      inherits that across `execve`. The TUI must inherit the **pane's tty** (it
+///      is the session the user drives) and the app-server's stderr must reach the
+///      held log file the bring-up error path reads back;
+///   2. the gate `setpgid(0, 0)`s every child. That is wanted for the app-server
+///      and is exactly what must NOT happen to the TUI, which has to stay in the
+///      pane's foreground process group or lose the keyboard (measured);
+///   3. the race that ends this session `wait()`s on `tokio::process::Child`
+///      handles with `kill_on_drop`; the gate owns a `std::process::Child` and
+///      hands back only an identity;
+///   4. the gate's readiness fence is blocking, and this is an async orchestrator.
+///
+/// Making it fit means giving the gate stdio and process-group knobs and an async
+/// handle — a change to shared D6 machinery in service of one caller. So the
+/// window is minimised here and the residual is a documented pre-ungate gate.
+const RECORD_LOCK_BUDGET: Duration = Duration::from_secs(1);
+
+/// Exit code when the D7 gate refused this host admission to its launch:
+/// `EX_TEMPFAIL`, matching what `internal-codex-host-preflight` already returns
+/// for the same refusal so one meaning has one number. It is not a failure of the
+/// session — there is no session — it is "this launch is not mine to run".
+///
+/// **What is guaranteed is the no-artifact invariant, not this status.** A refusal
+/// destroys the launch's own tmux session, and this host is inside its pane — so
+/// the pane's hangup can reach this process before it returns, and the observed
+/// status is then a signal rather than 75. Callers must therefore not treat 75 as
+/// the signature of a refusal. What holds on every ordering is the thing that
+/// matters: a host that was not admitted created no run directory, no sockets and
+/// no children, because admission runs before any of them exist.
+const EX_HOST_NOT_ADMITTED: i32 = 75;
+
 /// Exit code when the host itself was signalled (SIGTERM/SIGINT/SIGHUP). Shares
 /// the TUI's status namespace — see [`EX_HOST_FATAL`].
 const EX_HOST_SIGNALLED: i32 = 130;
@@ -190,7 +252,12 @@ pub fn run_host(args: &[String]) -> ! {
 }
 
 /// Everything the host needs to bring a session up, parsed from argv.
-struct HostArgs {
+///
+/// `pub(crate)` only so [`parse_host_args`] can be, for the coordinator's
+/// differential test. Every **field** stays private to this module, so the type
+/// is a receipt that a charter parsed and nothing else: no other module can read
+/// a value out of it.
+pub(crate) struct HostArgs {
     /// The codex binary to exec for BOTH the app-server and the TUI.
     ///
     /// The host takes this on trust and does **not** re-resolve, native-check or
@@ -204,6 +271,15 @@ struct HostArgs {
     run_dir: PathBuf,
     /// The isolated `CODEX_HOME` passed to both the app-server and the TUI.
     codex_home: PathBuf,
+    /// The launch this host belongs to, and the nonce proving it was invited.
+    /// Both are required: they are what [`admit`] presents to the D7 gate, and a
+    /// host that cannot name its launch cannot be admitted to it.
+    uid: String,
+    nonce: String,
+    /// The tmux socket the launch lives on. Needed only on the **refusal** path,
+    /// where a host that was not admitted destroys its own uid's session rather
+    /// than leaving a pane running for a launch that is already over.
+    tmux_socket: String,
     /// The durable launch-policy fingerprint the broker enforces.
     fingerprint: LaunchFingerprint,
     /// Passthrough args appended to the TUI invocation, after `--`. Vetted
@@ -223,17 +299,185 @@ struct Paths {
 impl Paths {
     fn under(run_dir: &Path) -> Self {
         Self {
-            as_sock: run_dir.join("as.sock"),
-            tui_sock: run_dir.join("tui.sock"),
-            ccd_sock: run_dir.join("ccd.sock"),
+            as_sock: run_dir.join(SOCKET_NAMES[0]),
+            tui_sock: run_dir.join(SOCKET_NAMES[1]),
+            ccd_sock: run_dir.join(SOCKET_NAMES[2]),
             broker_log: run_dir.join("broker.log"),
             as_stderr: run_dir.join("appserver.stderr.log"),
         }
     }
 }
 
+/// Every socket basename the host binds under its run dir, in the order
+/// [`Paths`] lays them out.
+///
+/// It is a named constant rather than three literals because the **coordinator**
+/// sizes the run dir against the longest of them
+/// ([`crate::codex_coordinator::choose_run_dir`]), and that sizing is only sound
+/// while this list is the whole list. With literals, adding a fourth leg with a
+/// longer name would leave the coordinator's SUN_LEN guard quietly
+/// under-measuring while every test stayed green; with this, the coordinator's
+/// test reads the list and fails.
+///
+/// Log files are deliberately absent: `SUN_LEN` constrains sockets alone.
+pub(crate) const SOCKET_NAMES: [&str; 3] = ["as.sock", "tui.sock", "ccd.sock"];
+
+/// Present this process to the D7 launch gate. `Ok(None)` means admitted and the
+/// caller proceeds; `Ok(Some(code))` means refused and the caller must exit with
+/// that code having created nothing.
+///
+/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the 2c
+/// primitive, called rather than reimplemented, so the lease rules (exclusive,
+/// taken over only from a *proven gone* incumbent) have exactly one
+/// implementation. A refusal also destroys this uid's own tmux session, which is
+/// what stops the refused pane from simply sitting there: the session should not
+/// exist, and this host is inside it.
+/// What the host must do about an admission outcome.
+///
+/// A separate, pure decision so the branch that must NOT exit is testable without
+/// a real forever-sleep — the whole point of that branch is that it never returns.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HostAction {
+    /// Admitted: bring the session up.
+    Proceed,
+    /// The gate answered no. Arrival is durable, so exiting is safe.
+    Exit(i32),
+    /// The gate could not be REACHED, so nothing durable records this pane. Stay
+    /// alive and inert, keeping the session observable.
+    ParkInert(String),
+}
+
+/// Map an admission outcome to the host's action.
+///
+/// The distinction that matters is **not** admitted-vs-refused; it is whether
+/// ARRIVAL was durably recorded. A refusal is a decision made after the record
+/// says this pane ran, and ending the pane then is fine — the custodian has what
+/// it needs. A failure to reach the gate at all is different in kind: nothing says
+/// the pane ever existed, and the pane IS the session's last observable trace when
+/// creation was indeterminate, so ending it strands cleanup until reboot.
+///
+/// An `Err` lands with the pre-arrival case for the same reason: a gate whose
+/// outcome could not be established has not told us that arrival is durable.
+pub(crate) fn admission_action(
+    outcome: Result<crate::codex_custodian::HostAdmission>,
+) -> HostAction {
+    use crate::codex_custodian::HostAdmission;
+    match outcome {
+        Ok(HostAdmission::Admitted) => HostAction::Proceed,
+        Ok(HostAdmission::CleanupOnly { reason, cleanup }) => {
+            HostAction::Exit(refused_exit_code(&reason, &format!("{cleanup:?}")))
+        }
+        Ok(HostAdmission::ParkInert { reason }) => HostAction::ParkInert(reason),
+        Err(err) => HostAction::ParkInert(format!(
+            "the admission gate could not be evaluated: {err:#}"
+        )),
+    }
+}
+
+/// The refusal exit code. A function so [`admission_action`] stays total and the
+/// reason/cleanup are threaded to the caller's message rather than lost.
+fn refused_exit_code(_reason: &str, _cleanup: &str) -> i32 {
+    EX_HOST_NOT_ADMITTED
+}
+
+/// Present this process to the D7 launch gate. `Ok(None)` means admitted and the
+/// caller proceeds; `Ok(Some(code))` means refused and the caller must exit with
+/// that code having created nothing. It may also never return — see
+/// [`HostAction::ParkInert`].
+///
+/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the 2c
+/// primitive, called rather than reimplemented, so the lease rules have exactly
+/// one implementation. A refusal also destroys this uid's own tmux session, which
+/// is what stops the refused pane from simply sitting there: the session should
+/// not exist, and this host is inside it.
+fn admit(args: &HostArgs) -> Result<Option<i32>> {
+    let outcome =
+        crate::codex_custodian::late_host_admission(&args.uid, &args.nonce, &args.tmux_socket);
+    // Keep the detail for the operator-facing line before the outcome is reduced.
+    let detail = match &outcome {
+        Ok(crate::codex_custodian::HostAdmission::CleanupOnly { reason, cleanup }) => {
+            Some(format!("{reason}; session cleanup: {cleanup:?}"))
+        }
+        _ => None,
+    };
+    match admission_action(outcome) {
+        HostAction::Proceed => Ok(None),
+        HostAction::Exit(code) => {
+            eprintln!(
+                "codex-host: refused admission to launch {} ({}); created nothing",
+                args.uid,
+                detail.as_deref().unwrap_or("no reason given")
+            );
+            Ok(Some(code))
+        }
+        HostAction::ParkInert(reason) => park_inert(args, &reason),
+    }
+}
+
+/// Stay alive, inert and visible, forever.
+///
+/// Reached only when the gate could not be REACHED, before arrival was durable.
+/// Nothing exists to clean up — no run dir, no sockets, no children — and nothing
+/// will be created, so this pane is inert in every sense except one that matters:
+/// it keeps the tmux session **observable**.
+///
+/// That is the whole point. On a launch whose `new-session` outcome was
+/// indeterminate, this pane is the only evidence the session was ever created.
+/// Exiting would take the session with it and leave the custodian an absence it
+/// cannot distinguish from "the late session never arrived" — armed until the next
+/// reboot. Parking instead lets the custodian's census find the uid **Present**,
+/// persist that sighting (before it kills anything), and reach a terminal cleanup.
+///
+/// **Termination is the custodian's, not ours.** This loop has no deadline
+/// because it must not have one: a self-imposed exit would recreate the very
+/// disappearance it exists to prevent. The host dies when the session is killed.
+/// The residual, stated plainly: a pane parked with no custodian left alive sits
+/// there visibly until someone kills it — a wedge a human can see in
+/// `tmux ls`, which is the point. A silent one is what this replaces.
+fn park_inert(args: &HostArgs, reason: &str) -> ! {
+    // One line, to the pane's tty — best-effort: `eprintln!` PANICS if the stderr
+    // write fails, and a panic aborts under the release profile, which would make
+    // this pane disappear — the exact evidence-less vanishing parking prevents.
+    // The diagnostic must never be able to defeat the park.
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr(),
+        "codex-host: could not reach the launch gate for {} ({reason}). Nothing was \
+         created. Holding this pane open so the session stays visible to cleanup — \
+         it will end when the session is killed.",
+        args.uid
+    );
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
 fn run_host_inner(args: &[String]) -> Result<i32> {
     let parsed = parse_host_args(args)?;
+
+    // --- The D7 gate, run by THIS process, before anything exists ------------
+    //
+    // Ordering is the whole point and it is deliberately the first fallible thing
+    // after argv: no run dir, no sockets, no children, and not even a tokio
+    // runtime yet. A host that is not admitted must leave the world exactly as it
+    // found it.
+    //
+    // It runs **in the host process itself** rather than in a short-lived
+    // preflight child, because the lease is an identity: `admit_host` CASes THIS
+    // pid+birth into the record's `host_lease`, and the custodian later reasons
+    // about whether the lease holder is still alive. A preflight child's identity
+    // dies with the child, so its lease would name a corpse and every later
+    // liveness question about "the host" would answer wrongly.
+    //
+    // The case this exists for is the timed-out `new-session`: the coordinator
+    // recorded the launch `failed{indeterminate}` and moved on, and then a frozen
+    // tmux server finally runs the queued pane command. Admission finds a record
+    // that is no longer `pending` and refuses, so that late pane never brings a
+    // real Codex session up for a launch that was already declared over.
+    if let Some(code) = admit(&parsed)? {
+        return Ok(code);
+    }
+
     // The one place codeconnect pays for an async runtime: the host is the
     // long-lived orchestrator, not the fast-exec shim (see the module doc).
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -279,8 +523,17 @@ fn run_host_inner(args: &[String]) -> Result<i32> {
 /// against [`crate::codex::validate_codex_argv`], the **same** 2a reserved-argv
 /// grammar `codeconnect codex` enforces. The host does not trust its caller: a
 /// refusal aborts before anything is created or spawned.
-fn parse_host_args(args: &[String]) -> Result<HostArgs> {
+///
+/// `pub(crate)` so the coordinator's unit tests can feed the pane argv it builds
+/// straight back into this parser. That differential check is the only thing that
+/// actually holds the two sides together: the coordinator writes this charter and
+/// the host reads it, in different processes, and a disagreement between them
+/// would otherwise surface as a pane that opens and immediately dies.
+pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     let mut codex: Option<PathBuf> = None;
+    let mut uid: Option<String> = None;
+    let mut nonce: Option<String> = None;
+    let mut tmux_socket: Option<String> = None;
     let mut run_dir: Option<PathBuf> = None;
     let mut codex_home: Option<PathBuf> = None;
     let mut approval_policy: Option<String> = None;
@@ -294,6 +547,9 @@ fn parse_host_args(args: &[String]) -> Result<HostArgs> {
         let flag = arg.as_str();
         match flag {
             "--codex" => set_once(&mut codex, flag, PathBuf::from(value_of(&mut it, flag)?))?,
+            "--uid" => set_once(&mut uid, flag, value_of(&mut it, flag)?)?,
+            "--nonce" => set_once(&mut nonce, flag, value_of(&mut it, flag)?)?,
+            "--tmux-socket" => set_once(&mut tmux_socket, flag, value_of(&mut it, flag)?)?,
             "--run-dir" => set_once(&mut run_dir, flag, PathBuf::from(value_of(&mut it, flag)?))?,
             "--codex-home" => set_once(
                 &mut codex_home,
@@ -306,16 +562,7 @@ fn parse_host_args(args: &[String]) -> Result<HostArgs> {
             }
             "--sandbox" => set_once(&mut sandbox, flag, value_of(&mut it, flag)?)?,
             "--hooks-enabled" => {
-                let raw = value_of(&mut it, flag)?;
-                let parsed = match raw.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    // Never a silent default: an unrecognised spelling would
-                    // otherwise decide hook trust by accident.
-                    other => bail!(
-                        "--hooks-enabled must be exactly \"true\" or \"false\", got {other:?}"
-                    ),
-                };
+                let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
                 set_once(&mut hooks_enabled, flag, parsed)?;
             }
             // Everything past the boundary belongs to the TUI, verbatim.
@@ -337,6 +584,9 @@ fn parse_host_args(args: &[String]) -> Result<HostArgs> {
         codex: codex.context("--codex <path> is required")?,
         run_dir: run_dir.context("--run-dir <path> is required")?,
         codex_home: codex_home.context("--codex-home <path> is required")?,
+        uid: uid.context("--uid <value> is required (the host must name its launch)")?,
+        nonce: nonce.context("--nonce <value> is required (the host must prove it was invited)")?,
+        tmux_socket: tmux_socket.context("--tmux-socket <value> is required")?,
         fingerprint: LaunchFingerprint {
             approval_policy: approval_policy
                 .context("--approval-policy <value> is required (the host applies no default)")?,
@@ -356,6 +606,12 @@ fn parse_host_args(args: &[String]) -> Result<HostArgs> {
 /// (which could smuggle terminal escapes into a log or an error message, or a NUL
 /// into a path), and not itself flag-shaped.
 ///
+/// `pub(crate)` because the **coordinator** builds this host's charter and parses
+/// its own with the same two helpers (2e-2b). One grammar, one place: a
+/// coordinator that validated its `--codex` / `--sandbox` / `--hooks-enabled`
+/// arguments more loosely than the host validates the same arguments would be a
+/// second grammar that can disagree with this one.
+///
 /// The shape check closes a swallowing hole. Without it `--codex --run-dir` sets
 /// `codex` to the literal `"--run-dir"` and eats the flag, and — the case that
 /// actually bites — `--codex --` sets `codex` to `"--"` and **destroys the
@@ -363,7 +619,7 @@ fn parse_host_args(args: &[String]) -> Result<HostArgs> {
 /// Those inputs happen to fail closed today via a later missing-flag error, but by
 /// accident of the error paths rather than by construction. No legitimate value
 /// here starts with `-`: all seven are paths or policy words.
-fn value_of(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
+pub(crate) fn value_of(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
     let value = it
         .next()
         .with_context(|| format!("{flag} requires a value"))?;
@@ -382,9 +638,24 @@ fn value_of(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String>
     Ok(value.clone())
 }
 
+/// The `--hooks-enabled` spelling, shared with the coordinator that writes it.
+///
+/// Never a silent default: an unrecognised spelling would otherwise decide hook
+/// trust by accident, and a coordinator that accepted `yes` while the host
+/// accepted only `true` would be a disagreement about a security dimension
+/// discovered at the pane rather than at the charter.
+pub(crate) fn parse_hooks_enabled(raw: &str) -> Result<bool> {
+    match raw {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => bail!("--hooks-enabled must be exactly \"true\" or \"false\", got {other:?}"),
+    }
+}
+
 /// Record a flag's value, refusing a second occurrence — a duplicate is an
-/// ambiguous charter, not a last-wins override.
-fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<()> {
+/// ambiguous charter, not a last-wins override. `pub(crate)` for the same
+/// one-grammar reason as [`value_of`].
+pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<()> {
     if slot.is_some() {
         bail!("{flag} was given more than once");
     }
@@ -418,8 +689,17 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
     // Scope, stated honestly: this covers the final component only. The host does
     // not validate the PARENT chain of `--run-dir`, so a same-uid attacker who
     // controls a parent directory can still redirect where the dir is made — and
-    // therefore what the sweep below removes. The caller passes a path under its
-    // own 0700 session dir, which is where that chain is owned.
+    // therefore what the sweep below removes.
+    //
+    // And the parent is **not** the caller's own 0700 session dir, as this used to
+    // say. The coordinator passes a path directly under world-writable, sticky
+    // `/tmp`, because a home-rooted run dir spends the SUN_LEN budget on the length
+    // of the user's home path (see
+    // `crate::codex_coordinator::RUN_DIR_PREFIX`). So this `mkdir` is not one
+    // safeguard among several — it is the load-bearing one: it turns a squatted
+    // name into a refused launch rather than an adopted directory. The marker
+    // written immediately below is what then makes the directory say whose it is,
+    // since its NAME cannot (the derivation is many-to-one).
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&args.run_dir)
@@ -430,6 +710,26 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
                 args.run_dir.display()
             )
         })?;
+
+    // Claim it, immediately and durably. The `mkdir` above proves the directory is
+    // fresh; this says WHOSE it is, and the two must be inseparable — the marker is
+    // written before anything else can exist inside, by the only process that could
+    // have created it.
+    //
+    // It is what lets the other two actors stop trusting the NAME. The coordinator
+    // will not accept sockets under this directory as evidence for a launch the
+    // marker does not name, and the custodian will not delete a directory whose
+    // marker is not its own — both real hazards, because the run-dir derivation is
+    // many-to-one and the custodian deletes a path recorded before it existed.
+    //
+    // A failure here removes the directory and aborts: the invariant is that a host
+    // which does not come up leaves nothing behind, and a claimed-but-unmarked
+    // directory is worse than none — nobody could later prove whose it was.
+    if let Err(err) = crate::codex_launch::write_owner_marker(&args.run_dir, &args.uid, &args.nonce)
+    {
+        let _ = std::fs::remove_dir_all(&args.run_dir);
+        return Err(err);
+    }
 
     let outcome = run_session(&args, &paths, &mut signals).await;
 
@@ -757,6 +1057,12 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(as_stderr_for_child))
+        // Its OWN process group, so cleanup can address it — and anything it
+        // forks — by a recorded pgid rather than hoping a signal aimed elsewhere
+        // reaches it. Safe here precisely because this child has no tty: its
+        // stdio is null/null/logfile, so being a background process group costs
+        // it nothing. (The TUI is the opposite case; see its spawn below.)
+        .process_group(0)
         // Safety net beneath the explicit teardown: even an unwind or an
         // early return that somehow skipped `teardown` cannot leak this child.
         .kill_on_drop(true)
@@ -771,6 +1077,17 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         }
     };
 
+    // Record the app-server's identity BEFORE anything depends on the session
+    // being up. The coordinator commits `ready` once the broker's legs are bound,
+    // which is strictly after this point, so a session that is ever declared ready
+    // has a recorded, signalable app-server behind it.
+    if let Err(err) = record_child(args, "app-server", &appserver) {
+        // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
+        // it, so returning here drops it through `kill_on_drop`. A session whose
+        // processes cleanup cannot name is the leak this chunk exists to remove.
+        return Outcome::Fatal(format!("{err:#}"));
+    }
+
     let mut session = Session::new(appserver, sink);
     let outcome = drive(&mut session, args, paths, signals, &mut as_stderr_file).await;
     session.teardown().await;
@@ -778,6 +1095,58 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         Ok(outcome) => outcome,
         Err(err) => Outcome::Fatal(format!("{err:#}")),
     }
+}
+
+/// Record a spawned child's `(pid, birth, pgid)` in the launch record.
+///
+/// **Launch-fatal, not best-effort.** An earlier version logged and continued, on
+/// the reasoning that the host's own teardown stops these children anyway. That
+/// reasoning is exactly backwards: this record exists for the paths where the host
+/// does NOT get to run teardown — SIGKILL, or an abort under `panic = "abort"` —
+/// and on those paths the custodian is the only actor left. A session that comes
+/// up with an unrecorded child is one whose processes nobody can name afterwards,
+/// which is the leak this whole chunk is about. So a failure here aborts the
+/// launch: no session is better than an unreapable one.
+///
+/// A child whose birth or pgid cannot be read is an error rather than a partial
+/// entry: a `(pid, ?)` record is a bare number, and this codebase does not signal
+/// bare numbers.
+fn record_child(args: &HostArgs, role: &str, child: &Child) -> Result<()> {
+    let pid = child
+        .id()
+        .with_context(|| format!("the {role} child has already been reaped"))? as i32;
+    let (Some(birth), Some(pgid)) = (
+        protocol::proc_identity::read_birth_identity(pid),
+        protocol::proc_identity::read_pgid(pid),
+    ) else {
+        bail!("could not read {role}'s (pid {pid}) birth identity and process group");
+    };
+    let entry = crate::codex_launch::ChildEntry {
+        role: role.to_string(),
+        identity: protocol::proc_identity::ProcessIdentity { pid, birth },
+        pgid,
+        nonce: args.nonce.clone(),
+        argv_hash: String::new(),
+        // Stamped by `record_host_child` from the verified lease holder.
+        recorded_by: None,
+    };
+    let me = crate::codex_launch::require_current_identity()?;
+    // A SHORT lock wait, deliberately, because this call sits inside a window.
+    //
+    // The child is already running by the time its identity can be read, so there
+    // is an interval between the spawn and the record in which a SIGKILLed host
+    // leaves a live child nobody has written down. The interval is bounded by how
+    // long this takes, and the lock is the only part that can stretch — so it gets
+    // a tight budget rather than the five seconds the non-urgent writers use. A
+    // launch that cannot get the lock in a second is failed, which is the same
+    // fail-closed answer as any other recording failure.
+    //
+    // This narrows the window; it does not close it. Closing it needs the child
+    // spawned inert and released only after its identity is durable — see
+    // `RECORD_LOCK_BUDGET`.
+    let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, RECORD_LOCK_BUDGET)?;
+    crate::codex_launch::record_host_child(&lock, &args.uid, &me, entry)
+        .with_context(|| format!("recording {role} in the launch record"))
 }
 
 /// The session proper, run under the teardown guard so it may use `?` freely.
@@ -832,11 +1201,35 @@ async fn drive(
         .arg(format!("unix://{}", paths.tui_sock.display()))
         .args(&args.tui_args)
         .env("CODEX_HOME", &args.codex_home)
-        // Inherit stdio (the pane's tty) so this IS the session the user drives.
+        // Inherit stdio (the pane's tty) so this IS the session the user drives —
+        // and, deliberately, inherit the host's PROCESS GROUP too.
+        //
+        // The app-server below gets its own group so cleanup can `killpg` a
+        // recorded pgid. The TUI must not, and this was measured rather than
+        // assumed: with `.process_group(0)` the real codex TUI comes up with
+        // `pgid == its own pid` while the pane's terminal keeps `tpgid == the
+        // host's group` — i.e. the TUI is a BACKGROUND process group on the tty it
+        // is supposed to own. It does not get stopped (it evidently blocks
+        // SIGTTIN), so nothing looks broken from the outside: the pane renders and
+        // the broker handshake succeeds. What breaks is the user's keyboard, which
+        // keeps going to the foreground group. Making it correct would mean the
+        // host also handing over terminal control with `tcsetpgrp`, and restoring
+        // it on every exit path — real terminal-ownership machinery, for a benefit
+        // already obtained without it.
+        //
+        // Nothing is lost for cleanup: the TUI's identity is recorded as
+        // (pid, birth, pgid) like the app-server's, and the custodian signals it by
+        // that verified identity. A group kill buys nothing here anyway, since the
+        // TUI's group would be the host's own.
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))?;
+    // Recorded before the TUI is handed to the session guard, but the result is
+    // checked AFTER, so a failure aborts through the guard that already owns both
+    // children rather than leaking the one just spawned.
+    let recorded = record_child(args, "tui", &tui);
     session.tui = Some(tui);
+    recorded?;
 
     // --- Step 4: race the two children, the broker, and a host signal -------
     // Destructured so all three can be polled in one `select!`.
@@ -1308,6 +1701,12 @@ mod tests {
     /// The minimum complete charter: every required flag, no passthrough.
     fn complete(extra: &[&str]) -> Vec<String> {
         let mut parts = vec![
+            "--uid",
+            "01JQXV9K7B8N4M2P6R3T5W9YQD",
+            "--nonce",
+            "0123456789abcdef0123456789abcdef",
+            "--tmux-socket",
+            "/tmp/cc.tmux.sock",
             "--codex",
             "/usr/local/bin/codex",
             "--run-dir",
@@ -1328,6 +1727,49 @@ mod tests {
     }
 
     #[test]
+    fn a_gate_that_could_not_be_reached_parks_while_a_refusal_exits() {
+        use crate::codex_custodian::HostAdmission;
+        use protocol::tmux::CleanupOutcome;
+
+        // The distinction is NOT admitted-vs-refused. It is whether ARRIVAL was
+        // durably recorded.
+        //
+        // A refusal is a decision made after the record already says this pane ran,
+        // so ending the pane is safe — the custodian has what it needs. A gate that
+        // could not be REACHED is different in kind: nothing says the pane ever
+        // existed, and on a launch whose creation was indeterminate this pane is
+        // the session's last observable trace. Exiting there strands cleanup until
+        // the next reboot, so the host parks instead and stays visible.
+        assert_eq!(
+            admission_action(Ok(HostAdmission::Admitted)),
+            HostAction::Proceed
+        );
+        assert_eq!(
+            admission_action(Ok(HostAdmission::CleanupOnly {
+                reason: "launch is Failed, not pending".into(),
+                cleanup: CleanupOutcome::Killed,
+            })),
+            HostAction::Exit(EX_HOST_NOT_ADMITTED),
+            "a post-arrival refusal exits as before"
+        );
+        match admission_action(Ok(HostAdmission::ParkInert {
+            reason: "could not take the launch lock".into(),
+        })) {
+            HostAction::ParkInert(why) => assert!(why.contains("launch lock")),
+            other => panic!("a pre-arrival failure must PARK, not {other:?}"),
+        }
+        // An unevaluable gate is pre-arrival too: it never told us arrival is
+        // durable, so it must not be read as a refusal.
+        match admission_action(Err(anyhow!("the record could not be read"))) {
+            HostAction::ParkInert(why) => assert!(
+                why.contains("could not be evaluated"),
+                "and it must say why: {why}"
+            ),
+            other => panic!("an unevaluable gate must PARK, not {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_a_complete_charter_and_passthrough() {
         let a = parse_host_args(&complete(&["--", "--search", "hello world"])).unwrap();
         assert_eq!(a.codex, PathBuf::from("/usr/local/bin/codex"));
@@ -1344,6 +1786,12 @@ mod tests {
     #[test]
     fn parses_explicit_fingerprint_dimensions() {
         let a = parse_host_args(&argv(&[
+            "--uid",
+            "u",
+            "--nonce",
+            "n",
+            "--tmux-socket",
+            "/s",
             "--codex",
             "/c",
             "--run-dir",
@@ -1372,6 +1820,9 @@ mod tests {
         // Dropping any one of the seven required flags fails closed. Each pair is
         // the flag name and its value's position in `complete`.
         for drop in [
+            "--uid",
+            "--nonce",
+            "--tmux-socket",
             "--codex",
             "--run-dir",
             "--codex-home",
@@ -1450,6 +1901,9 @@ mod tests {
     #[test]
     fn duplicate_flags_are_refused() {
         for dup in [
+            ["--uid", "other"],
+            ["--nonce", "other"],
+            ["--tmux-socket", "/other.sock"],
             ["--codex", "/other"],
             ["--run-dir", "/other"],
             ["--codex-home", "/other"],

@@ -19,12 +19,36 @@
 //!      cleaned by the coordinator — it records `failed{cleanup:pending,
 //!      new_session_indeterminate}` and hands the late-UID problem to the
 //!      retained custodian (tmux.rs:42; no probe-then-expire).
-//!   4. Bring the wrapper up (the 2d work; here an injected step because the
-//!      `codex` command is still gated). Re-check the custodian and the deadline
-//!      before committing `ready`.
+//!   4. Bring the wrapper up and **prove** it, then re-check the custodian and
+//!      the deadline before committing `ready`.
 //!
-//! The wrapper bring-up is a seam (`CoordinatorDeps::bring_up_wrapper`) so this
-//! chunk can drive every boundary in a test without a live Codex/app-server.
+//! The wrapper bring-up stays a seam (`CoordinatorDeps::bring_up_wrapper`) so the
+//! state machine can be driven at every boundary with fakes — but the real
+//! implementation is no longer a placeholder: the pane runs the real
+//! `internal-codex-host` ([`crate::codex_host`]), and bring-up is proven from the
+//! host's own evidence rather than asserted.
+//!
+//! ## What "the wrapper is up" means here (2e-2b)
+//!
+//! The coordinator chooses a fresh, SUN_LEN-safe **run dir**, records it durably,
+//! and passes it to the host, which creates it itself with one exclusive
+//! `mkdir(0700)` and binds three sockets under it. Readiness is then two
+//! independent facts, both required:
+//!
+//!   * **Both broker legs are bound** — `tui.sock` and `ccd.sock` exist as
+//!     sockets under the run dir. That is the host's step 2 having completed, and
+//!     it is meaningful *because* the directory was provably fresh: nothing under
+//!     it can be stale or pre-planted (see [`crate::codex_host`]'s invariant 1).
+//!     The host binds both legs before it spawns the TUI, so this is the last
+//!     moment at which a failure is still the wrapper's rather than the user's.
+//!   * **The pane's session is still ours** — `owned_liveness` against the
+//!     persisted server A, i.e. the 2c UID-atomic census, not a name-addressed
+//!     `has-session`. Sockets on disk say nothing about whether the pane that made
+//!     them still exists.
+//!
+//! Neither is inferred from the other, and an *unprovable* census is never read as
+//! `Live`: a launch that cannot prove both facts inside the launch deadline fails
+//! rather than commits.
 
 use crate::codex_launch::{
     self, deadline_expiry, CleanupState, Expiry, LaunchLock, LaunchRecord, LaunchState, NewLaunch,
@@ -44,9 +68,12 @@ pub enum NewSessionOutcome {
     Failed(String),
 }
 
-/// What the wrapper bring-up reported (2d). Injected in this chunk.
+/// What the wrapper bring-up reported.
 pub enum BringUp {
+    /// The host's evidence was observed: both broker legs bound under the run
+    /// dir, and the pane's session still proven ours.
     Ready,
+    /// Bring-up could not be proven inside the deadline, or was proven lost.
     Failed(String),
 }
 
@@ -60,12 +87,23 @@ pub trait CoordinatorDeps {
     fn spawn_custodian(&mut self, uid: &str) -> Result<ProcessIdentity>;
     /// Perform `tmux new-session` (the coordinator's own forward mutation).
     fn new_session(&mut self) -> NewSessionOutcome;
-    /// Bring the wrapper up and validate its thread evidence (2d seam).
+    /// Wait for the pane's `codex-host` to prove itself up, bounded by the launch
+    /// deadline. Never fabricates readiness: see [`RealCoordinatorDeps`].
     fn bring_up_wrapper(&mut self) -> BringUp;
     /// Liveness of the armed custodian. Defaulted to the real kernel check.
     fn custodian_liveness(&self, id: &ProcessIdentity) -> Liveness {
         liveness(id)
     }
+    /// The disposable run dir the pane's host will own, recorded durably before
+    /// `tmux new-session` so the custodian can sweep it even if the host never
+    /// ran. `None` only for deps that create no pane at all — there is then no
+    /// directory to name.
+    ///
+    /// Deliberately **not** defaulted: a default of `None` is fail-open on a
+    /// cleanup-critical value, and a future dep that forgot to override it would
+    /// silently record no run dir and silently sweep nothing. Every implementor
+    /// must say which it is.
+    fn run_dir(&self) -> Option<&str>;
 }
 
 /// Everything the launcher hands the coordinator.
@@ -315,6 +353,14 @@ fn after_pending<D: CoordinatorDeps>(
     // "indeterminate" and the custodian stays armed.
     {
         let lock = LaunchLock::acquire(&uid)?;
+        // The run dir goes into the record under the SAME lock, and before the
+        // mutation, for the same Principle-B reason: the host that will own the
+        // directory is about to be started by tmux, so a coordinator killed from
+        // here on must leave a record that already names what has to be swept.
+        if let Some(run_dir) = deps.run_dir() {
+            let run_dir = run_dir.to_string();
+            codex_launch::record_run_dir(&lock, &uid, &run_dir)?;
+        }
         codex_launch::mark_new_session_starting(&lock, &uid)?;
     }
     match deps.new_session() {
@@ -376,7 +422,7 @@ fn after_pending<D: CoordinatorDeps>(
         }
     }
 
-    // Step 4: bring the wrapper up (2d) and commit. `to_ready` itself re-checks,
+    // Step 4: bring the wrapper up and commit. `to_ready` itself re-checks,
     // under the lock at commit time, that the deadline still holds and the
     // custodian is still live (Principle A / finding 7).
     match deps.bring_up_wrapper() {
@@ -432,9 +478,9 @@ fn fail(uid: &str, reason: &str, cleanup: CleanupState) -> Result<CoordinateOutc
 /// What the launcher's wait resolved to.
 ///
 /// `LaunchWait`/[`wait_on_record`] are the **launcher** half of D7 — consumed by
-/// `codeconnect codex` once it is ungated (2d), which spawns the coordinator and
-/// then only waits here. Built and unit-tested now (the machinery this chunk
-/// delivers); dispatched by the ungated launcher later.
+/// `codeconnect codex` once it is ungated, which spawns the coordinator and then
+/// only waits here. Built and unit-tested; still undispatched, because
+/// [`crate::codex::start`] refuses before it would ever spawn a coordinator.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchWait {
@@ -500,27 +546,139 @@ fn sanitize(reason: &str) -> String {
 // Real deps + the `internal-codex-coordinator` subcommand.
 // ----------------------------------------------------------------------------
 
-/// The wrapper bring-up mode. In this chunk the real wrapper (2d) is not built,
-/// so the coordinator's bring-up is a seam the launcher/tests choose: `Ready`
-/// commits, `Fail` fails the launch, `Hang` blocks forever (used by the
-/// kill-at-boundary integration test to hold the coordinator after
-/// `new-session` so it can be killed there). The default is `Fail` — a build
-/// with no wrapper must never claim `ready`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BringupMode {
-    Ready,
-    Fail,
-    Hang,
+/// The `/tmp` prefix every coordinator-chosen run dir carries.
+///
+/// **Why `/tmp` and not `~/.codeconnect/sessions/<uid>/…`** — the durable record
+/// lives under the session dir precisely because it must survive cleanup, but the
+/// run dir is the opposite kind of thing: three unix-domain sockets, and a unix
+/// socket path must be shorter than `SUN_LEN` (104 on macOS). A home-rooted path
+/// spends that budget on someone else's name: `$HOME/.codeconnect/sessions/` is 23
+/// bytes past `$HOME` before the 26-byte uid, and `CODECONNECT_HOME` is routinely
+/// pointed at a deep temp path in tests and by operators. The bind would then fail
+/// as a function of how long the user's home path is — a launch that works on one
+/// machine and not another for a reason nothing in the error names.
+///
+/// So the run dir is rooted at a fixed short prefix and sized in code
+/// ([`choose_run_dir`], which asserts the worst case rather than trusting this
+/// paragraph). The durable record is unaffected: it still lives in the session
+/// dir and still outlives the run dir it names.
+///
+/// **What is given up, stated plainly.** `/tmp` is world-writable and sticky, so
+/// the parent chain is not the "0700 dir the caller owns" that
+/// [`crate::codex_host`]'s invariant 1 originally described as its premise (that
+/// module's doc now records this change rather than contradicting it). The load-
+/// bearing protection is therefore **not** secrecy of the name: it is that the
+/// host `mkdir`s the directory **exclusively**, so a squatter who did guess the
+/// name gets the launch refused (`EEXIST`), never adopted. The failure mode is a
+/// denied launch, not a hijacked one, and sticky `/tmp` means another uid cannot
+/// remove or replace the directory once it exists.
+///
+/// The nonce in the leaf is defence in depth on top of that, and it is worth
+/// being precise about its strength rather than leaning on it: it is 64 bits of
+/// [`codex_launch::mint_nonce`], which is unguessable **when `getentropy`
+/// succeeds**. That function has a documented fallback to time+pid, justified
+/// there by the record being 0700 — reasoning that does not carry over to a
+/// world-writable path. So on that fallback the name becomes predictable, and the
+/// exclusive `mkdir` is all that is left. That is why the `mkdir` is named as the
+/// protection and the nonce is not.
+pub(crate) const RUN_DIR_PREFIX: &str = "/tmp/cch.";
+
+/// How much of the uid goes into the run-dir name, and **which end**.
+///
+/// The **last** ten characters, not the first. A ULID is a 10-character
+/// millisecond timestamp followed by 16 characters of randomness, so a prefix
+/// slug renders every session of the same era identically — measured: six
+/// distinct uids in one test run all produced `/tmp/cch.01JQXV9K7B.*`, which is
+/// not an identity, it is a clock. The tail is the random half, so two live run
+/// dirs are told apart at a glance and a directory in `ls /tmp` can be matched
+/// back to the uid in its launch record.
+const RUN_DIR_UID_CHARS: usize = 10;
+
+/// How much of the launch nonce goes into the run-dir name: 16 hex characters of
+/// the 128 bits [`codex_launch::mint_nonce`] produces. This is what makes two
+/// launches of the *same* uid choose different directories, which is what lets
+/// the host insist the directory not already exist.
+const RUN_DIR_NONCE_CHARS: usize = 16;
+
+/// The longest path the host appends to the run dir *that has to bind*, derived
+/// from the host's own list rather than restated — so a fourth leg, or a longer
+/// name, cannot leave this sizing quietly wrong. `SUN_LEN` constrains sockets
+/// alone, so the (longer) log names are correctly absent from that list.
+fn longest_host_socket_len() -> usize {
+    // +1 for the `/` separator the host's `run_dir.join(..)` adds.
+    1 + crate::codex_host::SOCKET_NAMES
+        .iter()
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0)
 }
 
-impl BringupMode {
-    fn parse(s: &str) -> BringupMode {
-        match s {
-            "ready" => BringupMode::Ready,
-            "hang" => BringupMode::Hang,
-            _ => BringupMode::Fail,
-        }
+/// How often the bring-up wait looks at the run dir.
+const BRINGUP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How often the bring-up wait censuses tmux while the sockets are still absent.
+/// The filesystem poll is nearly free; a census forks `tmux`, so it runs on a
+/// slower cadence — often enough to notice a dead pane in about a second rather
+/// than at the deadline, rarely enough not to fork thirty times a second.
+const BRINGUP_CENSUS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Choose the fresh run dir for one launch: `/tmp/cch.<uid-prefix>.<nonce-prefix>`.
+///
+/// The path is **not** created here — the host owns that, with one exclusive
+/// `mkdir(0700)`, and refuses to adopt a directory it did not create. This
+/// function only picks a name and proves it fits.
+///
+/// Both components are filtered to ASCII alphanumerics and truncated. The uid is
+/// a ULID and the nonce is hex on every real path, so neither step changes
+/// anything there; they exist because both arrive from argv, and a value carrying
+/// `/` or `..` would otherwise choose a *different* directory than the one this
+/// function claims to name — the run dir is later swept by the custodian, so a
+/// name that can escape its prefix is the one input worth refusing outright.
+///
+/// **This mapping is many-to-one, and nothing here pretends otherwise.** Filtering
+/// and truncating means distinct `(uid, nonce)` pairs can name the same directory
+/// — `a/b` and `ab` collide, as do two nonces sharing their first sixteen
+/// characters. Uniqueness is therefore NOT a property of this function, and no
+/// caller may treat the name as an identity. What actually makes a run dir safe to
+/// use is the host's **exclusive `mkdir`**: whoever gets there first owns it, and
+/// a second launch that derived the same name is refused rather than handed a
+/// directory in use. Collision is a failed launch, never a shared one.
+///
+/// Fails closed if the worst-case socket path would reach `SUN_LEN`: a launch
+/// whose sockets cannot bind must be refused at the charter, not discovered by
+/// the host as an unexplained bind failure.
+pub(crate) fn choose_run_dir(uid: &str, launch_nonce: &str) -> Result<std::path::PathBuf> {
+    /// The last `take` ASCII-alphanumeric characters, in order.
+    fn tail_slug(s: &str, take: usize) -> String {
+        let kept: Vec<char> = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        kept[kept.len().saturating_sub(take)..].iter().collect()
     }
+    fn head_slug(s: &str, take: usize) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(take)
+            .collect()
+    }
+    let uid_slug = tail_slug(uid, RUN_DIR_UID_CHARS);
+    let nonce_slug = head_slug(launch_nonce, RUN_DIR_NONCE_CHARS);
+    if uid_slug.is_empty() || nonce_slug.is_empty() {
+        anyhow::bail!(
+            "cannot name a run dir from uid {uid:?} and nonce {launch_nonce:?}: \
+             both must contain at least one alphanumeric character"
+        );
+    }
+    let path = format!("{RUN_DIR_PREFIX}{uid_slug}.{nonce_slug}");
+    // The assertion the placement decision above rests on, checked rather than
+    // asserted in prose: the longest socket the host will bind under this dir.
+    let worst = path.len() + longest_host_socket_len();
+    if worst >= crate::codex_host::SUN_LEN_LIMIT {
+        anyhow::bail!(
+            "the chosen run dir {path} would put a {worst}-byte socket path under it, \
+             and a unix socket path must be < {} (SUN_LEN)",
+            crate::codex_host::SUN_LEN_LIMIT
+        );
+    }
+    Ok(std::path::PathBuf::from(path))
 }
 
 /// The real forward-launch operations, backed by the exec gate + tmux.
@@ -529,10 +687,44 @@ pub struct RealCoordinatorDeps {
     pub session_name: String,
     pub cwd: String,
     pub tmux_socket: String,
-    pub gate_program: std::path::PathBuf,
+    /// This `codeconnect` binary. It is both the exec-gate program the custodian
+    /// is launched through and the `internal-codex-host` the pane runs — one
+    /// executable wearing two hats, so it is resolved once
+    /// (`std::env::current_exe`) and fails the launch closed when it cannot be.
+    pub self_exe: std::path::PathBuf,
     pub custodian_nonce: String,
+    /// The launch nonce, carried into the pane so the host can prove to the D7
+    /// gate that it is the host THIS launch invited.
+    pub launch_nonce: String,
     pub coordinator: ProcessIdentity,
-    pub bringup: BringupMode,
+    /// The resolved, version-pinned `codex` executable the host execs for BOTH the
+    /// app-server and the TUI. The coordinator does not re-resolve it: resolution
+    /// and the version pin are the launcher's (`codex::start`), and passing the
+    /// single canonicalised path through is what keeps the recorded, checked and
+    /// executed binaries the same file.
+    pub codex: String,
+    /// The isolated `CODEX_HOME` for this session.
+    pub codex_home: String,
+    /// The four launch-policy dimensions the broker enforces, carried verbatim to
+    /// the host. The coordinator applies no default to any of them, for the same
+    /// reason the host does not: a default here is a silent disagreement with
+    /// whatever the record says was enforced.
+    pub approval_policy: String,
+    pub approvals_reviewer: String,
+    pub sandbox: String,
+    pub hooks_enabled: bool,
+    /// The user's vetted TUI passthrough, appended after `--`.
+    pub tui_args: Vec<String>,
+    /// The run dir this launch's host will own ([`choose_run_dir`]).
+    pub run_dir: std::path::PathBuf,
+    /// Absolute `CLOCK_MONOTONIC` nanoseconds past which the launch is expired —
+    /// the same deadline the record carries, so the bring-up wait is bounded by
+    /// the launch's own budget rather than a second, disagreeing one.
+    pub deadline_monotonic_nanos: u64,
+    /// The resolved session `new_session` created, kept so `bring_up_wrapper` can
+    /// census the pane bound to **this exact** server rather than to whatever
+    /// currently answers the socket.
+    pub session_a: Option<OwnedSession>,
     /// Test-only (Principle B): hang **inside** `new_session`, after the tmux
     /// session is created and resolved but **before returning** — so the
     /// integration test can SIGKILL the coordinator while it is literally still
@@ -540,6 +732,16 @@ pub struct RealCoordinatorDeps {
     /// coordinator killed "with tmux in flight" must leave the custodian armed to
     /// clean the (late) session. Never set on a real launch.
     pub hang_in_new_session: bool,
+    /// Test-only: hang **inside** `bring_up_wrapper`, before any evidence is
+    /// looked at, so the kill-at-boundary tests can hold the coordinator after
+    /// `new-session` and SIGKILL it there. It is the exact counterpart of
+    /// `hang_in_new_session` and, like it, never set on a real launch.
+    ///
+    /// Note what is deliberately absent: there is no injection that *reports*
+    /// readiness. A bring-up that has not observed the host's evidence has no way
+    /// to say `Ready` — not in a test, not behind a flag, not by default — because
+    /// a switch that fakes readiness is a switch that can be left on.
+    pub hang_in_bringup: bool,
 }
 
 impl RealCoordinatorDeps {
@@ -550,27 +752,13 @@ impl RealCoordinatorDeps {
             vec!["-L".into(), self.tmux_socket.clone()]
         }
     }
-}
 
-impl CoordinatorDeps for RealCoordinatorDeps {
-    fn spawn_custodian(&mut self, _uid: &str) -> Result<ProcessIdentity> {
-        // Bring the custodian up inertly through the D6 gate; its identity is
-        // CAS'd into the record (atomic with the child entry) before it is
-        // released to run. Shared with the recovery sweep's rearm. (`_uid` equals
-        // `self.uid`; the real arm reads it from `self`.)
-        crate::codex_custodian::spawn_custodian_through_gate(
-            &self.uid,
-            &self.tmux_socket,
-            self.coordinator,
-            self.gate_program.clone(),
-            &self.custodian_nonce,
-        )
-    }
-
-    fn new_session(&mut self) -> NewSessionOutcome {
-        let Some(bin) = protocol::tmux::tmux_bin() else {
-            return NewSessionOutcome::Failed("tmux not found".into());
-        };
+    /// The full `tmux new-session` argv, including the pane command.
+    ///
+    /// Split out as a pure function of `self` so the exact argv — the one thing
+    /// that decides what actually runs in the pane — is asserted in a unit test
+    /// rather than inferred from a live session.
+    fn new_session_argv(&self) -> Vec<String> {
         let mut argv = self.server_args();
         argv.extend(
             [
@@ -586,13 +774,356 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             .map(|s| s.to_string()),
         );
         argv.push(format!("{}={}", protocol::ENV_SESSION_UID, self.uid));
-        // A placeholder pane stands in for the 2d `codex-host`; the custodian
-        // cleans the session up regardless of what runs inside it.
-        argv.extend(
-            ["--", "/bin/sh", "-c", "while :; do sleep 1; done"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        // Pin the launch-record root into the pane as well.
+        //
+        // The host now reads the launch record to present itself to the D7 gate,
+        // so it and this coordinator have to agree on WHERE that record lives —
+        // and without this they need not. A pane inherits the **tmux server's**
+        // environment, and the server was started by whichever client happened to
+        // reach it first, which may be a process with a different (or absent)
+        // `CODECONNECT_HOME`. The uid stamp beside it has been passed this way all
+        // along; this is the same idea applied to the other thing the pane must
+        // not have to guess.
+        //
+        // In production both resolve to `~/.codeconnect` and this changes nothing.
+        // It is load-bearing exactly where the override is in play — tests, and any
+        // operator running against a non-default root.
+        argv.push("-e".into());
+        argv.push(format!(
+            "CODECONNECT_HOME={}",
+            protocol::root_dir().display()
+        ));
+        argv.push("--".into());
+        argv.extend(self.host_argv());
+        argv
+    }
+
+    /// The pane command: this binary re-invoked as `internal-codex-host`.
+    ///
+    /// Every flag the host requires is passed explicitly — it applies no default
+    /// to any of them — and the user's vetted passthrough follows a bare `--`,
+    /// which is the boundary the host parses back.
+    fn host_argv(&self) -> Vec<String> {
+        let mut argv = vec![
+            self.self_exe.to_string_lossy().into_owned(),
+            "internal-codex-host".into(),
+            // The launch identity the host presents to the D7 gate before it
+            // creates anything. Without these a pane started late by a frozen
+            // tmux server could not tell that its launch had already failed.
+            "--uid".into(),
+            self.uid.clone(),
+            "--nonce".into(),
+            self.launch_nonce.clone(),
+            "--tmux-socket".into(),
+            self.tmux_socket.clone(),
+            "--codex".into(),
+            self.codex.clone(),
+            "--run-dir".into(),
+            self.run_dir.to_string_lossy().into_owned(),
+            "--codex-home".into(),
+            self.codex_home.clone(),
+            "--approval-policy".into(),
+            self.approval_policy.clone(),
+            "--approvals-reviewer".into(),
+            self.approvals_reviewer.clone(),
+            "--sandbox".into(),
+            self.sandbox.clone(),
+            "--hooks-enabled".into(),
+            self.hooks_enabled.to_string(),
+        ];
+        if !self.tui_args.is_empty() {
+            argv.push("--".into());
+            argv.extend(self.tui_args.iter().cloned());
+        }
+        argv
+    }
+}
+
+/// What one bring-up poll saw. Plain data, so the decision it feeds is a pure
+/// function ([`bringup_step`]) that can be exercised without a filesystem or a
+/// live tmux server.
+struct BringupObservation {
+    /// BOTH broker legs (`tui.sock`, `ccd.sock`) **accepted a connection** just
+    /// now. Never "one of them": a half-bound broker is not a boundary.
+    sockets_bound: bool,
+    /// The host that took this launch's lease is recorded and proven live, AND
+    /// both of its children are recorded with a proven identity.
+    ///
+    /// One field because they are one question — "is there a host here that
+    /// cleanup can act on?" — and neither half is worth committing without the
+    /// other: a live host whose children nobody can name is precisely the session
+    /// that leaks when it dies.
+    host_live: bool,
+    /// The run dir itself exists — i.e. the host got as far as creating it.
+    run_dir_present: bool,
+    /// The pane's session liveness, when it was censused this pass. `None` means
+    /// *not looked at*, which is not the same as "unknown" and must never be read
+    /// as evidence either way.
+    session: Option<protocol::tmux::OwnedLiveness>,
+}
+
+/// One poll's verdict.
+enum BringupStep {
+    Ready,
+    Failed(String),
+    KeepWaiting,
+}
+
+/// Decide a bring-up poll, fail-closed in both directions.
+///
+///   * `Ready` requires **both** facts positively: the legs are bound AND the
+///     census proved the session is still ours. An `Unknown` census is a reason to
+///     keep waiting, never a reason to commit — the coordinator is about to write
+///     a durable `ready` that a launcher will attach to.
+///   * `Failed` is only returned on a **proven** loss: `Gone` is the 2c census's
+///     positive absence (a successful listing without our uid, or a server
+///     identity that no longer matches A), not a probe that failed to answer.
+///     Everything else waits for the deadline, which the caller owns.
+fn bringup_step(obs: &BringupObservation) -> BringupStep {
+    use protocol::tmux::OwnedLiveness;
+    // A live HOST is a precondition of readiness, not one of the racing facts.
+    // The sockets and the pane can both look right while the process that owns
+    // them is gone: a unix socket inode outlives an abnormal exit, and the tmux
+    // session outlives its pane command by however long tmux takes to notice. The
+    // lease is the one piece of evidence that names the process itself.
+    if obs.sockets_bound && !obs.host_live {
+        return BringupStep::KeepWaiting;
+    }
+    match (&obs.session, obs.sockets_bound) {
+        (Some(OwnedLiveness::Live), true) => BringupStep::Ready,
+        (Some(OwnedLiveness::Gone), true) => BringupStep::Failed(
+            "both broker sockets were bound under the run dir, but the pane's tmux session \
+             is gone — the wrapper came up and its pane did not survive"
+                .into(),
+        ),
+        (Some(OwnedLiveness::Gone), false) => BringupStep::Failed(format!(
+            "the pane's tmux session is gone and the wrapper never bound its broker \
+             sockets (run dir {}) — the host died before it was up",
+            if obs.run_dir_present {
+                "created but empty"
+            } else {
+                "never created"
+            }
+        )),
+        // Live-but-not-yet-bound, an unprovable census, and a pass that did not
+        // census at all all mean the same thing: no verdict yet.
+        _ => BringupStep::KeepWaiting,
+    }
+}
+
+/// Whether the run dir is one **this uid** owns, private (0700), and a real
+/// directory rather than a symlink to one.
+///
+/// This is the coordinator's own check on the premise the host's readiness
+/// argument rests on. `symlink_metadata` (not `metadata`) so a link planted at
+/// the name is judged as a link and rejected, rather than followed to whatever it
+/// points at.
+///
+/// Stated at its real strength, which is the same strength the host claims for
+/// its `mkdir`: this excludes **other uids**, not a hostile process running as
+/// this one. A same-uid attacker can already replace the binaries involved, so no
+/// filesystem check here is a boundary against it.
+fn run_dir_is_ours(path: &std::path::Path, uid: &str, launch_nonce: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let shape_ok = match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            meta.is_dir()
+                && meta.uid() == unsafe { libc::geteuid() }
+                && meta.permissions().mode() & 0o777 == 0o700
+        }
+        Err(_) => false,
+    };
+    // Shape is not identity. The run-dir NAME is a many-to-one derivation, so a
+    // correctly-shaped 0700 directory at the expected path can belong to a
+    // different launch — and its sockets would then be accepted as evidence for
+    // THIS one. Combined with a host that is merely paused between taking its
+    // lease and creating its own directory, that is a false `ready`: host A's
+    // serving legs under host B's lease. The marker is what makes the directory
+    // say which launch it belongs to.
+    // Only a marker that was READ and names this launch counts. `Unknown` — an
+    // unreadable or symlinked marker — is not evidence in either direction, so it
+    // simply is not readiness; the bring-up loop looks again next pass.
+    shape_ok
+        && codex_launch::run_dir_marker(path, uid, launch_nonce)
+            == codex_launch::MarkerVerdict::Ours
+}
+
+/// How long a single connect probe may take. A leg that cannot accept inside this
+/// is not counted as serving on that pass; the bring-up loop simply looks again.
+const LEG_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a broker leg is **serving**: it is a unix-domain socket AND a
+/// connection attempt reaches a listener within [`LEG_CONNECT_BUDGET`].
+///
+/// The file-type check alone is not evidence and this is the difference that
+/// matters: a socket inode is an ordinary directory entry that outlives the
+/// process that bound it. A host killed abnormally leaves both legs sitting on
+/// disk looking exactly like a healthy broker, and readiness built on `stat`
+/// would commit a durable `ready` for a session with nothing behind it.
+///
+/// **The connect is bounded, and that is not a detail.** `UnixStream::connect` is
+/// blocking, and AF_UNIX `connect` blocks when the listener's backlog is full and
+/// nothing is accepting — a broker whose accept loop has stalled is exactly the
+/// sick-but-present case readiness has to survive. A blocking probe there would
+/// sit inside a single poll iteration past the launch deadline, defeating the one
+/// property the bring-up loop exists to have. So the socket is created
+/// non-blocking and the wait is `poll(2)` with an explicit timeout.
+///
+/// What each outcome means:
+///   * connect succeeds ⇒ a listener accepted us. Serving.
+///   * `EAGAIN` ⇒ the backlog is full, which only a bound listening socket can
+///     report. Serving. **Measured note:** this does not occur for AF_UNIX on
+///     macOS — see below — but it is the documented meaning where it does, and
+///     the arm is kept rather than pruned to a platform.
+///   * `ECONNREFUSED` / `ENOENT` ⇒ not serving.
+///   * anything else, including the timeout ⇒ not proven, so not serving.
+///
+/// **`ECONNREFUSED` is ambiguous on this platform, and the ambiguity is safe.**
+/// Measured on macOS: a listener whose backlog is saturated refuses further
+/// connects with `ECONNREFUSED` (61) — the *same* errno as an unbound socket, and
+/// `EAGAIN` (35) is never seen. So a live-but-stalled broker is indistinguishable
+/// here from an abandoned inode, and both read as not-serving.
+///
+/// That is the harmless direction. Readiness only ever *withholds* on it: the
+/// bring-up loop looks again next pass, and a broker that cannot accept a
+/// connection is not one this launch should be declared ready on. The direction
+/// that would matter — an abandoned inode read as serving, committing a durable
+/// `ready` for a dead host — is exactly what the connect exists to prevent, and no
+/// errno makes that happen.
+///
+/// The connection is closed immediately; the broker sees a client that hung up
+/// before the WS handshake, which is exactly what it is.
+fn leg_is_serving(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+    // Check the type first so a regular file or FIFO at the name is rejected
+    // without any connect attempt.
+    let is_socket = std::fs::metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false);
+    if !is_socket {
+        return false;
+    }
+    let bytes = path.as_os_str().as_bytes();
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    // `sun_path` must hold the path AND its NUL terminator.
+    if bytes.len() >= std::mem::size_of_val(&addr.sun_path) {
+        return false;
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: a plain socket(2) with constant arguments.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // Owned from here: every return below goes through `close`.
+    let serving = (|| {
+        // SAFETY: `fd` is a socket we just created and still own.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+            return false;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        // SAFETY: `addr` is a fully initialised sockaddr_un and `fd` is ours.
+        let rc = unsafe { libc::connect(fd, std::ptr::addr_of!(addr).cast(), len) };
+        if rc == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            // The backlog is full: only a listening socket answers this way.
+            // (`EWOULDBLOCK` is the same value as `EAGAIN` on this platform, so
+            // one arm covers both spellings.)
+            Some(libc::EAGAIN) => return true,
+            // The one case that needs waiting.
+            Some(libc::EINPROGRESS) => {}
+            // ECONNREFUSED, ENOENT and everything else: not proven serving.
+            _ => return false,
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let timeout = LEG_CONNECT_BUDGET.as_millis().min(i32::MAX as u128) as libc::c_int;
+        // SAFETY: one pollfd, owned fd, explicit timeout.
+        let polled = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        if polled <= 0 {
+            // 0 is the timeout — a leg that did not answer in the budget is not
+            // proven serving this pass, which is the fail-closed reading.
+            return false;
+        }
+        // Writability alone is not success: the error is retrieved explicitly.
+        let mut so_error: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `so_error`/`len` are correctly sized for SO_ERROR.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                std::ptr::addr_of_mut!(so_error).cast(),
+                &mut len,
+            )
+        };
+        rc == 0 && so_error == 0
+    })();
+    // SAFETY: `fd` is ours and not used again.
+    unsafe { libc::close(fd) };
+    serving
+}
+
+/// Whether the launch record names a host whose process is **proven live**.
+///
+/// Read from the record rather than passed in, because the host writes it: the
+/// lease is CAS'd by the host process itself at the D7 gate, so it names the
+/// process actually running in the pane. `Unknown` liveness is not proof and does
+/// not commit — the same fail-closed rule the custodian applies.
+fn host_lease_is_live(uid: &str) -> bool {
+    match codex_launch::load(uid) {
+        Ok(record) => {
+            let leased = match &record.host_lease {
+                Some(lease) => liveness(&lease.identity) == Liveness::Alive,
+                None => false,
+            };
+            // Both children recorded, too. The host aborts if it cannot record
+            // one, so this is normally true by the time the legs serve — checking
+            // it makes that a verified invariant instead of an assumption about
+            // the ordering of statements in another process, and it is cheap
+            // because it reads the record we already loaded for the lease.
+            leased && codex_launch::host_children_recorded(&record)
+        }
+        Err(_) => false,
+    }
+}
+
+impl CoordinatorDeps for RealCoordinatorDeps {
+    fn spawn_custodian(&mut self, _uid: &str) -> Result<ProcessIdentity> {
+        // Bring the custodian up inertly through the D6 gate; its identity is
+        // CAS'd into the record (atomic with the child entry) before it is
+        // released to run. Shared with the recovery sweep's rearm. (`_uid` equals
+        // `self.uid`; the real arm reads it from `self`.)
+        crate::codex_custodian::spawn_custodian_through_gate(
+            &self.uid,
+            &self.tmux_socket,
+            self.coordinator,
+            self.self_exe.clone(),
+            &self.custodian_nonce,
+        )
+    }
+
+    fn run_dir(&self) -> Option<&str> {
+        self.run_dir.to_str()
+    }
+
+    fn new_session(&mut self) -> NewSessionOutcome {
+        let Some(bin) = protocol::tmux::tmux_bin() else {
+            return NewSessionOutcome::Failed("tmux not found".into());
+        };
+        let argv = self.new_session_argv();
         match protocol::proc::run_deadlined(
             std::process::Command::new(&bin)
                 .args(&argv)
@@ -628,20 +1159,109 @@ impl CoordinatorDeps for RealCoordinatorDeps {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }
         }
+        // Keep the pin: the bring-up census below binds to THIS server, not to
+        // whatever happens to answer the socket a few seconds from now.
+        self.session_a = Some(resolved.clone());
         NewSessionOutcome::Created(Box::new(resolved))
     }
 
+    /// Wait for the pane's host to prove itself up, or fail with a precise reason.
+    ///
+    /// The two facts and why neither is inferred from the other are in the module
+    /// doc. The loop's shape is the part worth stating here: evidence is checked
+    /// **before** the deadline on every pass, so a bring-up that completes in the
+    /// same instant the deadline lands is committed rather than discarded; and an
+    /// unreadable monotonic clock ends the wait immediately, because a wait that
+    /// cannot be bounded is not a bounded wait.
     fn bring_up_wrapper(&mut self) -> BringUp {
-        match self.bringup {
-            BringupMode::Ready => BringUp::Ready,
-            BringupMode::Fail => {
-                BringUp::Failed("wrapper bring-up is not built in this chunk (2d)".into())
-            }
-            BringupMode::Hang => loop {
-                // Block forever: the integration test kills the coordinator here,
-                // after new-session, to prove the custodian owns the outcome.
+        if self.hang_in_bringup {
+            loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
-            },
+            }
+        }
+        let Some(pin) = self.session_a.clone() else {
+            return BringUp::Failed(
+                "no resolved tmux session to bind the bring-up evidence to; refusing to \
+                 judge readiness unpinned"
+                    .into(),
+            );
+        };
+        let tui_sock = self.run_dir.join("tui.sock");
+        let ccd_sock = self.run_dir.join("ccd.sock");
+        let mut last_census: Option<std::time::Instant> = None;
+        let mut censused_while_bound = false;
+        loop {
+            // Sockets count as evidence only under a directory that is OURS.
+            //
+            // The readiness argument is "a socket appeared here, so our host bound
+            // it", and that only follows because the host `mkdir`s the directory
+            // exclusively as 0700. The coordinator never witnesses that `mkdir`,
+            // though — it sees a path — so it checks the property directly rather
+            // than inheriting it by assumption: owned by this uid, and 0700. A
+            // pre-existing directory with planted sockets makes the host abort with
+            // `EEXIST`, and without this check the coordinator's evidence would
+            // read `bound` with only the census standing between that and a false
+            // `Ready`.
+            let run_dir_present = self.run_dir.exists();
+            let sockets_bound = run_dir_is_ours(&self.run_dir, &self.uid, &self.launch_nonce)
+                && leg_is_serving(&tui_sock)
+                && leg_is_serving(&ccd_sock);
+            // Only asked once the legs answer, so the common waiting case still
+            // costs one `stat` per poll and no record read.
+            let host_live = sockets_bound && host_lease_is_live(&self.uid);
+            // Census when it can change the verdict, or when the slow cadence is
+            // due. "Can change the verdict" means the legs have just become bound:
+            // a proven-live pane then commits, so that pass censuses immediately
+            // rather than waiting out the cadence. It deliberately does NOT mean
+            // "every pass while bound" — if the census keeps answering `Unknown`,
+            // that would fork `tmux` ten times a second for the rest of the
+            // deadline. After the first look, the cadence governs again.
+            let newly_bound = sockets_bound && !censused_while_bound;
+            let census_due = last_census
+                .map(|at| at.elapsed() >= BRINGUP_CENSUS_INTERVAL)
+                .unwrap_or(true);
+            if sockets_bound {
+                censused_while_bound = true;
+            }
+            let session = if newly_bound || census_due {
+                last_census = Some(std::time::Instant::now());
+                Some(protocol::tmux::owned_liveness(
+                    &self.tmux_socket,
+                    &self.uid,
+                    Some(&pin),
+                ))
+            } else {
+                None
+            };
+            let observed = BringupObservation {
+                sockets_bound,
+                host_live,
+                run_dir_present,
+                session,
+            };
+            match bringup_step(&observed) {
+                BringupStep::Ready => return BringUp::Ready,
+                BringupStep::Failed(why) => return BringUp::Failed(why),
+                BringupStep::KeepWaiting => {}
+            }
+            match protocol::proc_identity::monotonic_now_nanos() {
+                Some(now) if now < self.deadline_monotonic_nanos => {}
+                Some(_) => {
+                    return BringUp::Failed(format!(
+                        "the wrapper did not prove ready before the launch deadline \
+                         (broker legs serving: {}, host lease live: {}, run dir present: {})",
+                        observed.sockets_bound, observed.host_live, observed.run_dir_present
+                    ))
+                }
+                None => {
+                    return BringUp::Failed(
+                        "the monotonic clock could not be read, so the bring-up wait cannot \
+                         be bounded; failing closed"
+                            .into(),
+                    )
+                }
+            }
+            std::thread::sleep(BRINGUP_POLL);
         }
     }
 }
@@ -656,61 +1276,192 @@ pub fn run_coordinator(args: &[String]) -> ! {
     }
 }
 
-fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
+/// Everything the launcher hands the coordinator on the command line.
+///
+/// The seven host dimensions are **required and defaulted nowhere**, parsed with
+/// [`crate::codex_host`]'s own `value_of`/`set_once`/`parse_hooks_enabled` rather
+/// than a second copy of them. That is the point: the coordinator's only job with
+/// these values is to hand them to the host, so a coordinator that accepted a
+/// value the host will reject would turn a legible charter error into a pane that
+/// flashes and dies.
+#[derive(Debug)]
+struct Charter {
+    uid: String,
+    launch_nonce: String,
+    custodian_nonce: String,
+    session_name: String,
+    cwd: String,
+    tmux_socket: String,
+    deadline_ms: u64,
+    codex: String,
+    codex_home: String,
+    approval_policy: String,
+    approvals_reviewer: String,
+    sandbox: String,
+    hooks_enabled: bool,
+    tui_args: Vec<String>,
+    hang_in_new_session: bool,
+    hang_in_bringup: bool,
+}
+
+/// The default launch deadline when the launcher does not set one.
+const DEFAULT_DEADLINE_MS: u64 = 30_000;
+
+fn parse_charter(args: &[String]) -> Result<Charter> {
+    use crate::codex_host::{parse_hooks_enabled, set_once, value_of};
+
     let mut uid = None;
-    let mut nonce = None;
+    let mut launch_nonce = None;
     let mut custodian_nonce = None;
     let mut session_name = None;
     let mut cwd = None;
-    let mut socket = None;
+    let mut tmux_socket = None;
     let mut deadline_ms: Option<u64> = None;
-    let mut bringup = BringupMode::Fail;
+    let mut codex = None;
+    let mut codex_home = None;
+    let mut approval_policy = None;
+    let mut approvals_reviewer = None;
+    let mut sandbox = None;
+    let mut hooks_enabled = None;
+    let mut tui_args = Vec::new();
     let mut hang_in_new_session = false;
+    let mut hang_in_bringup = false;
+
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--uid" => uid = it.next().cloned(),
-            "--nonce" => nonce = it.next().cloned(),
-            "--custodian-nonce" => custodian_nonce = it.next().cloned(),
-            "--session-name" => session_name = it.next().cloned(),
-            "--cwd" => cwd = it.next().cloned(),
-            "--tmux-socket" => socket = it.next().cloned(),
-            "--deadline-ms" => deadline_ms = it.next().and_then(|v| v.parse().ok()),
-            "--test-bringup" => {
-                bringup = it
-                    .next()
-                    .map(|s| BringupMode::parse(s))
-                    .unwrap_or(BringupMode::Fail)
+        let flag = arg.as_str();
+        match flag {
+            "--uid" => set_once(&mut uid, flag, value_of(&mut it, flag)?)?,
+            "--nonce" => set_once(&mut launch_nonce, flag, value_of(&mut it, flag)?)?,
+            "--custodian-nonce" => set_once(&mut custodian_nonce, flag, value_of(&mut it, flag)?)?,
+            "--session-name" => set_once(&mut session_name, flag, value_of(&mut it, flag)?)?,
+            "--cwd" => set_once(&mut cwd, flag, value_of(&mut it, flag)?)?,
+            "--tmux-socket" => set_once(&mut tmux_socket, flag, value_of(&mut it, flag)?)?,
+            "--deadline-ms" => {
+                let raw = value_of(&mut it, flag)?;
+                let parsed = raw.parse::<u64>().with_context(|| {
+                    format!("--deadline-ms must be a whole number, got {raw:?}")
+                })?;
+                set_once(&mut deadline_ms, flag, parsed)?;
             }
-            // Test-only (Principle B): hang inside new-session after the session
-            // is created, so the coordinator can be killed "with tmux in flight".
-            "--test-newsession" => {
-                hang_in_new_session = it.next().map(|s| s == "hang").unwrap_or(false)
+            "--codex" => set_once(&mut codex, flag, value_of(&mut it, flag)?)?,
+            "--codex-home" => set_once(&mut codex_home, flag, value_of(&mut it, flag)?)?,
+            "--approval-policy" => set_once(&mut approval_policy, flag, value_of(&mut it, flag)?)?,
+            "--approvals-reviewer" => {
+                set_once(&mut approvals_reviewer, flag, value_of(&mut it, flag)?)?
             }
-            _ => {}
+            "--sandbox" => set_once(&mut sandbox, flag, value_of(&mut it, flag)?)?,
+            "--hooks-enabled" => {
+                let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
+                set_once(&mut hooks_enabled, flag, parsed)?;
+            }
+            // Test-only (Principle B): hang at one of the two kill boundaries.
+            // Only `hang` is a value either flag accepts — there is no spelling
+            // that makes bring-up *succeed* without the host's evidence.
+            "--test-newsession" | "--test-bringup" => {
+                let raw = value_of(&mut it, flag)?;
+                if raw != "hang" {
+                    anyhow::bail!("{flag} accepts only \"hang\", got {raw:?}");
+                }
+                if flag == "--test-newsession" {
+                    hang_in_new_session = true;
+                } else {
+                    hang_in_bringup = true;
+                }
+            }
+            // Everything past the boundary belongs to the TUI, verbatim.
+            "--" => {
+                tui_args.extend(it.by_ref().cloned());
+                break;
+            }
+            other => anyhow::bail!("unexpected argument to internal-codex-coordinator: {other:?}"),
         }
     }
-    let uid = uid.context("--uid required")?;
+
+    // The same reserved grammar `codeconnect codex` and the host both apply. It
+    // runs here as well — not instead of the host's check, which stays the last
+    // word — so a refused flag is reported by the process a human is looking at
+    // rather than by a pane that has already opened.
+    crate::codex::validate_codex_argv(&tui_args)
+        .map_err(|refusal| anyhow::anyhow!("refused passthrough TUI argument: {refusal}"))?;
+
+    Ok(Charter {
+        uid: uid.context("--uid <value> is required")?,
+        launch_nonce: launch_nonce.unwrap_or_else(codex_launch::mint_nonce),
+        custodian_nonce: custodian_nonce.unwrap_or_else(codex_launch::mint_nonce),
+        session_name: session_name.unwrap_or_else(|| "cc-codex".into()),
+        cwd: cwd.unwrap_or_else(|| "/".into()),
+        tmux_socket: tmux_socket.unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
+        deadline_ms: deadline_ms.unwrap_or(DEFAULT_DEADLINE_MS),
+        codex: codex.context("--codex <path> is required (the coordinator resolves nothing)")?,
+        codex_home: codex_home.context("--codex-home <path> is required")?,
+        approval_policy: approval_policy
+            .context("--approval-policy <value> is required (no default is applied)")?,
+        approvals_reviewer: approvals_reviewer
+            .context("--approvals-reviewer <value> is required (no default is applied)")?,
+        sandbox: sandbox.context("--sandbox <value> is required (no default is applied)")?,
+        hooks_enabled: hooks_enabled
+            .context("--hooks-enabled true|false is required (no default is applied)")?,
+        tui_args,
+        hang_in_new_session,
+        hang_in_bringup,
+    })
+}
+
+fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
+    let charter = parse_charter(args)?;
     let coordinator = codex_launch::require_current_identity()?;
     let boot = protocol::proc_identity::boot_identity().context("reading boot identity")?;
     let now = protocol::proc_identity::monotonic_now_nanos().context("reading monotonic clock")?;
-    let deadline = now + deadline_ms.unwrap_or(30_000) * 1_000_000;
+    // Checked, not bare arithmetic. `--deadline-ms` is a `u64` from argv, and the
+    // ×1e6 to nanoseconds overflows well inside that range: in debug that panics,
+    // and in release — where this workspace sets `panic = "abort"` and leaves
+    // `overflow-checks` off — it WRAPS, handing the launch a deadline that is
+    // either already past or centuries away. The second case defeats both the
+    // bring-up loop's bound and the custodian's expiry check at once, so an
+    // out-of-range value has to be refused at the charter like every other
+    // malformed dimension.
+    let deadline = charter
+        .deadline_ms
+        .checked_mul(1_000_000)
+        .and_then(|ns| now.checked_add(ns))
+        .with_context(|| {
+            format!(
+                "--deadline-ms {} is out of range: it does not fit as nanoseconds past the \
+                 current monotonic clock",
+                charter.deadline_ms
+            )
+        })?;
+    let run_dir = choose_run_dir(&charter.uid, &charter.launch_nonce)?;
     let mut deps = RealCoordinatorDeps {
-        uid: uid.clone(),
-        session_name: session_name.clone().unwrap_or_else(|| "cc-codex".into()),
-        cwd: cwd.unwrap_or_else(|| "/".into()),
-        tmux_socket: socket.unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
-        gate_program: std::env::current_exe().context("locating this binary")?,
-        custodian_nonce: custodian_nonce.unwrap_or_else(codex_launch::mint_nonce),
+        uid: charter.uid.clone(),
+        session_name: charter.session_name.clone(),
+        cwd: charter.cwd,
+        tmux_socket: charter.tmux_socket,
+        // Fail closed: a coordinator that cannot name its own executable cannot
+        // put a host in the pane, and must not create a session it cannot fill.
+        self_exe: std::env::current_exe().context("locating this binary")?,
+        custodian_nonce: charter.custodian_nonce,
+        launch_nonce: charter.launch_nonce.clone(),
         coordinator,
-        bringup,
-        hang_in_new_session,
+        codex: charter.codex,
+        codex_home: charter.codex_home,
+        approval_policy: charter.approval_policy,
+        approvals_reviewer: charter.approvals_reviewer,
+        sandbox: charter.sandbox,
+        hooks_enabled: charter.hooks_enabled,
+        tui_args: charter.tui_args,
+        run_dir,
+        deadline_monotonic_nanos: deadline,
+        session_a: None,
+        hang_in_new_session: charter.hang_in_new_session,
+        hang_in_bringup: charter.hang_in_bringup,
     };
     coordinate(
         CoordinateSetup {
-            uid,
-            launch_nonce: nonce.unwrap_or_else(codex_launch::mint_nonce),
-            session_name: session_name.unwrap_or_else(|| "cc-codex".into()),
+            uid: charter.uid,
+            launch_nonce: charter.launch_nonce,
+            session_name: charter.session_name,
             coordinator,
             boot,
             deadline_monotonic_nanos: deadline,
@@ -789,6 +1540,10 @@ mod tests {
             } else {
                 Liveness::Gone
             }
+        }
+        /// This fake creates no pane, so there is no directory to name.
+        fn run_dir(&self) -> Option<&str> {
+            None
         }
     }
 
@@ -1114,5 +1869,844 @@ mod tests {
 
     fn ms(n: u64) -> std::time::Duration {
         std::time::Duration::from_millis(n)
+    }
+
+    // ------------------------------------------------------------ the charter
+
+    /// A charter with every required dimension present, as `&str`s the tests
+    /// extend or corrupt.
+    fn full_charter() -> Vec<String> {
+        [
+            "--uid",
+            "01JQXV9K7B8N4M2P6R3T5W9YQD",
+            "--nonce",
+            "0123456789abcdef0123456789abcdef",
+            "--session-name",
+            "cc-1",
+            "--cwd",
+            "/tmp",
+            "--tmux-socket",
+            "/tmp/t.sock",
+            "--deadline-ms",
+            "45000",
+            "--codex",
+            "/opt/codex/bin/codex",
+            "--codex-home",
+            "/tmp/cch.home",
+            "--approval-policy",
+            "untrusted",
+            "--approvals-reviewer",
+            "user",
+            "--sandbox",
+            "read-only",
+            "--hooks-enabled",
+            "true",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    /// `full_charter()` with the value following `flag` replaced, or with the
+    /// flag+value pair removed when `value` is `None`.
+    fn charter_with(flag: &str, value: Option<&str>) -> Vec<String> {
+        let mut args = full_charter();
+        let at = args.iter().position(|a| a == flag).expect("flag present");
+        match value {
+            Some(v) => args[at + 1] = v.to_string(),
+            None => {
+                args.remove(at);
+                args.remove(at);
+            }
+        }
+        args
+    }
+
+    #[test]
+    fn the_charter_requires_every_host_dimension_and_never_defaults_one() {
+        // The seven values the host itself refuses to default. The coordinator
+        // must refuse them too: it is the process a human is looking at, so a
+        // missing dimension has to fail here rather than inside a pane.
+        for flag in [
+            "--uid",
+            "--codex",
+            "--codex-home",
+            "--approval-policy",
+            "--approvals-reviewer",
+            "--sandbox",
+            "--hooks-enabled",
+        ] {
+            let err = parse_charter(&charter_with(flag, None))
+                .expect_err(&format!("{flag} must be required, never defaulted"))
+                .to_string();
+            assert!(
+                err.contains(flag),
+                "the refusal must name the missing flag, got {err:?}"
+            );
+        }
+        // And a full charter parses, carrying the values through verbatim.
+        let charter = parse_charter(&full_charter()).expect("a full charter parses");
+        assert_eq!(charter.codex, "/opt/codex/bin/codex");
+        assert_eq!(charter.codex_home, "/tmp/cch.home");
+        assert_eq!(charter.approval_policy, "untrusted");
+        assert_eq!(charter.approvals_reviewer, "user");
+        assert_eq!(charter.sandbox, "read-only");
+        assert!(charter.hooks_enabled);
+        assert_eq!(charter.deadline_ms, 45_000);
+        assert!(!charter.hang_in_new_session && !charter.hang_in_bringup);
+    }
+
+    #[test]
+    fn the_charter_refuses_a_duplicate_rather_than_letting_the_last_one_win() {
+        for (flag, second) in [
+            ("--codex", "/other/codex"),
+            ("--run-dir-is-not-a-flag-here", "x"),
+            ("--sandbox", "danger-full-access"),
+            ("--hooks-enabled", "false"),
+            ("--uid", "01JQXV9K7B8N4M2P6R3T5W9YQE"),
+        ] {
+            if flag == "--run-dir-is-not-a-flag-here" {
+                // The run dir is chosen by the coordinator, never accepted from
+                // its charter — passing one is an unknown flag, not an override.
+                let mut args = full_charter();
+                args.push("--run-dir".into());
+                args.push("/tmp/anything".into());
+                assert!(
+                    parse_charter(&args).is_err(),
+                    "the run dir is the coordinator's to choose, not its caller's"
+                );
+                continue;
+            }
+            let mut args = full_charter();
+            args.push(flag.into());
+            args.push(second.into());
+            let err = parse_charter(&args)
+                .expect_err(&format!("a repeated {flag} must be refused"))
+                .to_string();
+            assert!(
+                err.contains("more than once"),
+                "the refusal must say the flag was repeated, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_charter_refuses_empty_flag_shaped_and_unknown_arguments() {
+        // Empty and control-character values, and a value that is itself a flag —
+        // the swallowing hole `value_of` exists to close.
+        assert!(parse_charter(&charter_with("--sandbox", Some(""))).is_err());
+        assert!(parse_charter(&charter_with("--codex-home", Some("a\nb"))).is_err());
+        assert!(parse_charter(&charter_with("--codex", Some("--sandbox"))).is_err());
+        // A dangling flag with no value at all.
+        let mut dangling = full_charter();
+        dangling.push("--sandbox".into());
+        assert!(parse_charter(&dangling).is_err());
+        // An unknown flag is refused rather than silently ignored, so a typo
+        // cannot quietly drop a dimension the launch depends on.
+        let mut unknown = full_charter();
+        unknown.push("--poll-ms".into());
+        unknown.push("100".into());
+        let err = parse_charter(&unknown).unwrap_err().to_string();
+        assert!(err.contains("--poll-ms"), "got {err:?}");
+        // `--hooks-enabled` takes exactly true|false; nothing else is guessed.
+        for bad in ["yes", "1", "True", ""] {
+            assert!(
+                parse_charter(&charter_with("--hooks-enabled", Some(bad))).is_err(),
+                "--hooks-enabled {bad:?} must be refused, never defaulted"
+            );
+        }
+        // The test-only hang injections accept ONLY "hang": there is no spelling
+        // of either flag that makes bring-up report ready without evidence.
+        for flag in ["--test-bringup", "--test-newsession"] {
+            let mut ready = full_charter();
+            ready.push(flag.into());
+            ready.push("ready".into());
+            assert!(
+                parse_charter(&ready).is_err(),
+                "{flag} must accept only \"hang\""
+            );
+            let mut hang = full_charter();
+            hang.push(flag.into());
+            hang.push("hang".into());
+            let charter = parse_charter(&hang).expect("hang parses");
+            assert!(charter.hang_in_new_session || charter.hang_in_bringup);
+        }
+    }
+
+    #[test]
+    fn passthrough_past_the_boundary_is_carried_and_still_meets_the_reserved_grammar() {
+        let mut args = full_charter();
+        args.extend(
+            ["--", "hello world", "--search"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        let charter = parse_charter(&args).expect("a benign passthrough is carried");
+        assert_eq!(charter.tui_args, vec!["hello world", "--search"]);
+
+        // A flag CodeConnect owns is refused here as well as at the host — the
+        // coordinator is the process whose stderr a human can actually read.
+        let mut owned = full_charter();
+        owned.extend(["--", "--cd", "/elsewhere"].iter().map(|s| s.to_string()));
+        let err = parse_charter(&owned).unwrap_err().to_string();
+        assert!(
+            err.contains("refused passthrough TUI argument"),
+            "got {err:?}"
+        );
+    }
+
+    // ----------------------------------------------------------- the run dir
+
+    #[test]
+    fn the_chosen_run_dir_is_short_enough_for_every_socket_the_host_binds() {
+        let uid = "01JQXV9K7B8N4M2P6R3T5W9YQD";
+        let nonce = codex_launch::mint_nonce();
+        let dir = choose_run_dir(uid, &nonce).expect("a ULID + a minted nonce always fit");
+        let worst = dir.as_os_str().len() + longest_host_socket_len();
+        assert!(
+            worst < crate::codex_host::SUN_LEN_LIMIT,
+            "{}/<socket> is {worst} bytes, which must stay under SUN_LEN",
+            dir.display()
+        );
+        // The measured worst case for a real launch, so a future change to the
+        // name shape cannot quietly eat the headroom: prefix + 10 uid chars + a
+        // dot + 16 nonce chars + the longest socket.
+        assert_eq!(
+            worst,
+            RUN_DIR_PREFIX.len() + 10 + 1 + 16 + longest_host_socket_len()
+        );
+        assert_eq!(worst, 45);
+
+        // The sizing is only sound while the host's socket list is the whole list,
+        // so this reads the HOST's constant rather than restating the name. Adding
+        // a longer leg there must move this number, not slip past it.
+        assert_eq!(longest_host_socket_len(), "/tui.sock".len());
+        assert!(crate::codex_host::SOCKET_NAMES.contains(&"tui.sock"));
+        assert_eq!(crate::codex_host::SOCKET_NAMES.len(), 3);
+
+        // Different per launch in practice — the nonce is 128 random bits and only
+        // its first sixteen hex characters are used, so two launches of the same
+        // uid land on different names with overwhelming probability. Note the
+        // careful wording: this is not a uniqueness GUARANTEE (the derivation is
+        // many-to-one), and the host's exclusive `mkdir` is what makes a collision
+        // a refused launch rather than a shared directory.
+        let again = choose_run_dir(uid, &codex_launch::mint_nonce()).unwrap();
+        assert_ne!(dir, again);
+
+        // Nothing is created here — the host owns the mkdir.
+        assert!(!dir.exists(), "choose_run_dir must not create anything");
+    }
+
+    #[test]
+    fn the_uid_slug_is_the_random_half_of_the_ulid_not_the_clock() {
+        // A ULID is 10 timestamp chars + 16 random ones. Two sessions from the
+        // same millisecond era share the prefix entirely, so a prefix slug names
+        // a clock rather than a session. Taking the tail keeps two live run dirs
+        // distinguishable in `ls /tmp`, which is the whole point of putting the
+        // uid in the name at all.
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let a = choose_run_dir("01JQXV9K7BAAAAAAAAAAAAAAAA", nonce).unwrap();
+        let b = choose_run_dir("01JQXV9K7BBBBBBBBBBBBBBBBB", nonce).unwrap();
+        assert_ne!(
+            a, b,
+            "two uids sharing a ULID timestamp must still get different run dirs"
+        );
+        assert_eq!(a.to_str().unwrap(), "/tmp/cch.AAAAAAAAAA.0123456789abcdef");
+        // A uid shorter than the slug width is taken whole rather than padded.
+        assert_eq!(
+            choose_run_dir("abc", nonce).unwrap().to_str().unwrap(),
+            "/tmp/cch.abc.0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn a_run_dir_name_can_never_escape_its_prefix() {
+        // Path separators and dot-dots are filtered out of both components, so a
+        // hostile uid or nonce cannot aim the directory — or the custodian's later
+        // recursive removal of it — anywhere else.
+        let dir = choose_run_dir("../../etc", "..//passwd").expect("filtered, not refused");
+        let path = dir.to_str().unwrap();
+        assert_eq!(path, "/tmp/cch.etc.passwd");
+        assert!(!path.contains(".."), "no dot-dot may survive into the name");
+
+        // A uid or nonce with nothing usable in it is refused rather than
+        // collapsing to a shared, guessable name.
+        assert!(choose_run_dir("///", "abcdef").is_err());
+        assert!(choose_run_dir("01JQXV", "///").is_err());
+
+        // The custodian's sweep guard is EQUALITY against this function's output
+        // for the record's own uid+nonce, not a shape match on the path — so the
+        // property that matters is that the same inputs always name the same
+        // directory and different inputs never collide onto one.
+        let mine = choose_run_dir("01JQXV9K7B8N4M2P6R3T5W9YQD", "aaaabbbbccccdddd").unwrap();
+        assert_eq!(
+            mine,
+            choose_run_dir("01JQXV9K7B8N4M2P6R3T5W9YQD", "aaaabbbbccccdddd").unwrap(),
+            "the guard is only usable if the derivation is deterministic"
+        );
+        assert_ne!(
+            mine,
+            choose_run_dir("01JQXV9K7B8N4M2P6R3T5W9YQE", "aaaabbbbccccdddd").unwrap()
+        );
+    }
+
+    #[test]
+    fn only_a_private_directory_this_launch_claimed_counts_as_a_run_dir() {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::path::PathBuf::from(format!(
+            "/tmp/cch-owntest-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (uid, nonce) = ("01JQXV9K7B8N4M2P6R3T5W9YQD", "0123456789abcdef");
+        let mk = |name: &str, mode: u32| -> std::path::PathBuf {
+            let p = base.join(name);
+            std::fs::DirBuilder::new().mode(mode).create(&p).unwrap();
+            // `DirBuilder::mode` is filtered by the umask, which can only CLEAR
+            // bits — so a 0755 fixture can silently come out 0700 and then pass
+            // this test for the wrong reason (refused for its mode, when the mode
+            // was never actually loose). Set it explicitly after creation, and
+            // assert it below.
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        std::fs::create_dir_all(&base).unwrap();
+        let good = mk("good", 0o700);
+        let loose = mk("loose", 0o755);
+        let unclaimed = mk("unclaimed", 0o700);
+        let foreign = mk("foreign", 0o700);
+        codex_launch::write_owner_marker(&good, uid, nonce).unwrap();
+        codex_launch::write_owner_marker(&foreign, "01JQXV9K7B8N4M2P6R3T5W9YQE", nonce).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        let file = base.join("file");
+        std::fs::write(&file, b"x").unwrap();
+
+        assert!(
+            run_dir_is_ours(&good, uid, nonce),
+            "0700, ours, and carrying OUR marker is the only yes"
+        );
+        assert_eq!(
+            std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the loose fixture must really be 0755 or it proves nothing"
+        );
+        assert!(
+            !run_dir_is_ours(&loose, uid, nonce),
+            "a group/world-readable run dir must be refused: its 0700-ness is what makes \
+             'a socket appeared here' mean anything"
+        );
+        assert!(
+            !run_dir_is_ours(&link, uid, nonce),
+            "a SYMLINK to a good dir must be refused — judged as a link, not followed"
+        );
+        assert!(
+            !run_dir_is_ours(&file, uid, nonce),
+            "a regular file is not a directory"
+        );
+        assert!(
+            !run_dir_is_ours(&base.join("nope"), uid, nonce),
+            "absent is not ours"
+        );
+        assert!(
+            !run_dir_is_ours(&unclaimed, uid, nonce),
+            "a correctly-shaped directory with NO marker is not ours: the shape is the \
+             same for every launch, which is exactly why the marker exists"
+        );
+        assert!(
+            !run_dir_is_ours(&foreign, uid, nonce),
+            "a directory claimed by ANOTHER launch must never be read as ours — this is \
+             the false-Ready the many-to-one name derivation makes possible"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_broker_leg_counts_only_when_something_is_actually_listening() {
+        let base = std::path::PathBuf::from(format!(
+            "/tmp/cch-legtest-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let plain = base.join("plain.sock");
+        let live = base.join("live.sock");
+        std::fs::write(&plain, b"not a socket").unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+
+        assert!(
+            !leg_is_serving(&base.join("absent.sock")),
+            "an absent path is not a leg"
+        );
+        assert!(
+            !leg_is_serving(&plain),
+            "a REGULAR FILE at the leg's name must never be accepted as a bound socket"
+        );
+        // Retried within a small window rather than asserted on one probe. A single
+        // connect is bounded by LEG_CONNECT_BUDGET, and on a loaded machine a local
+        // connect can genuinely exceed it — which production handles by looking
+        // again on the next poll, so a test that demands one-shot success is
+        // asserting something the system never promises. (Observed: one failure
+        // here across ~30 suite runs, only while the machine was saturated.)
+        let serving_soon = |path: &std::path::Path| -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if leg_is_serving(path) {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        assert!(serving_soon(&live), "a bound, listening socket is a leg");
+
+        // The case `stat` cannot see, and the reason readiness connects instead of
+        // stat-ing: a socket INODE outlives the process that bound it. Drop the
+        // listener and the file is still there, still a socket, still passing every
+        // file-type check — and serving nothing.
+        drop(listener);
+        assert!(
+            std::fs::symlink_metadata(&live).is_ok(),
+            "the inode should still exist after the listener is gone"
+        );
+        assert!(
+            !leg_is_serving(&live),
+            "an unbound socket inode must not count as a serving leg — this is exactly \
+             what a host killed abnormally leaves behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Bind a unix socket at `path` with an explicit, deliberately tiny backlog,
+    /// and return its raw fd (closed by the caller).
+    fn listener_with_backlog(path: &std::path::Path, backlog: i32) -> i32 {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0, "socket(): {}", std::io::Error::last_os_error());
+            assert_eq!(
+                libc::bind(fd, std::ptr::addr_of!(addr).cast(), len),
+                0,
+                "bind(): {}",
+                std::io::Error::last_os_error()
+            );
+            // The whole point: a queue small enough that a handful of connects
+            // provably fills it, rather than hoping the default depth is exceeded.
+            assert_eq!(
+                libc::listen(fd, backlog),
+                0,
+                "listen(): {}",
+                std::io::Error::last_os_error()
+            );
+            fd
+        }
+    }
+
+    /// A non-blocking connect attempt: `Ok(fd)` when it completed, `Err(errno)`
+    /// otherwise. Used to FILL a listener's queue and to detect saturation.
+    fn try_connect(path: &std::path::Path) -> Result<i32, i32> {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0);
+            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+            if libc::connect(fd, std::ptr::addr_of!(addr).cast(), len) == 0 {
+                return Ok(fd);
+            }
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            libc::close(fd);
+            Err(errno)
+        }
+    }
+
+    #[test]
+    fn a_leg_probe_is_bounded_against_a_saturated_listener_and_withholds_on_this_platform() {
+        // The hazard the bounded connect exists for: a broker whose accept loop has
+        // stalled. The socket is bound and listening, so `stat` says "socket" and a
+        // BLOCKING `connect` blocks once the backlog fills — inside a single
+        // bring-up poll, past the launch deadline, defeating the one property that
+        // loop has.
+        //
+        // Saturation is PROVEN here rather than assumed. An earlier version fired 64
+        // connects at a default-backlog listener and hoped; the queue depth is
+        // unspecified, so that fixture could silently test an unsaturated socket and
+        // prove nothing. This binds the listener with an explicit backlog of 1 and
+        // fills it with non-blocking connects until one is refused — and asserts
+        // that refusal was observed before probing.
+        let base = std::path::PathBuf::from(format!(
+            "/tmp/cch-stall-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let stalled = base.join("stalled.sock");
+        let listener = listener_with_backlog(&stalled, 1);
+
+        let mut held = Vec::new();
+        let mut saturation_errno = None;
+        for _ in 0..256 {
+            match try_connect(&stalled) {
+                Ok(fd) => held.push(fd),
+                // EAGAIN (queue full) or ECONNREFUSED (BSD reports a full unix
+                // backlog this way) both mean the listener cannot take another —
+                // which is saturation, and exactly the state under test.
+                Err(errno) => {
+                    saturation_errno = Some(errno);
+                    break;
+                }
+            }
+        }
+        let errno = saturation_errno.expect(
+            "the listener never refused a connection, so the queue was NEVER saturated and \
+             this fixture would prove nothing about a stalled accept loop",
+        );
+        assert!(
+            errno == libc::EAGAIN || errno == libc::ECONNREFUSED,
+            "saturation should surface as EAGAIN or ECONNREFUSED, got errno {errno}"
+        );
+
+        // Now the real probe, on its own thread so the WAIT is what is bounded: a
+        // regression to a blocking connect fails in seconds rather than hanging the
+        // suite forever.
+        let probe = stalled.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let verdict = leg_is_serving(&probe);
+            let _ = tx.send((verdict, started.elapsed()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok((verdict, took)) => {
+                assert!(
+                    took < std::time::Duration::from_secs(2),
+                    "the leg probe took {took:?} against a saturated listener; it must be \
+                     bounded by LEG_CONNECT_BUDGET, not by the listener's willingness to accept"
+                );
+                // The VERDICT is asserted, not discarded — and asserted against
+                // what the kernel actually reports, which was measured rather than
+                // assumed. On macOS a saturated AF_UNIX listener refuses with
+                // `ECONNREFUSED`, the same errno as an unbound socket; `EAGAIN`
+                // never appears. So the probe cannot tell a stalled broker from an
+                // abandoned inode, and reads both as not-serving.
+                //
+                // Keyed off the observed errno rather than hardcoded, so this stays
+                // correct on a platform that does report `EAGAIN` — and so the day
+                // that changes, this fails and says why instead of drifting.
+                if errno == libc::EAGAIN {
+                    assert!(
+                        verdict,
+                        "EAGAIN is reportable only by a bound, listening socket, so the \
+                         probe must read it as serving"
+                    );
+                } else {
+                    assert!(
+                        !verdict,
+                        "a saturated listener refusing with ECONNREFUSED is indistinguishable \
+                         from an unbound socket, so the probe must withhold — readiness then \
+                         retries, which is the fail-closed direction"
+                    );
+                }
+            }
+            Err(_) => panic!(
+                "the leg probe did not return within 5s against a saturated listener — the \
+                 connect is BLOCKING again, which is the exact regression this test exists \
+                 to catch"
+            ),
+        }
+
+        for fd in held {
+            unsafe { libc::close(fd) };
+        }
+        unsafe { libc::close(listener) };
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ------------------------------------------------------ the pane command
+
+    fn real_deps(run_dir: &str) -> RealCoordinatorDeps {
+        RealCoordinatorDeps {
+            uid: "01JQXV9K7B8N4M2P6R3T5W9YQD".into(),
+            session_name: "cc-1".into(),
+            cwd: "/work".into(),
+            tmux_socket: "/tmp/t.sock".into(),
+            self_exe: std::path::PathBuf::from("/opt/cc/codeconnect"),
+            custodian_nonce: "cust".into(),
+            launch_nonce: "0123456789abcdef0123456789abcdef".into(),
+            coordinator: current_identity().unwrap(),
+            codex: "/opt/codex/bin/codex".into(),
+            codex_home: "/tmp/cch.home".into(),
+            approval_policy: "untrusted".into(),
+            approvals_reviewer: "user".into(),
+            sandbox: "read-only".into(),
+            hooks_enabled: true,
+            tui_args: vec![],
+            run_dir: std::path::PathBuf::from(run_dir),
+            deadline_monotonic_nanos: 0,
+            session_a: None,
+            hang_in_new_session: false,
+            hang_in_bringup: false,
+        }
+    }
+
+    #[test]
+    fn the_pane_runs_the_real_host_with_an_exact_argv() {
+        let deps = real_deps("/tmp/cch.01JQXV9K7B.0123456789abcdef");
+        let argv = deps.new_session_argv();
+        // Resolved, not hardcoded: the root is whatever this process's
+        // `CODECONNECT_HOME`/`$HOME` resolve to, and the pane must be told exactly
+        // that.
+        let home_env = format!("CODECONNECT_HOME={}", protocol::root_dir().display());
+        assert_eq!(
+            argv,
+            vec![
+                "-S",
+                "/tmp/t.sock",
+                "new-session",
+                "-d",
+                "-s",
+                "cc-1",
+                "-c",
+                "/work",
+                "-e",
+                // The uid stamp is injected exactly as before this chunk: an
+                // `-e` ENV VAR on the session, not an @-option.
+                "CODECONNECT_SESSION_UID=01JQXV9K7B8N4M2P6R3T5W9YQD",
+                "-e",
+                &home_env,
+                "--",
+                "/opt/cc/codeconnect",
+                "internal-codex-host",
+                "--uid",
+                "01JQXV9K7B8N4M2P6R3T5W9YQD",
+                "--nonce",
+                "0123456789abcdef0123456789abcdef",
+                "--tmux-socket",
+                "/tmp/t.sock",
+                "--codex",
+                "/opt/codex/bin/codex",
+                "--run-dir",
+                "/tmp/cch.01JQXV9K7B.0123456789abcdef",
+                "--codex-home",
+                "/tmp/cch.home",
+                "--approval-policy",
+                "untrusted",
+                "--approvals-reviewer",
+                "user",
+                "--sandbox",
+                "read-only",
+                "--hooks-enabled",
+                "true",
+            ]
+        );
+        // A label socket (no slash) still uses -L, unchanged by this chunk.
+        let mut labelled = real_deps("/tmp/cch.a.b");
+        labelled.tmux_socket = "codeconnect".into();
+        assert_eq!(&labelled.new_session_argv()[..2], &["-L", "codeconnect"]);
+    }
+
+    #[test]
+    fn the_pane_argv_is_one_the_host_itself_accepts() {
+        // The differential check: the coordinator writes this charter, a separate
+        // process reads it. Feed the argv the pane will actually run back into the
+        // HOST's own parser — not a restatement of it — so the two cannot drift.
+        let mut deps = real_deps("/tmp/cch.a.b");
+        deps.tui_args = vec!["a prompt".into()];
+        let argv = deps.host_argv();
+        assert_eq!(argv[1], "internal-codex-host");
+        crate::codex_host::parse_host_args(&argv[2..])
+            .expect("the host must accept the charter the coordinator writes");
+
+        // The passthrough boundary is only emitted when there is something past
+        // it, and what follows it is still subject to the reserved grammar.
+        assert!(deps.host_argv().contains(&"--".to_string()));
+        let none = real_deps("/tmp/cch.a.b");
+        assert!(!none.host_argv().contains(&"--".to_string()));
+        let mut owned = real_deps("/tmp/cch.a.b");
+        owned.tui_args = vec!["--cd".into(), "/elsewhere".into()];
+        assert!(
+            crate::codex_host::parse_host_args(&owned.host_argv()[2..]).is_err(),
+            "an owned flag must be refused by the host even if it reached the argv"
+        );
+    }
+
+    // --------------------------------------------------------- the bring-up
+
+    #[test]
+    fn bringup_reports_ready_only_when_both_facts_are_proven() {
+        use protocol::tmux::OwnedLiveness;
+        let observe = |bound: bool, present: bool, session: Option<OwnedLiveness>| {
+            bringup_step(&BringupObservation {
+                sockets_bound: bound,
+                // The lease-live precondition has its own case below; the rest of
+                // the table holds it true so each row varies one thing.
+                host_live: bound,
+                run_dir_present: present,
+                session,
+            })
+        };
+
+        // The only Ready: both legs bound AND the pane proven ours.
+        assert!(matches!(
+            observe(true, true, Some(OwnedLiveness::Live)),
+            BringupStep::Ready
+        ));
+
+        // Sockets bound but the census could not answer: NOT ready. A durable
+        // `ready` is what a launcher attaches to, so an unprovable pane waits.
+        assert!(matches!(
+            observe(true, true, Some(OwnedLiveness::Unknown("no server".into()))),
+            BringupStep::KeepWaiting
+        ));
+        // Sockets bound but nothing was censused this pass: also not ready.
+        assert!(matches!(
+            observe(true, true, None),
+            BringupStep::KeepWaiting
+        ));
+        // A live pane that has not bound its legs yet is simply still coming up.
+        assert!(matches!(
+            observe(false, true, Some(OwnedLiveness::Live)),
+            BringupStep::KeepWaiting
+        ));
+        // An unprovable census with nothing bound: no verdict either way.
+        assert!(matches!(
+            observe(false, false, Some(OwnedLiveness::Unknown("hiccup".into()))),
+            BringupStep::KeepWaiting
+        ));
+
+        // Serving legs and a live pane are NOT enough on their own: the process
+        // that owns them must be proven alive. A socket inode outlives an abnormal
+        // exit and a tmux session outlives its pane command, so without the lease
+        // this row would commit a durable `ready` for a dead host.
+        assert!(matches!(
+            bringup_step(&BringupObservation {
+                sockets_bound: true,
+                host_live: false,
+                run_dir_present: true,
+                session: Some(OwnedLiveness::Live),
+            }),
+            BringupStep::KeepWaiting
+        ));
+
+        // The two proven-loss failures, each naming what it saw.
+        let bound_but_gone = observe(true, true, Some(OwnedLiveness::Gone));
+        match bound_but_gone {
+            BringupStep::Failed(why) => assert!(why.contains("pane's tmux session is gone")),
+            _ => panic!("a gone pane under bound sockets must fail the launch"),
+        }
+        match observe(false, false, Some(OwnedLiveness::Gone)) {
+            BringupStep::Failed(why) => assert!(
+                why.contains("never created"),
+                "the reason must say the run dir was never created: {why}"
+            ),
+            _ => panic!("a gone pane with no run dir must fail the launch"),
+        }
+        match observe(false, true, Some(OwnedLiveness::Gone)) {
+            BringupStep::Failed(why) => assert!(
+                why.contains("created but empty"),
+                "the reason must distinguish a created-but-empty run dir: {why}"
+            ),
+            _ => panic!("a gone pane with an empty run dir must fail the launch"),
+        }
+    }
+
+    #[test]
+    fn a_bringup_that_proves_nothing_fails_at_the_deadline_and_never_at_ready() {
+        // A run dir that will never be created, against a tmux socket no server
+        // answers, with a deadline already in the past: the wait must end — and it
+        // must end as a failure, because nothing was ever proven.
+        let mut deps = real_deps("/tmp/cch.nosuch.deadline");
+        deps.tmux_socket = "/tmp/cc-no-such-server.sock".into();
+        deps.session_a = Some(fake_owned());
+        deps.deadline_monotonic_nanos = monotonic_now_nanos().unwrap().saturating_sub(1);
+        let started = std::time::Instant::now();
+        match deps.bring_up_wrapper() {
+            BringUp::Failed(why) => {
+                assert!(
+                    why.contains("deadline") || why.contains("gone"),
+                    "the failure must say why: {why}"
+                );
+            }
+            BringUp::Ready => panic!("bring-up must never report ready without evidence"),
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "a passed deadline must end the wait promptly"
+        );
+    }
+
+    #[test]
+    fn bringup_itself_refuses_a_run_dir_another_launch_claimed() {
+        // Drives the PRODUCTION path — `bring_up_wrapper`, not the helper — against
+        // the fixture that matters: a correctly-shaped, correctly-named run dir
+        // with SERVING broker legs that belongs to somebody else.
+        //
+        // This is the false-`Ready` the many-to-one name derivation makes
+        // reachable: host A's live sockets standing where this launch expects its
+        // own, while host B (paused between taking its lease and its own `mkdir`)
+        // supplies the live lease. Everything the old readiness looked at is
+        // present and correct. Only the owner marker disagrees.
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let run = std::path::PathBuf::from(format!(
+            "/tmp/cch-collide-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Real, serving legs — the strongest evidence readiness has.
+        let _tui = std::os::unix::net::UnixListener::bind(run.join("tui.sock")).unwrap();
+        let _ccd = std::os::unix::net::UnixListener::bind(run.join("ccd.sock")).unwrap();
+        // …claimed by a DIFFERENT launch.
+        codex_launch::write_owner_marker(&run, "01JQXV9K7B8N4M2P6R3T5W9YQZ", "someone-elses-nonce")
+            .unwrap();
+
+        let mut deps = real_deps(run.to_str().unwrap());
+        deps.session_a = Some(fake_owned());
+        // A deadline far enough out that a `Ready` would have every chance to fire.
+        deps.deadline_monotonic_nanos = monotonic_now_nanos().unwrap() + 1_500_000_000;
+        match deps.bring_up_wrapper() {
+            BringUp::Ready => panic!(
+                "bring-up committed READY against a run dir claimed by another launch — \
+                 serving sockets under someone else's directory are not this launch's host"
+            ),
+            BringUp::Failed(why) => assert!(
+                why.contains("deadline") || why.contains("gone"),
+                "it should time out having never accepted the evidence: {why}"
+            ),
+        }
+
+        let _ = std::fs::remove_dir_all(&run);
+    }
+
+    #[test]
+    fn a_bringup_with_no_pinned_session_refuses_rather_than_judging_unpinned() {
+        // `new_session` sets the pin; without it there is no server identity to
+        // bind the census to, and an unpinned census could be answered by a
+        // different server that rebound the socket. Fail closed.
+        let mut deps = real_deps("/tmp/cch.a.b");
+        deps.deadline_monotonic_nanos = far();
+        match deps.bring_up_wrapper() {
+            BringUp::Failed(why) => assert!(why.contains("unpinned"), "got {why}"),
+            BringUp::Ready => panic!("an unpinned bring-up must never report ready"),
+        }
     }
 }
