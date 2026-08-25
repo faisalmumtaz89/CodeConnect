@@ -996,6 +996,16 @@ impl PtyHost {
         use std::os::unix::process::CommandExt;
         // BSD `script`: `script [-q] file [command ...]` runs the command directly
         // (no shell) with a PTY as its stdio. `/dev/null` discards the typescript.
+        //
+        // Round-2 P4: the host is spawned WITHOUT a coordinator, so it inherits this
+        // process's cwd — and that is the cwd the app-server will resolve and report. The
+        // launch cwd must therefore be this directory, canonicalized here exactly as the
+        // real coordinator canonicalizes it before writing the host argv.
+        let launch_cwd = std::fs::canonicalize(std::env::current_dir().expect("cwd"))
+            .expect("canonical cwd")
+            .to_str()
+            .expect("utf-8 cwd")
+            .to_string();
         let mut child = Command::new("/usr/bin/script")
             .args([
                 "-q",
@@ -1041,6 +1051,9 @@ impl PtyHost {
                 "read-only",
                 "--hooks-enabled",
                 "true",
+                // Round-2 P4: the canonical launch cwd (the workspace anchor).
+                "--launch-cwd",
+                launch_cwd.as_str(),
             ])
             .env("TERM", "xterm-256color")
             .env("CODECONNECT_HOME", &launch.home)

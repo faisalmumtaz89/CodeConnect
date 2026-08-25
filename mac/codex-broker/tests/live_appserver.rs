@@ -322,6 +322,7 @@ fn fingerprint() -> LaunchFingerprint {
         approvals_reviewer: "user".into(),
         sandbox: "read-only".into(),
         hooks_enabled: true,
+        launch_cwd: "/work/proj".into(),
     }
 }
 

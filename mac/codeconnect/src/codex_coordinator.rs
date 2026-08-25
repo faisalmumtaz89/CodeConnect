@@ -713,6 +713,25 @@ pub struct RealCoordinatorDeps {
     pub approvals_reviewer: String,
     pub sandbox: String,
     pub hooks_enabled: bool,
+    /// The FIFTH launch-policy dimension: the workspace this session is launched in,
+    /// **already canonicalized**, carried to the host as `--launch-cwd` and from there into
+    /// the broker's `LaunchFingerprint`.
+    ///
+    /// It is the workspace anchor the client cannot choose. Everything else the broker can
+    /// see about a workspace is client-supplied — `thread/start`'s `cwd` comes from the
+    /// TUI, and the creation response's `cwd` is the app-server echoing that ask back — so
+    /// without this a client could name any directory and the thread binding would follow
+    /// it there.
+    ///
+    /// ## Canonicalization happens HERE, exactly once
+    ///
+    /// Measured: with `--cwd /tmp` the app-server reports the resolved `/private/tmp`
+    /// (macOS `/tmp` is a symlink). Exact equality of those two strings is FALSE; `realpath`
+    /// equality is TRUE. The coordinator is the authority that owns the launch cwd, so it
+    /// resolves the path ONCE, before it enters the argv. The broker then does pure exact
+    /// string equality and needs no filesystem access at all — deliberately, since it
+    /// compares paths a client controls. Do not add a normalizer downstream.
+    pub launch_cwd: String,
     /// The user's vetted TUI passthrough, appended after `--`.
     pub tui_args: Vec<String>,
     /// The run dir this launch's host will own ([`choose_run_dir`]).
@@ -830,6 +849,10 @@ impl RealCoordinatorDeps {
             self.sandbox.clone(),
             "--hooks-enabled".into(),
             self.hooks_enabled.to_string(),
+            // The fifth fingerprint dimension (round-2 P4), plumbed exactly like the four
+            // above. Already canonicalized — see `launch_cwd`.
+            "--launch-cwd".into(),
+            self.launch_cwd.clone(),
         ];
         if !self.tui_args.is_empty() {
             argv.push("--".into());
@@ -1307,6 +1330,33 @@ struct Charter {
 /// The default launch deadline when the launcher does not set one.
 const DEFAULT_DEADLINE_MS: u64 = 30_000;
 
+/// Resolve the launch cwd to the SAME spelling the app-server will report (round-2 P4).
+///
+/// This is the single canonicalization in the whole chain. It lives here, at the authority
+/// that owns the launch cwd, so that everything downstream — the host argv, the broker's
+/// `LaunchFingerprint`, the creation-response check, the turn workspace check — is plain
+/// exact string equality with no filesystem access.
+///
+/// MEASURED: the coordinator is given `--cwd /tmp`; the app-server (which inherits the
+/// pane's cwd) reports `/private/tmp`, because macOS `/tmp` is a symlink. `"/tmp" ==
+/// "/private/tmp"` is FALSE, and `realpath` equality is TRUE — so without this the broker
+/// would refuse every real turn of a session launched anywhere under a symlinked path.
+///
+/// Fails closed: a cwd that cannot be canonicalized (missing, unreadable, not a directory)
+/// aborts the launch. Starting anyway would produce a session whose broker can never verify
+/// a thread creation, i.e. a TUI that opens and then refuses the user's first turn.
+fn canonical_launch_cwd(cwd: &str) -> Result<String> {
+    let resolved = std::fs::canonicalize(cwd)
+        .with_context(|| format!("resolving the launch cwd {cwd:?} to its canonical path"))?;
+    if !resolved.is_dir() {
+        anyhow::bail!("the launch cwd {cwd:?} is not a directory");
+    }
+    resolved
+        .to_str()
+        .map(str::to_string)
+        .with_context(|| format!("the canonical launch cwd for {cwd:?} is not valid UTF-8"))
+}
+
 fn parse_charter(args: &[String]) -> Result<Charter> {
     use crate::codex_host::{parse_hooks_enabled, set_once, value_of};
 
@@ -1433,10 +1483,15 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
             )
         })?;
     let run_dir = choose_run_dir(&charter.uid, &charter.launch_nonce)?;
+    // The workspace anchor, canonicalized ONCE here (see `RealCoordinatorDeps::launch_cwd`).
+    // Fail closed: a launch cwd that cannot be resolved is a launch whose broker could never
+    // prove a thread binding, so it must not start rather than start un-anchored.
+    let launch_cwd = canonical_launch_cwd(&charter.cwd)?;
     let mut deps = RealCoordinatorDeps {
         uid: charter.uid.clone(),
         session_name: charter.session_name.clone(),
         cwd: charter.cwd,
+        launch_cwd,
         tmux_socket: charter.tmux_socket,
         // Fail closed: a coordinator that cannot name its own executable cannot
         // put a host in the pane, and must not create a session it cannot fill.
@@ -2458,6 +2513,8 @@ mod tests {
             approvals_reviewer: "user".into(),
             sandbox: "read-only".into(),
             hooks_enabled: true,
+            // Already canonicalized by `run_coordinator_inner` before it lands here.
+            launch_cwd: "/work".into(),
             tui_args: vec![],
             run_dir: std::path::PathBuf::from(run_dir),
             deadline_monotonic_nanos: 0,
@@ -2515,12 +2572,54 @@ mod tests {
                 "read-only",
                 "--hooks-enabled",
                 "true",
+                // The fifth fingerprint dimension (round-2 P4): the CANONICAL launch cwd,
+                // resolved once by the coordinator so the broker only ever compares strings.
+                "--launch-cwd",
+                "/work",
             ]
         );
         // A label socket (no slash) still uses -L, unchanged by this chunk.
         let mut labelled = real_deps("/tmp/cch.a.b");
         labelled.tmux_socket = "codeconnect".into();
         assert_eq!(&labelled.new_session_argv()[..2], &["-L", "codeconnect"]);
+    }
+
+    // ROUND-2 P4 — the ONE canonicalization in the chain, and the measurement that forced
+    // its placement. `/tmp` is a symlink on macOS, so the app-server resolves and reports
+    // `/private/tmp`; exact equality of the raw strings is FALSE and realpath equality is
+    // TRUE. Canonicalizing HERE — at the authority that owns the launch cwd, before the
+    // path enters the host argv — is what lets the broker stay a pure string comparator.
+    #[test]
+    fn the_launch_cwd_is_canonicalized_once_here() {
+        let raw = "/tmp";
+        let canonical = canonical_launch_cwd(raw).expect("/tmp resolves");
+        let reported_by_app_server = std::fs::canonicalize(raw)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            canonical, reported_by_app_server,
+            "the coordinator must hand the broker the SAME spelling the app-server reports"
+        );
+        // The measurement itself: on this platform the raw and resolved spellings differ,
+        // so a broker doing exact equality against the RAW path would refuse every turn.
+        if canonical != raw {
+            assert_ne!(
+                canonical, raw,
+                "measured: /tmp resolves to a different path ({canonical})"
+            );
+        }
+        // Fail closed: a launch cwd that cannot be resolved aborts the launch rather than
+        // producing a session whose broker can never verify a thread creation.
+        assert!(canonical_launch_cwd("/definitely/not/a/real/dir/xyzzy").is_err());
+        let file = std::env::temp_dir().join("cc-launch-cwd-probe");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            canonical_launch_cwd(file.to_str().unwrap()).is_err(),
+            "a regular file is not a workspace"
+        );
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

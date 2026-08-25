@@ -37,6 +37,7 @@
 pub mod allowlist;
 pub mod fingerprint;
 pub mod message;
+pub mod redact;
 pub mod refusal;
 pub mod response_capability;
 pub mod session;
@@ -52,4 +53,6 @@ pub use response_capability::{
     LegCapabilities, NoCapabilities, ResponseArbiter, ResponseCapabilityRegistry,
     COMMAND_EXEC_APPROVAL, FILE_CHANGE_APPROVAL, GENERATION_UNSTAMPED,
 };
-pub use session::{SessionThreads, ThreadBinding};
+pub use session::{
+    ConnId, IdAdmission, IdLedgerCounts, SessionThreads, ThreadBinding, VerifiedThread,
+};

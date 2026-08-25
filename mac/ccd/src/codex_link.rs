@@ -3,7 +3,7 @@
 //! `codex_adapter.rs` is the pure half of the Codex observation path — frames in,
 //! [`PendingEvent`]s out, no socket anywhere. This module is the other half and
 //! nothing more: it **holds the connection**. What it deliberately does *not* do is
-//! reconcile a resume response against live state — see the pre-2e-4 contract
+//! reconcile a resume response against live state — see the pre-2e-4b contract
 //! below for why that would be a guess today, and whose it is instead. Per Codex session it dials the
 //! broker's ccd leg (WS-over-UDS on the run dir's `ccd.sock`), completes the ccd
 //! role's allowlisted handshake, binds the session's thread, stamps every inbound
@@ -27,18 +27,32 @@
 //! the leg but this chunk has no use for them, and `turn/start`/`thread/start`/
 //! `thread/fork` are refused to ccd by role.
 //!
-//! ## The pre-2e-4 contract, and why it is this strict
+//! ## The pre-2e-4b contract, and why it is this strict
 //!
-//! `turn/start` is `FingerprintThenHeadCheck` on the TUI leg and **fails closed**
-//! until the D2 head-check lands (`codex-broker/src/allowlist.rs`). So on the live
-//! wire today: **no turn can run.** And with no turn there is no `item/started`, no
-//! open item, no rollout, and no `thread/resume` response carrying a populated
-//! `turns[]`. None of those inputs can be produced, which means nothing in this
-//! chunk could validate a design for handling them — not their completeness, not
-//! their keying, not the cross-resume id stability D15 warns about.
+//! **Turns now run.** `turn/start` is `FingerprintThenHeadCheck` on the TUI leg and
+//! the head-check is implemented (`codex-broker/src/refusal.rs`): a turn naming the
+//! session's one bound thread is forwarded, and a real TUI completes real turns
+//! through the broker — `codex_link_live`'s claim 4 asserts it.
 //!
-//! This link therefore implements the **total** contract for the world that exists,
-//! and fails closed at its edge rather than guessing past it:
+//! **This link is not subscribed to any of them, and that is measured.** Turn frames
+//! are delivered only to the connection whose `thread/resume` succeeded. This
+//! link's resume does not succeed — see below — so across a whole turn the only
+//! turn-correlated frames it is handed are `thread/status/changed`, which
+//! `codex_adapter.rs` drops as observation noise. Measured on the live gate: zero
+//! `turn/*` and zero `item/*` frames on a connection in exactly this position,
+//! against seven on the subscribed one.
+//!
+//! What HAS changed is the resume answer. After a turn, `thread/resume` returns a
+//! `result` whose `thread.turns` carries the turn that ran
+//! (`fixtures/codex/resume-populated-answer.json`) — and that is precisely the
+//! answer `settle_resume` refuses to guess at. It is not `item/started` replay, it
+//! is not a validated snapshot, and nothing in this chunk was designed against its
+//! completeness, its keying, or the cross-resume id stability D15 warns about. So
+//! the link reports it and reconnects, which is a loop rather than an attach — the
+//! honest cost of not inventing a reconciliation, and 2e-4b's to close.
+//!
+//! This link therefore implements the **total** contract for the world it was built
+//! for, and fails closed at its edge rather than guessing past it:
 //!
 //!   * **Binding: `thread/started` on this connection, and nothing else.** A thread
 //!     id from the registration, or carried over from a previous connection, is a
@@ -48,30 +62,35 @@
 //!     leg carries on.
 //!   * **Reconnect:** send `thread/resume`, and accept **exactly one** answer — the
 //!     measured `no rollout found` error for the thread that was asked about
-//!     (retry with backoff; A1/D3, and the only answer the live wire has ever
-//!     produced). *Everything* else, success shapes included, is reported with a
-//!     STOP-AND-AMEND log and reconnected. A success is not tolerated because none
-//!     has ever been observed: accepting one would quietly normalize an unobserved
-//!     wire change instead of reporting it, which is the same mistake as guessing
-//!     at a reconciliation, one level down.
+//!     (retry with backoff; A1/D3, and the only answer a thread that has not yet
+//!     run a turn can give). *Everything* else, success shapes included, is
+//!     reported with a STOP-AND-AMEND log and reconnected. A success is not
+//!     tolerated even though the live wire now produces one after a turn:
+//!     normalizing a response whose completeness and keying nothing here has
+//!     validated is exactly the guess this chunk refuses to make, and a reported
+//!     anomaly plus a reconnect loop is the cost of refusing it.
 //!   * **An announcement discharges an outstanding attach**, and redirects a target
 //!     that names a different thread: the wire's own announcement is better
 //!     evidence than any resume answer could be.
 //!
-//! ### 2e-4 owns the reconciliation
+//! ### 2e-4b owns the reconciliation
 //!
-//! Every one of those fail-closed edges is a marker, not a wall. When turns can run,
-//! resume responses will carry real `turns[]`, open items will survive a
-//! disconnect, and completions will happen while the link is down — and the design
-//! for reconciling them belongs to **2e-4, grounded in that evidence**: whether
-//! `turns[]` is complete for the turns it reports, whether item ids key uniquely
-//! across a resume (D15 says they do not, inside an interrupted turn), and what a
-//! partial snapshot must therefore be trusted for. Building it here would mean
-//! choosing those answers before anything could check them.
+//! Every one of those fail-closed edges is a marker, not a wall. Turns run now, so
+//! resume responses carry real `turns[]`, open items can survive a disconnect, and
+//! completions can happen while the link is down — and the design for reconciling
+//! them belongs to **2e-4b, grounded in that evidence**: whether `turns[]` is
+//! complete for the turns it reports, whether item ids key uniquely across a resume
+//! (D15 says they do not, inside an interrupted turn), and what a partial snapshot
+//! must therefore be trusted for. Building it here would have meant choosing those
+//! answers before anything could check them; the evidence now exists, captured at
+//! `fixtures/codex/first-turn.jsonl` and
+//! `fixtures/codex/resume-populated-answer.json`.
 //!
-//! The live gate carries the tripwire for exactly that moment: it drives a real TUI
-//! to attempt a turn and asserts the broker refuses it. When that assertion breaks,
-//! the premise above has changed and this contract is owed its successor.
+//! The live gate carries the tripwire for exactly that moment: it runs a real turn
+//! and asserts this link records **nothing** across it, because it is not
+//! subscribed. When 2e-4b lands and the link accepts the populated answer, it
+//! becomes subscribed and that assertion breaks — which is the signal that this
+//! contract has been given its successor.
 //!
 //! One fact from A2 survives into the simple contract and is worth keeping in view:
 //! `thread/read` can overtake `thread/resume` on the same connection, so anything
@@ -105,7 +124,7 @@
 //! announced is a claim this link cannot check.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -370,8 +389,8 @@ fn frame_thread_id(frame: &Value) -> FrameThread<'_> {
 /// Is this frame **exactly** the measured not-ready answer for the thread we asked
 /// about?
 ///
-/// The one resume answer the live wire has ever produced (A1/D3, captured by
-/// `codex_link_live`):
+/// The resume answer a thread that has not yet run a turn gives (A1/D3, captured by
+/// `codex_link_live`'s claim 3 at the last moment it is true):
 ///
 /// ```text
 /// {"id":102,"error":{"code":-32600,
@@ -408,6 +427,297 @@ pub fn is_measured_not_ready(frame: &Value, requested_thread: &str) -> bool {
 const NOT_READY_CODE: i64 = -32600;
 /// Its message, up to the thread id. Captured verbatim from codex 0.147.
 const NOT_READY_PREFIX: &str = "no rollout found for thread id ";
+
+/// A frame's fingerprint **as it may appear in a log a human reads**.
+///
+/// Two arms rather than one string, because the difference between them is the
+/// security property. A digest of the frame is a confirmation oracle: it goes to
+/// a log, and anyone who can guess what the frame said can hash their guess and
+/// check it against the line. Keying it with a secret this process drew from the
+/// CSPRNG and never writes down removes that — a candidate frame cannot be turned
+/// into a candidate digest by anyone who does not hold the salt, and nobody does.
+///
+/// When there is no such secret there is **no weaker digest to fall back to**.
+/// The field is absent instead, and the report says so in fixed vocabulary, so a
+/// reader can tell the difference between a digest that is missing by design and
+/// one that is missing by accident.
+///
+/// The salt is per-process, which is exactly the lifetime the throttle would need
+/// if it rode this — it does not, deliberately; see [`frame_discriminator`]. Two
+/// reports in one log are still comparable to each other. Across a restart the
+/// digests change, so they carry nothing between runs — the point, not a
+/// shortcoming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublicDigest {
+    /// 16 hex characters of an HMAC tag under this process's CSPRNG salt.
+    Keyed(String),
+    /// The CSPRNG refused. Rendered as [`DIGEST_UNAVAILABLE`], never as a value.
+    Unavailable,
+}
+
+/// What the report's `digest` field says when there is no digest to say. Fixed
+/// vocabulary, like every other non-numeric word the report prints.
+const DIGEST_UNAVAILABLE: &str = "unavailable";
+
+impl std::fmt::Display for PublicDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keyed(hex) => formatter.write_str(hex),
+            Self::Unavailable => formatter.write_str(DIGEST_UNAVAILABLE),
+        }
+    }
+}
+
+/// This frame's loggable digest, keyed by this process's salt if it has one.
+///
+/// HMAC-SHA256 from `ring`, which ccd already depends on for the APNs signature —
+/// a keyed hash this build can spell without a new crate. `Value` serializes its
+/// objects through a `BTreeMap`, so the text this signs is key-ordered.
+// Crate-visible so the live gate can assert the exact line the daemon would emit,
+// against the LIVE answer rather than only the fixture.
+pub(crate) fn frame_digest(frame: &Value) -> PublicDigest {
+    frame_digest_salted(digest_salt(), frame)
+}
+
+/// [`frame_digest`] against an explicit salt, so the test suite can prove the
+/// digest is keyed by watching two independently-salted instances disagree about
+/// the same frame — and can force the no-salt path, which on macOS is otherwise
+/// unreachable because `getrandom` there does not fail.
+///
+/// **The two cases are separate arms on purpose.** A fallback that quietly keyed
+/// the digest with something else would leave the log looking identical while the
+/// oracle was back: the clock and the pid are low-entropy and searchable, so an
+/// attacker who knows roughly when ccd started can enumerate candidate salts and
+/// recompute the digest from a guessed frame. There is therefore no salt-shaped
+/// value to substitute here — reaching the `sign` below requires a real key, and
+/// restoring a fallback would mean writing one out of thin air in full view
+/// rather than editing one branch of an `unwrap_or`.
+fn frame_digest_salted(salt: Option<&ring::hmac::Key>, frame: &Value) -> PublicDigest {
+    let Some(salt) = salt else {
+        return PublicDigest::Unavailable;
+    };
+    let tag = ring::hmac::sign(salt, frame.to_string().as_bytes());
+    PublicDigest::Keyed(
+        tag.as_ref()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// This process's digest salt, drawn once on first use — and `None` for the whole
+/// life of a process whose CSPRNG refused, so the refusal is uniform rather than
+/// per-call.
+fn digest_salt() -> Option<&'static ring::hmac::Key> {
+    static SALT: OnceLock<Option<ring::hmac::Key>> = OnceLock::new();
+    SALT.get_or_init(mint_digest_salt).as_ref()
+}
+
+/// Draw one salt from the system CSPRNG.
+///
+/// `SystemRandom::fill` is fallible in the type system, and a logging path is the
+/// wrong place to abort a daemon — so a failure is a `None` that costs the log its
+/// digest field, and nothing else. It is never a weaker salt: see
+/// [`frame_digest_salted`].
+fn mint_digest_salt() -> Option<ring::hmac::Key> {
+    let mut salt = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut salt).ok()?;
+    Some(ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &salt))
+}
+
+/// Tell two answers apart **inside this process**, for [`AmendThrottle`] only.
+///
+/// The throttle's whole question is "the same answer as last time?", and that
+/// comparison never leaves the process — so it needs no secret, no keying, and
+/// nothing that would survive a restart. A non-cryptographic hash answers it, and
+/// answers it whether or not the CSPRNG produced a salt, which is why a missing
+/// digest costs the log a field and does not cost the daemon its throttle.
+///
+/// **Compared, never rendered.** It is a `u64` and the report is built from a
+/// [`PublicDigest`]: neither [`describe_resume_answer`] nor
+/// [`stop_and_amend_report`] can see this value, so there is no edit to one of
+/// them that puts it in a log line.
+fn frame_discriminator(frame: &Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&frame.to_string(), &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// Describe a `thread/resume` answer down to the parts that cannot carry text.
+///
+/// **The frame itself may never reach the log, however useful the dump would be
+/// while debugging.** Once turns run, the answer is a populated `result`: it
+/// carries the user's prompt and the assistant's reply verbatim under
+/// `thread.turns[].items[]`, the rollout file's path under `CODEX_HOME`, the
+/// session's real `cwd`, and its workspace roots. That is the session's content,
+/// and ccd's log is not where it goes. Anyone tempted to restore `Frame: {frame}`
+/// here is restoring a content leak that a reconnect loop then repeats for the
+/// life of the daemon.
+///
+/// What survives is structure, and it is chosen so that none of it can be a
+/// carrier:
+///
+///   * whether the answer was a `result` or an `error`;
+///   * for an error, its `code` — structural. The `message` is **not**: the
+///     measured not-ready one already embeds a thread id, and a future one could
+///     embed anything;
+///   * how many turns a result claims, which is the fact that says *why* this
+///     branch fired;
+///   * **yes/no for each of the top-level `result` keys named in
+///     [`DESCRIBED_RESULT_KEYS`]**, and a **count** of the others. Never their
+///     names: a key name is peer-supplied text, unbounded in number and content
+///     and drawn from no fixed vocabulary, so printing the frame's keys is
+///     printing the frame. Every word of this section that is not a number comes
+///     from the constant below;
+///   * the digest, so two occurrences can be compared without either being read —
+///     or, when this process has no salt to key one with, the fixed
+///     [`DIGEST_UNAVAILABLE`] marker in its place. A [`PublicDigest`] rather than
+///     a string, so the only fingerprint this function can render is the one
+///     that is safe to render.
+// Crate-visible so the live gate can assert the exact line the daemon would emit,
+// against the LIVE answer rather than only the fixture.
+pub(crate) fn describe_resume_answer(frame: &Value, digest: &PublicDigest) -> String {
+    if let Some(result) = frame.get("result") {
+        let Some(map) = result.as_object() else {
+            return format!("a result (not an object; digest {digest})");
+        };
+        // Rendered for every allowlisted key whether present or not, so the line's
+        // vocabulary is the same for every frame and says nothing about this one
+        // beyond the yes/no this code chose to ask for.
+        let flags = DESCRIBED_RESULT_KEYS
+            .iter()
+            .map(|key| {
+                let present = if map.contains_key(*key) { "yes" } else { "no" };
+                format!("{key}={present}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let known = DESCRIBED_RESULT_KEYS
+            .iter()
+            .filter(|key| map.contains_key(**key))
+            .count();
+        let others = map.len() - known;
+        let turns = match result.pointer("/thread/turns").and_then(Value::as_array) {
+            Some(turns) => turns.len().to_string(),
+            None => "none".to_string(),
+        };
+        return format!(
+            "a result ({flags} turns={turns}; {others} other top-level keys; digest {digest})"
+        );
+    }
+    if let Some(error) = frame.get("error") {
+        let code = match error.get("code").and_then(Value::as_i64) {
+            Some(code) => code.to_string(),
+            None => "none".to_string(),
+        };
+        return format!("an error (code {code}; digest {digest})");
+    }
+    format!("neither a result nor an error (digest {digest})")
+}
+
+/// The only `result` key names that may ever be written to the log, spelled here
+/// rather than read off the frame.
+///
+/// These are the keys 2e-4b will be written against, so their presence or absence
+/// is the fact a human needs; anything else in the answer is counted, not named.
+/// Sorted, so the same answer always renders the same line.
+const DESCRIBED_RESULT_KEYS: [&str; 5] = ["approvalPolicy", "cwd", "model", "sandbox", "thread"];
+
+/// How long the STOP-AND-AMEND report stays quiet after one has been emitted for
+/// the same answer to the same thread.
+///
+/// The refusal **ends the connection**, so `run` reconnects and asks again — and
+/// a thread that has run a turn answers with the same populated result every
+/// cycle, at a reconnect backoff that tops out at 15s. Reporting every one of
+/// them wrote six copies of the report in fifteen seconds on the live gate, and
+/// would have kept doing it for as long as the daemon lived. One report per
+/// window, with the swallowed count attached to the next, keeps a permanent
+/// condition visible without the log becoming the thing that reports it.
+const AMEND_REPORT_QUIET: Duration = Duration::from_secs(300);
+
+/// The STOP-AND-AMEND report's own throttle.
+///
+/// Owned by [`run`] and lent to each connection, because the loop that repeats
+/// the report **is** the reconnect loop: state scoped to one connection would be
+/// rebuilt on every occurrence and would suppress nothing.
+#[derive(Debug, Default)]
+struct AmendThrottle {
+    /// The last answer reported, and what has happened since.
+    last: Option<AmendReport>,
+}
+
+/// One reported answer, held only as the things that identify it.
+#[derive(Debug)]
+struct AmendReport {
+    thread: String,
+    /// The [`frame_discriminator`], never the frame and never the loggable
+    /// [`PublicDigest`] — this is compared in memory and has no path to a log.
+    answer: u64,
+    at: Instant,
+    suppressed: u64,
+}
+
+impl AmendThrottle {
+    /// Decide whether this occurrence is reported. `Some(n)` reports it, carrying
+    /// how many occurrences were swallowed since the previous report; `None`
+    /// suppresses it and counts it.
+    ///
+    /// A different thread, or a different answer for the same thread, is a new
+    /// fact and is reported at once — the throttle only holds down a repeat of
+    /// the thing it has already said.
+    fn admit(&mut self, now: Instant, thread: &str, answer: u64) -> Option<u64> {
+        let same = self
+            .last
+            .as_ref()
+            .is_some_and(|last| last.thread == thread && last.answer == answer);
+        if same {
+            let last = self.last.as_mut().expect("matched just above");
+            if now.duration_since(last.at) < AMEND_REPORT_QUIET {
+                last.suppressed += 1;
+                return None;
+            }
+        }
+        let suppressed = match self.last.take() {
+            Some(last) if same => last.suppressed,
+            _ => 0,
+        };
+        self.last = Some(AmendReport {
+            thread: thread.to_string(),
+            answer,
+            at: now,
+            suppressed: 0,
+        });
+        Some(suppressed)
+    }
+}
+
+/// The whole STOP-AND-AMEND report, prose and redacted shape, ready to log.
+///
+/// A free function so the test suite can assert on the exact line that reaches
+/// stderr rather than on a piece of it — the redaction is only worth anything if
+/// what is *logged* is what was checked.
+// Crate-visible so the live gate can assert the exact line the daemon would emit,
+// against the LIVE answer rather than only the fixture.
+pub(crate) fn stop_and_amend_report(
+    session: &str,
+    requested_thread: &str,
+    shape: &str,
+    suppressed: u64,
+) -> String {
+    let repeats = match suppressed {
+        0 => String::new(),
+        n => format!(" (plus {n} suppressed since the previous report.)"),
+    };
+    format!(
+        "codex link for {session}: STOP-AND-AMEND — thread/resume for \
+         {requested_thread} answered with something this build cannot read. The \
+         only answer it is designed for is the not-ready error a thread with no \
+         rollout gives; a turn that has run answers with a populated turns[] \
+         instead, and reconciling that is 2e-4b's, not this chunk's. Guessing at \
+         it is exactly what this chunk refuses to do. Reconnecting. The answer, \
+         described rather than quoted: {shape}.{repeats}"
+    )
+}
 
 /// Where the attach stands on the connection now in hand.
 #[derive(Debug)]
@@ -468,6 +778,9 @@ pub async fn run(daemon: Arc<Daemon>, session: SessionKey, link: ControlLink) {
     let mut thread_id = link.thread_id.clone();
     let mut upstream_epoch: u64 = 0;
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // Lives out here rather than inside a connection: the STOP-AND-AMEND branch
+    // ends the connection, so the repeat it has to throttle is this very loop.
+    let mut amend = AmendThrottle::default();
 
     crate::log_info!(
         "codex link for {} ({}) attaching to {} at generation {}",
@@ -490,6 +803,7 @@ pub async fn run(daemon: Arc<Daemon>, session: SessionKey, link: ControlLink) {
             upstream_epoch,
             &mut thread_id,
             &mut adapter,
+            &mut amend,
         )
         .await;
         match outcome {
@@ -520,6 +834,7 @@ async fn serve_connection(
     upstream_epoch: u64,
     thread_id: &mut Option<String>,
     adapter: &mut CodexAdapter,
+    amend: &mut AmendThrottle,
 ) -> Result<()> {
     let stream = tokio::time::timeout(CONNECT_BUDGET, UnixStream::connect(&link.socket))
         .await
@@ -555,6 +870,7 @@ async fn serve_connection(
         },
         filtered: 0,
         next_id: 1,
+        amend,
     };
 
     // The handshake can bind (a `thread/started` may arrive before the `initialize`
@@ -739,10 +1055,13 @@ struct Connection<'a> {
     adapter: &'a mut CodexAdapter,
     visit: Visit,
     /// Frames dropped because they named a thread this connection is not bound to.
-    /// Counted and dropped: pre-2e-4 the only thread this link can be bound to is
+    /// Counted and dropped: pre-2e-4b the only thread this link can be bound to is
     /// one it watched start, so a frame for any other is not this session's.
     filtered: u64,
     next_id: i64,
+    /// The STOP-AND-AMEND report's throttle, lent by [`run`] so it outlives this
+    /// connection — which is the only way it can throttle a reconnect loop.
+    amend: &'a mut AmendThrottle,
 }
 
 impl Connection<'_> {
@@ -860,16 +1179,28 @@ impl Connection<'_> {
     ///
     /// The measured not-ready error, for the thread we asked about — and nothing
     /// else. Not a success with an empty `turns[]`, not a success of any shape, not
-    /// another error. See the module doc: a turn-less thread has no rollout, so the
-    /// not-ready error is the *only* answer this wire can currently give, and any
-    /// other one means the wire has changed under us.
+    /// another error. See the module doc: a thread that has not yet run a turn has
+    /// no rollout, so the not-ready error is the only answer it can give, and it is
+    /// the only one this build was designed against.
     ///
-    /// Accepting an unobserved success shape would be the same mistake one level
-    /// down from the one this chunk already deleted: normalizing a response nobody
-    /// has seen, on a guess about what it would mean. The point of failing closed
-    /// here is that the guess is never made — the anomaly is *reported*, loudly,
-    /// with the thing a human needs in order to decide: the frame itself.
-    fn settle_resume(&self, frame: &Value, requested_thread: &str, next_delay: Duration) -> Attach {
+    /// Once a turn has run, the wire answers instead with a `result` carrying a
+    /// populated `turns[]` — and that lands here too, on this branch, deliberately.
+    /// Accepting it would be normalizing a response whose completeness and keying
+    /// nothing in this chunk has validated, on a guess about what it means. The
+    /// point of failing closed here is that the guess is never made — the answer is
+    /// *reported*, loudly, with what a human needs in order to decide: its shape.
+    /// 2e-4b is what turns that report into an attach.
+    ///
+    /// The report is **described, never quoted** ([`describe_resume_answer`]) and
+    /// **throttled** ([`AmendThrottle`]) — a populated answer is the session's
+    /// content, and this branch recurs every reconnect for as long as the
+    /// condition lasts.
+    fn settle_resume(
+        &mut self,
+        frame: &Value,
+        requested_thread: &str,
+        next_delay: Duration,
+    ) -> Attach {
         if is_measured_not_ready(frame, requested_thread) {
             crate::log_debug!(
                 "codex link for {}: {requested_thread} has no rollout yet; retrying the \
@@ -881,14 +1212,21 @@ impl Connection<'_> {
                 next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
             };
         }
-        crate::log_error!(
-            "codex link for {}: STOP-AND-AMEND — thread/resume for {requested_thread} \
-             answered with something this build has never observed on the wire. The \
-             only answer a turn-less thread can give is the not-ready error, so this \
-             is either a wire change or a bug, and guessing at it is exactly what \
-             this chunk refuses to do. Reconnecting. Frame: {frame}",
-            self.session.name
-        );
+        // The throttle rides the in-process discriminator and the log rides the
+        // keyed digest: two values, because one of them must never be logged and
+        // the other must never be the reason the throttle stops working.
+        let answer = frame_discriminator(frame);
+        if let Some(suppressed) = self.amend.admit(Instant::now(), requested_thread, answer) {
+            crate::log_error!(
+                "{}",
+                stop_and_amend_report(
+                    &self.session.name,
+                    requested_thread,
+                    &describe_resume_answer(frame, &frame_digest(frame)),
+                    suppressed,
+                )
+            );
+        }
         Attach::Refused
     }
 
@@ -955,7 +1293,7 @@ impl Connection<'_> {
 
     /// Bind this connection to a thread, from the **`thread/started` it watched
     /// arrive**. That is the only thing that binds — see the module doc's
-    /// pre-2e-4 contract.
+    /// pre-2e-4b contract.
     fn bind_if_unbound(&mut self, frame: &Value) {
         if self.visit.thread_id.is_some() {
             return;
@@ -1245,6 +1583,423 @@ mod tests {
         );
     }
 
+    // ------------------------------ the STOP-AND-AMEND report carries no content
+
+    /// The real populated answer the live gate captured: prompt, reply, rollout
+    /// path and cwd, exactly as `thread/resume` returns them once a turn has run.
+    const POPULATED: &str = include_str!("../../../fixtures/codex/resume-populated-answer.json");
+    /// The thread that answer is about.
+    const POPULATED_THREAD: &str = "01a03652-f207-76e2-b1f5-aece767a3081";
+
+    fn populated_answer() -> Value {
+        serde_json::from_str(POPULATED).expect("the captured answer is JSON")
+    }
+
+    /// The line that reaches stderr, built the way `settle_resume` builds it, but
+    /// against an explicit salt so both entropy modes are reachable from a test.
+    ///
+    /// `None` **is** the production failure path: `digest_salt()` is `None` for the
+    /// life of a process whose CSPRNG refused, and every caller reaches the digest
+    /// through `frame_digest_salted`, so passing it `None` exercises exactly what
+    /// that process would log.
+    fn report_with_salt(salt: Option<&ring::hmac::Key>, frame: &Value, suppressed: u64) -> String {
+        stop_and_amend_report(
+            "cc-live",
+            POPULATED_THREAD,
+            &describe_resume_answer(frame, &frame_digest_salted(salt, frame)),
+            suppressed,
+        )
+    }
+
+    /// The line that reaches stderr, built the way `settle_resume` builds it.
+    fn report_for(frame: &Value, suppressed: u64) -> String {
+        report_with_salt(digest_salt(), frame, suppressed)
+    }
+
+    /// This process's salt, for a test that wants the with-digest mode explicitly.
+    fn a_salt() -> ring::hmac::Key {
+        mint_digest_salt().expect("the platform CSPRNG produces a salt")
+    }
+
+    /// The longest run of consecutive hex characters in `text` — the shape a digest
+    /// renders as, whatever keyed it. Used to assert that the digest-unavailable
+    /// report carries no digest *of any provenance*, not merely not the keyed one.
+    fn longest_hex_run(text: &str) -> usize {
+        let mut longest = 0;
+        let mut run = 0;
+        for character in text.chars() {
+            run = if character.is_ascii_hexdigit() {
+                run + 1
+            } else {
+                0
+            };
+            longest = longest.max(run);
+        }
+        longest
+    }
+
+    /// The report with the one thing in it that is legitimately hex — the thread id
+    /// the operator needs — replaced, so an assertion about digest-shaped or
+    /// number-shaped text is about the digest field and not about the thread id.
+    fn without_the_thread_id(line: &str) -> String {
+        line.replace(POPULATED_THREAD, "<thread>")
+    }
+
+    /// The two entropy modes, named for assertion messages. The redaction claims
+    /// are asserted across both: losing the digest may cost the report a field and
+    /// nothing else.
+    fn both_modes(salt: &ring::hmac::Key) -> [(&'static str, Option<&ring::hmac::Key>); 2] {
+        [("with a digest", Some(salt)), ("digest unavailable", None)]
+    }
+
+    #[test]
+    fn the_stop_and_amend_report_describes_the_answer_instead_of_quoting_it() {
+        let frame = populated_answer();
+        let salt = a_salt();
+        for (mode, salt) in both_modes(&salt) {
+            let line = report_with_salt(salt, &frame, 0);
+
+            // Nothing from inside the frame. These four are the session's content
+            // and the reason the frame dump was removed: two of them are what the
+            // user and the assistant said to each other, and two are real paths.
+            for leaked in [
+                "Reply with the single word ok",
+                "\"ok\"",
+                "rollout-2026-08-25T03-30-00",
+                "/work/proj",
+                "/work/.codex/sessions",
+                "gpt-5.6-luna",
+                // And the KEY names, which round 1 printed. A key name is peer text
+                // from no fixed vocabulary; a future or hostile server can put
+                // anything in one, so none of them may reach the log either.
+                "itemsBackwardsCursor",
+                "instructionSources",
+                "activePermissionProfile",
+                "runtimeWorkspaceRoots",
+                "turnsBackwardsCursor",
+                "initialTurnsPage",
+            ] {
+                assert!(
+                    !line.contains(leaked),
+                    "the report ({mode}) leaked {leaked:?} out of the frame:\n{line}"
+                );
+            }
+            // Belt and braces: no substring of the report is a substring of the
+            // frame long enough to be content. The prompt is the longest in there.
+            assert!(
+                !line.contains("nothing else."),
+                "the report ({mode}) quoted the prompt:\n{line}"
+            );
+
+            // And it still says the things a human needs: which thread, what shape,
+            // how many turns — the fact that says why this branch fired at all.
+            assert!(
+                line.contains(POPULATED_THREAD),
+                "no thread id ({mode}):\n{line}"
+            );
+            assert!(line.contains("turns=1"), "no turn count ({mode}):\n{line}");
+            // The allowlisted flags, all five, from this build's own constant — and
+            // the eleven remaining keys as a number rather than as names.
+            assert!(
+                line.contains(
+                    "a result (approvalPolicy=yes cwd=yes model=yes sandbox=yes thread=yes \
+                     turns=1; 11 other top-level keys;"
+                ),
+                "wrong described shape ({mode}):\n{line}"
+            );
+            assert!(
+                line.contains("STOP-AND-AMEND"),
+                "no prose ({mode}):\n{line}"
+            );
+        }
+
+        // With a salt the digest is present, and is 16 hex characters of an HMAC
+        // tag rather than the frame.
+        let line = report_with_salt(Some(&salt), &frame, 0);
+        let PublicDigest::Keyed(hex) = frame_digest_salted(Some(&salt), &frame) else {
+            panic!("a salted digest is keyed");
+        };
+        assert_eq!(hex.len(), 16, "digest {hex}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{hex}");
+        assert!(line.contains(&format!("digest {hex}")), "{line}");
+    }
+
+    #[test]
+    fn a_csprng_failure_omits_the_digest_rather_than_substituting_a_searchable_one() {
+        let frame = populated_answer();
+        // The failure, injected where production reads it.
+        assert_eq!(
+            frame_digest_salted(None, &frame),
+            PublicDigest::Unavailable,
+            "an unsalted digest must be an absence, not a value"
+        );
+        let line = report_with_salt(None, &frame, 0);
+
+        // The field is absent, and the report says so in fixed vocabulary so a
+        // reader knows it is missing by design and not by accident.
+        assert!(
+            line.contains(&format!("digest {DIGEST_UNAVAILABLE}")),
+            "the report does not mark the digest as unavailable:\n{line}"
+        );
+
+        // No digest of ANY provenance. The old fallback keyed the digest with the
+        // clock and the pid and rendered the same 16 hex characters, so the log
+        // looked identical while the confirmation oracle was back: those inputs are
+        // low-entropy, and an attacker who knows roughly when ccd started can
+        // enumerate candidate salts and recompute a digest from a guessed frame.
+        let scrubbed = without_the_thread_id(&line);
+        assert!(
+            longest_hex_run(&scrubbed) < 16,
+            "the digest-unavailable report carries digest-shaped text:\n{line}"
+        );
+        // And specifically none of the material that fallback was made of. A test
+        // process's pid is several digits, and unix seconds are ten, so neither
+        // collides with the report's own numbers (turn count, key count).
+        let pid = std::process::id().to_string();
+        assert!(
+            !scrubbed.contains(&pid),
+            "the report carries this process's pid ({pid}):\n{line}"
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch");
+        for stamp in [
+            now.as_secs().to_string(),
+            now.as_millis().to_string(),
+            format!("{:x}", now.as_secs()),
+        ] {
+            assert!(
+                !scrubbed.contains(&stamp),
+                "the report carries a clock-derived value ({stamp}):\n{line}"
+            );
+        }
+
+        // Losing the digest costs the report the field and nothing else: the prose
+        // and the shape a human acts on are still there.
+        assert!(line.contains("STOP-AND-AMEND"), "{line}");
+        assert!(line.contains(POPULATED_THREAD), "{line}");
+        assert!(line.contains("turns=1"), "{line}");
+    }
+
+    #[test]
+    fn an_error_answer_reports_its_code_and_never_its_message() {
+        // A message is not structural: the measured not-ready one already embeds a
+        // thread id, so a future one could embed anything.
+        let frame = json!({
+            "id": 2,
+            "error": {"code": -32000, "message": "/work/proj is not a workspace"}
+        });
+        let line = report_for(&frame, 0);
+        assert!(line.contains("an error (code -32000"), "{line}");
+        assert!(
+            !line.contains("/work/proj"),
+            "the report leaked a path:\n{line}"
+        );
+        assert!(!line.contains("not a workspace"), "{line}");
+    }
+
+    #[test]
+    fn an_unknown_top_level_key_is_counted_and_never_named() {
+        // The key names in an answer are the peer's text. This one is the bait: it
+        // may raise the "other" count and nothing else.
+        let frame = json!({
+            "id": 2,
+            "result": {
+                "thread": {"id": POPULATED_THREAD, "turns": []},
+                "zzz_secret_key_name": "whatever",
+                "another_unknown": 1
+            }
+        });
+        let line = report_for(&frame, 0);
+        assert!(
+            !line.contains("zzz_secret_key_name"),
+            "an unknown key reached the log by name:\n{line}"
+        );
+        assert!(!line.contains("another_unknown"), "{line}");
+        assert!(
+            !line.contains("whatever"),
+            "a value reached the log:\n{line}"
+        );
+        assert!(
+            line.contains("2 other top-level keys"),
+            "the unknown keys were not counted:\n{line}"
+        );
+        // The allowlisted vocabulary is rendered whole either way, so an absent
+        // key is a `no` rather than a silence that could be mistaken for one.
+        assert!(
+            line.contains("approvalPolicy=no cwd=no model=no sandbox=no thread=yes turns=0;"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_digest_is_keyed_by_a_per_process_salt_not_by_the_content() {
+        let frame = populated_answer();
+        let one = a_salt();
+        let two = a_salt();
+
+        // Stable under one salt: two reports in one log are comparable to each
+        // other, which is the whole reason the field is there.
+        assert_eq!(
+            frame_digest_salted(Some(&one), &frame),
+            frame_digest_salted(Some(&one), &frame)
+        );
+        // Different under another: nobody who guesses the frame can recompute the
+        // digest a log line carries, because the salt is not in the log.
+        assert_ne!(
+            frame_digest_salted(Some(&one), &frame),
+            frame_digest_salted(Some(&two), &frame),
+            "the digest is content-derived — it is a confirmation oracle"
+        );
+        // Still a short hex fingerprint, and still telling two answers apart.
+        let PublicDigest::Keyed(hex) = frame_digest_salted(Some(&one), &frame) else {
+            panic!("a salted digest is keyed");
+        };
+        assert_eq!(hex.len(), 16, "digest {hex}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{hex}");
+        assert_ne!(
+            frame_digest_salted(Some(&one), &frame),
+            frame_digest_salted(Some(&one), &json!({"result": {}}))
+        );
+        // On a platform whose CSPRNG works — every platform ccd ships on — the
+        // process-wide digest is present and stable, so the field is the normal
+        // case and the absence is the exception.
+        assert!(matches!(frame_digest(&frame), PublicDigest::Keyed(_)));
+        assert_eq!(frame_digest(&frame), frame_digest(&frame));
+    }
+
+    #[test]
+    fn the_line_that_actually_reaches_stderr_carries_no_frame() {
+        // `log.rs` writes to `std::io::stderr()`, which the harness cannot capture,
+        // so the redaction has never been asserted against the *emitted* text. The
+        // test-only sink closes that gap: this is the real `log_error!` line.
+        let frame = populated_answer();
+        let salt = a_salt();
+        for (mode, salt) in both_modes(&salt) {
+            crate::log::capture::install();
+            crate::log_error!("{}", report_with_salt(salt, &frame, 0));
+            let captured = crate::log::capture::drain();
+            crate::log::capture::uninstall();
+
+            // Other tests log on other threads into the same process-global sink,
+            // so the line this test means is selected by content.
+            let line = captured
+                .iter()
+                .find(|line| line.contains("STOP-AND-AMEND"))
+                .unwrap_or_else(|| panic!("the sink captured nothing ({mode}): {captured:?}"));
+            assert!(line.starts_with("20") && line.contains(" ERROR "), "{line}");
+            // The `Frame: {frame}` dump round 1 removed, asserted where it would
+            // actually have appeared.
+            assert!(!line.contains("Frame:"), "{mode}: {line}");
+            assert!(
+                !line.contains("Reply with the single word ok"),
+                "{mode}: {line}"
+            );
+            assert!(!line.contains("itemsBackwardsCursor"), "{mode}: {line}");
+            assert!(line.contains(POPULATED_THREAD), "{mode}: {line}");
+            // The emitted message carries the pid of no process. Taken after
+            // `log::emit`'s own level prefix, which is where the line's timestamp
+            // lives — that stamp is the log's, not the digest's, so the clock
+            // assertion belongs to the report and is made there.
+            let message = line.split(" ERROR ").nth(1).expect("an ERROR line");
+            assert!(
+                !without_the_thread_id(message).contains(&std::process::id().to_string()),
+                "{mode}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_report_is_throttled_and_says_how_many_it_swallowed() {
+        let frame = populated_answer();
+        let salt = a_salt();
+        // Both modes. The throttle rides the in-process discriminator, not the
+        // loggable digest, so losing the digest may not cost the daemon the one
+        // thing that keeps a permanent condition from filling the log.
+        for (mode, salt) in both_modes(&salt) {
+            let mut throttle = AmendThrottle::default();
+            let t0 = Instant::now();
+            // Recomputed at every occurrence, exactly as `settle_resume` does — a
+            // discriminator that were stable only within one call would suppress
+            // nothing in the reconnect loop this throttle exists for.
+            let answer = || frame_discriminator(&frame);
+
+            // The first occurrence is reported in full, nothing suppressed yet.
+            assert_eq!(
+                throttle.admit(t0, POPULATED_THREAD, answer()),
+                Some(0),
+                "{mode}"
+            );
+            // Every repeat inside the window is swallowed — this is the reconnect
+            // loop that wrote six copies of the frame in fifteen seconds.
+            for tick in 1..=6 {
+                assert_eq!(
+                    throttle.admit(t0 + Duration::from_secs(tick), POPULATED_THREAD, answer()),
+                    None,
+                    "{mode}: repeat {tick} was not suppressed"
+                );
+            }
+            // Once the window is out, one report — carrying the count it hid.
+            let suppressed = throttle
+                .admit(t0 + AMEND_REPORT_QUIET, POPULATED_THREAD, answer())
+                .unwrap_or_else(|| panic!("{mode}: the quiet window is over"));
+            assert_eq!(suppressed, 6, "{mode}");
+            let line = report_with_salt(salt, &frame, suppressed);
+            assert!(
+                line.contains("plus 6 suppressed"),
+                "{mode}: the count must reach the log:\n{line}"
+            );
+            // And the counter starts again from that report, not from the first.
+            assert_eq!(
+                throttle.admit(t0 + AMEND_REPORT_QUIET, POPULATED_THREAD, answer()),
+                None,
+                "{mode}"
+            );
+
+            // The discriminator itself is compared and never rendered: it is the
+            // one fingerprint of the frame with no keying, so a log line carrying
+            // it would be the oracle the digest's keying exists to remove.
+            for spelling in [answer().to_string(), format!("{:x}", answer())] {
+                assert!(
+                    !without_the_thread_id(&line).contains(&spelling),
+                    "{mode}: the throttle's discriminator reached the log:\n{line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_different_answer_or_a_different_thread_is_reported_at_once() {
+        let mut throttle = AmendThrottle::default();
+        let t0 = Instant::now();
+        assert_eq!(throttle.admit(t0, "th_A", 0xAAAA), Some(0));
+        // A new answer for the same thread is a new fact, not a repeat.
+        assert_eq!(throttle.admit(t0, "th_A", 0xBBBB), Some(0));
+        // As is the same answer for a different thread.
+        assert_eq!(throttle.admit(t0, "th_B", 0xBBBB), Some(0));
+        // The throttle holds down only what it last said.
+        assert_eq!(throttle.admit(t0, "th_B", 0xBBBB), None);
+    }
+
+    #[test]
+    fn the_discriminator_tells_answers_apart_without_being_the_digest() {
+        let frame = populated_answer();
+        // Stable, so a repeat is recognised as one.
+        assert_eq!(frame_discriminator(&frame), frame_discriminator(&frame));
+        // And distinguishing, so a genuinely new answer is reported at once.
+        assert_ne!(
+            frame_discriminator(&frame),
+            frame_discriminator(&json!({"result": {}}))
+        );
+        // It is not the digest, in either mode: it is not derived from the salt,
+        // which is exactly why the throttle survives the salt being absent.
+        let salt = a_salt();
+        let PublicDigest::Keyed(hex) = frame_digest_salted(Some(&salt), &frame) else {
+            panic!("a salted digest is keyed");
+        };
+        assert_ne!(hex, format!("{:016x}", frame_discriminator(&frame)));
+    }
+
     // -------------------------------- the link, against a scripted ccd leg
 
     /// A thread nothing in this session ever announces. Frames naming it are the
@@ -1268,14 +2023,14 @@ mod tests {
     /// the only answer the contract accepts; every other one must fail closed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ResumeAnswer {
-        /// The measured not-ready error — the only answer the live wire produces
-        /// today, because a turn-less thread has no rollout (A1/D3).
+        /// The measured not-ready error — what the live wire answers for a thread
+        /// that has not yet run a turn, because it has no rollout (A1/D3).
         NoRollout,
         /// A success with an empty `turns[]`. **Never observed on the wire**, so it
         /// fails closed like everything else: accepting it would normalize a shape
         /// nobody has seen, which is the mistake this chunk exists to not make.
         EmptyTurns,
-        /// A result describing a turn — the 2e-4 boundary.
+        /// A result describing a turn — the 2e-4b boundary.
         DescribesTurns,
         /// A policy refusal no retry can fix.
         Refused,
@@ -1661,7 +2416,7 @@ mod tests {
         );
     }
 
-    /// **The whole arc the pre-2e-4 contract actually supports**: bind from the
+    /// **The whole arc the pre-2e-4b contract actually supports**: bind from the
     /// `thread/started` this connection watched, record the stream under it, survive
     /// an EOF, carry the target across the reconnect, and meet the measured
     /// not-ready error there — retrying, indefinitely and bounded.
@@ -1669,7 +2424,7 @@ mod tests {
     /// The second connection gets **no announcement**, because a reconnect to a
     /// running thread does not get one: the announcement happened on a connection
     /// that is gone. So it stays unbound, drops the replayed named frames, and its
-    /// only business is the attach — which is exactly the pre-2e-4 contract.
+    /// only business is the attach — which is exactly the pre-2e-4b contract.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_link_binds_reconnects_and_retries_the_measured_attach() {
         let (events, connections, resumes, _) =

@@ -511,8 +511,9 @@ fn run_host_inner(args: &[String]) -> Result<i32> {
 
 /// Parse the host's charter, fail-closed in every dimension.
 ///
-/// `--codex`, `--run-dir`, `--codex-home` and **all four fingerprint dimensions**
-/// are required: the host applies no policy default, because a default is a
+/// `--codex`, `--run-dir`, `--codex-home` and **all five fingerprint dimensions**
+/// (`--approval-policy`, `--approvals-reviewer`, `--sandbox`, `--hooks-enabled`,
+/// `--launch-cwd`) are required: the host applies no policy default, because a default is a
 /// silent disagreement waiting to happen between the coordinator's durable launch
 /// record and what the broker actually enforces. Every flag takes a required,
 /// non-empty, control-character-free value; `--hooks-enabled` takes exactly
@@ -540,6 +541,7 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     let mut approvals_reviewer: Option<String> = None;
     let mut sandbox: Option<String> = None;
     let mut hooks_enabled: Option<bool> = None;
+    let mut launch_cwd: Option<String> = None;
     let mut tui_args = Vec::new();
 
     let mut it = args.iter();
@@ -565,6 +567,10 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
                 let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
                 set_once(&mut hooks_enabled, flag, parsed)?;
             }
+            // The workspace anchor (round-2 P4): the CANONICAL cwd this session was
+            // launched in. The coordinator resolved it once; the host passes it through
+            // verbatim and never re-resolves, so the broker compares exact strings.
+            "--launch-cwd" => set_once(&mut launch_cwd, flag, value_of(&mut it, flag)?)?,
             // Everything past the boundary belongs to the TUI, verbatim.
             "--" => {
                 tui_args.extend(it.by_ref().cloned());
@@ -597,6 +603,10 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
                 .context("--sandbox <value> is required (the host applies no default)")?,
             hooks_enabled: hooks_enabled
                 .context("--hooks-enabled true|false is required (the host applies no default)")?,
+            launch_cwd: launch_cwd.context(
+                "--launch-cwd <canonical path> is required (the host applies no default, and \
+                 re-resolving it here would be a second, disagreeing canonicalization)",
+            )?,
         },
         tui_args,
     })
@@ -1721,6 +1731,10 @@ mod tests {
             "read-only",
             "--hooks-enabled",
             "true",
+            // The fifth fingerprint dimension (round-2 P4): the CANONICAL launch cwd the
+            // coordinator resolved. The host passes it through and never re-resolves it.
+            "--launch-cwd",
+            "/work/proj",
         ];
         parts.extend_from_slice(extra);
         argv(&parts)
@@ -1779,6 +1793,7 @@ mod tests {
         assert_eq!(a.fingerprint.approvals_reviewer, "user");
         assert_eq!(a.fingerprint.sandbox, "read-only");
         assert!(a.fingerprint.hooks_enabled);
+        assert_eq!(a.fingerprint.launch_cwd, "/work/proj");
         // Everything past `--` is the TUI's, verbatim.
         assert_eq!(a.tui_args, vec!["--search", "hello world"]);
     }
@@ -1806,12 +1821,15 @@ mod tests {
             "workspace-write",
             "--hooks-enabled",
             "false",
+            "--launch-cwd",
+            "/private/tmp/ws",
         ]))
         .unwrap();
         assert_eq!(a.fingerprint.approval_policy, "on-request");
         assert_eq!(a.fingerprint.approvals_reviewer, "codex");
         assert_eq!(a.fingerprint.sandbox, "workspace-write");
         assert!(!a.fingerprint.hooks_enabled);
+        assert_eq!(a.fingerprint.launch_cwd, "/private/tmp/ws");
         assert!(a.tui_args.is_empty());
     }
 
@@ -1828,6 +1846,7 @@ mod tests {
             "--codex-home",
             "--approval-policy",
             "--approvals-reviewer",
+            "--launch-cwd",
             "--sandbox",
             "--hooks-enabled",
         ] {

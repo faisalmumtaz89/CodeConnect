@@ -38,7 +38,12 @@
 
 /// Which unix socket a client connection arrived on. Role is anchored here, not to
 /// the caller-controlled `initialize` identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// O12 — the role is NOT part of any correlation key. The session thread binding correlates
+/// an admitted creation to its response by `(ConnId, RequestId)` — the relay-minted
+/// per-connection instance id, not the role (round-2 P1; see [`crate::session`]). `Hash` is
+/// kept because [`crate::response_capability`] keys a capability's grant by role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
     /// `tui.sock` — the Codex TUI (and its `/resume` picker's second connection).
     Tui,
@@ -92,12 +97,26 @@ pub enum Disposition {
     /// Ownership-carrying request: assert the launch fingerprint over the params
     /// (typed fields *and* the `config` map, key-scoped) before forwarding; a
     /// conflict, or an absent ownership field on a policy-setting method, is refused.
+    ///
+    /// The **executor** adds two state-level rules this static table deliberately does not
+    /// encode (so the golden matrix does not move):
+    /// * `thread/start` additionally claims the session's single creation slot at the
+    ///   moment it is admitted, and is refused when that slot is closed (one thread bound
+    ///   or one creation already pending — [`crate::session`], P3).
+    /// * `thread/fork` is **refused outright pre-2e-4c**: a fork's lineage rule is that its
+    ///   SOURCE thread must be session-bound, and no fork frame exists in the wire capture,
+    ///   so the source-thread field is unprovable. See [`crate::refusal`].
     FingerprintAssert,
-    /// **Composable**: fingerprint-assert THEN the D2 head-check acceptance barrier.
-    /// `turn/start` needs later switch-quiesce sequencing, so with the head-check
-    /// executor deferred to the next sub-chunk the composed disposition **fails closed**
-    /// — the fingerprint is still evaluated (a conflict is a distinct policy refusal),
-    /// but a fingerprint-clean `turn/start` is refused as deferred, never forwarded.
+    /// **Composable**: fingerprint-assert THEN a head-check, in that order — a conflicting
+    /// ownership value stays its own distinct policy refusal before the head is consulted.
+    /// The executor implements the **pre-D2 subset**: a `turn/start` may only name the
+    /// session's ONE **verified** thread — one whose creation this broker admitted AND
+    /// whose creation response it correlated and verified ([`crate::session`]) — and must
+    /// carry exactly the `cwd`/`runtimeWorkspaceRoots` bound at that creation. This is also
+    /// the ONLY thing that discharges the measured `sandboxPolicy: null` deferral (see
+    /// [`crate::fingerprint`]). D2 — the latch, acknowledged quiesce, acceptance fence and
+    /// upstream seal — replaces the subset wholesale when it lands; it fills in the
+    /// executor, not this table.
     FingerprintThenHeadCheck,
     /// Refuse now (zero upstream bytes; synthetic error only for a request with a
     /// usable id).
@@ -173,7 +192,9 @@ fn tui_request(method: &str) -> Disposition {
     use RefuseReason::*;
     match method {
         // Ownership-carrying: thread creation/attach is fingerprint-asserted; a turn
-        // additionally needs the deferred head-check, so it fails closed until then.
+        // additionally head-checks against the session's verified thread. (`thread/fork`
+        // keeps its cell but is refused in the executor pre-2e-4c — see the disposition
+        // docs; keeping the cell keeps the golden matrix stable.)
         "thread/start" | "thread/resume" | "thread/fork" => FingerprintAssert,
         "turn/start" => FingerprintThenHeadCheck,
 

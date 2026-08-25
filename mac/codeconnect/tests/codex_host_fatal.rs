@@ -351,6 +351,9 @@ impl Host {
                 "read-only",
                 "--hooks-enabled",
                 "true",
+                // Round-2 P4: the canonical launch cwd (the workspace anchor).
+                "--launch-cwd",
+                "/tmp",
             ])
             .env("CODECONNECT_HOME", &launch.home)
             .stdin(Stdio::null())
@@ -695,6 +698,9 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
             "read-only",
             "--hooks-enabled",
             "true",
+            // Round-2 P4: the canonical launch cwd (the workspace anchor).
+            "--launch-cwd",
+            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
@@ -830,6 +836,9 @@ fn an_existing_run_dir_is_refused() {
             "read-only",
             "--hooks-enabled",
             "true",
+            // Round-2 P4: the canonical launch cwd (the workspace anchor).
+            "--launch-cwd",
+            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())

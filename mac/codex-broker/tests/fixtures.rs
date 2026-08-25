@@ -122,6 +122,7 @@ async fn captured_frames_pass_through_s2c_byte_exact_and_in_order() {
         approvals_reviewer: "user".into(),
         sandbox: "read-only".into(),
         hooks_enabled: true,
+        launch_cwd: "/work/proj".into(),
     };
     let broker = Broker::new(
         tui.clone(),

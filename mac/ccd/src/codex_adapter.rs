@@ -161,13 +161,14 @@ impl CodexAdapter {
             //
             // In-flight state on a late attach comes from the `thread/resume`
             // **response** instead. Reconciling that response against this open
-            // set is **2e-4's**, not this chunk's: no turn can run through the
-            // broker until the D2 head-check lands (`turn/start` fails closed on
-            // the TUI leg), so no turn, no in-flight item and no populated
-            // `turns[]` can exist on the wire yet — and a reconciliation designed
-            // against inputs nobody can produce is a guess. 2e-4 builds it against
-            // real evidence; until then [`crate::codex_link`] refuses any resume
-            // response that describes a turn at all.
+            // set is **2e-4b's**, not this chunk's. Turns DO run through the broker
+            // now (the head-check in `codex-broker/src/refusal.rs` forwards a
+            // `turn/start` naming the session's bound thread), and a post-turn
+            // resume really does come back with a populated `turns[]` — captured at
+            // `fixtures/codex/resume-populated-answer.json`. Nothing here has
+            // validated its completeness or its keying, so [`crate::codex_link`]
+            // still refuses any resume response that describes a turn at all, and
+            // 2e-4b is what designs the reconciliation against that evidence.
             "turn/started" => Vec::new(),
 
             // Known, deliberately not rendered: observation noise, ownership/

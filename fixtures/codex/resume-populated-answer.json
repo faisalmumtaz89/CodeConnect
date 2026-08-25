@@ -1,0 +1,86 @@
+{
+  "id": 2,
+  "result": {
+    "thread": {
+      "id": "01a03652-f207-76e2-b1f5-aece767a3081",
+      "extra": null,
+      "sessionId": "01a03652-f207-76e2-b1f5-aece767a3081",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "Reply with the single word ok and nothing else.",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "createdAt": 1787617800,
+      "updatedAt": 1787617806,
+      "recencyAt": 1787617803,
+      "status": {
+        "type": "idle"
+      },
+      "path": "/work/.codex/sessions/rollout-2026-08-25T03-30-00-01a03652-f207-76e2-b1f5-aece767a3081.jsonl",
+      "cwd": "/work/proj",
+      "cliVersion": "0.147.0",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": "user",
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "turns": [
+        {
+          "id": "01a03652-fe8e-79d2-99f8-2d5e445e6d8d",
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "01a03653-012c-70f1-97e0-cc6652384b07",
+              "clientId": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with the single word ok and nothing else.",
+                  "text_elements": []
+                }
+              ]
+            },
+            {
+              "type": "agentMessage",
+              "id": "msg_02ad7d65598a86e0016a8ce20ea2ec87d29971cc7f5e5b0f3c",
+              "text": "ok",
+              "phase": "final_answer",
+              "memoryCitation": null
+            }
+          ],
+          "itemsView": "full",
+          "status": "completed",
+          "error": null,
+          "startedAt": 1787617803,
+          "completedAt": 1787617806,
+          "durationMs": 2546
+        }
+      ]
+    },
+    "model": "gpt-5.6-luna",
+    "modelProvider": "openai",
+    "serviceTier": null,
+    "cwd": "/work/proj",
+    "runtimeWorkspaceRoots": [
+      "/work"
+    ],
+    "instructionSources": [],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+      "type": "readOnly",
+      "networkAccess": false
+    },
+    "activePermissionProfile": null,
+    "reasoningEffort": null,
+    "multiAgentMode": "explicitRequestOnly",
+    "initialTurnsPage": null,
+    "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a03652-f207-76e2-b1f5-aece767a3081\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+    "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a03652-f207-76e2-b1f5-aece767a3081\",\"rolloutOrdinal\":8,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+  }
+}
