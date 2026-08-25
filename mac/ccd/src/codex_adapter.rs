@@ -38,10 +38,19 @@
 //! from cross-resume item-id equality, which D15 says is unstable inside an
 //! interrupted turn.
 //!
-//! The live caller is [`crate::codex_link`], which holds the connection, stamps
-//! each frame at ingress and feeds the admitted ones through here. Nothing in this
-//! module knows that: it is still a pure mapper over frames, and the resume-response
-//! Nothing here knows that: it is still a pure mapper over frames.
+//! ## The two entry points
+//!
+//! [`CodexAdapter::ingest`] maps one **notification** to facts. [`CodexAdapter::plan_resume_seed`]
+//! reads a **`thread/resume` answer** — the other thing the app-server describes a
+//! thread with — into the same facts, and is what lets a link that was down across a
+//! turn recover it. Both are pure: no socket, no daemon, no clock. The seeding pair is
+//! deliberately split into plan-then-apply so its caller can make the recovered facts
+//! durable *before* anything in here forgets what it had open; the rules that split
+//! enforces are on [`CodexAdapter::apply_resume_seed`].
+//!
+//! The live caller is [`crate::codex_link`], which holds the connection, stamps each
+//! frame at ingress and feeds the admitted ones through here. Nothing in this module
+//! knows that: it is still a pure mapper.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -56,6 +65,45 @@ use serde_json::{json, Value};
 /// correlation state.
 fn require_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// An **optional** field that must be a non-empty string whenever it is there at all.
+///
+/// Absent and `null` both pass — the resume answer spells "no value" both ways
+/// (`reasoningEffort: null` beside an absent key) and neither is a shape this build
+/// cannot read. A present value that is not a non-empty string is: it means the field
+/// has changed type under us, and reading past it would be reading a shape nobody
+/// measured.
+fn absent_or_nonempty_str(v: &Value, key: &str) -> bool {
+    match v.get(key) {
+        None | Some(Value::Null) => true,
+        Some(other) => other.as_str().is_some_and(|s| !s.is_empty()),
+    }
+}
+
+/// An **optional** field that must be a `{"type": "<non-empty>"}` object when present.
+/// The effective sandbox is the one policy field that is an object rather than a
+/// string (`{"type":"readOnly","networkAccess":false}`, measured live and in the
+/// fixture).
+fn absent_or_typed_object(v: &Value, key: &str) -> bool {
+    match v.get(key) {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(map)) => map
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty()),
+        Some(_) => false,
+    }
+}
+
+/// An **optional** field that names a thread: absent or `null` passes, anything
+/// present must be exactly the thread we asked about. This is what makes a second
+/// thread-naming field unable to contradict the identity the answer is read under.
+fn absent_or_equal(v: &Value, key: &str, expected: &str) -> bool {
+    match v.get(key) {
+        None | Some(Value::Null) => true,
+        Some(other) => other.as_str() == Some(expected),
+    }
 }
 
 /// An `item/started` we have not yet seen `item/completed` (or a turn terminal)
@@ -77,6 +125,155 @@ struct OpenItem {
     /// Accumulated `item/agentMessage/delta` text, so a message interrupted
     /// before `item/completed` can still be synthesized with what streamed.
     delta_text: String,
+}
+
+/// **Is this a completed-turn item the seeding path is allowed to mint a fact from?**
+///
+/// An **allowlist**, not a sanity check, and the difference is the point. The live path
+/// reads these same fields from a frame the wire just emitted, one field at a time, and a
+/// malformed one costs that one frame. The seeding path mints facts onto **first-wins**
+/// dedup keys, so a payload built from a wrong-typed field does not cost one frame — it
+/// occupies the key the real live fact would have taken, permanently, and the real one is
+/// then dropped as a duplicate. A `""` where the assistant's reply belongs would be
+/// indistinguishable from an empty reply for ever.
+///
+/// So the answer may only describe item types this build has **measured on this wire**,
+/// and each of them only in the shape it was measured in:
+///
+///   * **`agentMessage`** — `text` must be a string (`"ok"` in the fixture). Absent or
+///     non-string, [`message_payload`] falls through to the `content` branch and yields
+///     `""`; that is the defaulted value this refuses to mint.
+///   * **`userMessage`** — `content` must be an array, and **every part an object with a
+///     string `text`** (`{"type":"text","text":…,"text_elements":[]}` as measured). A
+///     scalar part, or an object without `text`, is silently skipped by the join, so the
+///     recorded prompt would be a truncated version of what the user actually typed —
+///     and that truncation would hold the key for ever. It must also carry **no
+///     top-level `text`**: [`message_payload`] *prefers* that field when it is a string
+///     and never looks at `content` at all, so an answer carrying both would render the
+///     one field nothing here validated and persist it on a first-wins key. The measured
+///     shape has `content` and no `text`, so the alias is refused rather than
+///     accommodated — and the renderer stays shared with the live path rather than
+///     diverging into two spellings of the same fact.
+///   * **`reasoning`** — `summary` and `content` are arrays where present (both `[]` in
+///     the fixture). These are cloned rather than read, so there is no defaulting hazard,
+///     but a changed type is still a shape nobody measured.
+///
+/// **Everything else is refused**, including item types this build models perfectly well
+/// from the live wire. `commandExecution` and `fileChange` are refused earlier and by
+/// name (see the tool guard in [`CodexAdapter::plan_resume_seed`]); an item type that is
+/// simply unknown would otherwise be preserved wholesale as an `Other` fact, which sounds
+/// harmless and is not — nothing has ever compared such a fact against the one the live
+/// path produces for the same item, so there is no evidence the two would agree, and a
+/// first-wins key is the wrong place to find out. Refusing is the same re-grounding
+/// trigger the tool types get.
+///
+/// The three admitted types are exactly what a resume answer has been measured to carry:
+/// `userMessage` and `agentMessage` in the committed
+/// `fixtures/codex/resume-populated-answer.json`, and `reasoning` in the live two-session
+/// measurement recorded in the plan's A14 (a completed turn whose live stream was
+/// userMessage → reasoning → agentMessage came back carrying all three).
+fn seeded_item_shape_is_measured(item: &Value, item_type: &str) -> bool {
+    match item_type {
+        "agentMessage" => item.get("text").is_some_and(Value::is_string),
+        "userMessage" => {
+            item.get("text").is_none()
+                && item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().all(|part| {
+                            part.is_object() && part.get("text").is_some_and(Value::is_string)
+                        })
+                    })
+        }
+        "reasoning" => {
+            item.get("summary").is_none_or(Value::is_array)
+                && item.get("content").is_none_or(Value::is_array)
+        }
+        _ => false,
+    }
+}
+
+/// The `turn.status` a `thread/resume` answer uses for a turn that has **finished**.
+/// Measured: the only status under which the answer's item ids are the real ones.
+const RESUME_TURN_COMPLETED: &str = "completed";
+
+/// The `turn.status` a `thread/resume` answer uses for a turn that is **still
+/// running**. Measured: its `items[]` carry **placeholder ids** (`item-1`, `item-2`),
+/// never the ids the live wire emitted — see [`CodexAdapter::plan_resume_seed`].
+const RESUME_TURN_IN_PROGRESS: &str = "inProgress";
+
+/// The only `itemsView` a `thread/resume` answer has been measured to report for a
+/// turn — running or finished, every turn in every captured answer said `"full"`.
+///
+/// It is a **second, independent** guard beside the status: `turn/completed` on the
+/// live wire carries `itemsView:"summary"` with a partial `items[]`, and
+/// `turn/started` carries `"notLoaded"` with an empty one, so the vocabulary demonstrably
+/// distinguishes a whole item list from a partial one. An answer that starts reporting
+/// either of those — a paged history, a summarized turn — is describing a list this
+/// build must not read as complete, and fails closed instead.
+const RESUME_ITEMS_VIEW_FULL: &str = "full";
+
+/// The reconciliation one accepted `thread/resume` answer implies, computed **without
+/// mutating anything**.
+///
+/// Two phases rather than one, and the split is the whole safety property (see
+/// [`CodexAdapter::plan_resume_seed`]): the facts are made durable first, and only a
+/// caller that got them all written applies the state rebuild. A seed that is planned
+/// and never applied has changed nothing, so the attach that failed can simply be
+/// retried on the next connection.
+pub struct ResumeSeed {
+    /// The thread this answer was read under — the one the resume asked about.
+    thread_id: String,
+    /// The facts the answer describes, in timeline order. These must be durable
+    /// **before** [`CodexAdapter::apply_resume_seed`] is allowed to forget anything.
+    events: Vec<PendingEvent>,
+    /// The turns the answer reports as still running. An open item belonging to one of
+    /// these keeps the state this adapter observed live — the answer confirms the
+    /// item's turn is alive, and confirms nothing else about it.
+    running_turns: Vec<String>,
+    /// The `(thread, turn)` usage totals held for turns the answer reports finished.
+    /// They are **dropped** by the rebuild, never emitted — see the P4 note in
+    /// [`CodexAdapter::plan_resume_seed`]: a total held for a turn whose completion was
+    /// missed is a mid-turn snapshot, and the dedup key is first-wins.
+    discarded_usage: Vec<(String, String)>,
+    /// How many turns the answer described, and how many of those had finished —
+    /// reported by the caller, never inferred from the event count.
+    described_turns: usize,
+    terminal_turns: usize,
+}
+
+impl ResumeSeed {
+    /// The facts to record, taken out so the caller cannot record them twice.
+    pub fn take_events(&mut self) -> Vec<PendingEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// How many turns the answer described in total.
+    pub fn described_turns(&self) -> usize {
+        self.described_turns
+    }
+
+    /// How many of them had finished, and therefore contributed facts.
+    pub fn terminal_turns(&self) -> usize {
+        self.terminal_turns
+    }
+
+    /// How many were still running, and therefore only confirmed liveness.
+    pub fn running_turns(&self) -> usize {
+        self.running_turns.len()
+    }
+
+    /// **The turns this answer reported still running.**
+    ///
+    /// The caller needs their ids, not just a count, because a turn seeded in this state
+    /// carries a debt: its items that had already finished were described with
+    /// placeholder ids and could not be recovered, and the only thing that can settle
+    /// them is a later answer reporting the same turn finished. See
+    /// [`crate::codex_link`]'s follow-up attach.
+    pub fn running_turn_ids(&self) -> &[String] {
+        &self.running_turns
+    }
 }
 
 /// Normalizes one Codex app-server session's notification stream into the
@@ -160,15 +357,11 @@ impl CodexAdapter {
             // no "turn started" fact, so it maps to nothing.
             //
             // In-flight state on a late attach comes from the `thread/resume`
-            // **response** instead. Reconciling that response against this open
-            // set is **2e-4b's**, not this chunk's. Turns DO run through the broker
-            // now (the head-check in `codex-broker/src/refusal.rs` forwards a
-            // `turn/start` naming the session's bound thread), and a post-turn
-            // resume really does come back with a populated `turns[]` — captured at
-            // `fixtures/codex/resume-populated-answer.json`. Nothing here has
-            // validated its completeness or its keying, so [`crate::codex_link`]
-            // still refuses any resume response that describes a turn at all, and
-            // 2e-4b is what designs the reconciliation against that evidence.
+            // **response** instead, which [`CodexAdapter::plan_resume_seed`] now
+            // reads: a turn the answer reports `inProgress` confirms its open items
+            // are alive, and a turn it reports `completed` describes their real
+            // terminals. So there is still no "turn started" fact to mint here —
+            // the turn's existence is carried by its terminal, from either source.
             "turn/started" => Vec::new(),
 
             // Known, deliberately not rendered: observation noise, ownership/
@@ -200,24 +393,381 @@ impl CodexAdapter {
         }
     }
 
+    /// Read a `thread/resume` **result** into a [`ResumeSeed`] for `requested_thread`,
+    /// or refuse it. Pure: reads the answer and this adapter's own state, mutates
+    /// neither. `None` means "a shape this build has not measured" and is the caller's
+    /// signal to fail closed.
+    ///
+    /// # What the wire actually says, and what that forces
+    ///
+    /// Measured against a real codex 0.147 over two live sessions (seven turns, four
+    /// resume answers, cross-checked frame by frame against the same turns observed
+    /// live on a subscribed connection):
+    ///
+    ///   * **`turns[]` is complete.** After one, two and three turns the answer carried
+    ///     one, two and three turns — oldest first, `initialTurnsPage: null`. A
+    ///     finished turn's `items[]` is complete too: a turn whose live stream was
+    ///     `userMessage`, `reasoning`, `agentMessage` came back with all three, in that
+    ///     order, under `itemsView:"full"`.
+    ///   * **A finished turn keys stably.** Every turn id and every item id in a
+    ///     `completed` turn was **byte-identical** to the id the live wire emitted for
+    ///     it, and identical again across later resumes of the same thread. That is
+    ///     what makes recovering one safe: it lands on the dedup key the live path
+    ///     would have minted, so a fact observed live and the same fact recovered from
+    ///     an answer collapse to one row instead of doubling.
+    ///   * **A running turn does NOT.** The `items[]` of an `inProgress` turn carry
+    ///     **placeholder ids** — `item-1`, `item-2` — while the live wire is emitting
+    ///     `01a03888-ca10-…` and `msg_060c22…` for those very items. The same turn,
+    ///     resumed twice, reported `item-1`/`item-2` while it ran and the real ids once
+    ///     it finished. This is D15, and it is **wider than the plan recorded**: D15
+    ///     named interrupted turns, and it is every non-finished turn.
+    ///
+    /// So the rule is forced, not chosen:
+    ///
+    ///   * a `completed` turn contributes its items' terminals and its turn terminal —
+    ///     and **no usage fact**: a total held for a turn whose completion was missed is
+    ///     a mid-turn snapshot, and `usage:<turn>` is first-wins, so promoting it would
+    ///     durably shadow the real final total. The stale total is discarded instead and
+    ///     the gap is left legible;
+    ///   * an `inProgress` turn contributes **no item fact whatsoever** — its ids are
+    ///     known-fabricated, and minting `…:item:item-1` would both invent a fact and
+    ///     alias every running turn's first item onto one key — only the confirmation
+    ///     that its turn is alive;
+    ///   * **any other status fails closed.** `interrupted` and `failed` are real on
+    ///     the *notification* wire and have never been seen on this one; what a
+    ///     resume answer says about an aborted turn is exactly the thing D15 warns is
+    ///     treacherous, and guessing it is the mistake this whole chunk exists not to
+    ///     repeat. The refusal is loud and names the shape.
+    pub fn plan_resume_seed(&self, result: &Value, requested_thread: &str) -> Option<ResumeSeed> {
+        // --- identity: this answer must be about the thread we asked about -------
+        let thread = result.get("thread")?;
+        if require_str(thread, "id") != Some(requested_thread) {
+            return None;
+        }
+        // A second field naming a thread may not contradict the first. Picking one
+        // would be choosing which contradiction to believe — the same rule
+        // `codex_link::frame_thread_id` applies to a notification.
+        if !absent_or_equal(result, "threadId", requested_thread) {
+            return None;
+        }
+        // **P4: `sessionId` is a second name for the same thread, and it must agree.**
+        // Measured equal to `thread.id` on every captured answer. It is checked because
+        // it is an *alias*: a reader that trusted it over `id` — or a future field that
+        // starts being read — would file this session's facts under whatever it says, and
+        // a contradictory pair is precisely the shape that would go unnoticed.
+        //
+        // A forked thread might legitimately carry a different `sessionId`; forks are
+        // refused by the broker's single-thread invariant pre-D2, and if one ever
+        // reaches here the refusal is the designed re-grounding trigger rather than a
+        // silent misfiling.
+        if !absent_or_equal(thread, "sessionId", requested_thread) {
+            return None;
+        }
+
+        // --- the effective policy fields, read for SHAPE ------------------------
+        // Not turned into facts — they are the session's configuration, not its
+        // timeline. They are checked because a later chunk reads this answer for the
+        // policy a resumed thread is running under (the sandbox the turn/start
+        // deferral resolves to, D2's fingerprint material), and an answer whose policy
+        // has changed type is an answer this build cannot read. Absent and `null` both
+        // pass: the answer spells "no value" both ways.
+        if !absent_or_typed_object(result, "sandbox") {
+            return None;
+        }
+        for key in ["approvalPolicy", "approvalsReviewer", "cwd", "model"] {
+            if !absent_or_nonempty_str(result, key) {
+                return None;
+            }
+        }
+
+        let turns = result.pointer("/thread/turns")?.as_array()?;
+        // **An answer that describes no turn at all is refused.** Every answer measured
+        // on this wire carried at least one — a thread with no turns has no rollout and
+        // answers with the not-ready error instead, which is the *other* accepted
+        // shape. An empty `turns[]` under an otherwise well-formed envelope has never
+        // been seen, and attaching on it would mean subscribing on the strength of an
+        // answer that describes nothing.
+        if turns.is_empty() {
+            return None;
+        }
+        // **P3: an answer that is a PAGE of history is refused.** Every captured answer
+        // carried `initialTurnsPage: null`, and `turns[]` complete for the whole thread
+        // (1→1, 2→2, 3→3 turns). A non-null page is the shape a paged history would
+        // arrive as, and attaching on one would mean subscribing while older turns stay
+        // silently unrecovered — the seed would look complete and be a window.
+        //
+        // The two backwards cursors are NOT required absent: measured, they are always
+        // present, non-empty JSON strings, on every answer including the complete ones,
+        // so they say "here is where paging backwards would start", not "this is a
+        // page". They are checked for TYPE only, like the policy fields.
+        if !matches!(result.get("initialTurnsPage"), None | Some(Value::Null)) {
+            return None;
+        }
+        for cursor in ["turnsBackwardsCursor", "itemsBackwardsCursor"] {
+            if !absent_or_nonempty_str(result, cursor) {
+                return None;
+            }
+        }
+
+        let mut events = Vec::new();
+        let mut running_turns = Vec::new();
+        let mut discarded_usage = Vec::new();
+        let mut terminal_turns = 0;
+
+        // The session's own identity, from the same Thread object `thread/started`
+        // carries. This is how a link that never watched the announcement — a daemon
+        // that restarted mid-session — records the session at all.
+        events.push(self.thread_identity_event(thread)?);
+
+        // **P7: identities must be unique within one answer.** A turn that appears
+        // twice — once `completed` and once `inProgress` — is a contradiction, and
+        // reading it would both seed a terminal and hold the same turn open. Item ids
+        // are tracked across the whole answer for the same reason one layer down: two
+        // fact-producing items sharing an id would collide on one dedup key, and
+        // whichever was written first would silently swallow the other.
+        let mut seen_turns = std::collections::HashSet::new();
+        let mut seen_items = std::collections::HashSet::new();
+        // **P3: oldest-first, validated rather than assumed.** Measured on every
+        // captured answer (startedAt 1787654880 → …885 → …890). The order is what a
+        // reader would rely on to decide which turn is current, so it is checked.
+        let mut previous_started_at = i64::MIN;
+
+        for turn in turns {
+            let (Some(turn_id), Some(status)) =
+                (require_str(turn, "id"), require_str(turn, "status"))
+            else {
+                return None;
+            };
+            if !seen_turns.insert(turn_id) {
+                return None;
+            }
+            // Whole list or nothing: see [`RESUME_ITEMS_VIEW_FULL`].
+            if require_str(turn, "itemsView") != Some(RESUME_ITEMS_VIEW_FULL) {
+                return None;
+            }
+            let started_at = turn.get("startedAt").and_then(Value::as_i64)?;
+            if started_at < previous_started_at {
+                return None;
+            }
+            previous_started_at = started_at;
+            let items = turn.get("items")?.as_array()?;
+            // Every item must carry both routing identities — checked for EVERY turn,
+            // including the running ones whose ids are then deliberately not used. A
+            // turn whose items are not even shaped like items is not an answer this
+            // build can read, whatever it then chooses to do with them.
+            if items.iter().any(|item| {
+                require_str(item, "id").is_none() || require_str(item, "type").is_none()
+            }) {
+                return None;
+            }
+            // **P5: a tool-bearing answer is refused outright.** No resume answer
+            // describing a `commandExecution` or a `fileChange` has ever been captured
+            // — the live gate's sandbox is read-only with approvals on-request, so a
+            // tool call needs an approval nobody answers. The live path guards these
+            // two types specially (a terminal with no `status` is dropped rather than
+            // rendered, because `tool_result_payload` would otherwise default it to
+            // "completed" and persist a success that never happened), and nothing here
+            // has measured whether an answer even carries that field. Reading one would
+            // be fabricating a tool outcome; refusing is the designed re-grounding
+            // trigger, exactly as for an unmeasured turn status.
+            if items.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("commandExecution") | Some("fileChange")
+                )
+            }) {
+                return None;
+            }
+
+            match status {
+                // Alive: the answer confirms the turn is running and nothing more.
+                // Its item ids are measured placeholders and are never read.
+                RESUME_TURN_IN_PROGRESS => running_turns.push(turn_id.to_string()),
+                // Finished: its ids are the live ids, so its facts are recoverable.
+                RESUME_TURN_COMPLETED => {
+                    // **The terminal's own fields, validated before it is minted.**
+                    // `turn_terminal_events` copies these straight into the payload, so
+                    // a missing or retyped one would land as `null` on
+                    // `<thread>:turn:<id>` — first-wins — and hold that key against the
+                    // live terminal that carries the real values. Measured on every
+                    // captured answer: a finished turn reports both as numbers
+                    // (`completedAt: 1787617806`, `durationMs: 2546`), while a running
+                    // one reports both as null, which is exactly why this check belongs
+                    // on this branch and not above it.
+                    if turn.get("completedAt").and_then(Value::as_i64).is_none()
+                        || turn.get("durationMs").and_then(Value::as_i64).is_none()
+                    {
+                        return None;
+                    }
+                    // **A finished turn carrying an error has never been captured.**
+                    // Every measured turn reports `error: null`. The live path surfaces a
+                    // non-null one as its own `Error` fact, but nothing has measured what
+                    // an *answer* puts there — so reading it would be inventing the shape
+                    // of a failure. Refused, like every other uncaptured shape.
+                    if !turn.get("error").is_none_or(Value::is_null) {
+                        return None;
+                    }
+                    terminal_turns += 1;
+                    for item in items {
+                        let (Some(item_id), Some(item_type)) =
+                            (require_str(item, "id"), require_str(item, "type"))
+                        else {
+                            return None;
+                        };
+                        // P7: only the ids that BECOME facts are checked for
+                        // uniqueness. A running turn's placeholders (`item-1`) are
+                        // never read, and two running turns would legitimately carry
+                        // the same one.
+                        if !seen_items.insert(item_id) {
+                            return None;
+                        }
+                        // P3: type-checked BEFORE the fact is minted, because the key it
+                        // would take is first-wins.
+                        if !seeded_item_shape_is_measured(item, item_type) {
+                            return None;
+                        }
+                        if let Some(event) = self.terminal_item_event(
+                            requested_thread,
+                            Some(turn_id.to_string()),
+                            item_id,
+                            item_type,
+                            item,
+                            false,
+                        ) {
+                            events.push(event);
+                        }
+                    }
+                    // **P4: a held usage total is DISCARDED here, never promoted.**
+                    //
+                    // `latest_usage` holds the newest cumulative total this adapter has
+                    // *seen*, and a turn whose completion it missed is exactly a turn
+                    // whose final total it never saw: what it is holding is some
+                    // mid-turn snapshot U1, while the turn really ended at U2. Emitting
+                    // U1 under `usage:<turn>` would be worse than emitting nothing,
+                    // because the dedup key is first-wins — U1 would take the key and
+                    // permanently shadow the true U2, and no later observation could
+                    // ever correct it. So a recovered turn contributes no usage fact,
+                    // the stale total is dropped, and the gap is legible rather than
+                    // wrong. (A turn whose completion WAS observed live already emitted
+                    // its usage at `on_turn_completed`, which consumed the entry — so
+                    // there is nothing here to promote in that case either.)
+                    let key = (requested_thread.to_string(), turn_id.to_string());
+                    if self.latest_usage.contains_key(&key) {
+                        discarded_usage.push(key);
+                    }
+                    events.extend(self.turn_terminal_events(
+                        requested_thread,
+                        turn_id,
+                        turn,
+                        status,
+                        None,
+                    ));
+                }
+                // Anything else is a shape nobody measured. Fail closed, loudly.
+                _ => return None,
+            }
+        }
+
+        Some(ResumeSeed {
+            thread_id: requested_thread.to_string(),
+            events,
+            described_turns: turns.len(),
+            terminal_turns,
+            running_turns,
+            discarded_usage,
+        })
+    }
+
+    /// Rebuild in-flight state from a seed whose facts are **already durable**.
+    ///
+    /// Called only after every event in the seed has been recorded, because this is
+    /// where the adapter forgets things. Three rules, each of them a constraint the
+    /// review rounds paid for:
+    ///
+    ///   * **Never fabricate.** An open item the answer does not confirm still running
+    ///     is dropped **without a terminal**. It may have completed while the link was
+    ///     down — in which case the answer already described its real terminal and that
+    ///     fact is now durable — or it may have vanished from history entirely (D16).
+    ///     Either way, synthesizing one from an id the answer did not vouch for is
+    ///     inventing a fact. D15's renames land here by construction: a placeholder id
+    ///     matches no observed item, so the observed item is simply dropped rather than
+    ///     terminalized under a fabricated identity.
+    ///   * **Merge, never replace.** An open item whose turn the answer reports still
+    ///     running keeps everything this adapter watched happen — its `item/started`
+    ///     snapshot and every delta that streamed into it. The answer confirms the
+    ///     turn is alive; it does not re-describe the item, and it could not, because
+    ///     its ids for a running turn are placeholders.
+    ///   * **Another thread is not this answer's business.** Open items belonging to a
+    ///     thread this answer is not about survive untouched.
+    pub fn apply_resume_seed(&mut self, seed: &ResumeSeed) {
+        self.open.retain(|open| {
+            open.thread_id != seed.thread_id || seed.running_turns.contains(&open.turn_id)
+        });
+        // Dropped, not emitted: the total held for a turn whose completion this
+        // adapter missed is stale, and a stale total under a first-wins key is a
+        // permanent lie rather than a temporary gap.
+        for key in &seed.discarded_usage {
+            self.latest_usage.remove(key);
+        }
+    }
+
     fn on_thread_started(&mut self, params: &Value) -> Vec<PendingEvent> {
         let Some(thread) = params.get("thread") else {
             return Vec::new();
         };
-        let Some(tid) = require_str(thread, "id") else {
-            return Vec::new();
+        self.thread_identity_event(thread).into_iter().collect()
+    }
+
+    /// The session's identity fact, from a **Thread object**.
+    ///
+    /// Shared by the two places that carry one: the `thread/started` broadcast and a
+    /// `thread/resume` answer's `result.thread` — which is the same object, measured
+    /// field for field. Sharing the mapping is what makes the fact a link recovers on
+    /// re-attach byte-identical to the one it would have recorded live, so the dedup
+    /// key collapses them instead of the two paths drifting apart.
+    ///
+    /// **Only immutable fields go in.** The dedup key is `<thread>:thread_started`, so
+    /// whichever of the two routes reaches the store first wins the payload for ever —
+    /// which means any field that can *change* between the announcement and a later
+    /// resume would make the recorded content depend on arrival order rather than on
+    /// what happened. The Thread object carries several such fields, and they are
+    /// excluded by construction rather than by being forgotten:
+    ///
+    ///   * `status` — `{"type":"idle"}` at announcement, `{"type":"active",…}` while a
+    ///     turn runs. It is live state, and a *session started* fact is the wrong place
+    ///     for it: the timeline already carries turn terminals for that.
+    ///   * `preview`, `updatedAt`, `recencyAt` — all move as the thread is used
+    ///     (measured: `preview` is `""` at announcement and the user's first prompt
+    ///     afterwards), and none is read here.
+    ///
+    /// What is left — the thread id, its cwd, its rollout path and the CLI version that
+    /// created it — is fixed for the life of the thread, so both routes render the same
+    /// bytes whichever arrives first.
+    fn thread_identity_event(&self, thread: &Value) -> Option<PendingEvent> {
+        let tid = require_str(thread, "id")?;
+        // **Validated before minting, not defaulted while minting.** These three are the
+        // whole payload, and the key they land on is first-wins — so a Thread object
+        // missing one, or carrying it as something other than a string, would take
+        // `<thread>:thread_started` with a null in it and hold it against the correct
+        // description arriving afterwards. Measured present and string-valued on both
+        // routes: the `thread/started` broadcast and every `thread/resume` answer.
+        let (Some(cwd), Some(path), Some(cli_version)) = (
+            require_str(thread, "cwd"),
+            require_str(thread, "path"),
+            require_str(thread, "cliVersion"),
+        ) else {
+            return None;
         };
-        let field = |k: &str| thread.get(k).cloned().unwrap_or(Value::Null);
         let payload = json!({
             "thread_id": tid,
-            "cwd": field("cwd"),
-            "rollout_path": field("path"),
-            "status": field("status"),
-            "cli_version": field("cliVersion"),
+            "cwd": cwd,
+            "rollout_path": path,
+            "cli_version": cli_version,
         });
-        vec![self
-            .event(EventKind::SessionStart, payload)
-            .with_source_event_id(sid(tid, "thread_started"))]
+        Some(
+            self.event(EventKind::SessionStart, payload)
+                .with_source_event_id(sid(tid, "thread_started")),
+        )
     }
 
     fn on_item_started(&mut self, params: &Value) -> Vec<PendingEvent> {
@@ -378,12 +928,40 @@ impl CodexAdapter {
         // (For `completed`, `dangling` is dropped without synthesis — the items
         // completed normally and were already emitted.)
 
+        // The usage this turn accumulated is CONSUMED here: a live terminal is the
+        // one place the running total becomes a fact.
+        let usage = self
+            .latest_usage
+            .remove(&(tid.to_string(), turn_id.to_string()));
+        out.extend(self.turn_terminal_events(tid, turn_id, turn, status, usage));
+
+        out
+    }
+
+    /// The facts a **terminal turn** produces, whether the terminal was observed live
+    /// (`turn/completed`) or described by a `thread/resume` answer.
+    ///
+    /// One mapping, two callers, deliberately: the whole dedup story across a re-attach
+    /// is that the turn a link recovers from an answer carries the same key AND the
+    /// same payload as the one it would have recorded live. Two copies of this
+    /// rendering would be two chances for that to stop being true silently.
+    ///
+    /// `usage` is passed in rather than read here because the two callers own it
+    /// differently: the live terminal **consumes** the running total, while planning a
+    /// seed may only read it — nothing may be forgotten until the facts are durable.
+    fn turn_terminal_events(
+        &self,
+        tid: &str,
+        turn_id: &str,
+        turn: &Value,
+        status: &str,
+        usage: Option<Value>,
+    ) -> Vec<PendingEvent> {
+        let mut out = Vec::new();
+
         // The one authoritative token-usage fact for this turn — the latest
         // cumulative total we saw, emitted once as the turn closes.
-        if let Some(usage) = self
-            .latest_usage
-            .remove(&(tid.to_string(), turn_id.to_string()))
-        {
+        if let Some(usage) = usage {
             out.push(
                 self.event(EventKind::Usage, usage)
                     .with_source_event_id(sid(tid, &format!("usage:{turn_id}")))
@@ -1105,6 +1683,870 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------ seeding from a `thread/resume` answer
+
+    /// The committed answer a post-turn `thread/resume` really returned.
+    const POPULATED: &str = include_str!("../../../fixtures/codex/resume-populated-answer.json");
+    /// The live notification stream for **that same turn**, captured on the same run.
+    const FIRST_TURN: &str = include_str!("../../../fixtures/codex/first-turn.jsonl");
+    const POPULATED_THREAD: &str = "01a03652-f207-76e2-b1f5-aece767a3081";
+
+    fn populated_result() -> Value {
+        serde_json::from_str::<Value>(POPULATED).expect("the captured answer is JSON")["result"]
+            .clone()
+    }
+
+    fn seed_of(result: &Value) -> ResumeSeed {
+        CodexAdapter::new(key())
+            .plan_resume_seed(result, POPULATED_THREAD)
+            .expect("the captured answer is one this build reads")
+    }
+
+    /// One fact, as everything about it that has to match: its dedup key **and** the
+    /// content that key will lock in for ever.
+    type Fact = (String, String, String, Option<String>, Option<String>);
+
+    fn fact(event: &PendingEvent) -> Fact {
+        (
+            event.source_event_id.clone().unwrap_or_default(),
+            event.kind.as_str().to_string(),
+            serde_json::to_string(&event.payload).expect("a payload serializes"),
+            event.turn_id.clone(),
+            event.item_id.clone(),
+        )
+    }
+
+    /// Every fact, as a **multiset that cannot collapse**, with its keys proven unique.
+    ///
+    /// An earlier version of this helper built a `BTreeMap` keyed by
+    /// `source_event_id` — which silently discards a second fact carrying the same key,
+    /// and a second fact carrying the same key with a *different payload* is exactly
+    /// the conflict this comparison exists to catch. The map made the evidence
+    /// disappear into the evidence-gatherer.
+    fn facts(events: &[PendingEvent]) -> Vec<Fact> {
+        let mut keys = std::collections::HashSet::new();
+        for event in events {
+            let key = event.source_event_id.clone().unwrap_or_default();
+            assert!(
+                keys.insert(key.clone()),
+                "two facts share the dedup key {key}, so one of them can never be \
+                 written: {events:?}"
+            );
+        }
+        let mut out: Vec<Fact> = events.iter().map(fact).collect();
+        out.sort();
+        out
+    }
+
+    /// **The seeding path and the live path describe the same turn identically.**
+    ///
+    /// This is the assertion the whole reconciliation rests on, and it is only possible
+    /// because the two fixtures are two views of one real turn: `first-turn.jsonl` is
+    /// the notification stream the wire emitted, and `resume-populated-answer.json` is
+    /// what `thread/resume` returned about it moments later. If a fact recovered from
+    /// the answer carried a different key from the same fact observed live, a
+    /// reconnect would double every turn in the timeline; if it carried the same key
+    /// and a different payload, whichever arrived second would be silently discarded
+    /// and the timeline would depend on the order the daemon happened to see things.
+    ///
+    /// So: every fact the answer yields must also be one the live stream yields, under
+    /// the same key, with a byte-identical payload.
+    #[test]
+    fn a_seeded_fact_is_the_same_fact_the_live_stream_would_have_recorded() {
+        let live = replay(FIRST_TURN);
+        let mut seed = seed_of(&populated_result());
+        let seeded = seed.take_events();
+
+        let live_facts = facts(&live);
+        let seeded_facts = facts(&seeded);
+
+        // **Whole-fact comparison, not key-by-key.** Every recovered fact must appear in
+        // the live stream identically — same key, same kind, same payload bytes, same
+        // turn and item attribution. Comparing only what a map could hold is what let an
+        // earlier version of this test miss a payload conflict.
+        for candidate in &seeded_facts {
+            assert!(
+                live_facts.contains(candidate),
+                "the answer recovered a fact the live stream does not produce \
+                 identically:\n  recovered: {candidate:?}\n  live: {live_facts:#?}\n\
+                 A recovered fact that differs from the observed one in ANY of these — \
+                 key, kind, payload, turn, item — is not a recovery. A different key is \
+                 a duplicate row; the same key with different content means whichever \
+                 arrived second is silently dropped, so the timeline would depend on \
+                 whether the link happened to be up."
+            );
+        }
+        assert!(seeded.iter().all(|e| e.source == Source::Codex));
+
+        // And it recovers the whole turn, not a fragment of it: the session identity,
+        // both items, and the turn terminal.
+        let recovered: Vec<&str> = seeded_facts.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            recovered,
+            vec![
+                "01a03652-f207-76e2-b1f5-aece767a3081:item:01a03653-012c-70f1-97e0-cc6652384b07",
+                "01a03652-f207-76e2-b1f5-aece767a3081:item:msg_02ad7d65598a86e0016a8ce20ea2ec87d29971cc7f5e5b0f3c",
+                "01a03652-f207-76e2-b1f5-aece767a3081:thread_started",
+                "01a03652-f207-76e2-b1f5-aece767a3081:turn:01a03652-fe8e-79d2-99f8-2d5e445e6d8d",
+            ]
+        );
+        // The one fact it CANNOT recover, stated rather than left as a silent gap: the
+        // token totals arrive as notifications and the answer does not carry them, so a
+        // link that was down for the whole turn recovers everything except its usage.
+        assert!(
+            live.iter().any(|e| e.kind == EventKind::Usage),
+            "the live stream does produce a usage fact"
+        );
+        assert!(
+            !seeded.iter().any(|e| e.kind == EventKind::Usage),
+            "and the answer must not invent one it was never told"
+        );
+        assert_eq!(seed.described_turns(), 1);
+        assert_eq!(seed.terminal_turns(), 1);
+        assert_eq!(seed.running_turns(), 0);
+    }
+
+    /// **The session-identity payload does not move when the thread does.**
+    ///
+    /// `<thread>:thread_started` is minted by two routes — the `thread/started`
+    /// broadcast and every resume answer — and the dedup key is **first-wins**, so
+    /// whichever arrives first fixes the payload for ever. Any field that changes over
+    /// the life of the thread would therefore make the recorded content depend on
+    /// arrival order rather than on what happened.
+    ///
+    /// The committed fixtures cannot catch this on their own: `first-turn.jsonl`'s
+    /// announcement and `resume-populated-answer.json` both happen to report
+    /// `status: {"type":"idle"}`. So the divergence is constructed here — a thread seen
+    /// while a turn is running, against the same thread seen idle — and the payloads
+    /// must be byte-identical.
+    #[test]
+    fn the_session_identity_payload_is_stable_across_mutable_thread_state() {
+        let adapter = CodexAdapter::new(key());
+        let announced = populated_result()["thread"].clone();
+        let mut later = announced.clone();
+        // Everything measured to move over a thread's life.
+        later["status"] = json!({"type": "active", "activeFlags": []});
+        later["preview"] = json!("Reply with the single word ok and nothing else.");
+        later["updatedAt"] = json!(1_787_617_999_i64);
+        later["recencyAt"] = json!(1_787_617_998_i64);
+
+        let first = adapter
+            .thread_identity_event(&announced)
+            .expect("an identity fact");
+        let second = adapter.thread_identity_event(&later).expect("and another");
+        assert_eq!(
+            first.source_event_id, second.source_event_id,
+            "both routes mint the same key"
+        );
+        assert_eq!(
+            first.payload, second.payload,
+            "the session-identity payload moved because the THREAD moved. The dedup key \
+             is first-wins, so this makes the recorded fact depend on whether the \
+             announcement or a later resume answer reached the store first — the same \
+             session would be recorded differently depending on when the daemon \
+             happened to be up.\n  announced: {}\n  later:     {}",
+            first.payload, second.payload
+        );
+        // And it still says the things that identify the session.
+        assert_eq!(first.payload["thread_id"], POPULATED_THREAD);
+        assert_eq!(first.payload["cwd"], "/work/proj");
+        assert!(first.payload.get("status").is_none(), "{}", first.payload);
+    }
+
+    /// **The parity helper refuses to collapse a conflict.**
+    ///
+    /// [`facts`] is the instrument every cross-route comparison is read through. An
+    /// earlier version built a `BTreeMap` keyed by `source_event_id`, which silently
+    /// drops a second fact carrying the same key — and a second fact carrying the same
+    /// key with a *different payload* is exactly the conflict those comparisons exist to
+    /// catch. The evidence disappeared into the evidence-gatherer.
+    #[test]
+    #[should_panic(expected = "share the dedup key")]
+    fn the_parity_helper_refuses_to_collapse_two_facts_onto_one_key() {
+        let adapter = CodexAdapter::new(key());
+        let one = adapter
+            .event(EventKind::AgentMessage, json!({"text": "first"}))
+            .with_source_event_id("th:item:same".to_string());
+        let two = adapter
+            .event(EventKind::AgentMessage, json!({"text": "second"}))
+            .with_source_event_id("th:item:same".to_string());
+        facts(&[one, two]);
+    }
+
+    /// **A held usage total is DISCARDED by a recovered terminal, never promoted.**
+    ///
+    /// This test asserted the opposite for one round, and the defect it blessed is worth
+    /// spelling out. `latest_usage` holds the newest cumulative total the adapter has
+    /// *seen*. A turn whose completion it missed is precisely a turn whose final total
+    /// it never saw — what it holds is some mid-turn snapshot U1, while the turn really
+    /// ended at U2. The dedup key `usage:<turn>` is **first-wins**, so seeding U1 would
+    /// take that key permanently and no later observation could ever correct it: not a
+    /// gap, a durable wrong number.
+    ///
+    /// So a recovered turn contributes no usage fact at all, and the stale total is
+    /// dropped rather than left to be promoted by some later terminal. The missing
+    /// usage is the legible gap — the same disposition as the tool residual.
+    #[test]
+    fn a_held_usage_total_is_discarded_by_a_recovered_terminal_never_promoted() {
+        let mut adapter = CodexAdapter::new(key());
+        let turn = "01a03652-fe8e-79d2-99f8-2d5e445e6d8d";
+        // A mid-turn snapshot: the totals so far, not the turn's final total.
+        adapter.ingest(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": POPULATED_THREAD, "turnId": turn,
+                       "tokenUsage": {"total": {"totalTokens": 4_000}}}
+        }));
+        let mut seed = adapter
+            .plan_resume_seed(&populated_result(), POPULATED_THREAD)
+            .expect("accepted");
+        let events = seed.take_events();
+        assert!(
+            !events.iter().any(|e| e.kind == EventKind::Usage),
+            "a recovered terminal must NOT promote the total it happens to be holding: \
+             it is a mid-turn snapshot, and usage:<turn> is first-wins, so it would \
+             shadow the real final total for ever: {events:?}"
+        );
+
+        // And the stale total is dropped, not left to be promoted later.
+        adapter.apply_resume_seed(&seed);
+        let late = adapter.ingest(&json!({
+            "method": "turn/completed",
+            "params": {"threadId": POPULATED_THREAD,
+                       "turn": {"id": turn, "status": "completed", "items": []}}
+        }));
+        assert!(
+            !late.iter().any(|e| e.kind == EventKind::Usage),
+            "the stale total must be gone, not waiting to be emitted by the next \
+             terminal that comes along: {late:?}"
+        );
+    }
+
+    /// **A turn whose completion WAS observed live keeps its usage** — the discard above
+    /// is scoped to what a recovery cannot know, and must not cost the live path its
+    /// one authoritative total.
+    #[test]
+    fn a_live_terminal_still_emits_the_usage_it_observed() {
+        let events = replay(FIRST_TURN);
+        let usage = events
+            .iter()
+            .find(|e| e.kind == EventKind::Usage)
+            .expect("the live path emits the turn's usage at its terminal");
+        assert_eq!(usage.payload["total"]["totalTokens"], 12211);
+    }
+
+    /// **A running turn's items are never read, and what was observed of it survives.**
+    ///
+    /// Measured on a real 0.147: the `items[]` of an `inProgress` turn carry
+    /// placeholder ids (`item-1`, `item-2`) while the live wire is emitting the real
+    /// ones — the same turn, resumed twice, reported placeholders while it ran and the
+    /// real ids once it finished. So the answer may confirm that such a turn is alive
+    /// and may say nothing else about it.
+    ///
+    /// Both halves are asserted here, because they fail in opposite directions: reading
+    /// the ids INVENTS facts, and dropping the open item LOSES the ones already
+    /// observed.
+    #[test]
+    fn a_running_turn_confirms_liveness_and_contributes_nothing_else() {
+        let mut adapter = CodexAdapter::new(key());
+        let turn = "01a03652-fe8e-79d2-99f8-2d5e445e6d8d";
+        // Watched live: a message opened, and text streamed into it.
+        adapter.ingest(&json!({
+            "method": "item/started",
+            "params": {"item": {"type": "agentMessage", "id": "msg_REAL", "text": ""},
+                       "threadId": POPULATED_THREAD, "turnId": turn}
+        }));
+        adapter.ingest(&json!({
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": POPULATED_THREAD, "turnId": turn,
+                       "itemId": "msg_REAL", "delta": "half a sen"}
+        }));
+
+        // The answer, with that turn still running and its items renamed.
+        let mut result = populated_result();
+        let running = &mut result["thread"]["turns"][0];
+        running["status"] = json!("inProgress");
+        running["completedAt"] = Value::Null;
+        running["items"] = json!([
+            {"type": "userMessage", "id": "item-1", "content": []},
+            {"type": "agentMessage", "id": "item-2", "text": "half a sen"},
+        ]);
+
+        let mut seed = adapter
+            .plan_resume_seed(&result, POPULATED_THREAD)
+            .expect("a running turn is a shape this build reads");
+        assert_eq!(seed.described_turns(), 1);
+        assert_eq!(seed.terminal_turns(), 0);
+        assert_eq!(seed.running_turns(), 1);
+        let events = seed.take_events();
+        // Only the session identity. No item fact, no turn terminal.
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e.source_event_id.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec![format!("{POPULATED_THREAD}:thread_started")],
+            "a running turn contributes no fact of its own: its ids are placeholders \
+             and its terminal has not happened"
+        );
+
+        // MERGE, never replace: the item is still open and still carries what streamed.
+        adapter.apply_resume_seed(&seed);
+        let out = adapter.ingest(&json!({
+            "method": "turn/completed",
+            "params": {"threadId": POPULATED_THREAD,
+                       "turn": {"id": turn, "status": "interrupted", "items": []}}
+        }));
+        let synthesized = out
+            .iter()
+            .find(|e| e.item_id.as_deref() == Some("msg_REAL"))
+            .expect("the item the answer confirmed alive is still open, under its REAL id");
+        assert!(
+            serde_json::to_string(&synthesized.payload)
+                .unwrap()
+                .contains("half a sen"),
+            "an item confirmed still running keeps everything that was observed of it; \
+             the answer only vouches for its turn: {synthesized:?}"
+        );
+        assert!(
+            !out.iter().any(|e| e.item_id.as_deref() == Some("item-1")
+                || e.item_id.as_deref() == Some("item-2")),
+            "a placeholder id must never reach a fact: {out:?}"
+        );
+    }
+
+    /// **An open item the answer does not confirm is dropped WITHOUT a terminal.**
+    ///
+    /// It may have finished while the link was down — in which case the answer just
+    /// described its real terminal and that fact is already durable — or it may have
+    /// vanished from history altogether (D16). Synthesizing one from an id the answer
+    /// did not vouch for would be inventing a result for something that may never have
+    /// produced one.
+    #[test]
+    fn an_unconfirmed_open_item_is_dropped_without_a_terminal() {
+        let mut adapter = CodexAdapter::new(key());
+        // An exec left open in a turn the answer reports FINISHED, and which the
+        // answer's item list does not mention at all.
+        adapter.ingest(&json!({
+            "method": "item/started",
+            "params": {"item": {"type": "commandExecution", "id": "exec-GONE",
+                                "status": "inProgress", "command": "sleep 1"},
+                       "threadId": POPULATED_THREAD,
+                       "turnId": "01a03652-fe8e-79d2-99f8-2d5e445e6d8d"}
+        }));
+        let mut seed = adapter
+            .plan_resume_seed(&populated_result(), POPULATED_THREAD)
+            .expect("accepted");
+        assert!(
+            !seed
+                .take_events()
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some("exec-GONE")),
+            "the answer describes no such item, so no fact may be built for it"
+        );
+        adapter.apply_resume_seed(&seed);
+
+        // The turn terminal that would have synthesized it now finds nothing to.
+        let out = adapter.ingest(&json!({
+            "method": "turn/completed",
+            "params": {"threadId": POPULATED_THREAD,
+                       "turn": {"id": "01a03652-fe8e-79d2-99f8-2d5e445e6d8d",
+                                "status": "interrupted", "items": []}}
+        }));
+        assert!(
+            !out.iter()
+                .any(|e| e.item_id.as_deref() == Some("exec-GONE")),
+            "an unconfirmed open item is forgotten silently, never terminalized from an \
+             identity the answer did not vouch for: {out:?}"
+        );
+    }
+
+    /// **Another thread's in-flight state is not this answer's business.**
+    #[test]
+    fn a_seed_leaves_another_threads_open_items_alone() {
+        let mut adapter = CodexAdapter::new(key());
+        adapter.ingest(&json!({
+            "method": "item/started",
+            "params": {"item": {"type": "commandExecution", "id": "exec-B",
+                                "status": "inProgress"},
+                       "threadId": "th_OTHER", "turnId": "turn_B"}
+        }));
+        let seed = adapter
+            .plan_resume_seed(&populated_result(), POPULATED_THREAD)
+            .expect("accepted");
+        adapter.apply_resume_seed(&seed);
+        let out = adapter.ingest(&json!({
+            "method": "turn/completed",
+            "params": {"threadId": "th_OTHER",
+                       "turn": {"id": "turn_B", "status": "interrupted", "items": []}}
+        }));
+        assert!(
+            out.iter()
+                .any(|e| e.kind == EventKind::ToolResult && e.item_id.as_deref() == Some("exec-B")),
+            "a resume answer about one thread may not reach into another's open items"
+        );
+    }
+
+    /// **Planning mutates nothing**, which is what makes a failed attach safe: the
+    /// caller records the facts first and applies only when every one of them is
+    /// durable, so a plan that is never applied has to leave the adapter exactly as it
+    /// was for the retry to produce the same plan.
+    #[test]
+    fn planning_a_seed_changes_nothing_until_it_is_applied() {
+        let mut adapter = CodexAdapter::new(key());
+        let turn = "01a03652-fe8e-79d2-99f8-2d5e445e6d8d";
+        adapter.ingest(&json!({
+            "method": "item/started",
+            "params": {"item": {"type": "commandExecution", "id": "exec-1",
+                                "status": "inProgress"},
+                       "threadId": POPULATED_THREAD, "turnId": turn}
+        }));
+        adapter.ingest(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": POPULATED_THREAD, "turnId": turn,
+                       "tokenUsage": {"total": {"totalTokens": 7}}}
+        }));
+
+        // Plan twice, apply neither. Identical plans, because nothing moved.
+        let first = seed_keys(&adapter);
+        let second = seed_keys(&adapter);
+        assert_eq!(first, second, "planning is pure");
+
+        // And the state it read is still there to be acted on.
+        let out = adapter.ingest(&json!({
+            "method": "turn/completed",
+            "params": {"threadId": POPULATED_THREAD,
+                       "turn": {"id": turn, "status": "interrupted", "items": []}}
+        }));
+        assert!(
+            out.iter().any(|e| e.item_id.as_deref() == Some("exec-1")),
+            "the open item survived an unapplied plan"
+        );
+        assert!(
+            out.iter().any(|e| e.kind == EventKind::Usage),
+            "and so did the usage total"
+        );
+    }
+
+    fn seed_keys(adapter: &CodexAdapter) -> Vec<String> {
+        let mut seed = adapter
+            .plan_resume_seed(&populated_result(), POPULATED_THREAD)
+            .expect("accepted");
+        seed.take_events()
+            .iter()
+            .map(|e| e.source_event_id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// **Every shape this build has not measured is refused**, each one the captured
+    /// answer with a single thing changed — which is the only kind of near-miss worth
+    /// testing, since a reader that had quietly widened would still reject nonsense.
+    #[test]
+    fn an_unmeasured_answer_shape_is_refused_rather_than_read() {
+        let adapter = CodexAdapter::new(key());
+        let refused = |what: &str, mutate: &dyn Fn(&mut Value)| {
+            let mut result = populated_result();
+            mutate(&mut result);
+            assert!(
+                adapter
+                    .plan_resume_seed(&result, POPULATED_THREAD)
+                    .is_none(),
+                "{what} must be refused, not read"
+            );
+        };
+
+        // Identity.
+        refused("an answer about another thread", &|r| {
+            r["thread"]["id"] = json!("some-other-thread");
+        });
+        refused("a second field naming a different thread", &|r| {
+            r["threadId"] = json!("a-different-thread");
+        });
+        refused("an answer with no thread at all", &|r| {
+            r.as_object_mut().unwrap().remove("thread");
+        });
+
+        // Turn shape — the measured particulars.
+        refused("a turn state this wire has never reported", &|r| {
+            r["thread"]["turns"][0]["status"] = json!("interrupted");
+        });
+        refused("a turn with no status", &|r| {
+            r["thread"]["turns"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("status");
+        });
+        refused("a turn whose item list is flagged partial", &|r| {
+            r["thread"]["turns"][0]["itemsView"] = json!("summary");
+        });
+        refused("a turn whose items were not loaded", &|r| {
+            r["thread"]["turns"][0]["itemsView"] = json!("notLoaded");
+        });
+        refused(
+            "a turn that does not say how complete its items are",
+            &|r| {
+                r["thread"]["turns"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("itemsView");
+            },
+        );
+        refused("a turn with no id", &|r| {
+            r["thread"]["turns"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("id");
+        });
+        refused("a turns[] that is not an array", &|r| {
+            r["thread"]["turns"] = json!({"0": "not an array"});
+        });
+        refused("an answer describing no turn at all", &|r| {
+            r["thread"]["turns"] = json!([]);
+        });
+
+        // Item shape — checked for EVERY turn, running ones included.
+        refused("an item with no type", &|r| {
+            r["thread"]["turns"][0]["items"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("type");
+        });
+        refused("an item with no id", &|r| {
+            r["thread"]["turns"][0]["items"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("id");
+        });
+        refused("an item with an empty id", &|r| {
+            r["thread"]["turns"][0]["items"][0]["id"] = json!("");
+        });
+        refused("a malformed item inside a RUNNING turn", &|r| {
+            r["thread"]["turns"][0]["status"] = json!("inProgress");
+            r["thread"]["turns"][0]["completedAt"] = Value::Null;
+            r["thread"]["turns"][0]["items"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("type");
+        });
+
+        // P3 — pagination. A page of history must never attach: the seed would look
+        // complete and be a window, with older turns silently unrecovered.
+        refused("a non-null initialTurnsPage", &|r| {
+            r["initialTurnsPage"] = json!({"turns": [], "nextCursor": "x"});
+        });
+        refused("a backwards cursor that is not a string", &|r| {
+            r["turnsBackwardsCursor"] = json!({"rolloutOrdinal": 1});
+        });
+        refused("an items cursor that is not a string", &|r| {
+            r["itemsBackwardsCursor"] = json!(7);
+        });
+
+        // P3 — ordering. Oldest-first is what a reader relies on to know which turn is
+        // current, so it is validated rather than assumed.
+        // **Fresh ids on the clone, or this case proves nothing.** Cloning a turn keeps
+        // its item ids too, and the uniqueness guard below would then refuse the answer
+        // before the ordering guard ever saw it — mutation testing showed the ordering
+        // check could be deleted with this case still passing.
+        refused("turns out of chronological order", &|r| {
+            let mut older = r["thread"]["turns"][0].clone();
+            older["id"] = json!("01a03652-0000-0000-0000-000000000001");
+            older["startedAt"] = json!(1_787_617_000_i64);
+            for (n, item) in older["items"]
+                .as_array_mut()
+                .expect("items")
+                .iter_mut()
+                .enumerate()
+            {
+                item["id"] = json!(format!("older-item-{n}"));
+            }
+            let newer = r["thread"]["turns"][0].clone();
+            r["thread"]["turns"] = json!([newer, older]);
+        });
+        refused("a turn that does not say when it started", &|r| {
+            r["thread"]["turns"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("startedAt");
+        });
+
+        // P5 — a tool-bearing answer has never been captured, and the live path's own
+        // tool guard (a terminal with no `status` is dropped rather than rendered as a
+        // success) has no counterpart here. Refuse rather than fabricate an outcome.
+        for tool in ["commandExecution", "fileChange"] {
+            refused(&format!("an answer describing a {tool}"), &|r| {
+                r["thread"]["turns"][0]["items"][0]["type"] = json!(tool);
+            });
+            refused(&format!("a {tool} inside a RUNNING turn"), &|r| {
+                r["thread"]["turns"][0]["status"] = json!("inProgress");
+                r["thread"]["turns"][0]["completedAt"] = Value::Null;
+                r["thread"]["turns"][0]["items"][0]["type"] = json!(tool);
+            });
+        }
+
+        // P7 — an identity that appears twice in one answer is a contradiction.
+        refused("the same turn twice", &|r| {
+            let turn = r["thread"]["turns"][0].clone();
+            r["thread"]["turns"] = json!([turn.clone(), turn]);
+        });
+        refused("the same turn reported both finished and running", &|r| {
+            let finished = r["thread"]["turns"][0].clone();
+            let mut running = finished.clone();
+            running["status"] = json!("inProgress");
+            running["completedAt"] = Value::Null;
+            r["thread"]["turns"] = json!([finished, running]);
+        });
+        refused("two fact-producing items sharing one id", &|r| {
+            let first = r["thread"]["turns"][0]["items"][0]["id"].clone();
+            r["thread"]["turns"][0]["items"][1]["id"] = first;
+        });
+
+        // P4 — `sessionId` is a second name for the same thread and may not disagree.
+        refused("a sessionId naming a different thread", &|r| {
+            r["thread"]["sessionId"] = json!("01a03652-dead-beef-0000-000000000000");
+        });
+
+        // P3 — every field the SEEDING path consults is type-checked before a fact is
+        // minted, because the key that fact would take is first-wins: a payload
+        // defaulted from a wrong-typed field would occupy it ahead of the real live
+        // fact and never be corrected.
+        refused("an agentMessage whose text is not a string", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "agentMessage" {
+                    item["text"] = json!({"parts": ["ok"]});
+                }
+            }
+        });
+        refused("an agentMessage with no text at all", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "agentMessage" {
+                    item.as_object_mut().unwrap().remove("text");
+                }
+            }
+        });
+        refused("a userMessage whose content is not an array", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "userMessage" {
+                    item["content"] = json!("Reply with the single word ok");
+                }
+            }
+        });
+        refused(
+            "a userMessage content part whose text is not a string",
+            &|r| {
+                let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+                for item in items.iter_mut() {
+                    if item["type"] == "userMessage" {
+                        item["content"] = json!([{"type": "text", "text": 42}]);
+                    }
+                }
+            },
+        );
+        refused("a reasoning summary that is not an array", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            items.push(json!({"type": "reasoning", "id": "rs_1", "summary": "thought"}));
+        });
+        refused("a reasoning content that is not an array", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            items.push(json!({"type": "reasoning", "id": "rs_2", "content": "thought"}));
+        });
+        // Every part must be an OBJECT WITH A STRING TEXT. Each shape below is silently
+        // skipped by the join that builds the prompt, so each would record a truncated
+        // version of what the user typed — onto a first-wins key.
+        refused("a userMessage content part that is a bare scalar", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "userMessage" {
+                    item["content"] = json!(["Reply with the single word ok"]);
+                }
+            }
+        });
+        refused("a userMessage content part carrying no text at all", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "userMessage" {
+                    item["content"] = json!([{"type": "image", "url": "/tmp/x.png"}]);
+                }
+            }
+        });
+        refused(
+            "a userMessage where ONE part of several is malformed",
+            &|r| {
+                let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+                for item in items.iter_mut() {
+                    if item["type"] == "userMessage" {
+                        item["content"] =
+                            json!([{"type": "text", "text": "Reply with "}, {"type": "text"}]);
+                    }
+                }
+            },
+        );
+        // The top-level `text` alias, which `message_payload` PREFERS over `content` —
+        // so a userMessage carrying both renders the field nothing validated, and holds
+        // the key with it.
+        refused("a userMessage carrying a top-level text alias", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "userMessage" {
+                    item["text"] = json!("shadowed prompt");
+                }
+            }
+        });
+
+        // The turn terminal's own fields, copied verbatim into the payload.
+        refused("a finished turn with no completedAt", &|r| {
+            r["thread"]["turns"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("completedAt");
+        });
+        refused("a finished turn whose completedAt is null", &|r| {
+            r["thread"]["turns"][0]["completedAt"] = Value::Null;
+        });
+        refused("a finished turn whose completedAt is not a number", &|r| {
+            r["thread"]["turns"][0]["completedAt"] = json!("2026-08-25T03:30:06Z");
+        });
+        refused("a finished turn with no durationMs", &|r| {
+            r["thread"]["turns"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("durationMs");
+        });
+        refused("a finished turn whose durationMs is not a number", &|r| {
+            r["thread"]["turns"][0]["durationMs"] = json!("2546ms");
+        });
+        refused("a finished turn carrying an error", &|r| {
+            r["thread"]["turns"][0]["error"] = json!({"message": "the model refused"});
+        });
+
+        // An item type nobody has measured on THIS wire. The adapter models it perfectly
+        // well from a live frame — it becomes an `Other` fact — but nothing has ever
+        // compared that fact against the one a live frame produces for the same item, and
+        // a first-wins key is the wrong place to discover a disagreement.
+        refused("an item type no resume answer has ever carried", &|r| {
+            let items = r["thread"]["turns"][0]["items"].as_array_mut().unwrap();
+            items.push(json!({"type": "webSearch", "id": "ws-1", "query": "codex"}));
+        });
+        // The nested immutable identity fields, which are the WHOLE `thread_started`
+        // payload. Defaulting one to null would take that key ahead of the correct
+        // announcement and hold it.
+        for field in ["cwd", "path", "cliVersion"] {
+            refused(&format!("a thread whose {field} is missing"), &|r| {
+                r["thread"].as_object_mut().unwrap().remove(field);
+            });
+            refused(&format!("a thread whose {field} is not a string"), &|r| {
+                r["thread"][field] = json!({"value": "/work/proj"});
+            });
+        }
+
+        // The effective policy fields, read for shape because a later chunk reads them
+        // for value. Absent and null pass; a changed TYPE does not.
+        refused("a sandbox that is not a typed object", &|r| {
+            r["sandbox"] = json!("read-only");
+        });
+        refused("a sandbox object with no type", &|r| {
+            r["sandbox"] = json!({"networkAccess": false});
+        });
+        refused("an approval policy that is not a string", &|r| {
+            r["approvalPolicy"] = json!({"kind": "on-request"});
+        });
+        refused("a cwd that is not a string", &|r| {
+            r["cwd"] = json!(["/work/proj"]);
+        });
+
+        // **A completed turn whose userMessage carries no content parts is ACCEPTED.**
+        //
+        // `all()` over an empty array is true, and that is the intended reading: an empty
+        // `content` renders as an empty prompt, which is the honest rendering of an empty
+        // array rather than a value defaulted out of a wrong type. The other empty-ish
+        // cases in this table sit on `inProgress` turns, where the item guard is bypassed
+        // entirely — so without this one a `!parts.is_empty()` creeping into the
+        // validator would refuse a legitimate answer and nothing here would notice.
+        {
+            let mut result = populated_result();
+            let items = result["thread"]["turns"][0]["items"]
+                .as_array_mut()
+                .unwrap();
+            for item in items.iter_mut() {
+                if item["type"] == "userMessage" {
+                    item["content"] = json!([]);
+                }
+            }
+            let mut seed = adapter
+                .plan_resume_seed(&result, POPULATED_THREAD)
+                .expect("an empty content array is a shape this build reads");
+            let user = seed
+                .take_events()
+                .into_iter()
+                .find(|e| e.kind == EventKind::UserMessage)
+                .expect("the prompt is still a fact");
+            assert_eq!(user.payload["text"], "", "an empty prompt renders as empty");
+        }
+
+        // The measured item types are all accepted in their measured shapes, so the
+        // allowlist above is a list and not a wall.
+        for well_formed in [
+            json!({"type": "reasoning", "id": "rs_ok", "summary": [], "content": []}),
+            json!({"type": "reasoning", "id": "rs_bare"}),
+        ] {
+            let mut result = populated_result();
+            result["thread"]["turns"][0]["items"]
+                .as_array_mut()
+                .unwrap()
+                .push(well_formed.clone());
+            assert!(
+                adapter
+                    .plan_resume_seed(&result, POPULATED_THREAD)
+                    .is_some(),
+                "a measured item type in its measured shape must be ACCEPTED: {well_formed}"
+            );
+        }
+
+        // ...and the captured answer itself is accepted, so none of the above passed
+        // for the boring reason that everything is refused.
+        assert!(
+            adapter
+                .plan_resume_seed(&populated_result(), POPULATED_THREAD)
+                .is_some(),
+            "the committed captured answer must be ACCEPTED"
+        );
+        // Absent optional policy fields are legitimate, and must not be read as a
+        // changed type.
+        let mut trimmed = populated_result();
+        for key in [
+            "sandbox",
+            "approvalPolicy",
+            "approvalsReviewer",
+            "cwd",
+            "model",
+        ] {
+            trimmed.as_object_mut().unwrap().remove(key);
+        }
+        assert!(
+            adapter
+                .plan_resume_seed(&trimmed, POPULATED_THREAD)
+                .is_some(),
+            "an absent optional field is not a shape change"
+        );
+        let mut nulled = populated_result();
+        for key in [
+            "sandbox",
+            "approvalPolicy",
+            "approvalsReviewer",
+            "cwd",
+            "model",
+        ] {
+            nulled[key] = Value::Null;
+        }
+        assert!(
+            adapter
+                .plan_resume_seed(&nulled, POPULATED_THREAD)
+                .is_some(),
+            "the answer spells `no value` as null too"
+        );
     }
 
     #[test]

@@ -1,14 +1,12 @@
 //! The ccd **control link**: one live app-server connection per Codex session.
 //!
-//! `codex_adapter.rs` is the pure half of the Codex observation path — frames in,
-//! [`PendingEvent`]s out, no socket anywhere. This module is the other half and
-//! nothing more: it **holds the connection**. What it deliberately does *not* do is
-//! reconcile a resume response against live state — see the pre-2e-4b contract
-//! below for why that would be a guess today, and whose it is instead. Per Codex session it dials the
-//! broker's ccd leg (WS-over-UDS on the run dir's `ccd.sock`), completes the ccd
-//! role's allowlisted handshake, binds the session's thread, stamps every inbound
-//! frame with its ingress attribution, and hands the admitted ones to the
-//! adapter. What comes back lands through [`Daemon::ingest`] — the same call the
+//! `codex_adapter.rs` is the pure half of the Codex observation path — frames and
+//! resume answers in, [`PendingEvent`]s out, no socket anywhere. This module is the
+//! other half: it **holds the connection**. Per Codex session it dials the broker's ccd
+//! leg (WS-over-UDS on the run dir's `ccd.sock`), completes the ccd role's allowlisted
+//! handshake, attaches to the session's thread — by watching it start, or by resuming
+//! it and reconciling the answer — stamps every inbound frame with its ingress
+//! attribution, and hands the admitted ones to the adapter. What comes back lands through [`Daemon::ingest`] — the same call the
 //! hook and transcript paths make — so a Codex fact is deduplicated by
 //! `(session_uid, source, source_event_id)` exactly as a Claude fact is, and a
 //! re-observed frame costs a row that is never written rather than a duplicate.
@@ -27,76 +25,75 @@
 //! the leg but this chunk has no use for them, and `turn/start`/`thread/start`/
 //! `thread/fork` are refused to ccd by role.
 //!
-//! ## The pre-2e-4b contract, and why it is this strict
+//! ## The attach contract, and what each half of it is grounded in
 //!
-//! **Turns now run.** `turn/start` is `FingerprintThenHeadCheck` on the TUI leg and
-//! the head-check is implemented (`codex-broker/src/refusal.rs`): a turn naming the
-//! session's one bound thread is forwarded, and a real TUI completes real turns
-//! through the broker — `codex_link_live`'s claim 4 asserts it.
+//! **Turns run, and this link observes them.** `turn/start` is forwarded on the TUI leg
+//! by a head-check that discharges the real TUI's sandbox deferral
+//! (`codex-broker/src/refusal.rs`), and — measured in 2e-4a — the app-server delivers
+//! `turn/*` and `item/*` frames **only to the connection whose `thread/resume`
+//! succeeded**. A merely-initialized connection is handed none of them. So for this
+//! link, accepting the resume answer and observing turns are not two features: they are
+//! one, and the acceptance is what buys the other.
 //!
-//! **This link is not subscribed to any of them, and that is measured.** Turn frames
-//! are delivered only to the connection whose `thread/resume` succeeded. This
-//! link's resume does not succeed — see below — so across a whole turn the only
-//! turn-correlated frames it is handed are `thread/status/changed`, which
-//! `codex_adapter.rs` drops as observation noise. Measured on the live gate: zero
-//! `turn/*` and zero `item/*` frames on a connection in exactly this position,
-//! against seven on the subscribed one.
+//! The contract is total over the three things that can happen:
 //!
-//! What HAS changed is the resume answer. After a turn, `thread/resume` returns a
-//! `result` whose `thread.turns` carries the turn that ran
-//! (`fixtures/codex/resume-populated-answer.json`) — and that is precisely the
-//! answer `settle_resume` refuses to guess at. It is not `item/started` replay, it
-//! is not a validated snapshot, and nothing in this chunk was designed against its
-//! completeness, its keying, or the cross-resume id stability D15 warns about. So
-//! the link reports it and reconnects, which is a loop rather than an attach — the
-//! honest cost of not inventing a reconciliation, and 2e-4b's to close.
+//!   * **Binding: `thread/started` on this connection, or a resume answer this link
+//!     accepted.** Those are the two pieces of evidence that say which thread is this
+//!     session's, and they are evidence of the same strength — one is the app-server
+//!     announcing the thread to us, the other is the app-server accepting our
+//!     subscription to it. A thread id from the registration, or carried over from a
+//!     previous connection, is neither: it is a **resume target**, and until one of the
+//!     two lands, a frame naming a thread is a claim this link cannot check and is
+//!     counted, logged and dropped.
 //!
-//! This link therefore implements the **total** contract for the world it was built
-//! for, and fails closed at its edge rather than guessing past it:
+//!     **Bound is not subscribed**, and the two must not be confused. Binding says
+//!     *whose* frames these are; subscription is whether the app-server sends any. A
+//!     link that binds from the broadcast still has to ask.
+//!   * **Reconnect: send `thread/resume`, and accept exactly two answers.** The measured
+//!     `no rollout found` error for the thread that was asked about (retry with backoff;
+//!     A1/D3, the only answer a thread that has not yet run a turn can give), or a
+//!     **populated result this build can read whole** — about that same thread, with
+//!     every turn in one of the two states this wire was measured to report.
+//!     Everything else is reported with a STOP-AND-AMEND log and reconnected.
+//!   * **An announcement redirects the target. It does not discharge the attach.** The
+//!     thread a `thread/started` names is this session's, so it becomes what every
+//!     later attach addresses — better evidence than a registration hint. What it does
+//!     *not* do is settle anything. Until 2e-4b it did: a connection that watched the
+//!     thread start was taken to hold the whole stream already, so resuming would only
+//!     ask for a replay of what it had. That was sound while `thread/resume` could
+//!     never succeed, and the measurement retired it — turn frames reach only the
+//!     **resume-subscribed** connection, so an announced, never-resumed link is handed
+//!     the thread's identity and then nothing else for the life of the session. The
+//!     resume was never about recovery. It is what subscribes.
 //!
-//!   * **Binding: `thread/started` on this connection, and nothing else.** A thread
-//!     id from the registration, or carried over from a previous connection, is a
-//!     **resume target** — it says what to attach to, never that this connection is
-//!     bound. A frame naming a thread this connection did not watch start is
-//!     neither ingested nor buffered: it is counted, logged, and dropped, and the
-//!     leg carries on.
-//!   * **Reconnect:** send `thread/resume`, and accept **exactly one** answer — the
-//!     measured `no rollout found` error for the thread that was asked about
-//!     (retry with backoff; A1/D3, and the only answer a thread that has not yet
-//!     run a turn can give). *Everything* else, success shapes included, is
-//!     reported with a STOP-AND-AMEND log and reconnected. A success is not
-//!     tolerated even though the live wire now produces one after a turn:
-//!     normalizing a response whose completeness and keying nothing here has
-//!     validated is exactly the guess this chunk refuses to make, and a reported
-//!     anomaly plus a reconnect loop is the cost of refusing it.
-//!   * **An announcement discharges an outstanding attach**, and redirects a target
-//!     that names a different thread: the wire's own announcement is better
-//!     evidence than any resume answer could be.
+//! ### What acceptance does, in the order it does it
 //!
-//! ### 2e-4b owns the reconciliation
+//! [`Connection::attach_from_seed`] carries the ordering, and it is the part that was
+//! got wrong once and deleted rather than patched:
 //!
-//! Every one of those fail-closed edges is a marker, not a wall. Turns run now, so
-//! resume responses carry real `turns[]`, open items can survive a disconnect, and
-//! completions can happen while the link is down — and the design for reconciling
-//! them belongs to **2e-4b, grounded in that evidence**: whether `turns[]` is
-//! complete for the turns it reports, whether item ids key uniquely across a resume
-//! (D15 says they do not, inside an interrupted turn), and what a partial snapshot
-//! must therefore be trusted for. Building it here would have meant choosing those
-//! answers before anything could check them; the evidence now exists, captured at
-//! `fixtures/codex/first-turn.jsonl` and
-//! `fixtures/codex/resume-populated-answer.json`.
+//!   1. **Record before rebuild.** Every fact the answer describes goes through
+//!      [`Daemon::ingest`] — the ordinary dedup path — *before* the adapter is allowed
+//!      to forget what it had open. A fact observed live and the same fact recovered
+//!      from an answer carry the same key and the same payload, so they collapse to one
+//!      row rather than doubling.
+//!   2. **A failed insert fails the attach.** The seed is not applied, so no state
+//!      moved; the connection ends and the next one plans the identical seed.
+//!   3. **Never fabricate.** An open item the answer does not confirm still running is
+//!      dropped **without** a terminal.
+//!   4. **Merge, never replace.** An item whose turn the answer reports still running
+//!      keeps everything this link watched happen to it.
 //!
-//! The live gate carries the tripwire for exactly that moment: it runs a real turn
-//! and asserts this link records **nothing** across it, because it is not
-//! subscribed. When 2e-4b lands and the link accepts the populated answer, it
-//! becomes subscribed and that assertion breaks — which is the signal that this
-//! contract has been given its successor.
+//! The rules in 3 and 4 are not taste. A `thread/resume` answer reports the **real** ids
+//! for a turn that has finished — measured byte-identical to the live wire's, and stable
+//! across repeated resumes — and **placeholder** ids (`item-1`, `item-2`) for a turn
+//! that is still running, measured on the same turn resumed twice. That is D15, wider
+//! than the plan recorded it. [`CodexAdapter::plan_resume_seed`] is where those
+//! measurements are written down and where every uncaptured shape is refused.
 //!
-//! One fact from A2 survives into the simple contract and is worth keeping in view:
-//! `thread/read` can overtake `thread/resume` on the same connection, so anything
-//! depending on the attach is sound only strictly after its response. This link has
-//! exactly one request outstanding at a time and issues nothing between sending a
-//! resume and seeing its answer.
+//! One fact from A2 survives and is worth keeping in view: `thread/read` can overtake
+//! `thread/resume` on the same connection, so anything depending on the attach is sound
+//! only strictly after its response. This link has exactly one request outstanding at a
+//! time and issues nothing between sending a resume and seeing its answer.
 //!
 //! ## Ingress attribution (D4), and the single-generation reality of this chunk
 //!
@@ -136,7 +133,7 @@ use tokio::net::UnixStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
-use crate::codex_adapter::CodexAdapter;
+use crate::codex_adapter::{CodexAdapter, ResumeSeed};
 use crate::state::Daemon;
 
 /// How long a dial of `ccd.sock` may take before it counts as a failed attempt.
@@ -618,8 +615,8 @@ pub(crate) fn describe_resume_answer(frame: &Value, digest: &PublicDigest) -> St
 /// The only `result` key names that may ever be written to the log, spelled here
 /// rather than read off the frame.
 ///
-/// These are the keys 2e-4b will be written against, so their presence or absence
-/// is the fact a human needs; anything else in the answer is counted, not named.
+/// These are the keys the acceptance rule reads, so their presence or absence is the
+/// fact a human needs when it refused; anything else in the answer is counted, not named.
 /// Sorted, so the same answer always renders the same line.
 const DESCRIBED_RESULT_KEYS: [&str; 5] = ["approvalPolicy", "cwd", "model", "sandbox", "thread"];
 
@@ -710,25 +707,28 @@ pub(crate) fn stop_and_amend_report(
     };
     format!(
         "codex link for {session}: STOP-AND-AMEND — thread/resume for \
-         {requested_thread} answered with something this build cannot read. The \
-         only answer it is designed for is the not-ready error a thread with no \
-         rollout gives; a turn that has run answers with a populated turns[] \
-         instead, and reconciling that is 2e-4b's, not this chunk's. Guessing at \
-         it is exactly what this chunk refuses to do. Reconnecting. The answer, \
-         described rather than quoted: {shape}.{repeats}"
+         {requested_thread} answered with something this build cannot read. Two \
+         answers are accepted: the not-ready error a thread with no rollout gives, \
+         and a populated result about that same thread whose every turn is one of \
+         the two states this wire was measured to report (finished, or still \
+         running). This was neither — an unmeasured turn state, a partial item \
+         list, another thread, or a shape nobody has captured — and reading past it \
+         would be guessing, which is the one thing this link will not do. \
+         Reconnecting. The answer, described rather than quoted: {shape}.{repeats}"
     )
 }
 
 /// Where the attach stands on the connection now in hand.
 #[derive(Debug)]
 enum Attach {
-    /// Nothing to attach: either no thread is known yet, or the one that is was
-    /// **announced on this connection**. A link that arrives before its thread
-    /// hears `thread/started` (broadcast to a merely-initialized connection, A1/D2)
-    /// and holds the stream from the thread's first frame onwards, so there is no
-    /// history to recover; resuming would only ask the app-server to replay what
-    /// this connection already has. An announcement therefore *discharges* an
-    /// outstanding attach — see `serve_connection`.
+    /// **Nothing to attach to yet**: no thread is known — no registration hint, and no
+    /// `thread/started` on this connection so far. The moment either arrives this
+    /// leaves `Unbound` for [`Attach::due_now`].
+    ///
+    /// It is deliberately *not* where a bound connection rests. An announcement used to
+    /// land here, on the reasoning that a link holding the thread's stream from its
+    /// first frame has no history to recover — but recovery was never what the resume
+    /// bought. Subscription is, and only an accepted resume grants it.
     Unbound,
     /// A `thread/resume` is outstanding. Nothing else is sent until its response is
     /// observed (A2: never pipelined). `next_delay` rides along so a retryable
@@ -741,13 +741,29 @@ enum Attach {
         /// against what was *requested* rather than against a binding that may have
         /// moved, and so a response naming no thread can be read as answering it.
         target: String,
+        /// **This request asked about a thread that is no longer this session's.**
+        ///
+        /// Set when a `thread/started` announces a different thread while this resume
+        /// is still outstanding. The request cannot be recalled, so its answer is
+        /// received and **thrown away**: not settled, not seeded, and above all not
+        /// allowed to bind. Without this, a stale resume that happens to succeed would
+        /// overwrite the announced binding with the thread the link asked about before
+        /// the wire corrected it — and every fact after that would be filed under a
+        /// thread this session is not.
+        superseded: bool,
     },
     /// A retryable attach failure is being waited out while observation continues.
     Backoff {
         until: Instant,
         next_delay: Duration,
     },
-    /// The answer was not the measured not-ready one. Never a resting state: the
+    /// **Attached.** A `thread/resume` was answered with a populated result this build
+    /// read whole, its facts were recorded, and this connection is now **subscribed**
+    /// to the thread — so `turn/*` and `item/*` frames flow to it. A resting state
+    /// like [`Attach::Unbound`], and for the same reason: there is nothing left to ask
+    /// for.
+    Attached,
+    /// The answer was neither of the two this build accepts. Never a resting state: the
     /// connection ends and reconnects. The target is kept — it came from an
     /// announcement, and an answer this build cannot read is evidence about the
     /// answer, not about the thread.
@@ -871,6 +887,7 @@ async fn serve_connection(
         filtered: 0,
         next_id: 1,
         amend,
+        debts: std::collections::BTreeMap::new(),
     };
 
     // The handshake can bind (a `thread/started` may arrive before the `initialize`
@@ -886,9 +903,23 @@ async fn serve_connection(
     }
     handshook?;
 
-    // An announcement on this connection already gives the whole stream, so only a
-    // target this connection did NOT watch start is attached to by resume.
-    let mut attach = if conn.bound().is_none() && resume_target.is_some() {
+    // **Anything with a target attaches — being announced the thread is not enough.**
+    //
+    // Until 2e-4b this read `conn.bound().is_none() && …`: an announcement was taken to
+    // discharge the attach, on the reasoning that a connection which watched the thread
+    // start already holds its stream from the first frame and has nothing to recover.
+    // That reasoning was sound in a world where `thread/resume` could never succeed,
+    // and it is **wrong now**. The measurement is that `turn/*` and `item/*` frames are
+    // delivered only to the connection whose resume succeeded — so an announced,
+    // never-resumed connection is handed the thread's identity and then nothing else,
+    // for ever. Recovery was never what the resume was for; **subscription** is.
+    //
+    // So an announcement binds and names the target, and the link still asks. Before
+    // the thread's first turn the ask fails with the measured not-ready error and the
+    // existing backoff loop carries it; the turn creates the rollout, the next ask is
+    // answered, and acceptance subscribes the connection that has been watching all
+    // along.
+    let mut attach = if resume_target.is_some() {
         Attach::due_now()
     } else {
         Attach::Unbound
@@ -908,11 +939,16 @@ async fn serve_connection(
                         // afterwards would grant it a fresh budget on top.
                         let deadline = Instant::now() + RESUME_BUDGET;
                         let id = conn.send_resume(&mut ws, &target).await?;
+                        // The request is on the wire, so whatever it owes is paid. Done
+                        // here rather than where the debt was noticed: a debt cleared
+                        // against a state that could not issue a request is a debt lost.
+                        conn.launch_follow_up();
                         attach = Attach::Awaiting {
                             id,
                             deadline,
                             next_delay,
                             target,
+                            superseded: false,
                         };
                     }
                     // The id went away between states; nothing to resume.
@@ -997,52 +1033,113 @@ async fn serve_connection(
             }
         }
 
-        // **A binding discharges an outstanding attach, and redirects the target.**
+        // **A binding redirects the target, schedules an attach, and supersedes a stale
+        // one.** It does not settle anything.
         //
-        // The announcement is better evidence than any resume answer could be: this
-        // connection now holds the thread's stream from its first frame, so there is
-        // nothing left to recover and nothing left to ask for. And the thread it
-        // names is this session's — a target naming a different one is stale, from a
-        // registration hint or a thread the session has moved on from.
+        // The thread a `thread/started` names is this session's — better evidence than a
+        // registration hint, which is only a claim. So it becomes what every later
+        // attach addresses, both on this connection (`resume_target`) and on the next
+        // one (`thread_id`, published outward). What it does NOT do is end the attach:
+        // this connection is bound and still unsubscribed, and only an accepted resume
+        // changes that.
+        // **An announcement REDIRECTS the target. It does not discharge the attach.**
         //
-        // The redirect is done by **publishing outward**, which is what the next
-        // connection reads as its target. There is deliberately no local reassignment
-        // beside it: this connection stops attaching here, so a local target would
-        // never be read again, and code with no reachable effect is code that lies
-        // about what it does.
+        // The thread it names is this session's — better evidence than any registration
+        // hint — so it becomes what every later attach addresses. What it emphatically
+        // does not do is settle anything: this connection is bound but **unsubscribed**,
+        // and only an accepted `thread/resume` changes that.
         if let Some(bound) = conn.bound() {
-            if thread_id.as_deref() != Some(bound) {
-                if let Some(stale) = thread_id.as_deref() {
+            if resume_target.as_deref() != Some(bound) {
+                if let Some(stale) = resume_target.as_deref() {
                     crate::log_info!(
                         "codex link for {}: {bound} was announced on this connection; \
-                         the next attach will target it rather than {stale}",
+                         the attach will target it rather than {stale}",
                         session.name
                     );
                 }
-                // Only ever set, never cleared: a target that survived a reconnect is
-                // still the best thing the next connection has to attach with.
+                resume_target = Some(bound.to_string());
+                // Published outward too, so a reconnect starts from the announced
+                // thread. Only ever set, never cleared: a target that survived a
+                // reconnect is still the best thing the next connection has.
                 thread_id.clone_from(&conn.visit.thread_id);
             }
-            if !matches!(attach, Attach::Unbound) {
-                attach = Attach::Unbound;
+            // A binding with nothing scheduled means this connection learned its thread
+            // from the broadcast and has not asked yet. Ask now.
+            if matches!(attach, Attach::Unbound) {
+                attach = Attach::due_now();
+            }
+            // **An outstanding resume for a DIFFERENT thread is superseded.** It cannot
+            // be recalled, so it is marked here and its answer is discarded when it
+            // arrives. The announcement is the wire telling us which thread is this
+            // session's; a request issued before that correction must not be allowed to
+            // win by answering later.
+            if let Attach::Awaiting {
+                id,
+                target,
+                superseded,
+                ..
+            } = &mut attach
+            {
+                if target.as_str() != bound && !*superseded {
+                    crate::log_info!(
+                        "codex link for {}: thread/resume (id {id}) asked about {target}, \
+                         which {bound} has just superseded; its answer will be discarded",
+                        session.name
+                    );
+                    *superseded = true;
+                }
             }
         }
 
         // The only response this link can receive is the answer to its own resume.
         if is_our_response {
             if let Attach::Awaiting {
-                next_delay, target, ..
+                next_delay,
+                target,
+                superseded,
+                ..
             } = &attach
             {
-                let (next_delay, target) = (*next_delay, target.clone());
-                attach = conn.settle_resume(&frame, &target, next_delay);
+                let (next_delay, target, superseded) = (*next_delay, target.clone(), *superseded);
+                attach = if superseded {
+                    // **Received, logged, thrown away.** Not settled: a superseded answer
+                    // is evidence about a thread this session has moved off, and reading
+                    // it — even to refuse it — would let it bind, seed or report. The
+                    // next attach targets the announced thread.
+                    crate::log_debug!(
+                        "codex link for {}: discarded the answer to a superseded \
+                         thread/resume for {target}",
+                        session.name
+                    );
+                    Attach::due_now()
+                } else {
+                    conn.settle_resume(&frame, &target, next_delay).await?
+                };
             }
         }
-        // Any answer but the measured one ends the connection. The target is kept:
+        // **The follow-up attach, checked LAST.**
+        //
+        // A turn this link joined mid-flight has just finished, so its real item ids are
+        // now describable — one more resume settles what the placeholders hid. Fired only
+        // from `Attached`: any other state already has an attach in flight or scheduled,
+        // which will carry the same recovery.
+        //
+        // The position in the loop is load-bearing and was wrong once. Checked before the
+        // response is settled, this sees the state as it was *entering* the iteration —
+        // so a debt recorded while a resume was outstanding is tested against `Awaiting`,
+        // declines to fire, and then the loop blocks on the next read with nothing
+        // scheduled to wake it. `Attached` carries no deadline, so that block is
+        // permanent. Settling first and asking afterwards means the answer that returns
+        // this connection to `Attached` is the same pass that notices what is still owed.
+        if conn.follow_up_owed() && matches!(attach, Attach::Attached) {
+            attach = Attach::due_now();
+        }
+
+        // Any answer but the two accepted ones ends the connection. The target is kept:
         // it came from an announcement or the registration hint, and a wire answer
         // this build cannot read is evidence about the answer, not about the thread.
         if matches!(attach, Attach::Refused) {
-            bail!("thread/resume was not the measured not-ready answer; reconnecting");
+            bail!("thread/resume answered with a shape this build cannot read; reconnecting");
         }
     }
 }
@@ -1055,13 +1152,43 @@ struct Connection<'a> {
     adapter: &'a mut CodexAdapter,
     visit: Visit,
     /// Frames dropped because they named a thread this connection is not bound to.
-    /// Counted and dropped: pre-2e-4b the only thread this link can be bound to is
-    /// one it watched start, so a frame for any other is not this session's.
+    /// Counted and dropped: this link is bound to exactly one thread — the one it
+    /// watched start, or the one it resumed — so a frame for any other is not this
+    /// session's fact.
     filtered: u64,
     next_id: i64,
     /// The STOP-AND-AMEND report's throttle, lent by [`run`] so it outlives this
     /// connection — which is the only way it can throttle a reconnect loop.
     amend: &'a mut AmendThrottle,
+    /// **What this link still owes each turn it attached across.**
+    ///
+    /// A turn that was still running when the answer described it contributed no items:
+    /// its ids were placeholders. Whatever of it had already finished before this link
+    /// subscribed is therefore missing, and no live frame will ever carry it — those
+    /// items completed before the subscription existed. The one thing that can recover
+    /// them is a later answer describing the same turn **finished**, with the real ids.
+    ///
+    /// **One map, not three sets, and that is the fix rather than the tidying.** These
+    /// were three collections kept disjoint by discipline, and the discipline broke in
+    /// the one place it was hardest to see: a turn moved awaiting → owed, the answer
+    /// already in flight still reported it running and put it back into awaiting, and
+    /// the launch then moved it owed → settled and left the stale awaiting entry behind.
+    /// A replayed terminal for that turn found it awaiting again and bought a fourth
+    /// resume nobody owed. A single map makes a turn's state one value, so "in two
+    /// states at once" is not something the code can express.
+    debts: std::collections::BTreeMap<String, TurnDebt>,
+}
+
+/// Where one turn stands in the follow-up settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnDebt {
+    /// Attached across while it was running; its terminal has not been seen yet.
+    AwaitingTerminal,
+    /// Its terminal has been seen. A follow-up is owed and has **not** been launched.
+    Owed,
+    /// A follow-up has been launched for it. **Terminal state** — one per turn, ever,
+    /// which is what makes the follow-up a settlement rather than a loop.
+    Settled,
 }
 
 impl Connection<'_> {
@@ -1175,42 +1302,54 @@ impl Connection<'_> {
         Ok(id)
     }
 
-    /// Consume a `thread/resume` answer. **Exactly one shape is acceptable.**
+    /// Consume a `thread/resume` answer. **Exactly two shapes are acceptable.**
     ///
-    /// The measured not-ready error, for the thread we asked about — and nothing
-    /// else. Not a success with an empty `turns[]`, not a success of any shape, not
-    /// another error. See the module doc: a thread that has not yet run a turn has
-    /// no rollout, so the not-ready error is the only answer it can give, and it is
-    /// the only one this build was designed against.
+    /// 1. The measured not-ready error, for the thread we asked about — a thread that
+    ///    has not yet run a turn has no rollout (A1/D3), and this is the only answer it
+    ///    can give. Retried with backoff.
+    /// 2. A **populated result this build can read whole**: it is about the thread we
+    ///    asked about, its `turns[]` is readable, and every turn in it is one of the
+    ///    two states measured on this wire. Accepted — which reconciles it and
+    ///    **subscribes this connection** (see [`Connection::attach_from_seed`]).
     ///
-    /// Once a turn has run, the wire answers instead with a `result` carrying a
-    /// populated `turns[]` — and that lands here too, on this branch, deliberately.
-    /// Accepting it would be normalizing a response whose completeness and keying
-    /// nothing in this chunk has validated, on a guess about what it means. The
-    /// point of failing closed here is that the guess is never made — the answer is
-    /// *reported*, loudly, with what a human needs in order to decide: its shape.
-    /// 2e-4b is what turns that report into an attach.
+    /// Everything else — a success of an unmeasured shape, an answer about another
+    /// thread, another error — takes the STOP-AND-AMEND branch, which is
+    /// **described, never quoted** ([`describe_resume_answer`]) and **throttled**
+    /// ([`AmendThrottle`]): a populated answer is the session's content, and a
+    /// refusal recurs every reconnect for as long as the condition lasts.
     ///
-    /// The report is **described, never quoted** ([`describe_resume_answer`]) and
-    /// **throttled** ([`AmendThrottle`]) — a populated answer is the session's
-    /// content, and this branch recurs every reconnect for as long as the
-    /// condition lasts.
-    fn settle_resume(
+    /// The shape check lives in [`CodexAdapter::plan_resume_seed`], which is where the
+    /// measurements behind it are written down. This function owns only the two things
+    /// the *link* knows: which thread it asked about, and that a frame carrying both a
+    /// `result` and an `error` is not a response at all.
+    async fn settle_resume(
         &mut self,
         frame: &Value,
         requested_thread: &str,
         next_delay: Duration,
-    ) -> Attach {
+    ) -> Result<Attach> {
         if is_measured_not_ready(frame, requested_thread) {
             crate::log_debug!(
                 "codex link for {}: {requested_thread} has no rollout yet; retrying the \
                  attach in {next_delay:?}",
                 self.session.name
             );
-            return Attach::Backoff {
+            return Ok(Attach::Backoff {
                 until: Instant::now() + next_delay,
                 next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
-            };
+            });
+        }
+        // **Response exclusivity, before anything is read out of it.** A frame carrying
+        // both a `result` and an `error` is not a JSON-RPC response, and reading its
+        // result would be believing one half of a contradiction — the same test
+        // [`is_measured_not_ready`] makes from the other side.
+        if frame.get("error").is_none() {
+            if let Some(result) = frame.get("result") {
+                if let Some(seed) = self.adapter.plan_resume_seed(result, requested_thread) {
+                    self.attach_from_seed(seed, requested_thread).await?;
+                    return Ok(Attach::Attached);
+                }
+            }
         }
         // The throttle rides the in-process discriminator and the log rides the
         // keyed digest: two values, because one of them must never be logged and
@@ -1227,7 +1366,83 @@ impl Connection<'_> {
                 )
             );
         }
-        Attach::Refused
+        Ok(Attach::Refused)
+    }
+
+    /// Turn an accepted answer into an attach: **record, then rebuild, then subscribe.**
+    ///
+    /// The order is the whole safety property, and each step is a constraint a review
+    /// round paid for:
+    ///
+    ///   * **Record before rebuild.** Every fact the answer describes goes through
+    ///     [`Daemon::ingest`] — the same call the hook, transcript and live-frame paths
+    ///     make, deduplicated by `(session_uid, source, source_event_id)` — *before*
+    ///     [`CodexAdapter::apply_resume_seed`] is allowed to forget what it had open.
+    ///   * **A failed insert fails the attach.** Not "logs and carries on", which is
+    ///     what the live-frame path does: there, a lost fact costs one row, while here
+    ///     it would be a lost fact *plus* a state rebuild performed around its absence.
+    ///     So the error propagates, `serve_connection` ends the connection, and the
+    ///     reconnect asks again. Nothing was applied, so the retry plans the identical
+    ///     seed; the facts that did land cost rows that are never written twice, which
+    ///     is precisely what makes the retry free.
+    ///   * **Acceptance is what subscribes, so the admit filter opens FIRST.** Measured
+    ///     in 2e-4a: `turn/*` and `item/*` frames are delivered only to the connection
+    ///     whose `thread/resume` succeeded. The app-server may consider this connection
+    ///     subscribed from the moment it *sends* the answer, so live frames for this
+    ///     thread can be on the wire before the seed has finished being written — and
+    ///     `Visit::admits` rejects every named frame while `thread_id` is `None`.
+    ///     Opening the filter before the writes means such a frame is admitted rather
+    ///     than dropped.
+    ///
+    ///     This is **not** a violation of record-before-rebuild, and the distinction is
+    ///     the point: that rule protects the adapter's *open-item state*, which must
+    ///     not be rebuilt around facts that were never written. The admit filter is a
+    ///     different thing — it decides which frames belong to this session — and a
+    ///     frame admitted early is not a risk, because a live frame and the seed's
+    ///     description of the same fact carry the same key and collapse. That identity
+    ///     is the whole design, and here it is what makes the ordering safe.
+    async fn attach_from_seed(&mut self, mut seed: ResumeSeed, thread: &str) -> Result<()> {
+        let (described, terminal, running) = (
+            seed.described_turns(),
+            seed.terminal_turns(),
+            seed.running_turns(),
+        );
+        // Subscribed as of the answer: admit this thread's frames from here on. Set
+        // before the writes, and deliberately not undone if they fail — the visit is
+        // per-connection, and a failed attach ends the connection anyway.
+        self.visit.thread_id = Some(thread.to_string());
+        let events = seed.take_events();
+        let recorded = events.len();
+        for pending in events {
+            self.daemon.ingest(pending).await.with_context(|| {
+                format!(
+                    "recording a fact the thread/resume answer for {thread} described \
+                     (the attach fails rather than rebuilding state around a fact that \
+                     was never written)"
+                )
+            })?;
+        }
+        self.adapter.apply_resume_seed(&seed);
+        // A turn that was running when this answer described it owes items this link can
+        // never be sent: they finished before it subscribed. Remember it until its
+        // terminal is observed, then ask once more.
+        for turn in seed.running_turn_ids() {
+            // `or_insert` is doing real work: a turn whose terminal this link has
+            // already seen — or already asked about — keeps the state it is in. Only a
+            // turn it knows nothing about starts awaiting. An answer that is merely
+            // stale about a turn cannot rewind that turn's settlement.
+            self.debts
+                .entry(turn.clone())
+                .or_insert(TurnDebt::AwaitingTerminal);
+        }
+        crate::log_info!(
+            "codex link for {}: attached to thread {thread} by resume. The answer \
+             described {described} turn(s) ({terminal} finished, {running} still \
+             running); {recorded} described fact(s) went through the ordinary dedup \
+             path. This connection is subscribed.",
+            self.session.name
+        );
+        Ok(())
     }
 
     /// Stamp one inbound frame at ingress, admit it or retire it, and — for a
@@ -1278,7 +1493,67 @@ impl Connection<'_> {
     /// Normalize one admitted frame and record whatever it turned into.
     async fn ingest_frame(&mut self, frame: &Value) {
         for pending in self.adapter.ingest(frame) {
+            self.note_terminal(&pending);
             self.record(pending).await;
+        }
+    }
+
+    /// **Does this fact settle a turn this link attached across?**
+    ///
+    /// If so, the debt described on [`Connection::awaiting_terminal`] can now be paid:
+    /// the turn is finished, so an answer about it will carry its real item ids, and one
+    /// more `thread/resume` recovers whatever completed before this link subscribed.
+    ///
+    /// Only a **completed** terminal triggers it, and that is a deliberate narrowing. An
+    /// `interrupted` or `failed` turn is a state no resume answer has ever been captured
+    /// reporting, so [`CodexAdapter::plan_resume_seed`] refuses it — asking again would
+    /// buy nothing and would turn an ordinary interrupt into a refuse-and-reconnect loop.
+    /// The debt on such a turn stays unpaid and visible rather than chased.
+    fn note_terminal(&mut self, pending: &protocol::event::PendingEvent) {
+        if pending.kind != protocol::event::EventKind::TurnComplete {
+            return;
+        }
+        if pending.payload.get("status").and_then(Value::as_str) != Some("completed") {
+            return;
+        }
+        let Some(turn) = pending.turn_id.as_deref() else {
+            return;
+        };
+        // Only a turn still awaiting its terminal transitions. A turn already owed has
+        // nothing to add; one already settled has had its ask, and a replayed terminal
+        // for it must not buy another.
+        if self.debts.get(turn) == Some(&TurnDebt::AwaitingTerminal) {
+            // Owed, NOT settled: a debt is discharged by a request reaching the wire,
+            // and nothing here can issue one.
+            self.debts.insert(turn.to_string(), TurnDebt::Owed);
+            crate::log_info!(
+                "codex link for {}: turn {turn} finished, and this link attached while it \
+                 was running — asking once more so the items it could not name are \
+                 recovered",
+                self.session.name
+            );
+        }
+    }
+
+    /// Is a follow-up owed? **Peeked, never consumed** — see [`Connection::owed`]. The
+    /// debt is cleared by [`Connection::launch_follow_up`], and only once the request
+    /// that pays it is actually on the wire.
+    fn follow_up_owed(&self) -> bool {
+        self.debts.values().any(|debt| *debt == TurnDebt::Owed)
+    }
+
+    /// A resume has just been sent. Every debt outstanding at this moment is settled by
+    /// it: one answer describes the whole thread, so a single request recovers all of
+    /// them at once.
+    ///
+    /// A debt recorded *after* this point stays owed and fires when the connection is
+    /// attached again — which is what keeps at most one follow-up in flight without
+    /// letting the next one fall on the floor.
+    fn launch_follow_up(&mut self) {
+        for debt in self.debts.values_mut() {
+            if *debt == TurnDebt::Owed {
+                *debt = TurnDebt::Settled;
+            }
         }
     }
 
@@ -1291,9 +1566,9 @@ impl Connection<'_> {
         }
     }
 
-    /// Bind this connection to a thread, from the **`thread/started` it watched
-    /// arrive**. That is the only thing that binds — see the module doc's
-    /// pre-2e-4b contract.
+    /// Bind this connection to a thread from the **`thread/started` it watched
+    /// arrive**. The other thing that binds is an accepted resume answer
+    /// ([`Connection::attach_from_seed`]); see the module doc's attach contract.
     fn bind_if_unbound(&mut self, frame: &Value) {
         if self.visit.thread_id.is_some() {
             return;
@@ -2008,6 +2283,8 @@ mod tests {
     const NOISE_THREAD: &str = "th_NOISE_NOT_THIS_SESSION";
     /// The thread the lifecycle capture belongs to.
     const LIFECYCLE_THREAD: &str = "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86";
+    /// The turn it runs.
+    const LIFECYCLE_TURN: &str = "01a0127a-d9cd-7461-84d7-6eea6d0b98a5";
     /// The real 0.147 notification stream for one message turn.
     const LIFECYCLE: &str = include_str!("../../../fixtures/codex/lifecycle.jsonl");
 
@@ -2030,8 +2307,54 @@ mod tests {
         /// fails closed like everything else: accepting it would normalize a shape
         /// nobody has seen, which is the mistake this chunk exists to not make.
         EmptyTurns,
-        /// A result describing a turn — the 2e-4b boundary.
-        DescribesTurns,
+        /// A result whose `turns[]` sits at the TOP level rather than under
+        /// `thread` — so there is no `result.thread.turns` to read at all.
+        TurnsNotUnderThread,
+        /// **The real thing.** The committed populated answer, retargeted onto the
+        /// thread and the turn the lifecycle capture is about, so the answer and the
+        /// notification stream beside it describe the SAME facts. Accepted.
+        Populated,
+        /// The same answer, and then **silence** — the leg replays nothing. What lands
+        /// in the store therefore came from the ANSWER and from nowhere else.
+        PopulatedNoReplay,
+        /// The same answer with its turn reported `inProgress` and its items carrying
+        /// the **placeholder ids** a running turn is measured to report (`item-1`, …).
+        /// Accepted, and it must contribute no item fact whatsoever.
+        PopulatedInProgress,
+        /// A turn state this wire has never reported. Refused.
+        UnmeasuredTurnStatus,
+        /// A turn whose `itemsView` says its item list is partial. Refused.
+        PartialItemsView,
+        /// **The mid-turn attach, and what settles it.** The first resume answers with
+        /// the turn still RUNNING, and the leg then replays only the TAIL of that turn —
+        /// the userMessage frames are withheld, standing for items that finished before
+        /// this link subscribed and which no live frame will ever carry. The follow-up
+        /// resume the link owes itself is answered with the turn FINISHED, carrying both
+        /// items under their real ids, which is the only thing that can recover them.
+        MidTurnThenCompleted,
+        /// **Two debts, and the second falls due while the first is in flight.**
+        ///
+        /// The answer seeds TWO turns running. Turn A terminalizes, so a follow-up
+        /// fires; while that request is outstanding turn B terminalizes too. The second
+        /// answer still reports B running, so only a third resume can recover it — which
+        /// happens if and only if B's debt survived being noticed at a moment when no
+        /// request could be issued.
+        TwoMidTurnDebts,
+        /// **The stale request is answered, and must lose.** The first resume (for a
+        /// stale hint) goes unanswered until the leg has announced the real thread; only
+        /// then does it answer — with a perfectly valid populated result about the stale
+        /// thread. The announcement supersedes that request, so its answer must bind
+        /// nothing, seed nothing and report nothing.
+        AnnounceThenAnswerStale,
+        /// A well-formed answer whose one RUNNING turn carries an item with no
+        /// routing identity. Refused.
+        ///
+        /// The turn is running deliberately. A *finished* turn's items are read one by
+        /// one, so a malformed one is refused by that read whatever else is in place —
+        /// which mutation testing showed makes it useless for pinning the up-front
+        /// check. A running turn's items are never read at all, so the up-front check
+        /// is the only thing standing between this answer and an attach.
+        ItemWithoutType,
         /// A policy refusal no retry can fix.
         Refused,
         /// A `result` object with no `turns[]` anywhere — neither an error nor a
@@ -2046,16 +2369,11 @@ mod tests {
         /// a thread. Neither is a notification, so neither may bind this connection
         /// or reach the adapter; and the handshake must still complete.
         NoisyHandshake,
-        /// **Never answers.** The leg receives the resume and says nothing, then
-        /// announces a thread — so the announcement arrives while the attach is
-        /// still `Awaiting`, which is the discharge path. The connection is then
-        /// **held open**, so "no second resume" means discharged rather than
-        /// reconnected.
-        AnnounceInstead,
-        /// The same, but act one **drops** afterwards — so the reconnect's attach is
-        /// observable, and the target it addresses is the proof the announcement
-        /// redirected rather than merely silenced.
-        AnnounceInsteadThenDrop,
+        /// **The first resume goes unanswered and the thread is announced instead.**
+        /// The announcement redirects the target and settles nothing, so the stale
+        /// attach times out, the connection ends, and the reconnect asks under the
+        /// announced thread — which is how the redirect is observed.
+        AnnounceLate,
     }
 
     /// A stand-in for the broker's ccd leg. Act one announces the thread and
@@ -2068,6 +2386,15 @@ mod tests {
         connections: Arc<std::sync::atomic::AtomicUsize>,
         server: tokio::task::JoinHandle<()>,
     }
+
+    /// Whether the late-announcing script has already broadcast its thread, **for the
+    /// life of the leg** rather than for the life of one connection.
+    ///
+    /// A reconnect to a thread that is already running gets no `thread/started`: the
+    /// announcement happened once, on a connection that is gone. Scoping this per
+    /// connection re-announced on every reconnect, which both misrepresents the wire and
+    /// left the not-ready branch behind the announcement unreachable.
+    type AnnouncedOnce = Arc<std::sync::atomic::AtomicBool>;
 
     impl Drop for ScriptedLeg {
         fn drop(&mut self) {
@@ -2090,6 +2417,7 @@ mod tests {
             let listener = tokio::net::UnixListener::bind(&path).expect("bind the scripted leg");
             let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
             let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let announced: AnnouncedOnce = Arc::default();
             let server = tokio::spawn({
                 let seen = Arc::clone(&seen);
                 let connections = Arc::clone(&connections);
@@ -2100,9 +2428,17 @@ mod tests {
                         };
                         let nth = connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let seen = Arc::clone(&seen);
+                        let announced = Arc::clone(&announced);
                         tokio::spawn(async move {
-                            let _ =
-                                serve_scripted(stream, nth, answer, announce_thread, seen).await;
+                            let _ = serve_scripted(
+                                stream,
+                                nth,
+                                answer,
+                                announce_thread,
+                                seen,
+                                announced,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -2126,30 +2462,190 @@ mod tests {
         }
     }
 
-    /// The captured stream this leg replays. With `announce` false the capture's
-    /// own `thread/started` is withheld too — it is an announcement like any other,
-    /// and leaving it in would bind the connection the caller wanted left unbound.
-    fn capture(announce: bool) -> Vec<String> {
+    /// The captured turn stream this leg replays **after a resume that subscribes**.
+    ///
+    /// The capture's own `thread/started` is always withheld: an announcement is a
+    /// separate act on this leg (it happens at `initialized`, to a connection that has
+    /// not resumed), and leaving it in here would let a subscription hand out a binding
+    /// the real wire delivers by broadcast.
+    fn capture() -> Vec<String> {
         lifecycle_frames()
             .into_iter()
             .filter(|line| {
-                announce
-                    || serde_json::from_str::<Value>(line)
-                        .ok()
-                        .and_then(|v| v.get("method").and_then(Value::as_str).map(str::to_string))
-                        != Some("thread/started".to_string())
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("method").and_then(Value::as_str).map(str::to_string))
+                    != Some("thread/started".to_string())
             })
             .collect()
     }
 
+    /// The captured turn stream **without the userMessage**, standing for a turn joined
+    /// after some of its items had already finished.
+    ///
+    /// Those items are unrecoverable from the live wire by construction — they completed
+    /// before the subscription existed — and unrecoverable from the answer while the turn
+    /// is still running, because a running turn reports placeholder ids. Only the answer
+    /// that describes the turn finished can name them.
+    fn capture_tail() -> Vec<String> {
+        capture()
+            .into_iter()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .and_then(|v| v["params"]["item"]["type"].as_str().map(str::to_string))
+                    != Some("userMessage".to_string())
+            })
+            .collect()
+    }
+
+    /// A second turn, invented because the capture has only one — with real ids, its own
+    /// items, and a later `startedAt` so the answer is ordered oldest-first.
+    const TURN_B: &str = "01a0127a-bbbb-7000-0000-00000000000b";
+    const TURN_B_USER: &str = "01a0127a-bbbb-7000-0000-0000000000u1";
+    const TURN_B_AGENT: &str = "msg_bbbb0000000000000000000000000000000000000000000000";
+
+    fn turn_b(status: &str) -> Value {
+        let running = status == "inProgress";
+        json!({
+            "id": TURN_B,
+            // A running turn reports PLACEHOLDER ids — the measured behaviour this whole
+            // follow-up exists because of.
+            "items": if running {
+                json!([{"type": "userMessage", "id": "item-1",
+                        "content": [{"type": "text", "text": "second"}]}])
+            } else {
+                json!([
+                    {"type": "userMessage", "id": TURN_B_USER,
+                     "content": [{"type": "text", "text": "second"}]},
+                    {"type": "agentMessage", "id": TURN_B_AGENT, "text": "two"},
+                ])
+            },
+            "itemsView": "full",
+            "status": status,
+            "error": null,
+            "startedAt": 1_787_617_900_i64,
+            "completedAt": if running { Value::Null } else { json!(1_787_617_902_i64) },
+            "durationMs": if running { Value::Null } else { json!(2_000) },
+        })
+    }
+
+    /// The two-turn answer: turn A in whatever state, turn B in whatever state.
+    fn two_turn_answer(id: i64, thread: &str, a_running: bool, b_running: bool) -> Value {
+        let mut answer = if a_running {
+            lifecycle_answer_in_progress(id, thread)
+        } else {
+            lifecycle_answer(id, thread, |_| {})
+        };
+        let turn_a = answer["result"]["thread"]["turns"][0].clone();
+        answer["result"]["thread"]["turns"] = json!([
+            turn_a,
+            turn_b(if b_running { "inProgress" } else { "completed" }),
+        ]);
+        answer
+    }
+
+    /// A live `turn/completed` for one turn, as the wire sends it.
+    fn turn_terminal(thread: &str, turn: &str) -> String {
+        json!({
+            "method": "turn/completed",
+            "params": {"threadId": thread, "turn": {
+                "id": turn, "items": [], "itemsView": "summary", "status": "completed",
+                "error": null, "startedAt": 1_787_617_900_i64,
+                "completedAt": 1_787_617_902_i64, "durationMs": 2_000,
+            }}
+        })
+        .to_string()
+    }
+
     /// The `thread/started` that binds a connection, for `thread`.
+    ///
+    /// **Carries `cliVersion`, because the real broadcast does.** This helper used to
+    /// omit it, and that abbreviation stopped being free the moment the identity fact's
+    /// immutable fields were validated rather than defaulted: a Thread object without it
+    /// mints no `thread_started` at all. The fix is to make the stand-in faithful, not to
+    /// let the validation tolerate a shape the wire never sends —
+    /// `fixtures/codex/lifecycle.jsonl` and `first-turn.jsonl` both carry all three.
     fn announce(thread: &str) -> String {
         json!({
             "method": "thread/started",
             "params": {"thread": {"id": thread, "path": "/r/t.jsonl", "cwd": "/work",
-                                  "turns": []}}
+                                  "cliVersion": "0.147.0", "turns": []}}
         })
         .to_string()
+    }
+
+    /// The committed populated answer, retargeted onto the thread and the turn the
+    /// lifecycle capture is about.
+    ///
+    /// Built out of **both** committed fixtures rather than written by hand here. The
+    /// envelope — every top-level key, the whole Thread object, the policy fields — is
+    /// `fixtures/codex/resume-populated-answer.json` exactly as captured. The turn it
+    /// describes is rebuilt from `fixtures/codex/lifecycle.jsonl`'s own frames: the turn
+    /// object its `turn/completed` carried, carrying the items its `item/completed`s
+    /// carried, under the `itemsView:"full"` a resume answer is measured to report.
+    ///
+    /// That arrangement is the point. The answer and the notification stream the leg
+    /// replays beside it describe the same turn with the same ids, which is the only
+    /// way dedup **across the attach boundary** can be exercised at all: a hand-written
+    /// answer would mint facts the capture never produces, and every key would be
+    /// unique for the boring reason.
+    fn lifecycle_answer(id: i64, thread: &str, mutate: impl FnOnce(&mut Value)) -> Value {
+        let parsed: Vec<Value> = lifecycle_frames()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("a captured frame is JSON"))
+            .collect();
+        let mut turn = parsed
+            .iter()
+            .find(|f| f["method"] == "turn/completed")
+            .expect("the capture completes a turn")["params"]["turn"]
+            .clone();
+        // `turn/completed` carries `itemsView:"summary"` and a PARTIAL item list; a
+        // resume answer carries the whole one. Measured, and the difference is exactly
+        // what `RESUME_ITEMS_VIEW_FULL` guards.
+        turn["items"] = Value::Array(
+            parsed
+                .iter()
+                .filter(|f| f["method"] == "item/completed")
+                .map(|f| f["params"]["item"].clone())
+                .collect(),
+        );
+        turn["itemsView"] = json!("full");
+
+        let mut answer: Value = populated_answer();
+        answer["id"] = json!(id);
+        let result = answer
+            .get_mut("result")
+            .expect("the captured answer has a result");
+        result["thread"]["id"] = json!(thread);
+        result["thread"]["sessionId"] = json!(thread);
+        result["thread"]["turns"] = json!([turn]);
+        mutate(result);
+        answer
+    }
+
+    /// The lifecycle answer with its one turn still running — and therefore with the
+    /// **placeholder** item ids a running turn is measured to report, in place of the
+    /// real ones it reports once the turn finishes.
+    fn lifecycle_answer_in_progress(id: i64, thread: &str) -> Value {
+        lifecycle_answer(id, thread, |result| {
+            let turn = &mut result["thread"]["turns"][0];
+            turn["status"] = json!("inProgress");
+            turn["completedAt"] = Value::Null;
+            turn["durationMs"] = Value::Null;
+            let placeholders: Vec<Value> = turn["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .enumerate()
+                .map(|(n, item)| {
+                    let mut item = item.clone();
+                    item["id"] = json!(format!("item-{}", n + 1));
+                    item
+                })
+                .collect();
+            turn["items"] = Value::Array(placeholders);
+        })
     }
 
     async fn serve_scripted(
@@ -2158,8 +2654,17 @@ mod tests {
         answer: ResumeAnswer,
         announce_thread: bool,
         seen: Arc<std::sync::Mutex<Vec<Value>>>,
+        announced: AnnouncedOnce,
     ) -> Result<()> {
         let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
+        // Which scripts force a reconnect: only the one whose subject IS the reconnect
+        // arc. Every other script holds its connection, so "no further resume" cannot be
+        // a reconnect in disguise.
+        let drops_after_retry = matches!(answer, ResumeAnswer::NoRollout) && announce_thread;
+        // How many resumes THIS connection has answered. The "act one drops" scripts
+        // close on the second, which is what makes a retry-on-the-same-connection
+        // observable before the reconnect that follows it.
+        let mut resumes_answered = 0usize;
         while let Some(Ok(msg)) = ws.next().await {
             let Message::Text(text) = msg else { continue };
             let frame: Value = serde_json::from_str(&text)?;
@@ -2169,6 +2674,14 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             let id = frame.get("id").and_then(Value::as_i64).unwrap_or(-1);
+            // The app-server answers about the thread the request named; a leg that
+            // always answered about one hard-coded thread could not stage a test whose
+            // evidence has to be selectable by thread id.
+            let asked_about = frame
+                .pointer("/params/threadId")
+                .and_then(Value::as_str)
+                .unwrap_or(LIFECYCLE_THREAD)
+                .to_string();
             seen.lock().unwrap().push(frame);
 
             match method.as_str() {
@@ -2199,32 +2712,25 @@ mod tests {
                     .await?;
                 }
                 "initialized" => {
-                    // **Act one only.** A reconnect to a thread that is already
-                    // running gets no `thread/started` — the announcement happened
-                    // once, on a connection that is gone. Re-broadcasting it here
-                    // would hand the second connection a binding the real wire does
-                    // not give it, repairing the very thing under test.
-                    let announces_late = matches!(
-                        answer,
-                        ResumeAnswer::AnnounceInstead | ResumeAnswer::AnnounceInsteadThenDrop
-                    );
+                    // **The announcement, and NOTHING ELSE.**
+                    //
+                    // This is the measured wire, and an earlier version of this leg got
+                    // it wrong in a way that mattered: it replayed the whole captured
+                    // turn stream to a connection that had merely handshaked. On the
+                    // real wire that connection is handed the thread's identity, its
+                    // status changes, and **zero** `turn/*` or `item/*` frames — turn
+                    // frames go only to a connection whose `thread/resume` succeeded
+                    // (2e-4a, and `codex_link_live`'s claim 5 counts it). A leg that
+                    // handed them out for free let an announced-but-unsubscribed link
+                    // look like it was observing, which is exactly the defect P1 fixes.
+                    //
+                    // **Act one only.** A reconnect to a thread that is already running
+                    // gets no `thread/started` — the announcement happened once, on a
+                    // connection that is gone. Re-broadcasting it would hand the second
+                    // connection a binding the real wire does not give it.
+                    let announces_late = matches!(answer, ResumeAnswer::AnnounceLate);
                     if announce_thread && nth == 0 && !announces_late {
                         ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
-                    }
-                    if !announces_late {
-                        for line in capture(announce_thread && nth == 0) {
-                            ws.send(Message::Text(line)).await?;
-                        }
-                    }
-                    // Act one drops, so act two has a reconnect to attach on. Two
-                    // scripts keep a single connection instead: the unbound one
-                    // (nothing binds, so no target crosses a reconnect) and the
-                    // late-announcing one (its whole subject is what happens to an
-                    // attach that is already outstanding on THIS connection).
-                    if nth == 0 && announce_thread && !announces_late {
-                        tokio::time::sleep(Duration::from_millis(150)).await;
-                        ws.close(None).await?;
-                        return Ok(());
                     }
                 }
                 "thread/resume" => {
@@ -2236,66 +2742,193 @@ mod tests {
                             json!({"id": id, "error": {
                                 "code": -32600,
                                 "message":
-                                    format!("no rollout found for thread id {LIFECYCLE_THREAD}")
+                                    format!("no rollout found for thread id {asked_about}")
                             }})
                         }
-                        ResumeAnswer::EmptyTurns => json!({"id": id, "result": {
-                            "thread": {"id": LIFECYCLE_THREAD}, "turns": []
-                        }}),
-                        ResumeAnswer::DescribesTurns => json!({"id": id, "result": {
-                            "thread": {"id": LIFECYCLE_THREAD},
-                            "turns": [{"id": "turn_1", "status": "inProgress", "items": [
-                                {"id": "exec-1", "type": "commandExecution",
-                                 "status": "inProgress"}
-                            ]}]
-                        }}),
+                        // **Each of these is the REAL captured envelope with exactly
+                        // one thing wrong.** An earlier version wrote them out by hand
+                        // as bare `{"thread": {...}, "turns": [...]}` objects, and
+                        // mutation testing showed what that cost: with the identity
+                        // check or the empty-turns check deleted, they were still
+                        // refused — for the incidental reason that a hand-written
+                        // answer has no `thread.turns` to read at all. They named a
+                        // defect they did not isolate. Built from the fixture, each one
+                        // now fails for its own reason and for no other.
+                        ResumeAnswer::EmptyTurns => lifecycle_answer(id, &asked_about, |result| {
+                            result["thread"]["turns"] = json!([]);
+                        }),
+                        ResumeAnswer::TurnsNotUnderThread => {
+                            lifecycle_answer(id, &asked_about, |result| {
+                                let turns = result["thread"]["turns"].take();
+                                result["turns"] = turns;
+                            })
+                        }
                         // The broker's own refusal, verbatim (`refusal.rs`).
                         ResumeAnswer::Refused => json!({"id": id, "error": {
                             "code": -32001,
                             "message": "resume refused: target thread is not bound to this session"
                         }}),
                         ResumeAnswer::NoTurnsArray => {
-                            json!({"id": id, "result": {"thread": {"id": LIFECYCLE_THREAD}}})
+                            lifecycle_answer(id, &asked_about, |result| {
+                                result["thread"]
+                                    .as_object_mut()
+                                    .expect("the captured thread is an object")
+                                    .remove("turns");
+                            })
                         }
-                        ResumeAnswer::WrongThread => json!({"id": id, "result": {
-                            "thread": {"id": "some-other-thread"}, "turns": []
-                        }}),
-                        ResumeAnswer::ConflictingIdentity => json!({"id": id, "result": {
-                            "thread": {"id": LIFECYCLE_THREAD},
-                            "threadId": "a-different-thread",
-                            "turns": []
-                        }}),
-                        // No answer at all: the announcement is what settles the
-                        // outstanding attach. The capture then goes out TWICE — both
-                        // times under the freshly announced binding, so the second
-                        // pass is a genuine replay over already-recorded facts and
-                        // dedup is actually exercised rather than asserted over an
-                        // empty set.
-                        ResumeAnswer::AnnounceInstead | ResumeAnswer::AnnounceInsteadThenDrop => {
-                            ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
-                            for _ in 0..2 {
-                                for line in capture(true) {
-                                    ws.send(Message::Text(line)).await?;
-                                }
+                        ResumeAnswer::Populated | ResumeAnswer::PopulatedNoReplay => {
+                            lifecycle_answer(id, &asked_about, |_| {})
+                        }
+                        ResumeAnswer::PopulatedInProgress => {
+                            lifecycle_answer_in_progress(id, &asked_about)
+                        }
+                        // First ask: still running. Follow-up: finished, real ids.
+                        ResumeAnswer::MidTurnThenCompleted => {
+                            if resumes_answered == 0 {
+                                lifecycle_answer_in_progress(id, &asked_about)
+                            } else {
+                                lifecycle_answer(id, &asked_about, |_| {})
                             }
-                            // Act one only, and only for the dropping variant: this
-                            // forces the reconnect that makes the REDIRECTED target
-                            // observable. The holding variant keeps the connection so
-                            // "no second resume" cannot be a reconnect in disguise.
-                            if nth == 0 && matches!(answer, ResumeAnswer::AnnounceInsteadThenDrop) {
-                                tokio::time::sleep(Duration::from_millis(150)).await;
-                                ws.close(None).await?;
-                                return Ok(());
+                        }
+                        // Two turns running; A terminalizes, then B terminalizes while
+                        // the follow-up for A is still outstanding.
+                        ResumeAnswer::TwoMidTurnDebts => match resumes_answered {
+                            // Both running. Then A finishes on the wire.
+                            0 => {
+                                let answer = two_turn_answer(id, &asked_about, true, true);
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                ws.send(Message::Text(turn_terminal(&asked_about, LIFECYCLE_TURN)))
+                                    .await?;
+                                continue;
                             }
-                            continue;
+                            // The follow-up for A. B's terminal is sent FIRST and the
+                            // answer is held back, so B's debt is noticed while this very
+                            // request is in flight — the moment a flag would have been
+                            // consumed against a state that could not act on it.
+                            1 => {
+                                ws.send(Message::Text(turn_terminal(&asked_about, TURN_B)))
+                                    .await?;
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                let answer = two_turn_answer(id, &asked_about, false, true);
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                continue;
+                            }
+                            // The follow-up for B. Only now is B describable.
+                            _ => two_turn_answer(id, &asked_about, false, false),
+                        },
+                        // Announce first, THEN answer the now-superseded request.
+                        ResumeAnswer::AnnounceThenAnswerStale => {
+                            if resumes_answered == 0 {
+                                ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
+                                lifecycle_answer(id, &asked_about, |_| {})
+                            } else {
+                                json!({"id": id, "error": {
+                                    "code": -32600,
+                                    "message":
+                                        format!("no rollout found for thread id {asked_about}")
+                                }})
+                            }
+                        }
+                        ResumeAnswer::UnmeasuredTurnStatus => {
+                            lifecycle_answer(id, &asked_about, |result| {
+                                result["thread"]["turns"][0]["status"] = json!("interrupted");
+                            })
+                        }
+                        ResumeAnswer::PartialItemsView => {
+                            lifecycle_answer(id, &asked_about, |result| {
+                                result["thread"]["turns"][0]["itemsView"] = json!("summary");
+                            })
+                        }
+                        ResumeAnswer::ItemWithoutType => {
+                            let mut answer = lifecycle_answer_in_progress(id, &asked_about);
+                            answer["result"]["thread"]["turns"][0]["items"][0]
+                                .as_object_mut()
+                                .expect("an item is an object")
+                                .remove("type");
+                            answer
+                        }
+                        // A whole, well-formed, readable answer — about somebody
+                        // else's thread. Nothing but the identity check stands between
+                        // this and another session's timeline under our uid.
+                        ResumeAnswer::WrongThread => {
+                            lifecycle_answer(id, "th_SOME_OTHER_THREAD", |_| {})
+                        }
+                        // The same, with a second field naming a third thread.
+                        ResumeAnswer::ConflictingIdentity => {
+                            lifecycle_answer(id, &asked_about, |result| {
+                                result["threadId"] = json!("a-different-thread");
+                            })
+                        }
+                        // **The first resume is never answered; the thread is
+                        // announced instead.** The announcement redirects the target —
+                        // and, since 2e-4b, settles nothing: the outstanding attach for
+                        // the stale target times out, the connection ends, and the
+                        // reconnect asks again under the ANNOUNCED thread, which is what
+                        // makes the redirect observable. Later resumes answer not-ready.
+                        ResumeAnswer::AnnounceLate => {
+                            // Announce once for the whole leg, and never answer THAT
+                            // resume. Every later one — on this connection or on the
+                            // reconnect the timeout forces — answers not-ready, which is
+                            // the branch that proves the redirect took.
+                            if !announced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                resumes_answered += 1;
+                                ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
+                                continue;
+                            }
+                            json!({"id": id, "error": {
+                                "code": -32600,
+                                "message":
+                                    format!("no rollout found for thread id {asked_about}")
+                            }})
                         }
                     };
                     ws.send(Message::Text(reply.to_string())).await?;
-                    // A1: replay follows the response and has no end marker. Every
-                    // frame here was already recorded on act one, so each must cost
-                    // a row that is never written.
-                    for line in capture(false) {
-                        ws.send(Message::Text(line)).await?;
+                    resumes_answered += 1;
+
+                    // **Turn frames follow only an answer that SUBSCRIBES.** A1: they
+                    // follow the response and have no end marker, and they are on the
+                    // wire while the link is still writing its seed — which is the
+                    // ordering the admit filter has to survive. Every one of them
+                    // describes the very turn the answer just described, so each must
+                    // cost a row that is never written; that is the dedup claim across
+                    // the attach boundary. `PopulatedNoReplay` withholds them so a test
+                    // can see what the ANSWER alone recovers.
+                    let subscribes = matches!(
+                        answer,
+                        ResumeAnswer::Populated | ResumeAnswer::PopulatedInProgress
+                    );
+                    if subscribes {
+                        for line in capture() {
+                            ws.send(Message::Text(line)).await?;
+                        }
+                    }
+                    // **A duplicate terminal for a turn whose debt is already settled.**
+                    // The wire replays after a resume (A1, no end marker), so a terminal
+                    // this link has already acted on can and does come round again. It
+                    // must buy nothing: the turn has had its one ask.
+                    if matches!(answer, ResumeAnswer::TwoMidTurnDebts) && resumes_answered == 3 {
+                        ws.send(Message::Text(turn_terminal(&asked_about, TURN_B)))
+                            .await?;
+                    }
+                    // The mid-turn script replays only the TAIL, and only once: the
+                    // withheld userMessage is what the follow-up has to recover, and a
+                    // second replay would hand it over for free.
+                    if matches!(answer, ResumeAnswer::MidTurnThenCompleted) && resumes_answered == 1
+                    {
+                        for line in capture_tail() {
+                            ws.send(Message::Text(line)).await?;
+                        }
+                    }
+                    // Act one drops after answering a SECOND resume, so a test sees the
+                    // retry on one connection and then the reconnect. Only the scripts
+                    // that need a reconnect arc do this; the rest hold the connection so
+                    // "no further resume" cannot be a reconnect in disguise.
+                    if nth == 0 && drops_after_retry && resumes_answered >= 2 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        ws.close(None).await?;
+                        return Ok(());
                     }
                 }
                 _ => {}
@@ -2391,6 +3024,24 @@ mod tests {
         out
     }
 
+    /// **What an announced-but-unsubscribed link records: the announcement, once.**
+    ///
+    /// The measured wire hands such a connection the thread's identity and no `turn/*`
+    /// or `item/*` frame at all, so this is the whole of its timeline until an accepted
+    /// resume subscribes it.
+    fn assert_only_the_announcement_recorded(events: &[protocol::event::Event]) {
+        let keys: Vec<String> = events
+            .iter()
+            .map(|e| e.source_event_id.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![format!("{LIFECYCLE_THREAD}:thread_started")],
+            "a link that has not attached is handed the announcement and nothing else, \
+             so anything beyond it here is a fact the wire never delivered: {events:?}"
+        );
+    }
+
     /// The capture's five facts, one copy each, with no duplicate dedup key.
     fn assert_capture_recorded_once(events: &[protocol::event::Event]) {
         let mut keys = std::collections::HashSet::new();
@@ -2416,15 +3067,19 @@ mod tests {
         );
     }
 
-    /// **The whole arc the pre-2e-4b contract actually supports**: bind from the
-    /// `thread/started` this connection watched, record the stream under it, survive
-    /// an EOF, carry the target across the reconnect, and meet the measured
-    /// not-ready error there — retrying, indefinitely and bounded.
+    /// **The pre-turn arc, end to end**: bind from the `thread/started` this connection
+    /// watched, **still resume it**, meet the measured not-ready error, retry on the
+    /// same connection, survive an EOF, and carry the target across the reconnect.
     ///
-    /// The second connection gets **no announcement**, because a reconnect to a
-    /// running thread does not get one: the announcement happened on a connection
-    /// that is gone. So it stays unbound, drops the replayed named frames, and its
-    /// only business is the attach — which is exactly the pre-2e-4b contract.
+    /// The resume is the part that moved. Until 2e-4b an announcement discharged the
+    /// attach and this link would never have asked at all — which, on the measured
+    /// wire, is a link that is bound and permanently unsubscribed. Now it asks, and
+    /// before the thread's first turn the honest answer is that there is no rollout
+    /// yet, so it keeps asking.
+    ///
+    /// The second connection gets **no announcement**, because a reconnect to a running
+    /// thread does not get one: the announcement happened on a connection that is gone.
+    /// So it stays unbound and its only business is the attach.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_link_binds_reconnects_and_retries_the_measured_attach() {
         let (events, connections, resumes, _) =
@@ -2448,27 +3103,40 @@ mod tests {
                 "the target survives the reconnect and addresses every attach: {resume}"
             );
         }
-        assert_capture_recorded_once(&events);
+        assert_only_the_announcement_recorded(&events);
     }
 
-    /// **Every answer but the measured one fails closed** — including the success
-    /// shapes. That is finding 12 applied: an empty `turns[]` has never been seen on
-    /// this wire, and accepting it would normalize an unobserved wire change instead
-    /// of reporting one. A populated `turns[]` is the same mistake with more
-    /// consequences.
+    /// **Every answer outside the two accepted shapes fails closed.**
+    ///
+    /// Two families here, and the second is the one that earns its keep. The shapeless
+    /// ones — an empty `turns[]`, a `turns[]` in the wrong place, no turns array, a
+    /// policy refusal, another thread, two disagreeing identities — would be caught by
+    /// almost any reader. The other four are the **real captured answer with exactly
+    /// one measured particular changed**: a turn state this wire has never reported, an
+    /// item list the answer itself flags as partial, an item missing a routing
+    /// identity. A rule that had quietly widened would take all four while still
+    /// rejecting the shapeless ones, and the suite would look green.
     ///
     /// Each is asserted per connection: the leg answers, the link reconnects, and
     /// the count grows every time — a link that quietly accepted any of them would
     /// settle on one connection and stop.
     #[tokio::test(flavor = "multi_thread")]
-    async fn every_answer_but_the_measured_one_fails_closed() {
+    async fn every_answer_outside_the_two_accepted_shapes_fails_closed() {
         for answer in [
             ResumeAnswer::EmptyTurns,
-            ResumeAnswer::DescribesTurns,
+            ResumeAnswer::TurnsNotUnderThread,
             ResumeAnswer::Refused,
             ResumeAnswer::NoTurnsArray,
             ResumeAnswer::WrongThread,
             ResumeAnswer::ConflictingIdentity,
+            // The four that are the REAL answer with one thing wrong. These are the
+            // ones worth having: each is a well-formed populated result that differs
+            // from the accepted shape in exactly one measured particular, so a rule
+            // that had quietly widened would accept them while the shapeless ones
+            // above still failed.
+            ResumeAnswer::UnmeasuredTurnStatus,
+            ResumeAnswer::PartialItemsView,
+            ResumeAnswer::ItemWithoutType,
         ] {
             let (_, connections, resumes, _) =
                 drive(answer, None, true, Duration::from_secs(3)).await;
@@ -2516,61 +3184,28 @@ mod tests {
         );
     }
 
-    /// **An announcement arriving mid-attach discharges it, and the replay that
-    /// follows is deduplicated.**
+    /// **An announcement REDIRECTS the target, and never settles the attach.**
     ///
-    /// Two things this pins that nothing else did. The leg takes the reconnect's
-    /// `thread/resume` and never answers it; instead it announces the thread. The
-    /// announcement is better evidence than any resume could be — this connection
-    /// now holds the stream from the thread's first frame — so the outstanding
-    /// attach is **discharged** rather than left to time out, and no further resume
-    /// is sent. And because the connection is now bound, the capture it replays is
-    /// admitted and normalized for the second time, which is the only place dedup on
-    /// a real replay is actually exercised: every fact must still exist exactly once.
+    /// This test used to assert the opposite — that an announcement *discharged* an
+    /// outstanding resume — and that rule was retired by measurement, not by taste. A
+    /// connection that has not resumed is handed no `turn/*` frame at all, so treating
+    /// the announcement as "nothing left to ask for" left a perfectly healthy link
+    /// bound, silent and permanently unsubscribed. Recovery was never what the resume
+    /// bought; subscription is.
+    ///
+    /// So: the link is given a stale hint and attaches to it. The leg never answers that
+    /// resume and announces the real thread instead. What must follow is that the
+    /// announcement **redirects** the target, the stale attach is left to time out
+    /// (RESUME_BUDGET is shortened under `cfg(test)` precisely so this is
+    /// distinguishable from a discharge), the connection ends, and every later attach
+    /// addresses the ANNOUNCED thread.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_announcement_mid_attach_discharges_it_and_the_replay_deduplicates() {
-        // A target is carried in so an attach actually fires: the subject here is
-        // what happens to a resume that is ALREADY outstanding when the thread is
-        // announced, which needs one to be outstanding.
+    async fn an_announcement_redirects_the_target_and_never_settles_the_attach() {
         let (events, connections, resumes, _) = drive(
-            ResumeAnswer::AnnounceInstead,
-            Some(LIFECYCLE_THREAD),
-            true,
-            Duration::from_secs(4),
-        )
-        .await;
-        // **Discharge, not timeout.** The scripted budget is 1.5s and the window is
-        // 4s, so an attach that was *not* discharged would have timed out, torn the
-        // connection down, and reconnected into a second resume. Exactly one resume
-        // and exactly one connection is what tells the two apart.
-        assert_eq!(
-            resumes.len(),
-            1,
-            "the announcement discharges the attach, so no second resume is ever \
-             sent: {resumes:?}"
-        );
-        assert_eq!(
-            connections, 1,
-            "and the connection is never torn down: a timed-out attach would have \
-             ended it and reconnected"
-        );
-        // The capture was replayed twice over the SAME bound connection, so every
-        // frame was normalized twice and every fact still exists once. Dedup on a
-        // genuine replay, not on an empty set.
-        assert_capture_recorded_once(&events);
-    }
-
-    /// **A stale target is redirected by an announcement.** The link is handed a
-    /// hint it never watched start, attaches to it, and is then told by the wire
-    /// which thread is actually this session's. The announced thread wins: the
-    /// stale target is dropped, and the facts land under the announced thread.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_announcement_redirects_a_stale_resume_target() {
-        let (events, _, resumes, _) = drive(
-            ResumeAnswer::AnnounceInsteadThenDrop,
+            ResumeAnswer::AnnounceLate,
             Some("th_STALE_TARGET"),
             true,
-            Duration::from_secs(4),
+            Duration::from_secs(5),
         )
         .await;
         assert_eq!(
@@ -2578,13 +3213,16 @@ mod tests {
             Some("th_STALE_TARGET"),
             "the hint addresses the first attach: {resumes:?}"
         );
-        // **The redirect is proven by the NEXT connection's target**, not merely by
-        // the attaching stopping. Act one drops after announcing, so act two attaches
-        // again — and it must address the announced thread, never the stale hint.
+        // **Not discharged.** A discharge would leave exactly one resume for ever. The
+        // attach instead times out, the connection ends, and the link asks again.
         assert!(
             resumes.len() >= 2,
-            "the reconnect must attach again so the redirected target is observable: \
-             {resumes:?}"
+            "an announcement must not settle an outstanding attach — the link has to \
+             keep asking, because only an accepted answer subscribes it: {resumes:?}"
+        );
+        assert!(
+            connections >= 2,
+            "the unanswered attach must time the connection out: {connections}"
         );
         for resume in &resumes[1..] {
             assert_eq!(
@@ -2594,14 +3232,8 @@ mod tests {
                  never the stale one it replaced: {resume}"
             );
         }
-        assert!(!events.is_empty());
-        for event in &events {
-            let id = event.source_event_id.clone().unwrap_or_default();
-            assert!(
-                id.starts_with(LIFECYCLE_THREAD) && !id.starts_with("th_STALE"),
-                "facts land under the ANNOUNCED thread, never the stale target: {id}"
-            );
-        }
+        // The announcement itself is still a fact, and still exactly one.
+        assert_only_the_announcement_recorded(&events);
     }
 
     /// **P4: `method` must be a STRING.**
@@ -2641,7 +3273,9 @@ mod tests {
     /// Before the `initialize` answer the leg sends an unmatched method-less
     /// response and a `"method": null` frame, both naming a thread this session
     /// never announces. The handshake must complete, the link must bind to the REAL
-    /// thread, and nothing may be recorded under the noise thread.
+    /// thread, and nothing may be recorded under the noise thread. The link is not
+    /// subscribed here (its resume answers not-ready), so the announcement is the whole
+    /// of what it legitimately records.
     ///
     /// **Stated honestly: this pins the outcome, not the routing.** Both frames are
     /// discarded either way today — `bind_if_unbound` requires a *string* method
@@ -2674,10 +3308,10 @@ mod tests {
                  {NOISE_THREAD} would mean a non-notification was normalized: {id}"
             );
         }
-        assert_capture_recorded_once(&events);
+        assert_only_the_announcement_recorded(&events);
     }
 
-    /// This link says only the three things it claims to.    /// This link says only the three things it claims to. Not a check of the
+    /// This link says only the three things it claims to. Not a check of the
     /// broker's allowlist — `codex-broker` owns and tests that table — but of this
     /// module's own contract, so a stray request added here has to be added to the
     /// module doc too.
@@ -2694,6 +3328,425 @@ mod tests {
                  initialized and thread/resume"
             );
         }
+    }
+
+    // ------------------------------------------- the attach, and what it recovers
+
+    /// The five facts of the capture, whatever route each of them took.
+    fn fact_keys(events: &[protocol::event::Event]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| e.source_event_id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// **A populated answer is ACCEPTED, and what it describes is recovered — from the
+    /// answer and from nothing else.**
+    ///
+    /// The leg answers the attach with the real captured shape and then says nothing at
+    /// all: no `thread/started`, no replay. So every fact in the store arrived by being
+    /// read out of the resume answer, which is the whole capability this chunk adds.
+    /// The link was never announced a thread, so before the answer it was unbound and
+    /// dropped the named frames it was sent — which is what makes the recovery, rather
+    /// than the observation, the thing under test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_populated_answer_is_accepted_and_its_facts_are_recovered() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::PopulatedNoReplay,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(3),
+        )
+        .await;
+        // **ONE connection and ONE resume.** A refusal ends the connection, so a link
+        // that had not accepted this answer would be several connections deep by now
+        // and would have asked again on each. This is the discriminator the live gate
+        // uses too, and it is the difference between attaching and looping.
+        assert_eq!(
+            connections, 1,
+            "an accepted answer ATTACHES: the connection is kept and never reconnects. \
+             More than one connection means the answer was refused: {connections}"
+        );
+        assert_eq!(
+            resumes.len(),
+            1,
+            "and nothing is re-asked once attached: {resumes:?}"
+        );
+
+        // What the answer described, and only that. The capture's `usage` fact is
+        // deliberately absent: the token totals it is built from arrive as
+        // notifications, this link was unbound when they went past, and the answer does
+        // not carry them. Recovering a usage total nobody observed would be inventing
+        // one — the recovery is honest about its own edges.
+        let mut keys = fact_keys(&events);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                format!("{LIFECYCLE_THREAD}:item:01a0127a-dbdd-7d11-b925-5bb0c2dac319"),
+                format!(
+                    "{LIFECYCLE_THREAD}:item:msg_0903e096e1c759f8016a83b4f7c4a481918c11f878e92d0c37"
+                ),
+                format!("{LIFECYCLE_THREAD}:thread_started"),
+                format!("{LIFECYCLE_THREAD}:turn:01a0127a-d9cd-7461-84d7-6eea6d0b98a5"),
+            ],
+            "the recovered facts are the session's identity, both items' terminals and \
+             the turn's — keyed exactly as the live path keys them, which is what makes \
+             them dedup rather than double: {events:?}"
+        );
+        // And they carry the content, not just the keys: a recovery that landed empty
+        // rows would satisfy the keys above perfectly.
+        let agent = events
+            .iter()
+            .find(|e| e.kind == protocol::event::EventKind::AgentMessage)
+            .expect("the agent's reply is recovered");
+        assert_eq!(agent.payload["text"], "pong");
+        assert_eq!(
+            agent.turn_id.as_deref(),
+            Some("01a0127a-d9cd-7461-84d7-6eea6d0b98a5"),
+            "a recovered item is attributed to its turn"
+        );
+        let turn = events
+            .iter()
+            .find(|e| e.kind == protocol::event::EventKind::TurnComplete)
+            .expect("the turn terminal is recovered");
+        assert_eq!(turn.payload["status"], "completed");
+    }
+
+    /// **The same turn, described by the answer AND replayed as frames, is ONE set of
+    /// facts — and the frames that arrive while the seed is still being written are
+    /// admitted, not dropped.**
+    ///
+    /// Two claims, and the second is the subscription-timing one. The leg sends the
+    /// answer and then, immediately, the turn's real frames — which is the wire's own
+    /// ordering (A1: replay follows the response, with no end marker). Those bytes are
+    /// in flight while the link is writing its seed, so if the admit filter only opened
+    /// *after* the writes finished, a named frame could be read against an unbound
+    /// visit and dropped. The **usage** fact is what makes that visible: it exists only
+    /// on the notification route — a recovered turn deliberately contributes none, since
+    /// a held total is a mid-turn snapshot under a first-wins key — so its presence says
+    /// the post-answer frames were really admitted, and its absence would say they were
+    /// silently discarded.
+    ///
+    /// The dedup claim is a claim at all only because the scripted answer is built from
+    /// the capture itself: the answer's turn id and item ids are the capture's own, so
+    /// the two routes mint the same keys and the store has to collapse them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn facts_from_the_answer_and_facts_from_the_frames_dedup_to_one() {
+        let (events, _, resumes, _) = drive(
+            ResumeAnswer::Populated,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(3),
+        )
+        .await;
+        // **An answer that owed nothing asks nothing more.** This turn was already
+        // finished when the answer described it, so its items came back under their real
+        // ids and there is no debt to settle — the follow-up attach must stay silent.
+        // Firing on every terminal instead of only on the turns an attach joined
+        // mid-flight would mean a resume per turn, for ever, on any busy session.
+        assert_eq!(
+            resumes.len(),
+            1,
+            "a completed turn leaves nothing for a follow-up to recover, so the link \
+             must not ask again: {resumes:?}"
+        );
+        assert_capture_recorded_once(&events);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == protocol::event::EventKind::Usage),
+            "the usage fact can only come from the frames the leg sent AFTER the \
+             answer, so its absence means either the attach never subscribed this \
+             connection or the admit filter was still closed while the seed was being \
+             written — and a frame read against an unbound visit is dropped, not \
+             queued: {events:?}"
+        );
+    }
+
+    /// **A running turn contributes no item fact, and the attach still happens.**
+    ///
+    /// The answer reports its turn `inProgress`, which is measured to mean its item ids
+    /// are placeholders — `item-1`, `item-2` — while the real ids are the ones on the
+    /// wire. The link must attach on it and record **nothing** keyed to a placeholder:
+    /// those keys are fabrications, and two running turns would collide on them.
+    ///
+    /// The replay that follows carries the same turn's REAL frames, so the facts that
+    /// do land are the observed ones — which is exactly the point. A build that seeded
+    /// the placeholders would show `…:item:item-1` beside them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_running_turns_placeholder_item_ids_are_never_recorded() {
+        let (events, connections, _, _) = drive(
+            ResumeAnswer::PopulatedInProgress,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert_eq!(
+            connections, 1,
+            "an in-progress turn is a shape this build reads, so the answer attaches"
+        );
+        for key in fact_keys(&events) {
+            assert!(
+                !key.contains(":item:item-"),
+                "a PLACEHOLDER item id reached the store as {key}. A running turn's \
+                 item ids are measured not to be the real ones, so a fact keyed to one \
+                 is invented — and every running turn's first item would alias onto it"
+            );
+        }
+        // The turn is still running, so its terminal is not described either.
+        assert!(
+            !fact_keys(&events)
+                .iter()
+                .any(|k| k.starts_with(&format!("{LIFECYCLE_THREAD}:turn:"))
+                    && events
+                        .iter()
+                        .any(|e| e.source_event_id.as_deref() == Some(k)
+                            && e.kind == protocol::event::EventKind::TurnComplete
+                            && e.payload["status"] == "inProgress")),
+            "a running turn must never be recorded as a turn terminal: {events:?}"
+        );
+        // And the attach really did subscribe: the replayed frames landed.
+        assert!(
+            !events.is_empty(),
+            "the attach must subscribe, so the replay that follows is observed"
+        );
+    }
+
+    /// **A mid-turn attach FINISHES ITSELF once the turn terminalizes.**
+    ///
+    /// This is the hole the follow-up attach closes, and it is worth stating precisely
+    /// because it is invisible from any single frame. A link that attaches while a turn
+    /// is running is told that turn is `inProgress` — whose item ids are measured
+    /// placeholders — so it recovers none of that turn's items. The ones that had
+    /// already finished are then unreachable from **both** directions: no live frame
+    /// will carry them, because they completed before the subscription existed, and no
+    /// answer will name them, because a running turn does not report real ids. Without a
+    /// follow-up the link sits `Attached` and perfectly quiescent with that gap
+    /// permanent — nothing in the machine ever asks again.
+    ///
+    /// The leg stages exactly that: the answer reports the turn running, and the replay
+    /// that follows carries only the turn's tail, the userMessage having "already
+    /// happened". When the turn terminalizes the link must ask **once** more, and the
+    /// answer — now describing a finished turn with real ids — must complete the
+    /// timeline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mid_turn_attach_finishes_itself_when_the_turn_terminalizes() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::MidTurnThenCompleted,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(4),
+        )
+        .await;
+        assert_eq!(
+            connections, 1,
+            "the follow-up rides the SAME connection: the link is attached and \
+             subscribed, and re-handshaking would throw that away"
+        );
+        assert_eq!(
+            resumes.len(),
+            2,
+            "exactly ONE follow-up — the debt is settled, not chased. A third resume \
+             would mean the link re-asks on every terminal it sees, which on a busy \
+             session is a request per turn for ever: {resumes:?}"
+        );
+        // The whole turn, one copy of each fact — including the userMessage, which the
+        // live replay withheld and which only the follow-up's answer could name.
+        assert_capture_recorded_once(&events);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == protocol::event::EventKind::UserMessage),
+            "the item that finished before this link subscribed is exactly what the \
+             follow-up exists to recover; without it the attach left a permanent gap: \
+             {events:?}"
+        );
+    }
+
+    /// **A second debt falling due while the first follow-up is in flight is not lost.**
+    ///
+    /// This is the failure a single `follow_up_due` flag made unrepresentable-looking and
+    /// was not. The loop read-and-cleared that flag *before* checking whether a request
+    /// could actually be issued, and `note_terminal` had already marked the turn
+    /// followed-up — so a terminal arriving while an earlier follow-up was outstanding
+    /// consumed the flag against a state that could not act on it, and nothing ever
+    /// re-armed it. The turn's items were then unreachable for ever, exactly as if no
+    /// follow-up existed at all.
+    ///
+    /// The leg stages the collision precisely: two turns seeded running; A finishes, so a
+    /// follow-up goes out; B's terminal is delivered while that request is still
+    /// unanswered; and the answer to it still reports B running, so **only a third
+    /// resume** can name B's items. If B's debt survived, it fires once the connection is
+    /// attached again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_debt_falling_due_mid_follow_up_still_gets_paid() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::TwoMidTurnDebts,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            connections, 1,
+            "every follow-up rides the connection the link already has"
+        );
+        assert_eq!(
+            resumes.len(),
+            3,
+            "three asks: the attach, the follow-up for the turn that finished first, and \
+             the follow-up for the one that finished while that request was in flight. \
+             TWO means the second debt was noticed at a moment nothing could act on it \
+             and then dropped — the items of that turn are unreachable from the live wire \
+             (they completed before this link subscribed) and from every future answer \
+             (the turn is marked followed-up), so they are gone for good: {resumes:?}"
+        );
+        let items: Vec<String> = events.iter().filter_map(|e| e.item_id.clone()).collect();
+        assert!(
+            items.iter().any(|id| id == TURN_B_USER),
+            "the second turn's items were never recovered: {items:?}"
+        );
+        assert!(
+            items.iter().any(|id| id == TURN_B_AGENT),
+            "the second turn's reply was never recovered: {items:?}"
+        );
+        // And no placeholder ever reached a fact along the way.
+        for key in fact_keys(&events) {
+            assert!(
+                !key.contains(":item:item-"),
+                "a placeholder id was recorded: {key}"
+            );
+        }
+        // **Bounded against a REPLAYED terminal, which is the shape that broke it.**
+        //
+        // After the third answer the leg sends B's terminal again — the wire replays
+        // after a resume, so this is not contrived. It must buy nothing. It used to: the
+        // debt lived in three sets kept disjoint by hand, and the answer still in flight
+        // during B's first terminal put B back into `awaiting` while the launch moved it
+        // from `owed` to `settled`, leaving it in two states at once. The replayed
+        // terminal then found it awaiting and asked a fourth time. One map, one state per
+        // turn, and the overlap is not expressible.
+        assert_eq!(
+            resumes.len(),
+            3,
+            "a replayed terminal for a turn whose follow-up has already been launched \
+             bought another ask. Each turn gets ONE, however many times its terminal \
+             comes round: {resumes:?}"
+        );
+    }
+
+    /// **A stale resume answer loses to the announcement, even when it succeeds.**
+    ///
+    /// The link attaches to a registration hint. Before that request is answered the
+    /// wire announces the real thread — so the outstanding resume is now asking about a
+    /// thread this session is not. The leg then answers it, and answers it *well*: a
+    /// perfectly valid populated result, about the stale thread.
+    ///
+    /// Nothing about that answer may be acted on. Accepting it would bind the visit to
+    /// the stale thread and seed its turns under this session's uid — every fact
+    /// afterwards filed under a thread the wire has already corrected, and no later
+    /// frame could undo it because the binding would then be doing the filtering.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_superseded_resume_answer_cannot_bind_or_seed() {
+        let (events, _, resumes, _) = drive(
+            ResumeAnswer::AnnounceThenAnswerStale,
+            Some("th_STALE_TARGET"),
+            true,
+            Duration::from_secs(4),
+        )
+        .await;
+        assert_eq!(
+            resumes[0]["params"]["threadId"].as_str(),
+            Some("th_STALE_TARGET"),
+            "the hint addresses the first attach: {resumes:?}"
+        );
+        assert!(
+            resumes.len() >= 2,
+            "the superseded answer settles nothing, so the link must ask again — under \
+             the announced thread: {resumes:?}"
+        );
+        for resume in &resumes[1..] {
+            assert_eq!(
+                resume["params"]["threadId"].as_str(),
+                Some(LIFECYCLE_THREAD),
+                "every attach after the announcement targets the ANNOUNCED thread: \
+                 {resume}"
+            );
+        }
+        // Nothing the stale answer described may exist, and the link may not have bound
+        // to the thread it was about.
+        for event in &events {
+            let key = event.source_event_id.clone().unwrap_or_default();
+            assert!(
+                key.starts_with(LIFECYCLE_THREAD),
+                "a fact was filed under the STALE thread: the superseded answer was \
+                 read and acted on, so this session's timeline now belongs to a thread \
+                 the wire had already corrected: {key}"
+            );
+        }
+        assert_only_the_announcement_recorded(&events);
+    }
+
+    /// **A failed insert FAILS the attach — it does not attach anyway.**
+    ///
+    /// The lever is a session key with an empty uid, which `store::append_in_tx`
+    /// refuses outright ("refusing to append an event with no session_uid"). It stands
+    /// in for any storage failure, and it is the one this suite can produce
+    /// deterministically **through the real `Daemon::ingest` path** rather than by
+    /// mocking it.
+    ///
+    /// What must follow is that the link keeps reconnecting — and, crucially, that it
+    /// does so **without** a STOP-AND-AMEND report. That is the whole discriminator: a
+    /// refused answer and a failed attach both look like a reconnect loop from the
+    /// outside, and only the absence of the report says the answer was understood and
+    /// the *write* was what failed. Attaching regardless would leave the link
+    /// subscribed with its state rebuilt around facts that were never written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ingest_failure_fails_the_attach_rather_than_attaching_anyway() {
+        // Its own thread, because `log::capture` is process-global and every other
+        // test in this suite is logging into it at the same time. Selecting this
+        // link's lines by a thread id nothing else uses is what makes the assertion
+        // about THIS link rather than about whatever else was running.
+        const UNWRITABLE_THREAD: &str = "th_INGEST_FAILS_TO_WRITE";
+        let leg = ScriptedLeg::start(ResumeAnswer::PopulatedNoReplay, false);
+        // A key whose uid no append can accept.
+        let session = SessionKey::new("", "cc-1");
+        let (daemon, _db) = linked_daemon(&SessionKey::new(protocol::uid::new().unwrap(), "cc-1"));
+        crate::log::capture::install();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session,
+            ControlLink {
+                socket: leg.path.clone(),
+                generation: 1,
+                thread_id: Some(UNWRITABLE_THREAD.to_string()),
+            },
+        ));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let connections = leg.connections.load(std::sync::atomic::Ordering::SeqCst);
+        let resumes = leg.requests("thread/resume").len();
+        task.abort();
+        let _ = task.await;
+        let captured = crate::log::capture::drain();
+        crate::log::capture::uninstall();
+
+        assert!(
+            connections >= 2 && resumes >= 2,
+            "an attach whose facts could not be written must FAIL, which ends the \
+             connection and re-attaches on the next one: {connections} connection(s), \
+             {resumes} resume(s)"
+        );
+        assert!(
+            !captured
+                .iter()
+                .any(|line| line.contains("STOP-AND-AMEND") && line.contains(UNWRITABLE_THREAD)),
+            "the answer was readable — it was the WRITE that failed — so the refusal \
+             report must not fire. Reporting one here would send an operator looking \
+             for a wire change when the fault is storage:\n{}",
+            captured.join("\n")
+        );
     }
 
     #[test]
