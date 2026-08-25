@@ -10,6 +10,11 @@ mod apns;
 mod apns_sender;
 mod catalog;
 mod codex_adapter;
+mod codex_link;
+/// The gated live gate for the control link — a real codex, a real coordinator, a
+/// real broker. Test-only, and never built into the daemon.
+#[cfg(test)]
+mod codex_link_live;
 mod db;
 #[cfg(test)]
 mod fixture_replay;

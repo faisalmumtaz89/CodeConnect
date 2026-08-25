@@ -358,16 +358,107 @@ struct LiveSandbox {
     run_dir: PathBuf,
 }
 
+/// Create `path` as a private (0700) directory that must not already exist.
+///
+/// `create_dir_all` succeeds on a directory somebody else made, at whatever mode
+/// they chose — which is exactly the wrong behaviour for a directory this harness
+/// is about to put credentials in. `DirBuilder::create` with `mode(0700)` is
+/// atomic-or-fail: the same idiom as `ShortTmpDir` in `live_codex_host.rs`.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// Assert a path is a directory this account owns, readable by nobody else.
+fn assert_private_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
+    assert!(meta.is_dir(), "{} is not a directory", path.display());
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(
+        mode,
+        0o700,
+        "{} is mode {mode:o}; a directory holding credentials must be 0700",
+        path.display()
+    );
+}
+
 impl LiveSandbox {
     fn new(tag: &str) -> LiveSandbox {
-        // Keep the private tmux socket under a short /tmp path: it is a unix
-        // socket too, and the macOS temp dir is long enough to matter.
+        // **A unique, unguessable, atomically created private base.** The old
+        // `/tmp/ccli.<pid>.<tag>.<seq>` was fully predictable from a running
+        // process's pid, and `create_dir_all` would have happily adopted a
+        // directory planted there in advance — under which the credential written
+        // below could be read. Nanos plus the sequence make the name unguessable;
+        // `create_private_dir` refuses to adopt anything that already exists.
         let seq = SANDBOX_SEQ.fetch_add(1, Ordering::SeqCst);
-        let base = PathBuf::from(format!("/tmp/ccli.{}.{tag}.{seq}", std::process::id()));
+        let mut base = PathBuf::new();
+        for attempt in 0..16 {
+            let candidate = PathBuf::from(format!(
+                "/tmp/ccli.{}.{tag}.{seq}.{:x}",
+                std::process::id(),
+                nanos()
+            ));
+            match create_private_dir(&candidate) {
+                Ok(()) => {
+                    base = candidate;
+                    break;
+                }
+                Err(e) if attempt == 15 => {
+                    panic!("could not create a private sandbox dir: {e}")
+                }
+                Err(_) => continue,
+            }
+        }
         let home = base.join("home");
         let codex_home = base.join("codexhome");
-        std::fs::create_dir_all(&home).expect("mk CODECONNECT_HOME");
-        std::fs::create_dir_all(&codex_home).expect("mk CODEX_HOME");
+        create_private_dir(&home).expect("mk CODECONNECT_HOME");
+        create_private_dir(&codex_home).expect("mk CODEX_HOME");
+        assert_private_dir(&base);
+        assert_private_dir(&codex_home);
+
+        // **The operator's credentials, written into the sandbox's own CODEX_HOME.**
+        //
+        // Nothing here runs a turn. This is what gets the TUI past its **sign-in
+        // screen**, and without it these gates prove far less than they read:
+        // measured on an empty `CODEX_HOME`, a real `codex --remote` completes its
+        // handshake, issues two bootstrap reads, and then parks on
+        //
+        //   Sign in with ChatGPT to use Codex as part of your paid plan
+        //
+        // for ever. `Tui: forward` is satisfied by that, and so was this file's
+        // CRUX assertion — against a client that never asks for a thread. Seeded so
+        // the TUI reaches `thread/start`, which is what
+        // `assert_session_survives_the_thread_start` is there to watch.
+        //
+        // **Read-then-write, never `fs::copy`.** `copy` follows a symlink at the
+        // destination and inherits the source's mode; this reads the bytes and
+        // creates the destination with `create_new` at 0600, so it cannot be made
+        // to write through a planted link and cannot land world-readable. The file
+        // goes with the sandbox on `Drop`, which the test asserts.
+        let real_auth =
+            PathBuf::from(std::env::var("HOME").expect("HOME")).join(".codex/auth.json");
+        let credential = std::fs::read(&real_auth).unwrap_or_else(|e| {
+            panic!(
+                "CC_CODEX_LIVE=1 but {} could not be read ({e}). Without it the TUI \
+                 sits on its sign-in screen and never starts a thread, and a live run \
+                 whose premise is unmet must FAIL rather than pass vacuously; run \
+                 `codex login` first.",
+                real_auth.display()
+            )
+        });
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(codex_home.join("auth.json"))
+                .expect("create the sandbox credential");
+            f.write_all(&credential).expect("write the credential");
+        }
+
         // A ULID-shaped uid, unique per run.
         // Exactly 26 Crockford Base32 symbols — a WELL-FORMED ULID.
         //
@@ -436,7 +527,23 @@ impl LiveSandbox {
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
             // The host applies no policy default; the coordinator carries these
             // four dimensions verbatim into the pane command.
-            .args(["--approval-policy", "untrusted"])
+            //
+            // **`on-request`, because that is what the real TUI asserts.** A codex
+            // 0.147 `codex --remote` sends `approvalPolicy:"on-request"` on its
+            // `thread/start`, and the broker's fingerprint validator refuses any
+            // present ownership value that disagrees with the launch fingerprint.
+            // Launching with `untrusted` therefore produces
+            //
+            //   Tui: refuse->synthetic error (thread/start: fingerprint refused
+            //   (Conflict): params.approvalPolicy: "on-request" but fingerprint is
+            //   "untrusted")
+            //
+            // whereupon the TUI exits fatally and the session dies about two
+            // seconds in, having never created a thread. The broker is behaving
+            // exactly as designed; the fingerprint it was handed was the wrong one.
+            // `assert_session_survives_the_thread_start` below is what keeps this
+            // value honest — see the note there on what a passing gate used to hide.
+            .args(["--approval-policy", "on-request"])
             .args(["--approvals-reviewer", "user"])
             .args(["--sandbox", "read-only"])
             .args(["--hooks-enabled", "true"])
@@ -498,6 +605,14 @@ impl LiveSandbox {
 
     fn tag(&self) -> &str {
         self.run_dir.to_str().expect("short /tmp path is utf-8")
+    }
+
+    /// The credential this sandbox wrote, and the base that holds it. Handed out so
+    /// a test can prove they are GONE after `Drop` — a sweep nobody checks is a
+    /// sweep that can silently stop happening, and this one is what keeps the
+    /// operator's token out of `/tmp`.
+    fn credential_paths(&self) -> (PathBuf, PathBuf) {
+        (self.base.clone(), self.codex_home.join("auth.json"))
     }
 }
 
@@ -700,6 +815,7 @@ fn a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane() {
          broker.log:\n{}",
         read_file(&broker_log)
     );
+    assert_session_survives_the_thread_start(&sb);
     println!("live session processes:");
     for (pid, cmd) in processes_referencing(&tag) {
         println!("  {pid} {cmd}");
@@ -843,9 +959,152 @@ fn a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane() {
     println!("PASS a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane");
 }
 
+/// The session is **still there** after the TUI has asked for its thread.
+///
+/// # What a passing gate used to hide
+///
+/// `Tui: forward` is the first thing a codex client does, and every assertion above
+/// it lands within a second or two of the pane coming up. `thread/start` comes
+/// later — and when the launch fingerprint disagrees with what the TUI asserts, the
+/// broker refuses it, the TUI exits fatally, and the pane, the tmux server and the
+/// run dir all go with it about two seconds in. Every assertion in this test would
+/// still have passed, because every one of them had already run. The gate was green
+/// against a session that no longer existed.
+///
+/// So this waits past that window and asks two questions the CRUX cannot:
+///
+///   1. **Is the session still alive?** A dead tmux session is the observable end
+///      state of a fatal TUI exit, whatever caused it.
+///   2. **Did the broker refuse a `thread/start`?** The cause, named. Asserted
+///      separately from (1) because a refusal that somehow did *not* kill the
+///      session is still a launch whose thread never existed — and because a bare
+///      "the session died" would send the next reader hunting.
+///
+/// # Why it waits for the decision rather than for a clock
+///
+/// `thread/start` is not the first thing the TUI sends — a bootstrap census of
+/// reads comes first, and how long that takes depends on the machine and on what
+/// else the suite is running. So this waits for the broker to **decide** the
+/// request, either way, and only then sleeps out the window in which a refusal
+/// takes the session down. Sleeping a fixed interval from the CRUX instead would
+/// be a guess about someone else's timing, and a green one would prove nothing.
+fn assert_session_survives_the_thread_start(sb: &LiveSandbox) {
+    /// How long the TUI may take to get around to asking for its thread.
+    const THREAD_START_BUDGET: Duration = Duration::from_secs(45);
+    /// How long after that request the session must still be standing. The failure
+    /// this guards against is measured at ~2 s from the refusal; holding a real
+    /// codex session open longer buys the suite no further evidence.
+    const VIABILITY_WAIT: Duration = Duration::from_secs(3);
+
+    let broker_log = || read_file(&sb.run_dir.join("broker.log"));
+    let decided = wait_until(THREAD_START_BUDGET, || {
+        let log = broker_log();
+        log.contains("Tui: forward (ownership request: fingerprint asserted)")
+            || log.contains("refuse->synthetic error (thread/start")
+    });
+    // Captured while the run dir still exists. A refused thread/start kills the
+    // TUI, the pane, the tmux server and the run dir together, so a log read
+    // *after* the wait below reports `<unreadable>` — the one moment the evidence
+    // matters is the one moment it is gone.
+    let at_decision = broker_log();
+    assert!(
+        decided,
+        "the TUI never asked for a thread within {THREAD_START_BUDGET:?}, so this gate \
+         cannot say whether the launch is viable. It parks like this when its \
+         CODEX_HOME has no credentials. broker.log:\n{at_decision}"
+    );
+    std::thread::sleep(VIABILITY_WAIT);
+
+    // The cause first: it is the sentence that explains the symptom after it.
+    assert!(
+        !at_decision.contains("refuse->synthetic error (thread/start"),
+        "the broker refused the TUI's thread/start, so this launch's fingerprint \
+         disagrees with what a real codex client asserts and no thread was ever \
+         created. broker.log at the refusal:\n{at_decision}"
+    );
+    assert!(
+        sb.has_session(),
+        "the session was gone {VIABILITY_WAIT:?} after the TUI attached — it did not \
+         survive its own thread/start. broker.log at the request:\n{at_decision}"
+    );
+    // The session lived, so the log is still readable and can be re-read — and it
+    // is re-checked for a refusal, not just for the positive signal. A refusal that
+    // lands DURING the survival window is exactly as fatal as one that lands before
+    // it, and `at_decision` is by definition blind to it.
+    let broker_log = broker_log();
+    assert!(
+        !broker_log.contains("refuse->synthetic error (thread/start"),
+        "the broker refused a thread/start during the survival window. \
+         broker.log:\n{broker_log}"
+    );
+    assert!(
+        broker_log.contains("Tui: forward (ownership request: fingerprint asserted)"),
+        "the TUI's thread/start must be FORWARDED, not merely un-refused: a launch \
+         whose ownership request never reached the app-server has no thread. \
+         broker.log:\n{broker_log}"
+    );
+    println!(
+        "VIABILITY PASS — thread/start forwarded and the session is still alive \
+         {VIABILITY_WAIT:?} after the TUI attached. broker.log:\n{broker_log}"
+    );
+}
+
 /// The teardown assertions both live gates share: the session is destroyed, the
 /// record's cleanup is durably `Complete`, no visible process references the run
 /// dir, and the directory is gone.
+/// **The sandbox's copy of the operator's credential is gone once it drops.**
+///
+/// `Drop` sweeping the base directory is what keeps a real ChatGPT token out of
+/// `/tmp` after a live run, and a sweep nobody checks is one that can silently stop
+/// happening — a `remove_dir_all` whose error is discarded looks identical to a
+/// successful one. So the paths are captured, the sandbox is dropped, and their
+/// absence is asserted. It is deliberately a test of the harness rather than of the
+/// product: the harness is what handles the credential.
+#[test]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+fn the_sandbox_credential_is_written_privately_and_removed_on_drop() {
+    use std::os::unix::fs::PermissionsExt;
+    if live_gate().is_none() {
+        return;
+    }
+    let (base, credential) = {
+        let sb = LiveSandbox::new("cred");
+        let paths = sb.credential_paths();
+        let (base, credential) = (&paths.0, &paths.1);
+        assert!(
+            credential.is_file(),
+            "the credential must have been written"
+        );
+        let mode = std::fs::metadata(credential)
+            .expect("stat the credential")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the sandbox credential is mode {mode:o}; it must be readable by this \
+             account alone"
+        );
+        assert_private_dir(base);
+        println!(
+            "credential written 0600 under a 0700 base: {}",
+            base.display()
+        );
+        paths.clone()
+    };
+    assert!(
+        !credential.exists(),
+        "the sandbox credential survived Drop: {}",
+        credential.display()
+    );
+    assert!(
+        !base.exists(),
+        "the sandbox base survived Drop: {}",
+        base.display()
+    );
+    println!("CREDENTIAL CLEANUP PASS — {} is gone", base.display());
+}
+
 fn assert_torn_down_clean(sb: &LiveSandbox, tag: &str) {
     let torn = wait_until(Duration::from_secs(45), || {
         !sb.has_session()

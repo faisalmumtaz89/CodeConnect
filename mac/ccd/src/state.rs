@@ -181,6 +181,18 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per session, held across a control link's whole
+    /// take → retire → spawn → install sequence.
+    ///
+    /// The same shape as [`Daemon::publish_gate`], for the same reason: a per-uid
+    /// `Arc<Mutex<()>>` in its own map, so the lock ordering stays one-way — gate,
+    /// then `inner`, never the reverse. It is what makes the sequence *one* step:
+    /// without it, "take" and "install" are two acquisitions of `inner` with a
+    /// spawn and a bounded join between them, and every interleaving of two
+    /// registrations for the same session has to be reasoned about separately.
+    /// With it there is one state (a link, or none) instead of a reservation
+    /// protocol, and no third claimant can arrive mid-retirement.
+    codex_link_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Held for the duration of a liveness sweep, so two never overlap.
     ///
     /// Taken with `try_lock`, which makes a slow sweep skip the next tick
@@ -400,6 +412,162 @@ struct Inner {
     /// spoofed by scrollback, and is exact — a card raised at generation N is
     /// answering a prompt that generation N+1 has already replaced.
     prompt_generation: HashMap<String, u64>,
+    /// Live Codex control links, keyed by `session_uid` — one connection per
+    /// registered Codex session (`crate::codex_link`). Empty on the Claude path,
+    /// which has no control link at all.
+    codex_links: HashMap<String, CodexLinkHandle>,
+    /// Links that were aborted but would not join inside their budget.
+    ///
+    /// **Not left in the slot.** A slot holding an aborted-but-unjoined handle is a
+    /// registration that looks served and is not: the new link was never installed,
+    /// so the session is accepted and unobserved, and nothing says so. The handle is
+    /// parked here instead — the slot is left honestly empty — and the next
+    /// transaction for that session joins it before doing anything else. Bounded: a
+    /// turn joins what is parked and re-parks only what still refuses to die.
+    parked_codex_links: HashMap<String, Vec<OwnedLink>>,
+}
+
+/// A running Codex control link, and the registration epoch that owns it.
+///
+/// The epoch is here for the same reason it is on [`SupervisorHandle`]: a supervisor
+/// that reconnects registers again under the same uid, and the losing connection's
+/// teardown can run afterwards. Acting blindly would tear down the link the *new*
+/// registration had just installed.
+struct CodexLinkHandle {
+    epoch: u64,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// How long a superseded control link may take to stop. Bounded: a task that will
+/// not die must not hold a registration open, and the link's own awaits are short.
+const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// A control-link task that is **out of the slot and owned by nobody else**.
+///
+/// Its `Drop` aborts the task. That matters because the transaction below is a
+/// future, and a future can be dropped at any await point — a supervisor connection
+/// going away mid-retirement, say. Without this, the handle would simply be dropped,
+/// which **detaches** the task: a link nothing holds, nothing can stop, and nothing
+/// will ever join.
+///
+/// # The rule
+///
+/// A raw `JoinHandle` never exists outside a guard except in the same statement that
+/// installs or parks it, and a guard is never held across an await: parked guards
+/// live in `Inner`, and the join happens **in place** against them
+/// ([`Daemon::join_parked_codex_links`]). So a cancelled transaction can never be
+/// the reason a task stops being tracked.
+///
+/// **Abort-not-detach is the floor; proven-join is the goal.** `Drop` cannot await,
+/// so the most it can do is request cancellation — which is why a guard is only
+/// dropped once [`OwnedLink::is_finished`] says the task is genuinely gone.
+struct OwnedLink(Option<tokio::task::JoinHandle<()>>);
+
+impl OwnedLink {
+    fn new(task: tokio::task::JoinHandle<()>) -> OwnedLink {
+        OwnedLink(Some(task))
+    }
+
+    /// Request cancellation without waiting.
+    fn abort(&self) {
+        if let Some(task) = self.0.as_ref() {
+            task.abort();
+        }
+    }
+
+    /// Has the task actually finished? The only proof of completion this type
+    /// accepts — an `abort()` that has returned proves nothing.
+    fn is_finished(&self) -> bool {
+        self.0.as_ref().is_none_or(|task| task.is_finished())
+    }
+}
+
+impl Drop for OwnedLink {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Inner {
+    /// Validate ownership, and **only then** build and install the link.
+    ///
+    /// The spawn happens inside this function, after the check, under the lock that
+    /// guards both maps — because a task that exists is a task that is *running*.
+    /// On a multithreaded runtime it can dial the broker leg and ingest before an
+    /// install a few lines later gets the chance to reject it, so "spawn, then
+    /// check, then hand the handle back" is not a rejection at all: the damage is
+    /// done in the window. `spawn` is therefore a closure this function may decline
+    /// to call.
+    ///
+    /// Returns the task to be cancelled and joined only when the install *itself*
+    /// races (a newer link already in the slot) — never as the ownership check.
+    fn spawn_codex_link_if_owner(
+        &mut self,
+        session_uid: &str,
+        epoch: u64,
+        spawn: impl FnOnce() -> tokio::task::JoinHandle<()>,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>, Option<u64>> {
+        let owner = self.supervisors.get(session_uid).map(|handle| handle.epoch);
+        if owner != Some(epoch) {
+            return Err(owner);
+        }
+        Ok(self.install_codex_link(session_uid, epoch, spawn()))
+    }
+
+    /// Put a link in the slot — **and this is the transaction's linearization
+    /// point.**
+    ///
+    /// Ownership is re-checked here, under the very lock that guards
+    /// `supervisors`, because the gated check earlier is a time-of-check the world
+    /// can move past: a second connection publishes its supervisor epoch without
+    /// taking the per-uid gate, so between that check and this one the session can
+    /// have changed hands. Checking again *here* makes the install itself the
+    /// moment ownership is decided, and the earlier check merely a cheap early-out.
+    ///
+    /// Returns the task back when this registration no longer owns the session, or
+    /// when a newer one already holds the slot. The caller must then cancel and
+    /// join it — never drop it.
+    fn install_codex_link(
+        &mut self,
+        session_uid: &str,
+        epoch: u64,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let owner = self.supervisors.get(session_uid).map(|handle| handle.epoch);
+        if owner != Some(epoch) {
+            return Some(task);
+        }
+        if self
+            .codex_links
+            .get(session_uid)
+            .is_some_and(|held| held.epoch > epoch)
+        {
+            return Some(task);
+        }
+        match self
+            .codex_links
+            .insert(session_uid.to_string(), CodexLinkHandle { epoch, task })
+        {
+            // Nothing should be here — the gate serializes this sequence and the
+            // take above emptied it — but if something is, it is handed back rather
+            // than dropped.
+            Some(displaced) => Some(displaced.task),
+            None => None,
+        }
+    }
+
+    /// Release the control link belonging to *this* registration, if it still holds
+    /// the slot. Same epoch test as the supervisor handle, for the same reason: a
+    /// stale connection's teardown must not stop the link a newer registration has
+    /// just installed.
+    fn release_codex_link(&mut self, session_uid: &str, epoch: u64) -> Option<CodexLinkHandle> {
+        match self.codex_links.get(session_uid) {
+            Some(held) if held.epoch == epoch => self.codex_links.remove(session_uid),
+            _ => None,
+        }
+    }
 }
 
 pub struct SupervisorHandle {
@@ -820,6 +988,7 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
+            codex_link_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
@@ -1094,7 +1263,84 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
-    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
+    /// The gate serializing one session's control-link lifecycle. Same eviction
+    /// rule as [`Daemon::publish_gate`]: an entry nobody holds is dropped, so this
+    /// map is bounded by live sessions rather than by every session ever seen.
+    async fn codex_link_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.codex_link_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// Move whatever link the slot holds into the park, **atomically**.
+    ///
+    /// One lock acquisition, so there is no instant in which the handle belongs to
+    /// neither. That is the point: parking is what records "this task's completion
+    /// is unproven", and a window between the two would be a window in which a
+    /// dropped transaction leaves nothing recorded at all.
+    async fn park_current_codex_link(&self, session_uid: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(handle) = inner.codex_links.remove(session_uid) {
+            inner
+                .parked_codex_links
+                .entry(session_uid.to_string())
+                .or_default()
+                .push(OwnedLink::new(handle.task));
+        }
+    }
+
+    /// Abort everything parked for this session and wait, bounded, for it to be
+    /// gone. **Returns whether the park is now empty.**
+    ///
+    /// # Why the handles never leave the map
+    ///
+    /// The obvious shape — take the list out, await each join, put the survivors
+    /// back — has a hole: a transaction dropped mid-await drops the handles it is
+    /// holding, so their tasks are aborted but their *unproven completion* is no
+    /// longer recorded anywhere. The next transaction then sees an empty park and
+    /// installs a second observer beside a task that may still be running.
+    ///
+    /// So nothing is ever removed except on proof. The handles stay owned by
+    /// `Inner` throughout; each turn aborts them and drops only those reporting
+    /// `is_finished`. A cancelled transaction changes nothing — the park is exactly
+    /// as it was, and the next turn tries again.
+    ///
+    /// A survivor is a task still running under this session's uid. Installing a
+    /// link beside it would put two observers on one timeline, so a uid with
+    /// anything parked gets no new link until this returns true.
+    async fn join_parked_codex_links(&self, session: &SessionKey) -> bool {
+        let deadline = std::time::Instant::now() + CODEX_LINK_STOP_BUDGET;
+        loop {
+            let remaining = {
+                let mut inner = self.inner.lock().await;
+                let Some(parked) = inner.parked_codex_links.get_mut(&session.uid) else {
+                    return true;
+                };
+                // Dropped ONLY on proof. A finished task's guard aborts a corpse,
+                // which is a no-op.
+                parked.retain(|link| !link.is_finished());
+                if parked.is_empty() {
+                    inner.parked_codex_links.remove(&session.uid);
+                    return true;
+                }
+                for link in parked.iter() {
+                    link.abort();
+                }
+                parked.len()
+            };
+            if std::time::Instant::now() >= deadline {
+                crate::log_warn!(
+                    "{remaining} codex link(s) for {} are still running after an abort; \
+                     no new link will be installed until they stop",
+                    session.name
+                );
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
     pub async fn ingest(&self, pending: PendingEvent) -> Result<Option<Event>> {
         let mut pending = pending;
         self.truncate_payload(&mut pending);
@@ -3196,7 +3442,7 @@ impl Daemon {
     /// socket is what tells us the supervisor went away, and unregistering by
     /// name would detach whichever run currently holds it.
     pub async fn register_supervisor(
-        &self,
+        self: &Arc<Self>,
         info: RegisterSession,
         tx: mpsc::Sender<DaemonFrame>,
         inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
@@ -3251,6 +3497,19 @@ impl Daemon {
                 info.session_id
             );
         }
+
+        // **The control-link fact, and the Codex mirror of the guard above.** A
+        // Codex registration must name the broker's ccd leg and the generation its
+        // frames are attributed to, or this daemon would install a session it can
+        // list but never observe — live in the fleet, silent in the log. Extracted
+        // before any write, so a registration that cannot be observed leaves no
+        // trace (`crate::codex_link::ControlLink::from_registration`).
+        //
+        // Unreachable while `supported_agents()` is `[Claude]`, which refuses every
+        // Codex registration above: this is the guard the ungate turns on, and it
+        // is proven directly against the frame rather than through a path the gate
+        // currently closes.
+        let control_link = crate::codex_link::ControlLink::from_registration(&info)?;
 
         // **Stale generation is rejected BEFORE any persistent mutation (D4).**
         // The upsert and the card relabel below are persistent writes, so the
@@ -3345,8 +3604,107 @@ impl Daemon {
             inner
                 .last_seen_ms
                 .insert(session.uid.clone(), protocol::time::now_unix_ms());
+            // The supervisor handle is published here; the control link is
+            // installed by the gated transaction below, which re-validates this
+            // very epoch under the lock before it builds anything. The two are
+            // deliberately NOT one step — the link's lifecycle needs awaits (a
+            // bounded join) that must not run under `inner`.
             epoch
         };
+
+        // **The control link's whole lifecycle, serialized per session.** Join any
+        // parked corpse, take the incumbent, retire it, spawn the replacement,
+        // install it — one transaction, under one gate, so no second registration
+        // for this session can interleave with any part of it. Held across awaits,
+        // and taken *before* `inner` on every path, which is the lock ordering the
+        // rest of this type already uses.
+        {
+            let gate = self.codex_link_gate(&session.uid).await;
+            let _transaction = gate.lock().await;
+            // The incumbent moves from the slot into the park in one lock
+            // acquisition, so its unproven completion is recorded before anything
+            // can be dropped. Everything parked — this one and any survivor from an
+            // earlier turn — is then retired together, in place.
+            self.park_current_codex_link(&session.uid).await;
+            let park_clear = self.join_parked_codex_links(&session).await;
+
+            // A cheap early-out only — the authoritative check is inside
+            // `install_codex_link`, under the lock that guards the map.
+            let owns = self
+                .inner
+                .lock()
+                .await
+                .supervisors
+                .get(&session.uid)
+                .is_some_and(|handle| handle.epoch == epoch);
+            if !park_clear {
+                crate::log_error!(
+                    "codex link for {} at epoch {epoch}: a previous link is still \
+                     running after an abort, so this registration has NO link \
+                     installed. The session is registered and unobserved until a \
+                     later transaction can join it.",
+                    session.name
+                );
+            } else if !owns {
+                crate::log_debug!(
+                    "not installing a codex link for {} at epoch {epoch}: a newer \
+                     registration owns the session",
+                    session.name
+                );
+            } else {
+                match control_link {
+                    // A Claude registration reclaims the slot and leaves it empty:
+                    // the same uid can change agent, and a link left running under
+                    // an epoch no later release can match would never be stopped.
+                    None => {}
+                    Some(link) => {
+                        // **Validated, then spawned, then installed — all under one
+                        // lock, with no await between them.** The spawn is a closure
+                        // this call may decline to run: a task that exists is a task
+                        // that is already running, and on a multithreaded runtime a
+                        // stale transaction's link would dial and ingest long before
+                        // a later rejection could matter.
+                        let mut inner = self.inner.lock().await;
+                        let outcome = inner.spawn_codex_link_if_owner(&session.uid, epoch, || {
+                            tokio::spawn(crate::codex_link::run(
+                                Arc::clone(self),
+                                session.clone(),
+                                link,
+                            ))
+                        });
+                        let orphan = match outcome {
+                            Err(owner) => {
+                                let now = owner
+                                    .map(|e| format!("now epoch {e}"))
+                                    .unwrap_or_else(|| "now unowned".to_string());
+                                crate::log_debug!(
+                                    "not installing a codex link for {} at epoch \
+                                     {epoch}: the session changed hands ({now}) while \
+                                     this transaction was retiring the previous one — \
+                                     nothing was spawned",
+                                    session.name
+                                );
+                                None
+                            }
+                            Ok(orphan) => orphan,
+                        };
+                        if let Some(orphan) = orphan {
+                            // Parked rather than retired in hand — for the same
+                            // reason everything else is: a handle held across an
+                            // await is a handle a cancelled transaction loses
+                            // without recording that its completion is unproven.
+                            inner
+                                .parked_codex_links
+                                .entry(session.uid.clone())
+                                .or_default()
+                                .push(OwnedLink::new(orphan));
+                            drop(inner);
+                            let _ = self.join_parked_codex_links(&session).await;
+                        }
+                    }
+                }
+            }
+        }
 
         // Re-attach after a daemon restart is a fact worth logging, not a
         // session boundary: the agent never stopped running.
@@ -3386,16 +3744,43 @@ impl Daemon {
     /// supervisor that had just replaced it, leaving a live session with no way
     /// to be typed into and a `detached` link that never recovers.
     pub async fn unregister_supervisor(&self, registration: &Registration) {
+        // The same gate the registration path holds, so a disconnect can never
+        // interleave with a re-registration's park → join → spawn → install.
+        let gate = self.codex_link_gate(&registration.session.uid).await;
+        let _sequence = gate.lock().await;
         let released = {
             let mut inner = self.inner.lock().await;
-            match inner.supervisors.get(&registration.session.uid) {
+            let released = match inner.supervisors.get(&registration.session.uid) {
                 Some(handle) if handle.epoch == registration.epoch => {
                     inner.supervisors.remove(&registration.session.uid);
                     true
                 }
                 _ => false,
+            };
+            // Moved into the park under the same lock that took it out of the
+            // slot, so no instant exists in which it belongs to neither.
+            if let Some(link) =
+                inner.release_codex_link(&registration.session.uid, registration.epoch)
+            {
+                inner
+                    .parked_codex_links
+                    .entry(registration.session.uid.clone())
+                    .or_default()
+                    .push(OwnedLink::new(link.task));
             }
+            released
         };
+        // Stopped and JOINED on the same bounded budget as a supersession. Sound to
+        // cancel because every fact the link produced was already durable when it
+        // produced it — a cancellation can cost a live subscriber the *push* of a
+        // final event, never the event itself. A link that will not stop goes back
+        // in the slot rather than being detached.
+        // Sound to cancel because every fact the link produced was already durable
+        // when it produced it — a cancellation can cost a live subscriber the *push*
+        // of a final event, never the event itself. Anything an earlier transaction
+        // parked is retried here too, so a corpse is not left waiting on a
+        // registration that may never come.
+        let _ = self.join_parked_codex_links(&registration.session).await;
         if !released {
             crate::log_debug!(
                 "ignoring a stale disconnect for {}: a newer supervisor holds it",
@@ -8092,6 +8477,549 @@ mod tests {
         assert!(
             daemon.store.get_session(uid).unwrap().is_none(),
             "an inconsistent Claude frame must leave no row"
+        );
+    }
+
+    /// **A Claude registration installs no control link, and a Codex one cannot
+    /// yet be reached to install one.**
+    ///
+    /// Both halves are asserted here because the second is the more surprising:
+    /// `supported_agents()` is `[Claude]`, so every Codex registration is refused
+    /// before the control-link guard is consulted, and the spawn below it is
+    /// unreachable by construction. That is the gate, not an omission — the guard
+    /// itself is proven directly against the frame in
+    /// `codex_link::tests::a_codex_registration_missing_the_fact_is_refused`, and
+    /// what this test pins is that nothing on the **Claude** path grew a link.
+    #[tokio::test]
+    async fn the_claude_path_installs_no_control_link_and_codex_never_gets_that_far() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(try_register(&daemon, claude, AgentKind::Claude, None, None)
+            .await
+            .is_ok());
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a Claude session has no control link to install"
+        );
+
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let refused = try_register(&daemon, codex, AgentKind::Codex, Some(1), None).await;
+        assert!(refused.is_err(), "Codex is not a supported agent yet");
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a refused registration must leave no link task behind"
+        );
+    }
+
+    /// **The control-link slot's epoch bookkeeping**, driven directly.
+    ///
+    /// Driven at [`Inner`] rather than through `register_supervisor`, because
+    /// `supported_agents()` is `[Claude]` and no Codex registration can reach the
+    /// install: the rules would otherwise ship with no coverage at all until the
+    /// ungate. The three that matter are the three that can lose a task or stop the
+    /// wrong one — a supersede, a stale release, and the agent-change case where
+    /// the incoming registration carries no link of its own.
+    /// **A control link is always installed or joined — never detached.**
+    ///
+    /// Driven through the **real** registration transaction: each `try_register` is
+    /// a full gate → join-parked → ownership-check → retire → install turn. The
+    /// spawn arm cannot be reached this way (`supported_agents()` is `[Claude]`, so
+    /// no registration carries a link), so the link is installed by hand at the
+    /// epoch the real registration published — and it is the real transaction that
+    /// then retires it.
+    ///
+    /// Dropping a `JoinHandle` detaches its task, and a detached link is one nothing
+    /// can ever stop, ingesting into a session under an epoch no later release can
+    /// match. Every path below ends in an install or a proven join.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_control_link_is_always_installed_or_joined_and_never_detached() {
+        use protocol::agent::AgentKind;
+        fn park() -> tokio::task::JoinHandle<()> {
+            tokio::spawn(std::future::pending())
+        }
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // A real registration owns the session; a link is installed at its epoch.
+        let first = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        let link = park();
+        let link_watch = link.abort_handle();
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(uid, first.epoch, link)
+            .is_none());
+
+        // **A real re-registration retires it.** This is the whole transaction: the
+        // gate, the parked join, the ownership check, and the retire — and the
+        // retire is a proven join, not a fire-and-forget abort.
+        let second = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        assert!(
+            link_watch.is_finished(),
+            "the real transaction must CANCEL AND JOIN the incumbent, not detach it"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "and a Claude registration leaves the slot empty"
+        );
+
+        // A link under the current owner installs; a stale disconnect must not take
+        // it, and the owning registration must.
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(uid, second.epoch, park())
+            .is_none());
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .release_codex_link(uid, first.epoch)
+                .is_none(),
+            "a stale disconnect must not release a newer registration's link"
+        );
+        let released = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, second.epoch)
+            .expect("the owning registration releases its own link");
+        {
+            let link = OwnedLink::new(released.task);
+            link.abort();
+            for _ in 0..200 {
+                if link.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(link.is_finished(), "the link must be proven finished");
+        }
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // And unregistering runs the teardown half of the same transaction.
+        daemon.unregister_supervisor(&second).await;
+        assert!(!daemon.inner.lock().await.supervisors.contains_key(uid));
+    }
+
+    /// **A dropped transaction aborts the link it was holding, never detaches it.**
+    ///
+    /// The transaction is a future, and a future can be dropped at any await point —
+    /// a supervisor connection going away mid-retirement, say. `OwnedLink`'s `Drop`
+    /// is what makes that safe: a handle merely dropped would detach its task, and a
+    /// detached link runs for ever with nothing able to reach it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_transaction_mid_retirement_aborts_the_link_it_held() {
+        // Started for real before it is abandoned: a task the runtime has never
+        // polled can report finished for the wrong reason, which would make this
+        // pass without proving anything.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await
+        });
+        started_rx.await.expect("the task must be running");
+        let watch = task.abort_handle();
+        drop(OwnedLink::new(task));
+        for _ in 0..200 {
+            if watch.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            watch.is_finished(),
+            "a guard dropped mid-transaction must ABORT its task, not detach it"
+        );
+    }
+
+    /// **A link that will not stop is parked, and the slot is left honestly empty.**
+    ///
+    /// Reinstalling an aborted-but-unjoined handle would leave the incoming
+    /// registration accepted and unobserved behind a slot that looks served. Parking
+    /// it says the truth instead — no link installed — and the next transaction
+    /// joins the corpse before doing anything else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_link_that_will_not_stop_is_parked_not_reinstalled() {
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let session = SessionKey::new(uid.to_string(), "cc-1".to_string());
+        let daemon = test_daemon();
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking
+        // one has no await point to be cancelled at. It must be RUNNING before the
+        // abort — tokio cancels a blocking task that has not started, and the handle
+        // would then resolve instantly, which is a cancellation working rather than
+        // the case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(CODEX_LINK_STOP_BUDGET + Duration::from_secs(1));
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        // Installed, then parked the way the transaction parks it: one lock, out of
+        // the slot and into the park, with no instant in which it belongs to neither.
+        daemon.inner.lock().await.codex_links.insert(
+            uid.to_string(),
+            CodexLinkHandle {
+                epoch: 1,
+                task: stubborn,
+            },
+        );
+        daemon.park_current_codex_link(uid).await;
+        assert!(
+            !daemon.join_parked_codex_links(&session).await,
+            "a blocking task cannot be cancelled within the budget, so the park must \
+             report UNCLEAR"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "the slot must be left EMPTY — a stale handle there would masquerade as \
+             a served registration"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[uid].len(),
+            1,
+            "and the corpse must be parked, not lost"
+        );
+
+        // The next transaction joins it — by then its blocking work has finished, so
+        // the join succeeds and the park empties.
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "a parked corpse must be joined on the next turn, and the park reported \
+             EMPTY — that report is what lets a registration install at all"
+        );
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .get(uid)
+            .is_none_or(Vec::is_empty));
+    }
+
+    /// **M7: ownership is re-checked where the map is locked, not only where the
+    /// gate was taken.**
+    ///
+    /// The gated check is a time-of-check the world can move past: a second
+    /// connection publishes its supervisor epoch **without** taking the per-uid
+    /// gate, so between an older transaction's check and its install the session
+    /// can change hands. `install_codex_link` therefore re-reads `supervisors`
+    /// under the very lock that guards the link map, and that install is the
+    /// moment ownership is decided.
+    ///
+    /// Driven against the real maps, and shaped so it can only pass for the right
+    /// reason: the SLOT is left empty throughout, so a slot-only check — or no
+    /// check — would install happily. Only a check against `supervisors` refuses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_is_refused_when_the_session_changed_hands_mid_transaction() {
+        use protocol::agent::AgentKind;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // One registration owns the session; note the epoch it published.
+        let owner = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a Claude registration is accepted");
+        let current = owner.epoch;
+
+        // The slot is EMPTY — so nothing about the link map can refuse this install.
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // An older transaction (its gated ownership check long since passed) tries
+        // to install. The session has moved on, and the install must say so.
+        let stale = tokio::spawn(std::future::pending::<()>());
+        let watch = stale.abort_handle();
+        let handed_back = daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(uid, current - 1, stale)
+            .expect(
+                "an install by a registration that no longer owns the session must be \
+                 REFUSED — the empty slot cannot be what refuses it, so only the \
+                 supervisor check can",
+            );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "and nothing may be left in the slot"
+        );
+        // The handed-back task is the caller's to stop, never to drop.
+        let handed_back = OwnedLink::new(handed_back);
+        handed_back.abort();
+        for _ in 0..200 {
+            if handed_back.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(watch.is_finished());
+
+        // The CURRENT owner installs fine, which is what stops this test from
+        // passing because installs simply never work.
+        let live = tokio::spawn(std::future::pending::<()>());
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(uid, current, live)
+            .is_none());
+        assert_eq!(daemon.inner.lock().await.codex_links[uid].epoch, current);
+        let installed = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, current)
+            .expect("installed");
+        {
+            let link = OwnedLink::new(installed.task);
+            link.abort();
+            for _ in 0..200 {
+                if link.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(link.is_finished(), "the link must be proven finished");
+        }
+    }
+
+    /// **P1: a stale transaction never SPAWNS.**
+    ///
+    /// The distinction the earlier shape missed: rejecting an install is not the
+    /// same as not building the thing. A task that exists is already running, so on
+    /// a multithreaded runtime a stale transaction's link can dial the broker leg
+    /// and ingest before any later rejection matters — the damage is done inside the
+    /// window, and handing the handle back afterwards cannot undo it.
+    ///
+    /// So the factory is asserted **never called**. A `pending()` task could not
+    /// show this (nothing observable happens either way); this one records the fact
+    /// that it was built at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_transaction_never_spawns_its_link() {
+        use protocol::agent::AgentKind;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+        let owner = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        let current = owner.epoch;
+
+        // The slot is EMPTY, so nothing about the link map can be what refuses this.
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        let built = Arc::new(AtomicBool::new(false));
+        let refused = {
+            let built = Arc::clone(&built);
+            daemon
+                .inner
+                .lock()
+                .await
+                .spawn_codex_link_if_owner(uid, current - 1, move || {
+                    built.store(true, Ordering::SeqCst);
+                    tokio::spawn(std::future::pending())
+                })
+        };
+        assert!(
+            refused.is_err(),
+            "a registration that no longer owns the session must be refused"
+        );
+        assert!(
+            !built.load(Ordering::SeqCst),
+            "and it must be refused BEFORE the link is built — a spawned task is a \
+             running task, and no later rejection can un-dial the socket it opened"
+        );
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // The current owner does build and install, so this cannot pass by never
+        // spawning anything at all.
+        let built_now = Arc::new(AtomicBool::new(false));
+        let orphan = {
+            let built_now = Arc::clone(&built_now);
+            daemon
+                .inner
+                .lock()
+                .await
+                .spawn_codex_link_if_owner(uid, current, move || {
+                    built_now.store(true, Ordering::SeqCst);
+                    tokio::spawn(std::future::pending())
+                })
+                .expect("the owner may install")
+        };
+        assert!(orphan.is_none(), "and the install is accepted");
+        assert!(built_now.load(Ordering::SeqCst));
+        let installed = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, current)
+            .expect("installed");
+        let link = OwnedLink::new(installed.task);
+        link.abort();
+        for _ in 0..200 {
+            if link.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(link.is_finished());
+    }
+
+    /// **P2: a uid with a survivor gets no new link.**
+    ///
+    /// `join_parked_codex_links` reporting the park EMPTY is the precondition for
+    /// installing at all. A survivor is a task still running under this session, and
+    /// a link installed beside it would put two observers on one timeline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_with_a_surviving_parked_link_reports_the_park_unclear() {
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let session = SessionKey::new(uid.to_string(), "cc-1".to_string());
+        let daemon = test_daemon();
+
+        // A task that cannot be cancelled inside the budget, running for real.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(CODEX_LINK_STOP_BUDGET * 2 + Duration::from_secs(1));
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("running before it is aborted");
+        daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .entry(uid.to_string())
+            .or_default()
+            .push(OwnedLink::new(stubborn));
+
+        assert!(
+            !daemon.join_parked_codex_links(&session).await,
+            "a survivor must report the park UNCLEAR, which is what withholds a new \
+             link from this session"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[uid].len(),
+            1,
+            "and the survivor must remain parked in place, still guarded, for the next turn"
+        );
+    }
+
+    /// **The real registration transaction**, driven through `register_supervisor`
+    /// and `unregister_supervisor` rather than around them.
+    ///
+    /// Claude is the only agent this daemon hosts, so the spawn arm is unreachable —
+    /// but every other part of the transaction runs on this path: the gate is taken,
+    /// ownership is re-validated against the freshly published supervisor epoch,
+    /// parked corpses are joined, and the slot is reclaimed. What it pins is that a
+    /// registration leaves **no** link behind on the Claude path, and that a corpse
+    /// parked by an earlier turn is collected by the next real transaction rather
+    /// than waiting for one that never comes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_real_registration_transaction_runs_the_link_lifecycle() {
+        use protocol::agent::AgentKind;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // Park a corpse the way a timed-out retirement would, then register for
+        // real: the transaction must collect it.
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let watch = idle.abort_handle();
+        daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .entry(uid.to_string())
+            .or_default()
+            .push(OwnedLink::new(idle));
+        assert_eq!(daemon.inner.lock().await.parked_codex_links[uid].len(), 1);
+
+        let first = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a Claude registration is accepted");
+        assert!(
+            watch.is_finished(),
+            "the real transaction must join what an earlier turn parked"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .parked_codex_links
+                .get(uid)
+                .is_none_or(Vec::is_empty),
+            "and empty the park"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a Claude registration installs no link"
+        );
+
+        // A re-registration bumps the epoch and runs the whole transaction again.
+        let second = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a re-registration is accepted");
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // And the stale connection's teardown, arriving late, must not disturb the
+        // newer registration.
+        daemon.unregister_supervisor(&first).await;
+        assert!(
+            daemon.inner.lock().await.supervisors.contains_key(uid),
+            "a stale disconnect must not detach the newer registration"
+        );
+        daemon.unregister_supervisor(&second).await;
+        assert!(!daemon.inner.lock().await.supervisors.contains_key(uid));
+    }
+
+    /// **The gate makes the sequence one step.** Two registrations for the same
+    /// session cannot interleave their take → retire → spawn → install, so a third
+    /// claimant cannot arrive mid-retirement — the shape a reservation protocol
+    /// would have had to defend against with extra states.
+    #[tokio::test]
+    async fn the_codex_link_gate_serializes_one_sessions_lifecycle() {
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let gate = daemon.codex_link_gate(uid).await;
+        let held = gate.lock().await;
+
+        // A second sequence for the SAME session cannot start while one is running.
+        let other = daemon.codex_link_gate(uid).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other.lock())
+                .await
+                .is_err(),
+            "one session's link lifecycle must be serialized end to end"
+        );
+        // A different session is unaffected — the gate is per-uid, not global.
+        let elsewhere = daemon.codex_link_gate("01K1B3XQ8ZC0DE5FGH7JKMNP99").await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), elsewhere.lock())
+                .await
+                .is_ok(),
+            "another session's lifecycle must not queue behind this one"
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other.lock())
+                .await
+                .is_ok(),
+            "and the next sequence proceeds once the first releases"
         );
     }
 

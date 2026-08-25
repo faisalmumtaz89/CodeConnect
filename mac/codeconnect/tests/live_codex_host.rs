@@ -1018,8 +1018,23 @@ impl PtyHost {
                 home,
                 // The host applies no policy default: every fingerprint dimension
                 // is required and must be passed explicitly.
+                //
+                // **`on-request`, because that is what the real TUI asserts.** A
+                // codex 0.147 `codex --remote` sends `approvalPolicy:"on-request"`
+                // on its `thread/start`, and the broker's fingerprint validator
+                // refuses any present ownership value that disagrees with the
+                // launch fingerprint. A harness that launches with `untrusted`
+                // therefore gets
+                //
+                //   Tui: refuse->synthetic error (thread/start: fingerprint refused
+                //   (Conflict): params.approvalPolicy: "on-request" but fingerprint
+                //   is "untrusted")
+                //
+                // the TUI exits fatally, and the session dies about two seconds in
+                // with no thread ever created. The broker is behaving correctly;
+                // the fingerprint it was handed was the wrong one.
                 "--approval-policy",
-                "untrusted",
+                "on-request",
                 "--approvals-reviewer",
                 "user",
                 "--sandbox",

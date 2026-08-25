@@ -38,11 +38,10 @@
 //! from cross-resume item-id equality, which D15 says is unstable inside an
 //! interrupted turn.
 //!
-//! The live caller (the broker/wrapper chunk) does not exist yet, so in a
-//! non-test build this module's surface is legitimately unused — the same
-//! `cfg_attr(not(test), allow(dead_code))` idiom the store uses for
-//! proven-but-not-yet-wired code applies here.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The live caller is [`crate::codex_link`], which holds the connection, stamps
+//! each frame at ingress and feeds the admitted ones through here. Nothing in this
+//! module knows that: it is still a pure mapper over frames, and the resume-response
+//! Nothing here knows that: it is still a pure mapper over frames.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -160,12 +159,15 @@ impl CodexAdapter {
             // the resume response's turns[].status instead. The neutral model has
             // no "turn started" fact, so it maps to nothing.
             //
-            // ### Where resume-response state plugs in (not built here)
-            // The wrapper/broker chunk parses the `thread/resume` **response**
-            // (`turns[]` with full items and statuses) to seed in-flight turn
-            // state on a late attach. That seeding feeds this same adapter's
-            // open-item set; the frame→event mapping in this module is the part
-            // that stays identical whether an item arrived live or from replay.
+            // In-flight state on a late attach comes from the `thread/resume`
+            // **response** instead. Reconciling that response against this open
+            // set is **2e-4's**, not this chunk's: no turn can run through the
+            // broker until the D2 head-check lands (`turn/start` fails closed on
+            // the TUI leg), so no turn, no in-flight item and no populated
+            // `turns[]` can exist on the wire yet — and a reconciliation designed
+            // against inputs nobody can produce is a guess. 2e-4 builds it against
+            // real evidence; until then [`crate::codex_link`] refuses any resume
+            // response that describes a turn at all.
             "turn/started" => Vec::new(),
 
             // Known, deliberately not rendered: observation noise, ownership/
