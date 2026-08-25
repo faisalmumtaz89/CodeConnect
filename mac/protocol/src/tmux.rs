@@ -3567,14 +3567,19 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         start_session(&bin, &sock, "cc-1", &uid);
         assert_eq!(owned_liveness(&sock, &uid, None), OwnedLiveness::Live);
 
-        // Remove the socket file while the server is STILL ALIVE (a SIGUSR1-style
-        // socket loss): unreachable ⇒ Unknown, never a durable Gone.
-        std::fs::remove_file(&sock).ok();
+        // Make the socket path empty while the server is STILL ALIVE (a
+        // SIGUSR1-style socket loss): unreachable ⇒ Unknown, never a durable Gone.
+        // Renamed aside rather than removed: the probe reads the PATH either way,
+        // and the rename keeps the listening inode so cleanup can reach the server
+        // again — a kill aimed at a missing socket reaches nothing and leaks it.
+        let aside = dir.join("sock-aside");
+        std::fs::rename(&sock, &aside).unwrap();
         assert!(matches!(
             owned_liveness(&sock, &uid, None),
             OwnedLiveness::Unknown(_)
         ));
 
+        std::fs::rename(&aside, &sock).unwrap();
         kill_server(&bin, &sock);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3603,8 +3608,11 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         start_session(&bin, &sock, "keep", &crate::uid::new().unwrap());
         start_session(&bin, &sock, "cc-1", &uid);
         // B is alive and carries our uid — but simulate B's socket-recreation
-        // window by removing the socket file (B keeps running, unreachable).
-        std::fs::remove_file(&sock).ok();
+        // window by renaming the socket aside (B keeps running, unreachable; the
+        // rename keeps the inode so cleanup can reach B again — a kill aimed at
+        // a missing socket reaches nothing and leaks the server).
+        let aside = dir.join("sock-aside");
+        std::fs::rename(&sock, &aside).unwrap();
 
         // Destroy pinned to the DEAD A: A is proc-gone, the socket is unreachable
         // (B's recreation window). We cannot prove our uid is absent everywhere (B
@@ -3617,6 +3625,7 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         assert_ne!(outcome, CleanupOutcome::ServerGone);
         assert_ne!(outcome, CleanupOutcome::Killed);
 
+        std::fs::rename(&aside, &sock).unwrap();
         kill_server(&bin, &sock);
         std::fs::remove_dir_all(&dir).ok();
     }
