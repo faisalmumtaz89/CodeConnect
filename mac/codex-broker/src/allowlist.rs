@@ -28,13 +28,18 @@
 //!
 //! ## Deferred dispositions (clean seam for the switch/fanout sub-chunk)
 //!
-//! Three composable actions from the plan's set — `hold/serialize`, `head-check`,
-//! `consume-locally` — require machinery this sub-chunk deliberately defers (the D2
-//! vector barrier / quiesce / seal, and the one-use response-capability fanout).
-//! Their table entries are **final and correct** ([`Disposition::HoldSerialize`],
-//! [`Disposition::HeadCheck`], [`Disposition::ConsumeLocally`]); only their
-//! *executor branches* are stubbed, and they **fail closed** here (see
-//! [`crate::refusal`]). The switch sub-chunk fills in the executor, not the table.
+//! Two composable actions from the plan's set — `head-check` and `consume-locally` —
+//! require machinery still deferred (the D2 vector barrier and the one-use
+//! response-capability fanout). Their table entries are **final and correct**
+//! ([`Disposition::HeadCheck`], [`Disposition::ConsumeLocally`]); only their *executor
+//! branches* are stubbed, and they **fail closed** here (see [`crate::refusal`]).
+//!
+//! The third — `hold/serialize` — is GONE as of 2e-4c. It existed for exactly one cell,
+//! `thread/unsubscribe`, to hold the switch marker behind D2's linearization latch. D2 and
+//! D3 are deferred to Phase 3 **together with their subject** (a ccd write that can
+//! actuate; see [`crate::session`]), so there is no latch to serialize behind and a
+//! variant nothing maps to is dead weight. That cell is now
+//! [`Disposition::UnsubscribeSessionThread`].
 
 /// Which unix socket a client connection arrived on. Role is anchored here, not to
 /// the caller-controlled `initialize` identity.
@@ -121,8 +126,19 @@ pub enum Disposition {
     /// Refuse now (zero upstream bytes; synthetic error only for a request with a
     /// usable id).
     Refuse(RefuseReason),
-    /// DEFERRED: serialize behind the thread-switch latch (`thread/unsubscribe`).
-    HoldSerialize,
+    /// Forward iff `params.threadId` names a thread of THIS session — the active head or
+    /// one it retired. Carries no ownership fields and cannot actuate anything: it only
+    /// drops the *calling connection's* subscription (2e-4c MEASURED: an observer that
+    /// unsubscribed stopped receiving that thread's `turn/*`/`item/*` frames while every
+    /// other connection kept receiving them — the effect is strictly connection-local, so
+    /// one leg can never unsubscribe another's).
+    ///
+    /// This replaces the `hold/serialize` cell `thread/unsubscribe` used to hold. That cell
+    /// existed to serialize the marker behind D2's switch latch; with D2 deferred to Phase 3
+    /// alongside its subject (see [`crate::session`]), there is no latch to serialize behind
+    /// and the honest disposition is the one the wire supports: a scoped, read-only-ish
+    /// forward that fails closed on any thread this session does not own.
+    UnsubscribeSessionThread,
     /// DEFERRED: the D2 vector acceptance barrier for a thread-scoped actuation
     /// (`turn/steer`, `turn/interrupt`).
     HeadCheck,
@@ -212,9 +228,10 @@ fn tui_request(method: &str) -> Disposition {
         // Observation reads used by the picker / resume path (read-only).
         "thread/read" | "thread/loaded/list" | "thread/turns/list" | "thread/items/list" => Forward,
 
-        // Switch marker and thread-scoped actuations — final dispositions whose
-        // machinery is deferred (fail closed here).
-        "thread/unsubscribe" => HoldSerialize,
+        // The measured `/new` switch marker: scoped to a session thread (2e-4c).
+        "thread/unsubscribe" => UnsubscribeSessionThread,
+        // Thread-scoped actuations — final dispositions whose machinery is deferred
+        // (fail closed here).
         "turn/steer" | "turn/interrupt" => HeadCheck,
 
         // Everything else on the TUI leg: refuse-by-default.

@@ -495,7 +495,7 @@ Tui	Request	thread/unarchive	Refuse(NotAllowlisted)
 Tui	Notification	thread/unarchive	Refuse(NotAllowlisted)
 Ccd	Request	thread/unarchive	Refuse(NotAllowlisted)
 Ccd	Notification	thread/unarchive	Refuse(NotAllowlisted)
-Tui	Request	thread/unsubscribe	HoldSerialize
+Tui	Request	thread/unsubscribe	UnsubscribeSessionThread
 Tui	Notification	thread/unsubscribe	Refuse(NotAllowlisted)
 Ccd	Request	thread/unsubscribe	Refuse(NotAllowlisted)
 Ccd	Notification	thread/unsubscribe	Refuse(NotAllowlisted)

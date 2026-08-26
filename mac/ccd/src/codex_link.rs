@@ -121,7 +121,7 @@
 //! announced is a claim this link cannot check.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -178,6 +178,23 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(15);
 /// costing a request per second for as long as it is open.
 const ATTACH_BACKOFF_MIN: Duration = Duration::from_millis(500);
 const ATTACH_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// **How long a followed switch waits for the broker to ADOPT the new thread**
+/// (round-1 P5), and at what interval.
+///
+/// The window being waited on is one `thread/start` round trip: the link re-targets off the
+/// `thread/started` BROADCAST, and the broker makes that thread resumable when it correlates
+/// and verifies the creation RESPONSE — the very next frame on the TUI's leg. Milliseconds,
+/// in other words. It deliberately does NOT ride the general attach ladder, whose ceiling is
+/// a minute away: that ladder exists for a thread with no rollout yet, which legitimately
+/// takes ~0.9 s and can take longer, and borrowing it here would make a switch that will
+/// never be adopted take a minute to say so.
+///
+/// Five tries at 250 ms is ~1.25 s — three orders of magnitude over the round trip it is
+/// waiting for, and short enough that a switch which is never adopted is reported while the
+/// operator is still looking at the screen.
+const ADOPTION_RETRY_DELAY: Duration = Duration::from_millis(250);
+const ADOPTION_RETRIES: u32 = 5;
 
 /// Byte-based WebSocket bounds. D8: a single notification reaches multi-MB
 /// (`plugin/list` at 5.76 MB is the worst case measured), so the ceiling is on
@@ -763,6 +780,18 @@ enum Attach {
     /// like [`Attach::Unbound`], and for the same reason: there is nothing left to ask
     /// for.
     Attached,
+    /// **A recovery-only resume is outstanding** (round-3 P7): an on-demand ask about a
+    /// thread this link has already switched AWAY from, purely to record the items that
+    /// finished before it subscribed.
+    ///
+    /// Deliberately its own state rather than a reuse of `Awaiting`: its answer must NOT
+    /// bind the visit, must NOT move the attach target, and must NOT adopt anything. The
+    /// link is on the new thread and stays there; this only pays a debt.
+    Recovering {
+        id: i64,
+        deadline: Instant,
+        thread: String,
+    },
     /// The answer was neither of the two this build accepts. Never a resting state: the
     /// connection ends and reconnects. The target is kept — it came from an
     /// announcement, and an answer this build cannot read is evidence about the
@@ -791,7 +820,11 @@ impl Attach {
 /// a final event, never the event.
 pub async fn run(daemon: Arc<Daemon>, session: SessionKey, link: ControlLink) {
     let mut adapter = CodexAdapter::new(session.clone());
-    let mut thread_id = link.thread_id.clone();
+    // **The chase survives a reconnect** (round-2 P6b) — see [`Carried`].
+    let carried = Arc::new(Mutex::new(Carried {
+        hint: link.thread_id.clone(),
+        ..Carried::default()
+    }));
     let mut upstream_epoch: u64 = 0;
     let mut backoff = RECONNECT_BACKOFF_MIN;
     // Lives out here rather than inside a connection: the STOP-AND-AMEND branch
@@ -817,7 +850,7 @@ pub async fn run(daemon: Arc<Daemon>, session: SessionKey, link: ControlLink) {
             &session,
             &link,
             upstream_epoch,
-            &mut thread_id,
+            &carried,
             &mut adapter,
             &mut amend,
         )
@@ -842,13 +875,62 @@ pub async fn run(daemon: Arc<Daemon>, session: SessionKey, link: ControlLink) {
     }
 }
 
-/// One connection, end to end: dial, handshake, attach, observe until it ends.
+/// **The link state that survives a reconnect** (round-2 P6b, round-3 P7/P9).
+///
+/// A connection is disposable; these are not. `thread/started` is broadcast exactly once
+/// per thread and never replayed, so a switch this link learned about and has not finished
+/// chasing could never be rediscovered if it died with the connection that heard it.
+///
+/// **The three thread slots are DISTINCT, and the distinction is load-bearing** (round-3
+/// P9). An earlier form collapsed them into one "carried target", which then had to answer
+/// two different questions at once — "what should I resume?" and "what have I adopted?" —
+/// and got the second wrong: a merely-PENDING thread was handed to the next connection
+/// labelled as adopted, so it was treated as retired-and-readable when it had never been
+/// verified by anything.
+#[derive(Debug, Default)]
+struct Carried {
+    /// **Adopted**: a thread whose `thread/resume` this link ACCEPTED. The only slot that
+    /// may be published outward, and the only one a fallback may point at — it is the one
+    /// state that is provably readable. Written at exactly one site.
+    adopted: Option<String>,
+    /// **Pending**: a thread the wire announced and this link is chasing. Not adopted, not
+    /// readable, not a fallback. Resumed first on a fresh connection, because it is where
+    /// the user is.
+    pending_candidate: Option<String>,
+    /// **Fallback**: the last ADOPTED thread, kept while a chase is in flight so a
+    /// never-adopted candidate cannot strand the link.
+    fallback: Option<String>,
+    /// **The registration's CLAIM.** Not evidence: it is what the daemon was told at
+    /// registration, and the wire's own announcement outranks it. Used only until something
+    /// is adopted.
+    hint: Option<String>,
+    /// **An unrecovered pre-subscription debt** (round-3 P7): a thread this link attached
+    /// to MID-TURN and then switched away from before its follow-up resume could land. The
+    /// items that finished before the subscription existed are reachable from nowhere else
+    /// — no live frame carries them, and the link will never be asked about that thread
+    /// again — so the obligation outlives the connection and is paid once, on demand, after
+    /// the new thread is adopted.
+    owed_recovery: Option<String>,
+}
+
+impl Carried {
+    /// What a fresh connection should resume first: the chase if there is one, then the
+    /// thread we adopted, then the registration's claim.
+    fn first_target(&self) -> Option<String> {
+        self.pending_candidate
+            .clone()
+            .or_else(|| self.adopted.clone())
+            .or_else(|| self.hint.clone())
+    }
+}
+
+/// One connection, end to end: dial, handshake, attach, observe until it ends./// One connection, end to end: dial, handshake, attach, observe until it ends.
 async fn serve_connection(
     daemon: &Arc<Daemon>,
     session: &SessionKey,
     link: &ControlLink,
     upstream_epoch: u64,
-    thread_id: &mut Option<String>,
+    carried: &Arc<Mutex<Carried>>,
     adapter: &mut CodexAdapter,
     amend: &mut AmendThrottle,
 ) -> Result<()> {
@@ -874,7 +956,19 @@ async fn serve_connection(
     // resume; it does not say this connection is bound. Only a `thread/started`
     // watched on THIS connection binds, so `visit.thread_id` starts empty and the
     // D4 filter rejects every NAMED frame until one arrives.
-    let mut resume_target = thread_id.clone();
+    // A pending candidate carried in from a previous connection outranks the published
+    // target: it is the thread the user moved to, and `thread/started` will not be
+    // broadcast again for it (round-2 P6b).
+    // The round-3 P7 debt this connection must pay once the new thread is adopted.
+    let mut owed_recovery: Option<String> = None;
+    let (mut resume_target, carried_adopted, carried_candidate) = {
+        let c = carried.lock().expect("the carried link state");
+        (
+            c.first_target(),
+            c.adopted.clone(),
+            c.pending_candidate.clone(),
+        )
+    };
     let mut conn = Connection {
         daemon,
         session,
@@ -888,6 +982,20 @@ async fn serve_connection(
         next_id: 1,
         amend,
         debts: std::collections::BTreeMap::new(),
+        unadopted_retries: 0,
+        fallback_due: false,
+        // **Deliberately NOT seeded from the carried candidate.** The chase is carried by
+        // `resume_target` (which prefers `pending_candidate`) and the visit binds when that
+        // resume is ACCEPTED, so seeding the slot here changed nothing observable — it was
+        // a second representation of the same fact, and the kind of redundancy that later
+        // disagrees with itself. A fresh connection re-learns a candidate only from a fresh
+        // announcement.
+        switch_candidate: carried_candidate,
+        // **Adopted-only** (round-3 P9): a merely-PENDING thread is not something this link
+        // has verified, so it must not be handed to the candidate rule as though it were.
+        carried_target: carried_adopted,
+        carried: Arc::clone(carried),
+        adopted_thread: None,
     };
 
     // The handshake can bind (a `thread/started` may arrive before the `initialize`
@@ -898,8 +1006,19 @@ async fn serve_connection(
     // connection needs.
     let handshook = conn.handshake(&mut ws).await;
     if let Some(bound) = conn.bound() {
+        // **The handshake's announcement supersedes the carried HINT** (closing S8).
+        //
+        // Written even when `resume_target` already agrees, and that is the whole point: a
+        // hint and an announcement can name the same thread while the SLOTS still disagree,
+        // and it is the slot a reconnect reads. Left unwritten, a connection that dies
+        // before adopting anything would reconnect to the registration's stale claim rather
+        // than to the thread the wire actually named — the announcement that corrected it
+        // is broadcast once and never repeated.
         resume_target = Some(bound.to_string());
-        *thread_id = Some(bound.to_string());
+        let mut c = carried.lock().expect("the carried link state");
+        if c.adopted.is_none() {
+            c.hint = Some(bound.to_string());
+        }
     }
     handshook?;
 
@@ -928,9 +1047,85 @@ async fn serve_connection(
     loop {
         // The one place a request is issued. Reached only when no request is
         // outstanding, which is what keeps the resume unpipelined (A2).
+        // **PAY THE ROUND-3 P7 DEBT, ONCE.** The link has adopted the new thread and owes a
+        // pre-subscription recovery on one it left. Fired from `Attached` only — any other
+        // state has an attach in flight or scheduled, and this must never pipeline against
+        // it (A2: a resume is never pipelined).
+        if matches!(attach, Attach::Attached) {
+            if let Some(thread) = owed_recovery.take() {
+                // Cleared from the durable record at the SEND site, not where it was
+                // noticed: a debt discharged against a state that could not issue a request
+                // is a debt lost — the same lesson the follow-up debt taught.
+                carried
+                    .lock()
+                    .expect("the carried link state")
+                    .owed_recovery = None;
+                let id = conn.send_resume(&mut ws, &thread).await?;
+                crate::log_info!(
+                    "codex link for {}: asking once more about {thread}, which this link \
+                     attached to mid-turn and then switched away from — its \
+                     pre-subscription items are reachable from nowhere else",
+                    session.name
+                );
+                attach = Attach::Recovering {
+                    id,
+                    deadline: Instant::now() + RESUME_BUDGET,
+                    thread,
+                };
+            }
+        }
+
         if let Attach::Backoff { until, next_delay } = &attach {
             if Instant::now() >= *until {
                 let next_delay = *next_delay;
+                // **THE FALLBACK FIRES HERE** (round-1 P5). A followed switch re-targets
+                // off a broadcast; only the broker's verification makes the new thread
+                // resumable. `settle_resume` retries a not-yet-adopted refusal with
+                // backoff, and the backoff is capped — so when it reaches the ceiling
+                // without ever being accepted, the link stops asking about a thread that
+                // may never become a session thread and goes back to the one it could
+                // demonstrably read. The switch is not "undone": the visit stays on the new
+                // thread, so nothing of the new thread would be mis-filed; only the ATTACH
+                // target reverts, which is what keeps the session observable instead of
+                // silent.
+                if conn.fallback_due {
+                    conn.fallback_due = false;
+                    let previous = carried
+                        .lock()
+                        .expect("the carried link state")
+                        .fallback
+                        .take();
+                    if let Some(previous) = previous {
+                        crate::log_info!(
+                            "codex link for {}: {} was announced but never became a \
+                             session thread within the attach budget; falling back to \
+                             {previous}, which this link could read",
+                            session.name,
+                            resume_target.as_deref().unwrap_or("?")
+                        );
+                        // **THE VISIT GOES BACK TOO.** Moving only the target left the
+                        // visit on the un-adopted thread, so the redirect pulled the target
+                        // straight back and the link looped: chase, refuse, fall back,
+                        // chase. Reverting both is what makes giving up mean giving up.
+                        conn.revert_visit_to(&previous);
+                        resume_target = Some(previous.clone());
+                        // The chase is over — the candidate is not carried to the next
+                        // connection, because it was tried and never adopted. The published
+                        // id is untouched: it is still the last ADOPTED thread (P6a).
+                        {
+                            let mut c = carried.lock().expect("the carried link state");
+                            c.pending_candidate = None;
+                            // **The fallback IS the recovery** (closing S11). Going back to
+                            // the thread we could read means resuming it — and that resume
+                            // returns its whole history, which is exactly what the owed
+                            // recovery would have asked for. Leaving the debt set would buy
+                            // a second, redundant resume of the same thread moments later.
+                            if c.owed_recovery.as_deref() == Some(previous.as_str()) {
+                                c.owed_recovery = None;
+                            }
+                        }
+                    }
+                }
                 match resume_target.clone() {
                     Some(target) => {
                         // The deadline starts when the attach BEGINS, not when the
@@ -942,7 +1137,7 @@ async fn serve_connection(
                         // The request is on the wire, so whatever it owes is paid. Done
                         // here rather than where the debt was noticed: a debt cleared
                         // against a state that could not issue a request is a debt lost.
-                        conn.launch_follow_up();
+                        conn.launch_follow_up(&target);
                         attach = Attach::Awaiting {
                             id,
                             deadline,
@@ -967,7 +1162,9 @@ async fn serve_connection(
         }
 
         let deadline = match &attach {
-            Attach::Awaiting { deadline, .. } => Some(*deadline),
+            Attach::Awaiting { deadline, .. } | Attach::Recovering { deadline, .. } => {
+                Some(*deadline)
+            }
             Attach::Backoff { until, .. } => Some(*until),
             _ => None,
         };
@@ -1020,7 +1217,7 @@ async fn serve_connection(
         // never reach the STOP-AND-AMEND log that exists to report it.
         let kind = frame_kind(&frame);
         let is_our_response = kind == FrameKind::Response
-            && matches!(&attach, Attach::Awaiting { id, .. }
+            && matches!(&attach, Attach::Awaiting { id, .. } | Attach::Recovering { id, .. }
                 if frame.get("id").and_then(Value::as_i64) == Some(*id));
         if !is_our_response {
             match kind {
@@ -1048,7 +1245,10 @@ async fn serve_connection(
         // hint — so it becomes what every later attach addresses. What it emphatically
         // does not do is settle anything: this connection is bound but **unsubscribed**,
         // and only an accepted `thread/resume` changes that.
-        if let Some(bound) = conn.bound() {
+        // Owned, so the block may also mutate `conn` (an immutable borrow held across a
+        // mutable one would otherwise refuse to compile).
+        if let Some(bound) = conn.bound().map(str::to_string) {
+            let bound = bound.as_str();
             if resume_target.as_deref() != Some(bound) {
                 if let Some(stale) = resume_target.as_deref() {
                     crate::log_info!(
@@ -1058,19 +1258,72 @@ async fn serve_connection(
                     );
                 }
                 resume_target = Some(bound.to_string());
-                // Published outward too, so a reconnect starts from the announced
-                // thread. Only ever set, never cleared: a target that survived a
-                // reconnect is still the best thing the next connection has.
-                thread_id.clone_from(&conn.visit.thread_id);
+                // **Published outward, unless that would DISCARD an adopted thread**
+                // (round-2 P6a).
+                //
+                // Two cases, and only one of them defers:
+                //
+                // * **Nothing adopted yet.** The published id is a registration HINT — a
+                //   claim — and the announcement is the wire's own evidence. There is no
+                //   readable thread to preserve, so publishing at once is strictly better:
+                //   a reconnect should ask about the thread the wire named, not the one the
+                //   registration guessed.
+                // * **A thread was adopted and a switch announced another.** Publishing B
+                //   now would hand the next connection a target the broker may never adopt
+                //   while discarding A, which this link demonstrably could read. Deferred
+                //   until B's resume is ACCEPTED; the chase itself survives the reconnect
+                //   through `pending_candidate`/`fallback_target` (P6b).
+                //
+                // **`Carried::adopted` is NOT written here** (round-2 d2, resolved as
+                // polish in round 3): it has exactly ONE write site — `attach_from_seed`,
+                // where a resume is accepted — so "what is published is a thread we
+                // adopted" is a property of the type's single writer rather than a
+                // condition this site must remember to apply.
+                //
+                // What IS written is the HINT, and only while nothing has been adopted. A
+                // registration hint is the daemon's claim; a `thread/started` is the wire's
+                // own evidence, and evidence supersedes a claim at once. Without this a
+                // reconnect would go on asking about the thread the registration guessed
+                // rather than the one the wire named — with no adopted thread to prefer,
+                // the hint is all `first_target` has to fall back on.
+                {
+                    let mut c = carried.lock().expect("the carried link state");
+                    if c.adopted.is_none() {
+                        c.hint = Some(bound.to_string());
+                    }
+                }
             }
             // A binding with nothing scheduled means this connection learned its thread
             // from the broadcast and has not asked yet. Ask now.
             if matches!(attach, Attach::Unbound) {
                 attach = Attach::due_now();
             }
+            // **A FOLLOWED SWITCH RE-ARMS THE ATTACH, from ANY state** (2e-4c).
+            //
+            // `Unbound` above is not enough, and the state it misses is the only one that
+            // matters in practice: a link that has been happily watching thread A is
+            // `Attached`, which is a RESTING state carrying no deadline. Left alone it
+            // would block on the next read for ever — bound to B, subscribed to A,
+            // recording nothing.
+            //
+            // MEASURED, and this is why re-arming is sufficient rather than merely
+            // hopeful: `thread/resume` on an already-subscribed connection ADDS a
+            // subscription; it does not replace one and it does not error. The very same
+            // connection that resumed A can resume B and immediately begin receiving B's
+            // `turn/*` and `item/*` frames (proven live: an observer resumed A, watched
+            // A's turn, followed a `/new` to B, resumed B on that same socket, and
+            // received B's whole turn stream). No reconnect, no second connection.
+            //
+            // The residual subscription to A is deliberately left in place. Nothing can
+            // produce a frame on A any more — only the TUI starts turns, the TUI is on B,
+            // and the `/resume` affordance that could send it back is refused by the
+            // broker — so an unsubscribe would be machinery with no observable effect.
+            // Should a stale A frame arrive anyway, the thread term of [`Visit::admits`]
+            // drops it, which is the D4 filter doing precisely the job it exists for.
             // **An outstanding resume for a DIFFERENT thread is superseded.** It cannot
             // be recalled, so it is marked here and its answer is discarded when it
-            // arrives. The announcement is the wire telling us which thread is this
+            // arrives. Skipped during a fallback (round-2 P5): there the outstanding
+            // request names the old thread ON PURPOSE. The announcement is the wire telling us which thread is this
             // session's; a request issued before that correction must not be allowed to
             // win by answering later.
             if let Attach::Awaiting {
@@ -1088,6 +1341,20 @@ async fn serve_connection(
                     );
                     *superseded = true;
                 }
+            }
+        }
+
+        // **A RECOVERY ANSWER RECORDS AND NOTHING ELSE** (round-3 P7). It is about a thread
+        // this link has already left, so it may not bind the visit, move the target or
+        // adopt anything — the link is on the new thread and stays there. Whatever the
+        // answer is, the attach returns to `Attached`: this debt is paid once, and a second
+        // ask would be a loop over a thread nobody is on.
+        if is_our_response {
+            if let Attach::Recovering { thread, .. } = &attach {
+                let thread = thread.clone();
+                let _ = conn.recover_from(&frame, &thread).await;
+                attach = Attach::Attached;
+                continue;
             }
         }
 
@@ -1113,10 +1380,110 @@ async fn serve_connection(
                     );
                     Attach::due_now()
                 } else {
-                    conn.settle_resume(&frame, &target, next_delay).await?
+                    let has_fallback = carried
+                        .lock()
+                        .expect("the carried link state")
+                        .fallback
+                        .is_some();
+                    let settled = conn
+                        .settle_resume(&frame, &target, next_delay, has_fallback)
+                        .await?;
+                    // An answer that did not ATTACH recovered nothing, so any debt this
+                    // request was paying is owed again (round-3 P7).
+                    if !matches!(settled, Attach::Attached) {
+                        conn.unsettle_debts(&target);
+                    }
+                    settled
                 };
+                // **ADOPTION ENDS THE CHASE** (round-2 P5/P6), checked AFTER the settle —
+                // `attach_from_seed` is what records the adoption, so reading it before
+                // would only ever see the previous one.
+                //
+                // The connection accepted a resume for `target`, so that thread is the one
+                // to publish outward and to inherit, and neither the candidate nor the
+                // fallback is owed anything further. This is the ONLY place the published
+                // id moves to a switched-to thread (P6a).
+                if conn.adopted_thread.as_deref() == Some(target.as_str()) {
+                    // `attach_from_seed` already wrote `Carried::adopted` and cleared the
+                    // chase (round-3 P8/P9). What is left for the loop is the LOCAL target,
+                    // and the round-3 P7 debt: if this link owes a pre-subscription
+                    // recovery on a thread it switched away from, adopting the new one is
+                    // the moment that debt becomes payable.
+                    owed_recovery = carried
+                        .lock()
+                        .expect("the carried link state")
+                        .owed_recovery
+                        .clone();
+                }
             }
         }
+        // **P7 — AN UNREADABLE ANSWER ENDS THE LEG BEFORE ANY CANDIDATE IS APPLIED.**
+        //
+        // This bail used to sit at the very bottom, after the candidate block, so a switch
+        // announcement arriving on the same pass could apply a candidate, re-arm the attach
+        // and leave `Refused` behind — SUPPRESSING the loud stop that an answer this build
+        // cannot read is supposed to produce. The candidate is not lost by moving the bail:
+        // it is carried to the next connection by `pending_candidate`/`fallback_target`
+        // (round-2 P6b), which live outside this function precisely so a reconnect resumes
+        // the chase rather than forgetting it.
+        if matches!(attach, Attach::Refused) {
+            bail!("thread/resume answered with a shape this build cannot read; reconnecting");
+        }
+
+        // **APPLY A HELD SWITCH CANDIDATE — after settling, never before** (round-1 P5/P6).
+        //
+        // Position is the whole point. By here, an outstanding `thread/resume` of the
+        // thread the link is leaving has had its answer settled and RECORDED on this very
+        // pass, so the recovery it carried — potentially the only copy of the items that
+        // finished before this link subscribed — is durable before the link moves on. An
+        // announcement applied where it arrived would have marked that request superseded
+        // and thrown its answer away.
+        //
+        // Nothing is applied while a resume is still outstanding: the candidate is kept and
+        // reconsidered next pass, which is what gives the settle its chance to happen.
+        if conn.switch_candidate.is_some() && !matches!(attach, Attach::Awaiting { .. }) {
+            if let Some(retired) = conn.apply_switch_candidate() {
+                let target = conn.bound().unwrap_or_default().to_string();
+                crate::log_info!(
+                    "codex link for {}: re-targeting the attach from {retired} to {target} \
+                     (attach was {})",
+                    session.name,
+                    match &attach {
+                        Attach::Unbound => "Unbound",
+                        Attach::Awaiting { .. } => "Awaiting",
+                        Attach::Backoff { .. } => "Backoff",
+                        Attach::Attached => "Attached",
+                        Attach::Recovering { .. } => "Recovering",
+                        Attach::Refused => "Refused",
+                    }
+                );
+                // **The fallback** (round-1 P5). The announcement said which thread the TUI
+                // moved to; it did NOT say the broker has adopted it. If the new thread
+                // never verifies, every resume of it is policy-refused — and the previous
+                // thread, which this link CAN still read, is remembered so the retry loop
+                // can fall back to it rather than stranding the session on a thread that
+                // was never a session thread.
+                //
+                // Both halves already live OUTSIDE this connection — persisted when the
+                // candidate was NOTED, above. This only sharpens the fallback to the thread
+                // actually being retired, which is the most precise answer available.
+                {
+                    let mut c = carried.lock().expect("the carried link state");
+                    c.fallback = Some(retired.clone());
+                    c.pending_candidate = Some(target.clone());
+                    // **ROUND-3 P7.** If the thread being left still owes a
+                    // pre-subscription recovery — this link attached to it MID-TURN and its
+                    // follow-up never landed — that obligation must outlive the switch and
+                    // the connection. Nothing else will ever ask about that thread again.
+                    if conn.owes_recovery_on(&retired) {
+                        c.owed_recovery = Some(retired.clone());
+                    }
+                }
+                resume_target = Some(target);
+                attach = Attach::due_now();
+            }
+        }
+
         // **The follow-up attach, checked LAST.**
         //
         // A turn this link joined mid-flight has just finished, so its real item ids are
@@ -1133,13 +1500,6 @@ async fn serve_connection(
         // this connection to `Attached` is the same pass that notices what is still owed.
         if conn.follow_up_owed() && matches!(attach, Attach::Attached) {
             attach = Attach::due_now();
-        }
-
-        // Any answer but the two accepted ones ends the connection. The target is kept:
-        // it came from an announcement or the registration hint, and a wire answer
-        // this build cannot read is evidence about the answer, not about the thread.
-        if matches!(attach, Attach::Refused) {
-            bail!("thread/resume answered with a shape this build cannot read; reconnecting");
         }
     }
 }
@@ -1176,7 +1536,57 @@ struct Connection<'a> {
     /// A replayed terminal for that turn found it awaiting again and bought a fourth
     /// resume nobody owed. A single map makes a turn's state one value, so "in two
     /// states at once" is not something the code can express.
-    debts: std::collections::BTreeMap<String, TurnDebt>,
+    ///
+    /// **Keyed by (THREAD, turn)** (round-1 P7). Turn ids are unique per thread, not per
+    /// session, and 2e-4c made one connection carry more than one thread's worth of them:
+    /// the link follows a `/new` switch on the socket it already has, so debts recorded
+    /// under thread A now share a map with turns of thread B. A bare turn-id key would let
+    /// a terminal on B settle a debt owed on A — and, worse, let a resume of B be counted
+    /// as paying it, so A's unrecoverable items would be marked recovered and never asked
+    /// for again.
+    debts: std::collections::BTreeMap<(String, String), TurnDebt>,
+    /// How many times a resume of a followed-to thread has been refused as not-yet-adopted
+    /// (round-1 P5). Reset when an attach is accepted or a fresh candidate is applied.
+    unadopted_retries: u32,
+    /// Set when the adoption budget is spent and a fallback target exists; read by the loop
+    /// at its one send site.
+    fallback_due: bool,
+    /// **A `thread/started` for a different thread, not yet applied** (round-1 P5/P6).
+    ///
+    /// Set by [`Connection::note_switch_candidate`] and consumed by the loop once any
+    /// outstanding resume of the CURRENT thread has been settled. Holding it as a
+    /// candidate — rather than re-pointing the visit where the frame arrives — is what
+    /// keeps an in-flight recovery of the old thread from being thrown away, and what
+    /// keeps the link from committing to a thread the broker has not adopted.
+    /// The thread the SUBSCRIPTION should chase, once any outstanding recovery for the
+    /// current one is settled. Latest announcement wins (round-2 P8); the announcement's
+    /// own fact is recorded when it arrives, so a replaced candidate costs nothing.
+    switch_candidate: Option<String>,
+    /// The target this connection inherited from a previous one **that the link had
+    /// actually ADOPTED** (round-2 P6c). A carried adopted target means "not unbound,
+    /// merely unannounced": an announcement naming a DIFFERENT thread gets candidate
+    /// treatment rather than binding instantly, exactly as it would on a connection that
+    /// had been announced.
+    ///
+    /// **A registration HINT is deliberately not carried here**, and the distinction is
+    /// the module's existing one rather than a new rule: a hint is a CLAIM, an announcement
+    /// is the WIRE's own evidence, and evidence beats a claim immediately. Treating a
+    /// never-verified hint as something to fall back to would delay the bind by a pass —
+    /// and that pass is exactly where the outstanding stale request gets marked superseded,
+    /// so its answer would be read and this session's timeline filed under a thread the
+    /// wire had already corrected.
+    carried_target: Option<String>,
+    /// **The reconnect-surviving state, shared with [`run`]** (round-3 P8).
+    ///
+    /// Held by handle rather than mirrored by the loop, because the mirror had a window:
+    /// a candidate noted during the HANDSHAKE — before the main loop runs at all — was not
+    /// persisted, and a connection that died there took it with it. `thread/started` is
+    /// broadcast once and never replayed, so that candidate was gone for good. Writing it
+    /// where it is noted removes the window rather than narrowing it.
+    carried: Arc<Mutex<Carried>>,
+    /// The thread whose resume this connection ACCEPTED. Only an adopted thread is
+    /// published outward for the next connection to inherit (round-2 P6a).
+    adopted_thread: Option<String>,
 }
 
 /// Where one turn stands in the follow-up settlement.
@@ -1190,6 +1600,29 @@ enum TurnDebt {
     /// which is what makes the follow-up a settlement rather than a loop.
     Settled,
 }
+
+/// Is this answer the BROKER's own policy refusal, rather than the app-server's?
+///
+/// Matched on the broker's synthetic code (`crate::codex_broker`'s `E_POLICY_REFUSED`,
+/// -32001) — a code the app-server does not emit, which is what makes the two
+/// distinguishable at all. The message text is deliberately not matched: it is the
+/// broker's own wording and pinning it here would couple two crates through prose.
+///
+/// Narrow on purpose. It gates ONE behaviour — retry instead of reconnect — and every
+/// other unmeasured answer still takes the STOP-AND-AMEND branch.
+fn is_broker_policy_refusal(frame: &Value) -> bool {
+    frame.get("result").is_none()
+        && frame
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(Value::as_i64)
+            == Some(BROKER_POLICY_REFUSED)
+}
+
+/// The broker's synthetic policy-refusal code. Mirrors `codex_broker::refusal::E_POLICY_REFUSED`;
+/// ccd does not depend on that crate, so the constant is restated with the reason it must
+/// not drift.
+const BROKER_POLICY_REFUSED: i64 = -32001;
 
 impl Connection<'_> {
     /// The ccd role's handshake: `initialize`, then the one notification the leg
@@ -1327,6 +1760,7 @@ impl Connection<'_> {
         frame: &Value,
         requested_thread: &str,
         next_delay: Duration,
+        has_fallback: bool,
     ) -> Result<Attach> {
         if is_measured_not_ready(frame, requested_thread) {
             crate::log_debug!(
@@ -1338,6 +1772,52 @@ impl Connection<'_> {
                 until: Instant::now() + next_delay,
                 next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
             });
+        }
+        // **The broker has not adopted this thread YET — retryable, not fatal**
+        // (round-1 P5). A followed switch re-targets off a `thread/started` BROADCAST,
+        // which announces that the TUI created a thread; only the broker's own correlated
+        // verification of that creation makes it a session thread, and until then a
+        // `thread/resume` naming it is policy-refused on the ccd leg.
+        //
+        // That window is ordinary and short — it is the round trip of the very
+        // `thread/start` whose broadcast we just saw — so treating the refusal as a
+        // STOP-AND-AMEND would end the connection and reconnect on every switch, which is
+        // both noisy and, because the new connection asks the same question, a loop. It
+        // backs off exactly like the measured no-rollout answer instead. If the thread is
+        // NEVER adopted, the caller's fallback (see `fallback_target` in [`run`]) is what
+        // stops the retrying being forever.
+        if is_broker_policy_refusal(frame) {
+            if self.unadopted_retries < ADOPTION_RETRIES {
+                self.unadopted_retries += 1;
+                crate::log_debug!(
+                    "codex link for {}: the broker has not yet adopted {requested_thread} \
+                     (try {}/{ADOPTION_RETRIES}); retrying in {ADOPTION_RETRY_DELAY:?}",
+                    self.session.name,
+                    self.unadopted_retries
+                );
+                return Ok(Attach::Backoff {
+                    until: Instant::now() + ADOPTION_RETRY_DELAY,
+                    next_delay,
+                });
+            }
+            // The budget is spent. If this link has a thread it could demonstrably read,
+            // go back to it rather than keep asking about one that may never be adopted.
+            if has_fallback {
+                self.unadopted_retries = 0;
+                self.fallback_due = true;
+                crate::log_info!(
+                    "codex link for {}: {requested_thread} was announced but never became \
+                     a session thread; falling back to the thread this link could read",
+                    self.session.name
+                );
+                return Ok(Attach::Backoff {
+                    until: Instant::now() + ADOPTION_RETRY_DELAY,
+                    next_delay,
+                });
+            }
+            // No fallback: this is an ordinary policy refusal of a thread that is simply
+            // not this session's, and it keeps the LOUD disposition it always had — end the
+            // connection and report — reached after a bounded delay instead of instantly.
         }
         // **Response exclusivity, before anything is read out of it.** A frame carrying
         // both a `result` and an `error` is not a JSON-RPC response, and reading its
@@ -1367,6 +1847,56 @@ impl Connection<'_> {
             );
         }
         Ok(Attach::Refused)
+    }
+
+    /// **Record what a recovery answer describes, and change nothing else** (round-3 P7).
+    ///
+    /// The full attach path binds the visit, seeds the adapter and marks the connection
+    /// adopted. None of that may happen here: this answer is about a thread the link has
+    /// already switched away from, asked purely so the items that finished before the link
+    /// subscribed are not lost with it.
+    ///
+    /// The same acceptance rule applies — an answer this build cannot read whole is
+    /// refused, not guessed at — and a refusal costs only the recovery, never the
+    /// connection: the link is attached to a different thread and healthy.
+    async fn recover_from(&mut self, frame: &Value, thread: &str) {
+        let Some(result) = frame.get("result").filter(|_| frame.get("error").is_none()) else {
+            crate::log_info!(
+                "codex link for {}: the recovery ask about {thread} was not answered with a \
+                 readable result; its pre-subscription items stay a legible gap rather \
+                 than a guess",
+                self.session.name
+            );
+            return;
+        };
+        let Some(mut seed) = self.adapter.plan_resume_seed(result, thread) else {
+            crate::log_info!(
+                "codex link for {}: the recovery answer for {thread} is a shape this build \
+                 does not read; recording nothing",
+                self.session.name
+            );
+            return;
+        };
+        let events = seed.take_events();
+        let recorded = events.len();
+        for pending in events {
+            // Recorded through the ordinary dedup path: every one of these keys may
+            // already exist (the answer re-describes the whole thread), and a duplicate
+            // costing nothing is exactly what makes an on-demand recovery safe to fire.
+            self.record(pending).await;
+        }
+        // The debts of a thread we have left are settled either way: this was their one
+        // ask, and there will not be another.
+        for ((t, _), debt) in self.debts.iter_mut() {
+            if t == thread {
+                *debt = TurnDebt::Settled;
+            }
+        }
+        crate::log_info!(
+            "codex link for {}: recovered {recorded} fact(s) from {thread} on demand; the \
+             link remains on its current thread",
+            self.session.name
+        );
     }
 
     /// Turn an accepted answer into an attach: **record, then rebuild, then subscribe.**
@@ -1423,6 +1953,21 @@ impl Connection<'_> {
             })?;
         }
         self.adapter.apply_resume_seed(&seed);
+        // The attach was ACCEPTED, so whatever adoption budget an earlier switch spent is
+        // returned: the next switch gets a full one (round-1 P5).
+        self.unadopted_retries = 0;
+        self.fallback_due = false;
+        // ADOPTED (round-2 P6a). Only now may this thread be published outward as the
+        // target a future connection should inherit — the single write site for
+        // [`Carried::adopted`], which is what makes "published implies adopted" structural
+        // rather than a condition to be maintained (round-2 d2, now polish).
+        self.adopted_thread = Some(thread.to_string());
+        {
+            let mut carried = self.carried.lock().expect("the carried link state");
+            carried.adopted = Some(thread.to_string());
+            carried.pending_candidate = None;
+            carried.fallback = None;
+        }
         // A turn that was running when this answer described it owes items this link can
         // never be sent: they finished before it subscribed. Remember it until its
         // terminal is observed, then ask once more.
@@ -1432,7 +1977,7 @@ impl Connection<'_> {
             // turn it knows nothing about starts awaiting. An answer that is merely
             // stale about a turn cannot rewind that turn's settlement.
             self.debts
-                .entry(turn.clone())
+                .entry((thread.to_string(), turn.clone()))
                 .or_insert(TurnDebt::AwaitingTerminal);
         }
         crate::log_info!(
@@ -1470,7 +2015,17 @@ impl Connection<'_> {
         // **The announcement is consumed before the filter, not after.** While
         // unbound the filter rejects every named frame, so a `thread/started`
         // checked first would be dropped by the very rule it exists to satisfy.
-        self.bind_if_unbound(frame);
+        //
+        // A SWITCH announcement is NOT applied here, though (round-1 P5/P6). It is
+        // recorded as a CANDIDATE and applied by the loop, after the loop has had a
+        // chance to settle an outstanding resume of the thread being left. See
+        // [`Connection::note_switch_candidate`] and the loop's candidate block.
+        //
+        // **Its FACT, however, is recorded immediately** (round-2 P8) — see that method.
+        if self.note_switch_candidate(frame) {
+            self.ingest_frame(frame).await;
+            return;
+        }
         let stamp = Ingress {
             generation: self.visit.generation,
             upstream_epoch: self.visit.upstream_epoch,
@@ -1519,13 +2074,21 @@ impl Connection<'_> {
         let Some(turn) = pending.turn_id.as_deref() else {
             return;
         };
+        // The thread this terminal belongs to. A fact only reaches here after the D4
+        // filter admitted it, so it is this visit's thread by construction — but the key is
+        // built from the CURRENT binding rather than assumed, so a debt can never be
+        // recorded under a thread the link is not on (round-1 P7).
+        let Some(thread) = self.bound().map(str::to_string) else {
+            return;
+        };
+        let key = (thread.clone(), turn.to_string());
         // Only a turn still awaiting its terminal transitions. A turn already owed has
         // nothing to add; one already settled has had its ask, and a replayed terminal
         // for it must not buy another.
-        if self.debts.get(turn) == Some(&TurnDebt::AwaitingTerminal) {
+        if self.debts.get(&key) == Some(&TurnDebt::AwaitingTerminal) {
             // Owed, NOT settled: a debt is discharged by a request reaching the wire,
             // and nothing here can issue one.
-            self.debts.insert(turn.to_string(), TurnDebt::Owed);
+            self.debts.insert(key, TurnDebt::Owed);
             crate::log_info!(
                 "codex link for {}: turn {turn} finished, and this link attached while it \
                  was running — asking once more so the items it could not name are \
@@ -1538,8 +2101,32 @@ impl Connection<'_> {
     /// Is a follow-up owed? **Peeked, never consumed** — see [`Connection::owed`]. The
     /// debt is cleared by [`Connection::launch_follow_up`], and only once the request
     /// that pays it is actually on the wire.
+    /// **Does this link owe `thread` a pre-subscription recovery?** (round-3 P7.)
+    ///
+    /// True when a turn on that thread was seeded while RUNNING and its follow-up resume
+    /// has not been launched. Those items — the ones that finished before this link
+    /// subscribed — are reachable from nowhere else: no live frame carries them, and once
+    /// the link switches away nothing will ever ask about that thread again. The obligation
+    /// therefore has to outlive the switch.
+    fn owes_recovery_on(&self, thread: &str) -> bool {
+        self.debts
+            .iter()
+            .any(|((t, _), debt)| t == thread && *debt != TurnDebt::Settled)
+    }
+
+    /// Is a follow-up owed **for the thread this link is currently on**?
+    ///
+    /// Thread-scoped (round-1 P7): a resume can only ever ask about ONE thread, so a debt
+    /// owed on a thread the link has switched away from cannot be paid by the request this
+    /// would schedule. Counting it would fire a resume of the CURRENT thread and then mark
+    /// the OTHER thread's debt settled — retiring a recovery that never happened.
     fn follow_up_owed(&self) -> bool {
-        self.debts.values().any(|debt| *debt == TurnDebt::Owed)
+        let Some(thread) = self.bound() else {
+            return false;
+        };
+        self.debts
+            .iter()
+            .any(|((t, _), debt)| t == thread && *debt == TurnDebt::Owed)
     }
 
     /// A resume has just been sent. Every debt outstanding at this moment is settled by
@@ -1549,9 +2136,30 @@ impl Connection<'_> {
     /// A debt recorded *after* this point stays owed and fires when the connection is
     /// attached again — which is what keeps at most one follow-up in flight without
     /// letting the next one fall on the floor.
-    fn launch_follow_up(&mut self) {
-        for debt in self.debts.values_mut() {
-            if *debt == TurnDebt::Owed {
+    /// **A follow-up went out but did not RECOVER anything** (round-3 P7).
+    ///
+    /// `launch_follow_up` marks a debt `Settled` at the send site, which is right for the
+    /// purpose it was written for — one ask per turn, never a loop. But "asked" is not
+    /// "recovered": if that ask comes back not-ready, refused, or unreadable, the items it
+    /// was for are still missing, and a debt left `Settled` would say they had been found.
+    ///
+    /// Rolling it back to `Owed` is what lets the switch see a genuine outstanding
+    /// obligation and carry it. The one-ask-per-turn bound still holds: the roll-back only
+    /// happens on an answer that recovered nothing.
+    fn unsettle_debts(&mut self, target: &str) {
+        for ((thread, _), debt) in self.debts.iter_mut() {
+            if thread == target && *debt == TurnDebt::Settled {
+                *debt = TurnDebt::Owed;
+            }
+        }
+    }
+
+    fn launch_follow_up(&mut self, target: &str) {
+        // Settles only the debts of the thread the request ACTUALLY names (round-1 P7).
+        // One answer describes one whole thread, so it pays every debt of that thread at
+        // once — and none of any other's.
+        for ((thread, _), debt) in self.debts.iter_mut() {
+            if thread == target && *debt == TurnDebt::Owed {
                 *debt = TurnDebt::Settled;
             }
         }
@@ -1569,21 +2177,251 @@ impl Connection<'_> {
     /// Bind this connection to a thread from the **`thread/started` it watched
     /// arrive**. The other thing that binds is an accepted resume answer
     /// ([`Connection::attach_from_seed`]); see the module doc's attach contract.
-    fn bind_if_unbound(&mut self, frame: &Value) {
-        if self.visit.thread_id.is_some() {
-            return;
-        }
+    /// Bind to the announced thread — or, if one is already bound, **FOLLOW THE SWITCH**.
+    ///
+    /// # The switch signal is the announcement, and that is measured
+    ///
+    /// 2e-4c spike, real codex 0.147 TUI driven through `/new`: `thread/started` for the
+    /// new thread is broadcast to **every initialized connection**, whatever it is
+    /// subscribed to and whether it is subscribed at all (proven on three connections at
+    /// once: one resume-subscribed to the old thread, one subscribed to a different
+    /// thread, and one merely initialized). It is therefore the ONE signal a link that is
+    /// watching thread A reliably receives when the operator moves to thread B.
+    ///
+    /// It is also the ONLY one. The same capture shows a resume-subscribed connection
+    /// receives **nothing else** about the new thread — no `turn/*`, no `item/*`, not one
+    /// frame of B's turn reached A's subscription — so a link that ignored the
+    /// announcement would sit on a thread nobody is using, recording nothing, for the life
+    /// of the session. That is exactly what this build did before 2e-4c.
+    ///
+    /// # What following costs, and what it does not
+    ///
+    /// * **The generation is bumped.** D4: a generation identifies a VISIT, not a thread.
+    ///   The old visit is retired here and the new one begins, which is what makes the two
+    ///   distinguishable in the log, in [`Ingress`], and to anything downstream that
+    ///   attributes a frame to a visit.
+    ///
+    ///   Be precise about what that bump does *at this call site*, because overstating it
+    ///   would be the kind of claim this module does not make: `observe_notification`
+    ///   builds its stamp out of this same `Visit`, so the generation term of
+    ///   [`Visit::admits`] compares a value with itself and cannot reject anything. **The
+    ///   term that actually retires stale-A frames here is the THREAD term** — once
+    ///   `thread_id` moves to B, a frame naming A is not this session's fact and is
+    ///   filtered. The generation becomes load-bearing the moment a frame can arrive
+    ///   stamped with a generation other than the live one, i.e. when a second delivery
+    ///   connection exists (Phase 3's fanout). Until then it is honest bookkeeping, and it
+    ///   is kept because a visit counter that only starts counting when it is needed has
+    ///   no history to count.
+    /// * **The thread is re-pointed**, which is what the caller's redirect block reads to
+    ///   move `resume_target` and to supersede an outstanding resume for A.
+    /// * **Nothing is unrecorded.** A's facts are already durable and stay so; A's own
+    ///   `<A>:thread_started` identity key is thread-namespaced, so B's announcement mints
+    ///   its own and neither shadows the other under first-wins.
+    ///
+    /// Returns the thread that was retired, iff this announcement was a switch.
+    fn bind_or_follow(&mut self, frame: &Value) -> Option<String> {
         if frame.get("method").and_then(Value::as_str) != Some("thread/started") {
-            return;
+            return None;
         }
         let FrameThread::Named(id) = frame_thread_id(frame) else {
-            return;
+            return None;
         };
+        match self.visit.thread_id.as_deref() {
+            // The first announcement: an ordinary bind.
+            None => {
+                crate::log_info!(
+                    "codex link for {}: bound to thread {id}, announced on this connection",
+                    self.session.name
+                );
+                self.visit.thread_id = Some(id.to_string());
+                None
+            }
+            // A re-announcement of the SAME thread. The app-server broadcasts one
+            // `thread/started` per creation, so this is not a shape the wire has shown —
+            // but it is trivially idempotent and must not be read as a switch, or a
+            // duplicate would retire a live visit.
+            Some(bound) if bound == id => None,
+            // A DIFFERENT thread: the operator pressed `/new`.
+            Some(retired) => {
+                let retired = retired.to_string();
+                self.visit.generation += 1;
+                self.visit.thread_id = Some(id.to_string());
+                crate::log_info!(
+                    "codex link for {}: thread {id} was announced while bound to \
+                     {retired} — following the switch; the visit is now generation {} \
+                     and {retired} is retired (its recorded facts stand; frames naming \
+                     it are no longer this session's)",
+                    self.session.name,
+                    self.visit.generation
+                );
+                Some(retired)
+            }
+        }
+    }
+
+    /// Apply a held switch candidate: bump the generation, retire the visit, re-point the
+    /// thread. Returns the thread that was retired, or `None` if there is no candidate (or
+    /// the candidate is already the bound thread).
+    ///
+    /// The state change is exactly what [`Connection::bind_or_follow`] used to do inline;
+    /// only WHEN it happens moved (round-1 P5/P6).
+    /// **Give up on the chased thread and go back** (round-2 P5).
+    ///
+    /// A fallback that moved only the ATTACH target was not a fallback at all: the visit
+    /// stayed on the un-adopted thread, so the bound-target redirect — whose whole job is
+    /// to make the target agree with the visit — pulled the target straight back, and the
+    /// link chased, was refused, fell back, chased again, for ever. The suppression flag
+    /// that used to guard this was papering over the missing half.
+    ///
+    /// Giving up means the link IS back on the previous thread: it never subscribed to the
+    /// chased one, that thread's only fact (its announcement) is already recorded, and its
+    /// history stays resumable on demand. The generation advances because this is a new
+    /// VISIT of the old thread (D4), which is what keeps any late frame stamped under the
+    /// abandoned visit distinguishable.
+    fn revert_visit_to(&mut self, previous: &str) {
+        if self.visit.thread_id.as_deref() == Some(previous) {
+            return;
+        }
+        self.visit.generation += 1;
+        self.visit.thread_id = Some(previous.to_string());
+        self.switch_candidate = None;
+    }
+
+    fn apply_switch_candidate(&mut self) -> Option<String> {
+        let candidate = self.switch_candidate.take()?;
+        let retired = self
+            .visit
+            .thread_id
+            .clone()
+            .or_else(|| self.carried_target.clone())?;
+        if retired == candidate {
+            return None;
+        }
+        self.visit.generation += 1;
+        self.visit.thread_id = Some(candidate.clone());
+        // A FRESH switch gets a fresh adoption budget.
+        self.unadopted_retries = 0;
+        self.fallback_due = false;
         crate::log_info!(
-            "codex link for {}: bound to thread {id}, announced on this connection",
-            self.session.name
+            "codex link for {}: following the switch from {retired} to {candidate}; the \
+             visit is now generation {} and {retired} is retired (its recorded facts \
+             stand; frames naming it are no longer this session's)",
+            self.session.name,
+            self.visit.generation
         );
-        self.visit.thread_id = Some(id.to_string());
+        Some(retired)
+    }
+
+    /// Record a `thread/started` that names a DIFFERENT thread as a switch CANDIDATE,
+    /// without touching the visit (round-1 P5/P6).
+    ///
+    /// # Why the announcement is not applied where it arrives
+    ///
+    /// Two reasons, both about what would be lost if it were:
+    ///
+    /// * **P6 — an in-flight recovery is the only copy of some facts.** When the switch
+    ///   lands, this link may have a `thread/resume` of the OLD thread outstanding. That
+    ///   answer can be the only thing that will ever name the items which finished before
+    ///   this link subscribed: no live frame carries them, and once the link has moved on
+    ///   it will never ask about that thread again. Re-pointing the visit here marks the
+    ///   request superseded, so its answer is received and thrown away. The loop settles it
+    ///   FIRST and follows afterwards.
+    /// * **P5 — the announcement is not an adoption.** `thread/started` is a broadcast; the
+    ///   broker has not necessarily verified the new thread's creation yet, and it may
+    ///   never (a creation response can prove failure, or prove nothing at all). Until it
+    ///   does, the new thread is not a session thread and a `thread/resume` naming it is
+    ///   policy-refused. Committing the visit to it irrevocably would strand the link on a
+    ///   thread that was never adopted, with the thread it *could* still read forgotten.
+    ///
+    /// Returns TRUE when the caller must ingest this frame itself (round-2 P8).
+    ///
+    /// # Why a switch announcement's FACT is recorded at once
+    ///
+    /// The candidate slot holds ONE thread. With `/new` pressed twice while a recovery of A
+    /// is still outstanding, C overwrites B and B is dropped — so what, exactly, is lost?
+    ///
+    /// From the measurements: a link that never subscribed to B receives **nothing about B
+    /// but its announcement**. No `turn/*`, no `item/*` — those reach only the
+    /// resume-subscribed connection. And B's history is not lost either: a retired thread
+    /// stays fully resumable, so it can be recovered on demand later.
+    ///
+    /// So the only thing a dropped candidate can cost is the announcement's own fact — and
+    /// that fact needs no candidate at all. It is verified broadcast content from this
+    /// session's own app-server, describing a thread that session just created, so it is
+    /// recorded the moment it arrives. The candidate then carries only the SUBSCRIPTION
+    /// decision, and the latest announcement wins it: **the link subscribes to where the
+    /// user IS**. Queueing candidates would chase threads the user has already left.
+    ///
+    /// (The frame is ingested by the CALLER rather than here because ingestion is async and
+    /// this is the sync bind/filter path. Returning the obligation keeps the one ingest
+    /// site — and therefore the one dedup path — intact.)
+    fn note_switch_candidate(&mut self, frame: &Value) -> bool {
+        if frame.get("method").and_then(Value::as_str) != Some("thread/started") {
+            return false;
+        }
+        let FrameThread::Named(id) = frame_thread_id(frame) else {
+            return false;
+        };
+        // The FIRST bind is not a switch and needs no deferral: there is no outstanding
+        // recovery to lose and no previous thread to fall back to. It binds, and the
+        // ordinary filter then admits the frame — so the caller must NOT ingest it twice.
+        if self.visit.thread_id.is_none() && self.carried_target.is_none() {
+            let _ = self.bind_or_follow(frame);
+            return false;
+        }
+        let current = self
+            .visit
+            .thread_id
+            .clone()
+            .or_else(|| self.carried_target.clone());
+        if current.as_deref() == Some(id) {
+            // A re-announcement of the thread we are already on (or carrying). If we are
+            // BOUND to it the ordinary filter admits the frame; if we are merely carrying
+            // it as a target, bind now — this is the reconnect case (P6c) where the
+            // announcement finally names the thread we were already asking about.
+            if self.visit.thread_id.is_none() {
+                let _ = self.bind_or_follow(frame);
+            }
+            return false;
+        }
+        if self.switch_candidate.as_deref() != Some(id) {
+            crate::log_info!(
+                "codex link for {}: thread {id} was announced while on {} — held as a \
+                 switch candidate until any outstanding recovery for the current thread \
+                 is settled; its own fact is recorded now",
+                self.session.name,
+                current.as_deref().unwrap_or("?")
+            );
+        }
+        // Latest wins. A candidate this replaces cost nothing but its announcement, which
+        // was recorded when it arrived.
+        self.switch_candidate = Some(id.to_string());
+        // **Persisted HERE, at note time, in every path** (round-3 P8) — including the
+        // handshake, where the main loop has not begun and a mirror would never run.
+        {
+            let mut carried = self.carried.lock().expect("the carried link state");
+            carried.pending_candidate = Some(id.to_string());
+            // The thread to fall back to is the last ADOPTED one — the only slot that is
+            // provably readable (round-3 P9). Never overwritten by a second switch.
+            //
+            // **Honest status: REDUNDANT, and deliberately kept** (closing S10).
+            //
+            // Deleting it changes no test, and the earlier claim that its case was merely
+            // unstageable was wrong: the apply site sets the fallback from the thread being
+            // retired, and every path that reaches a fallback passes through one of the two
+            // writers. This one is genuinely redundant with that.
+            //
+            // It stays because the two writers answer different questions and the redundancy
+            // is fail-closed: the apply site knows which thread is being RETIRED, this one
+            // knows which was last ADOPTED, and on the un-applied path — a candidate noted
+            // whose connection dies before the loop can act — only this one has run. A
+            // redundant write on a fail-closed slot costs nothing; a missing one strands the
+            // link on a thread that may never be adopted.
+            if carried.fallback.is_none() {
+                carried.fallback = carried.adopted.clone();
+            }
+        }
+        true
     }
 
     /// The thread this connection is bound to, if it has been announced.
@@ -2369,6 +3207,121 @@ mod tests {
         /// a thread. Neither is a notification, so neither may bind this connection
         /// or reach the adapter; and the handshake must still complete.
         NoisyHandshake,
+        /// **A RECOVERY ANSWER CROSSING THE SWITCH BOUNDARY** (round-1 P6).
+        ///
+        /// The first resume is answered with the turn still RUNNING, so the link owes
+        /// itself a follow-up; the leg replays only the TAIL, standing for items that
+        /// finished before the link subscribed. The turn then terminalizes, the link fires
+        /// its follow-up — and the leg announces a SWITCH while that request is in flight,
+        /// answering it only afterwards with the turn FINISHED and its real ids.
+        ///
+        /// That answer is the ONLY thing that can ever name those items: no live frame
+        /// carries them, and once the link moves to the new thread it will never ask about
+        /// the old one again. It must be CONSUMED before the switch is followed.
+        RecoveryCrossingASwitch,
+        /// **THE FOLLOWED-TO THREAD IS NOT ADOPTED YET** (round-1 P5).
+        ///
+        /// The link is announced a new thread and re-targets to it — but the broker has not
+        /// finished verifying that thread's creation, so the first resumes of it come back
+        /// as the broker's own policy refusal (`-32001`). That window is ordinary and short
+        /// (one `thread/start` round trip), so it must be RETRIED IN PLACE rather than
+        /// treated as an unreadable answer: ending the connection would reconnect, ask the
+        /// same question, and be refused again — a loop, on every switch.
+        ///
+        /// After a few refusals the leg relents and answers properly, and the link must be
+        /// attached to the new thread on the connection it has had all along.
+        SwitchThenNotAdoptedYet,
+        /// **THE HANDSHAKE ANNOUNCEMENT MUST SUPERSEDE A STALE HINT** (closing S8).
+        ///
+        /// The link carries a registration hint. The leg announces the real thread at
+        /// `initialized` — and then drops before anything is adopted. Nothing will ever
+        /// announce that thread again, so the reconnect can only reach it if the
+        /// announcement replaced the hint in the SLOT a reconnect reads.
+        ///
+        /// The leg refuses the stale hint outright, so a reconnect that still asks for it
+        /// gets nowhere: the observable is which thread the second connection names.
+        AnnouncedThenDroppedBeforeAdopting,
+        /// **A CROSSING RECOVERY THAT NEVER LANDS BEFORE THE SWITCH** (round-3 P7).
+        ///
+        /// The link attaches to A MID-TURN, so it owes a follow-up: A's earlier items
+        /// finished before the subscription existed and are reachable from nowhere else.
+        /// The turn terminalizes, the follow-up goes out — and the leg announces B and
+        /// answers that follow-up with the measured NOT-READY error, so the recovery never
+        /// lands. The link follows the switch and adopts B.
+        ///
+        /// A's withheld item must still be recovered: the obligation outlives the switch,
+        /// and is paid once, on demand, after B is adopted. That is the on-demand recovery
+        /// the P8 doctrine promises, made real rather than asserted.
+        SwitchWithACrossingRecoveryOwed,
+        /// **THE CANDIDATE MUST SURVIVE A CONNECTION THAT DIES BEFORE APPLYING IT**
+        /// (round-2 P6b).
+        ///
+        /// Connection 1: the resume of A is answered and A's stream replays, so A is
+        /// ADOPTED. The leg then announces B **and immediately drops the connection**,
+        /// before the link's next pass can apply the candidate.
+        ///
+        /// `thread/started` is broadcast once and never replayed, so nothing will ever tell
+        /// this link about B again. If the candidate died with the connection, the link
+        /// would sit on A for the rest of the session while the user works in B. The
+        /// reconnect must therefore ask about B — with A still the thing to fall back to.
+        CandidateAnnouncedThenTheLegDrops,
+        /// **A RECONNECT CARRYING AN ADOPTED TARGET IS ANNOUNCED A DIFFERENT THREAD**
+        /// (round-2 P6c).
+        ///
+        /// Connection 1 adopts A and drops. Connection 2 carries A and is announced B as
+        /// its FIRST announcement. That must get candidate treatment — announcement is not
+        /// an instant repoint, uniformly — with A as the fallback, exactly as it would on a
+        /// connection that had been announced A earlier. Binding B instantly would discard
+        /// a thread this link demonstrably could read in favour of one the broker may never
+        /// adopt.
+        ///
+        /// The leg refuses B for ever, so the fallback to A is what the test observes.
+        ReconnectCarryingAdoptedThenAnnouncedAnother,
+        /// **TWO SWITCHES WHILE A RECOVERY IS OUTSTANDING** (round-2 P8).
+        ///
+        /// The link attaches mid-turn (so it owes a follow-up), and while that request is
+        /// in flight the leg announces B and then C. The single candidate slot holds one
+        /// thread, so B is replaced — and what B costs must be nothing but its
+        /// announcement, which is recorded the moment it arrives. The SUBSCRIPTION chases
+        /// C, because C is where the user is.
+        TwoSwitchesDuringRecovery,
+        /// **AN UNREADABLE ANSWER ARRIVES WITH A SWITCH ANNOUNCEMENT** (round-2 P7).
+        ///
+        /// The leg announces a switch and answers the outstanding resume with a shape this
+        /// build cannot read, on the same pass. The unreadable answer must still END the
+        /// leg loudly — a candidate must never suppress that stop — and the candidate must
+        /// survive to the next connection, since `thread/started` is broadcast once and
+        /// never replayed.
+        UnreadableAnswerBesideASwitch,
+        /// **THE SWITCH TARGET IS NEVER ADOPTED, AND THE FALLBACK MUST COMPLETE**
+        /// (round-2 P5).
+        ///
+        /// The first resume (A) is answered and A's stream replays; the leg announces B and
+        /// then refuses EVERY resume of B, for ever. Once the adoption budget is spent the
+        /// link must fall back to A — and the fallback has to actually finish, which is the
+        /// part that was structurally impossible before: the bound-target redirect rewrote
+        /// the target back to B and marked the A-request superseded on the very next pass,
+        /// so the link retargeted B, was refused, fell back, and looped.
+        ///
+        /// Scripted honestly: the leg refuses B more times than [`ADOPTION_RETRIES`], so
+        /// the fallback is genuinely reached rather than short-circuited by a script that
+        /// relented first.
+        SwitchNeverAdoptedThenFallback,
+        /// **THE MEASURED `/new` SWITCH, on one connection** (2e-4c).
+        ///
+        /// The first resume — for the announced thread A — is answered populated and A's
+        /// captured turn stream replays, so this link is genuinely SUBSCRIBED to A. The
+        /// leg then broadcasts a `thread/started` for a SECOND thread, which is exactly
+        /// what the real app-server sends to every initialized connection when the
+        /// operator presses `/new`, and is the ONLY thing it sends a connection about the
+        /// new thread. The link must follow: re-target, re-resume on this same socket,
+        /// and start recording B.
+        ///
+        /// B's stream carries the SAME item and turn ids as A's, retargeted. That is
+        /// deliberate and it is what makes "zero cross-thread contamination" provable
+        /// rather than incidental: if the dedup key were not thread-namespaced, B's facts
+        /// would collide with A's and be silently dropped as duplicates.
+        SwitchToSecondThread,
         /// **The first resume goes unanswered and the thread is announced instead.**
         /// The announcement redirects the target and settles nothing, so the stale
         /// attach times out, the connection ends, and the reconnect asks under the
@@ -2495,6 +3448,34 @@ mod tests {
                     .ok()
                     .and_then(|v| v["params"]["item"]["type"].as_str().map(str::to_string))
                     != Some("userMessage".to_string())
+            })
+            .collect()
+    }
+
+    /// The captured turn's `userMessage` item — the one `capture_tail()` WITHHOLDS, so it
+    /// can only ever reach the store through a resume answer that describes the turn
+    /// finished. Read from `fixtures/codex/lifecycle.jsonl`'s own `item/completed`.
+    const LIFECYCLE_USER_ITEM: &str = "01a0127a-dbdd-7d11-b925-5bb0c2dac319";
+
+    /// A THIRD thread, for the two-switches-in-a-row case (round-2 P8).
+    const THIRD_THREAD: &str = "01a039a6-d67c-7bb1-9050-071265c77067";
+
+    /// The thread the `/new` switch moves TO. A second real-shaped thread id.
+    const SWITCHED_THREAD: &str = "01a0399e-7504-79f3-8740-233aa08ca259";
+
+    /// The captured turn stream retargeted onto `thread` — the same frames, the same item
+    /// and turn ids, a different `threadId`.
+    ///
+    /// A plain string substitution would be wrong (it would rewrite an id that merely
+    /// looked like the thread's), so the retarget is done on the parsed frame, at the one
+    /// key that names the thread.
+    fn capture_on(thread: &str) -> Vec<String> {
+        capture()
+            .into_iter()
+            .map(|line| {
+                let mut v: Value = serde_json::from_str(&line).expect("a captured frame");
+                v["params"]["threadId"] = json!(thread);
+                v.to_string()
             })
             .collect()
     }
@@ -2648,6 +3629,13 @@ mod tests {
         })
     }
 
+    /// Is this the SECOND ask about the fallback thread? It counts as a side effect, which
+    /// is why it is a named function rather than a block inside an `if` condition.
+    fn is_second_fallback_ask(seen: &mut usize) -> bool {
+        *seen += 1;
+        *seen == 2
+    }
+
     async fn serve_scripted(
         stream: tokio::net::UnixStream,
         nth: usize,
@@ -2665,6 +3653,12 @@ mod tests {
         // close on the second, which is what makes a retry-on-the-same-connection
         // observable before the reconnect that follows it.
         let mut resumes_answered = 0usize;
+        // Asks about a thread OTHER than the switch target. `resumes_answered` counts every
+        // reply the shared tail sends — refusals included — so it cannot be used to say
+        // "this is the second time the link asked about the fallback thread".
+        let mut fallback_asks = 0usize;
+        // Asks about the ORIGINAL thread, for the round-3 P7 script.
+        let mut a_asks = 0usize;
         while let Some(Ok(msg)) = ws.next().await {
             let Message::Text(text) = msg else { continue };
             let frame: Value = serde_json::from_str(&text)?;
@@ -2731,6 +3725,15 @@ mod tests {
                     let announces_late = matches!(answer, ResumeAnswer::AnnounceLate);
                     if announce_thread && nth == 0 && !announces_late {
                         ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
+                    }
+                    // P6c: the RECONNECT — which is carrying an ADOPTED target — is
+                    // announced a DIFFERENT thread as its first announcement.
+                    if matches!(
+                        answer,
+                        ResumeAnswer::ReconnectCarryingAdoptedThenAnnouncedAnother
+                    ) && nth > 0
+                    {
+                        ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
                     }
                 }
                 "thread/resume" => {
@@ -2818,6 +3821,338 @@ mod tests {
                             // The follow-up for B. Only now is B describable.
                             _ => two_turn_answer(id, &asked_about, false, false),
                         },
+                        // A follow-up recovery answer racing a switch announcement.
+                        ResumeAnswer::RecoveryCrossingASwitch => {
+                            match resumes_answered {
+                                // Attach MID-TURN: the turn is running, so its items carry
+                                // placeholder ids and contribute nothing.
+                                0 => {
+                                    let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    // Only the TAIL: the userMessage is withheld, standing
+                                    // for what finished before the subscription existed.
+                                    for line in capture_tail() {
+                                        ws.send(Message::Text(line)).await?;
+                                    }
+                                }
+                                // The FOLLOW-UP. Announce the switch FIRST, so the
+                                // announcement is in flight beside this answer, then answer
+                                // with the turn finished and its REAL ids.
+                                _ => {
+                                    ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
+                                    let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                }
+                            }
+                            continue;
+                        }
+                        // Announce the real thread, then drop before anything is adopted.
+                        ResumeAnswer::AnnouncedThenDroppedBeforeAdopting => {
+                            // Connection 0 has been ANNOUNCED the real thread at
+                            // `initialized`, so it asks about it — and the leg drops
+                            // WITHOUT answering. Nothing is adopted, and nothing will ever
+                            // announce that thread again.
+                            if nth == 0 {
+                                tokio::time::sleep(Duration::from_millis(120)).await;
+                                ws.close(None).await?;
+                                return Ok(());
+                            }
+                            // On the reconnect the stale hint is refused outright, so the
+                            // link can only get anywhere if the announcement replaced it in
+                            // the slot a reconnect reads.
+                            if asked_about == LIFECYCLE_THREAD {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                continue;
+                            }
+                            json!({"id": id, "error": {
+                                "code": -32001,
+                                "message": "resume refused: target thread is not bound to this session"
+                            }})
+                        }
+                        // Attach to A mid-turn; the follow-up is refused; B is announced
+                        // and adopted; A's recovery must still be paid afterwards.
+                        ResumeAnswer::SwitchWithACrossingRecoveryOwed => {
+                            if asked_about == SWITCHED_THREAD {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                continue;
+                            }
+                            a_asks += 1;
+                            match a_asks {
+                                // Attach MID-TURN: placeholder ids, tail only. The
+                                // userMessage is withheld — that is what must be recovered.
+                                1 => {
+                                    let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    for line in capture_tail() {
+                                        ws.send(Message::Text(line)).await?;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    ws.send(Message::Text(turn_terminal(
+                                        &asked_about,
+                                        LIFECYCLE_TURN,
+                                    )))
+                                    .await?;
+                                    continue;
+                                }
+                                // The FOLLOW-UP. Announce the switch, then answer it with
+                                // the measured not-ready error: the recovery never lands.
+                                2 => {
+                                    ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    resumes_answered += 1;
+                                    json!({"id": id, "error": {
+                                        "code": -32600,
+                                        "message":
+                                            format!("no rollout found for thread id {asked_about}")
+                                    }})
+                                }
+                                // The ON-DEMAND recovery, fired after B was adopted. NOW
+                                // the answer is complete, with A's real ids.
+                                _ => {
+                                    let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    // **And then a fresh B frame.** The link must still be
+                                    // on B: a recovery is a read of a thread it left, not
+                                    // a return to it. If the recovery re-bound the visit,
+                                    // the D4 filter drops this and the fact never lands.
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    ws.send(Message::Text(turn_terminal(SWITCHED_THREAD, TURN_B)))
+                                        .await?;
+                                    continue;
+                                }
+                            }
+                        }
+                        // Adopt A, announce B, then drop before the link can act.
+                        ResumeAnswer::CandidateAnnouncedThenTheLegDrops => {
+                            if nth == 0 && resumes_answered == 0 {
+                                // Attach MID-TURN so the link owes itself a follow-up. That
+                                // follow-up is what makes a resume OUTSTANDING when the
+                                // announcement lands — which is the window where a
+                                // candidate is held UN-APPLIED and would die with the
+                                // connection.
+                                let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_tail() {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                // Terminalize it: the link now fires its follow-up.
+                                tokio::time::sleep(Duration::from_millis(80)).await;
+                                ws.send(Message::Text(turn_terminal(&asked_about, LIFECYCLE_TURN)))
+                                    .await?;
+                                continue;
+                            }
+                            if nth == 0 {
+                                // The follow-up is OUTSTANDING. Announce, and drop before
+                                // answering it — so the candidate can never be applied on
+                                // this connection.
+                                ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                tokio::time::sleep(Duration::from_millis(120)).await;
+                                ws.close(None).await?;
+                                return Ok(());
+                            }
+                            if asked_about == SWITCHED_THREAD {
+                                // **B is never adopted.** The reconnect therefore needs a
+                                // FALLBACK — and the only place it could have been recorded
+                                // is when the candidate was NOTED, because the apply block
+                                // never ran on the connection that heard the announcement.
+                                json!({"id": id, "error": {
+                                    "code": -32001,
+                                    "message":
+                                        "resume refused: target thread is not bound to this session"
+                                }})
+                            } else {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                continue;
+                            }
+                        }
+                        // Adopt A and drop; then announce B to the RECONNECT and refuse it.
+                        ResumeAnswer::ReconnectCarryingAdoptedThenAnnouncedAnother => {
+                            if asked_about == SWITCHED_THREAD {
+                                json!({"id": id, "error": {
+                                    "code": -32001,
+                                    "message":
+                                        "resume refused: target thread is not bound to this session"
+                                }})
+                            } else {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                // Connection 0 adopts A and drops. Connection 1 is
+                                // announced B, chases it, falls back to A — and then drops
+                                // too, so connection 2's FIRST ask reveals what was
+                                // PUBLISHED across all of it (round-2 P6a).
+                                if nth <= 1 {
+                                    tokio::time::sleep(Duration::from_millis(120)).await;
+                                    ws.close(None).await?;
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                        }
+                        // Two announcements while the follow-up is in flight.
+                        ResumeAnswer::TwoSwitchesDuringRecovery => {
+                            match resumes_answered {
+                                0 => {
+                                    let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    for line in capture_tail() {
+                                        ws.send(Message::Text(line)).await?;
+                                    }
+                                }
+                                // The follow-up is now outstanding: announce B, then C,
+                                // and only then answer it.
+                                1 => {
+                                    ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    ws.send(Message::Text(announce(THIRD_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                }
+                                _ => {
+                                    let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    for line in capture_on(&asked_about) {
+                                        ws.send(Message::Text(line)).await?;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        // An unreadable answer arriving beside a switch announcement.
+                        ResumeAnswer::UnreadableAnswerBesideASwitch => {
+                            if asked_about == SWITCHED_THREAD {
+                                // On the reconnect the carried candidate is asked about and
+                                // answered properly, which is how its survival is observed.
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                continue;
+                            }
+                            // First connection: announce the switch, then answer the
+                            // outstanding resume with a shape this build refuses.
+                            ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            resumes_answered += 1;
+                            lifecycle_answer(id, &asked_about, |result| {
+                                result["thread"]["turns"][0]["status"] = json!("interrupted");
+                            })
+                        }
+                        // The switch, then B is refused for ever; A stays answerable.
+                        ResumeAnswer::SwitchNeverAdoptedThenFallback => {
+                            if asked_about == SWITCHED_THREAD {
+                                // B is never adopted. Not once.
+                                json!({"id": id, "error": {
+                                    "code": -32001,
+                                    "message":
+                                        "resume refused: target thread is not bound to this session"
+                                }})
+                            } else if is_second_fallback_ask(&mut fallback_asks) {
+                                // **The first FALLBACK ask gets the measured not-ready
+                                // error**, so the fallback needs a SECOND ask to complete.
+                                // That second ask is what reads `resume_target` again — and
+                                // therefore what exposes a redirect that quietly rewrote it
+                                // back to B while the fallback was in flight.
+                                json!({"id": id, "error": {
+                                    "code": -32600,
+                                    "message":
+                                        format!("no rollout found for thread id {asked_about}")
+                                }})
+                            } else {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                if resumes_answered == 1 {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                }
+                                continue;
+                            }
+                        }
+                        // The switch, then a few not-yet-adopted refusals of the new
+                        // thread, then a proper answer.
+                        ResumeAnswer::SwitchThenNotAdoptedYet => {
+                            if resumes_answered == 0 {
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                continue;
+                            }
+                            // The next three resumes of the NEW thread are refused as
+                            // not-yet-adopted; the fourth is answered.
+                            if resumes_answered <= 3 {
+                                resumes_answered += 1;
+                                json!({"id": id, "error": {
+                                    "code": -32001,
+                                    "message":
+                                        "resume refused: target thread is not bound to this session"
+                                }})
+                            } else {
+                                resumes_answered += 1;
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                for line in capture_on(&asked_about) {
+                                    ws.send(Message::Text(line)).await?;
+                                }
+                                continue;
+                            }
+                        }
+                        // The `/new` switch, all on ONE connection.
+                        ResumeAnswer::SwitchToSecondThread => {
+                            let answer = lifecycle_answer(id, &asked_about, |_| {});
+                            ws.send(Message::Text(answer.to_string())).await?;
+                            resumes_answered += 1;
+                            // Subscribe: replay the turn stream for whichever thread was
+                            // just resumed, so BOTH visits produce live facts.
+                            for line in capture_on(&asked_about) {
+                                ws.send(Message::Text(line)).await?;
+                            }
+                            if resumes_answered == 1 {
+                                // ...and then the operator presses `/new`. The broadcast
+                                // reaches this connection whatever it is subscribed to.
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                            }
+                            continue;
+                        }
                         // Announce first, THEN answer the now-superseded request.
                         ResumeAnswer::AnnounceThenAnswerStale => {
                             if resumes_answered == 0 {
@@ -2999,6 +4334,23 @@ mod tests {
         announce_thread: bool,
         settle: Duration,
     ) -> (Vec<protocol::event::Event>, usize, Vec<Value>, Vec<Value>) {
+        // **One scripted leg at a time, process-wide.**
+        //
+        // Each of these stands up a real unix-socket server and a real link that reconnects
+        // against it for the whole of its settle budget, holding sockets, tasks and a SQLite
+        // file open throughout. Run concurrently — which is what `cargo test` does by
+        // default — a dozen of them are a genuine resource load, and it lands on the rest of
+        // the workspace rather than on itself: the `apns`/`relay_sender` suites read the
+        // system trust store, and under that load the read intermittently fails with "no
+        // trust anchors available", failing tests that have nothing to do with any of this.
+        //
+        // Observed directly: `cargo test --workspace` failed with 29 unrelated failures on
+        // one run and passed clean on the next, while the same suites were green on a tree
+        // without these tests. Serializing caps the peak at one leg, which costs this
+        // module wall-clock time it already spends waiting anyway.
+        static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _serialized = ONE_AT_A_TIME.lock().await;
+
         let leg = ScriptedLeg::start(answer, announce_thread);
         let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
         let (daemon, _db) = linked_daemon(&session);
@@ -3138,8 +4490,19 @@ mod tests {
             ResumeAnswer::PartialItemsView,
             ResumeAnswer::ItemWithoutType,
         ] {
-            let (_, connections, resumes, _) =
-                drive(answer, None, true, Duration::from_secs(3)).await;
+            // **A policy refusal is now reported after a BOUNDED delay, not instantly**
+            // (round-1 P5). A followed switch re-targets off a broadcast and the broker
+            // adopts the new thread one round trip later, so a `-32001` for a thread that
+            // is simply "not adopted YET" is retried a few times before it is believed.
+            // The disposition is unchanged — end the connection and report loudly — but it
+            // now costs `ADOPTION_RETRIES * ADOPTION_RETRY_DELAY` first, so this budget
+            // covers three connections' worth of that instead of three instant refusals.
+            let budget = if matches!(answer, ResumeAnswer::Refused) {
+                4 * ADOPTION_RETRIES * ADOPTION_RETRY_DELAY
+            } else {
+                Duration::from_secs(3)
+            };
+            let (_, connections, resumes, _) = drive(answer, None, true, budget).await;
             assert!(
                 connections >= 3,
                 "{answer:?} must end its connection and reconnect, every time: \
@@ -3151,6 +4514,810 @@ mod tests {
                  once per connection: {resumes:?}"
             );
         }
+    }
+
+    /// **THE LINK FOLLOWS THE SWITCH** (2e-4c) — the whole deliverable, on one socket.
+    ///
+    /// Before this chunk the link bound once and never again: `bind_if_unbound` returned
+    /// early while bound, so a `thread/started` for a new thread was learned by nobody and
+    /// then dropped by the thread filter for naming a thread the link was not on. A link
+    /// watching thread A stayed on thread A for the life of the session while the operator
+    /// worked on B, recording nothing. This test is what fails if that returns.
+    ///
+    /// Four claims, and each is one of the spike's measurements:
+    ///
+    /// 1. **The announcement is the switch signal.** It is the only frame about B this
+    ///    connection receives, so the link must act on it or act on nothing.
+    /// 2. **The attach is re-targeted from `Attached`.** That is a resting state with no
+    ///    deadline; a re-arm that only fired from `Unbound` would leave the link blocked
+    ///    on a read for ever.
+    /// 3. **One connection, two subscriptions.** `thread/resume` ADDS a subscription
+    ///    rather than replacing one, so following the switch costs no reconnect. A
+    ///    `connections == 1` assertion is what proves the link did not simply die and come
+    ///    back — which is how this could pass while being completely broken.
+    /// 4. **Zero cross-thread contamination.** B's replayed stream carries A's very item
+    ///    and turn ids, so every fact is distinguishable only by its thread namespace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_link_follows_a_new_switch_on_the_same_connection() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::SwitchToSecondThread,
+            None,
+            true,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // CLAIM 2/3 — re-targeted, on the connection that was already attached.
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&LIFECYCLE_THREAD) && targets.contains(&SWITCHED_THREAD),
+            "the link must resume BOTH the original thread and the switched-to one: \
+             {targets:?}"
+        );
+        assert!(
+            targets.iter().position(|t| *t == LIFECYCLE_THREAD)
+                < targets.iter().position(|t| *t == SWITCHED_THREAD),
+            "it must resume the original FIRST and follow the switch afterwards: {targets:?}"
+        );
+        assert_eq!(
+            connections, 1,
+            "following a switch costs NO reconnect — a resume adds a subscription to the \
+             connection that already has one (measured). {connections} connections means \
+             the link died and recovered, which is not following a switch."
+        );
+
+        // CLAIM 1/4 — both threads produced facts, and every fact names exactly one of
+        // them. The ids are shared between the two streams, so this can only pass if the
+        // dedup key is thread-namespaced.
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        let from_a = ids
+            .iter()
+            .filter(|i| i.starts_with(LIFECYCLE_THREAD))
+            .count();
+        let from_b = ids
+            .iter()
+            .filter(|i| i.starts_with(SWITCHED_THREAD))
+            .count();
+        assert!(from_a > 0, "the original visit's facts must stand: {ids:?}");
+        assert!(
+            from_b > 0,
+            "the switched-to thread's turn must be OBSERVED, which is the entire point: \
+             {ids:?}"
+        );
+        assert_eq!(
+            from_a + from_b,
+            ids.len(),
+            "every recorded fact must be namespaced to one of the two session threads, \
+             and to no other: {ids:?}"
+        );
+        // A's timeline is INTACT: the switch retired a visit, it did not retract a fact.
+        assert!(
+            ids.iter()
+                .any(|i| i == &format!("{LIFECYCLE_THREAD}:turn:{LIFECYCLE_TURN}")),
+            "the pre-switch turn terminal must survive the switch: {ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .any(|i| i == &format!("{SWITCHED_THREAD}:turn:{LIFECYCLE_TURN}")),
+            "and the post-switch turn must be recorded under the NEW thread: {ids:?}"
+        );
+        // **The ANNOUNCEMENT ITSELF is a fact, and deferring the bind must not lose it.**
+        //
+        // `thread/started` carries the whole Thread object and mints the new thread's
+        // session-identity row. Holding it as a candidate means the D4 filter — still on
+        // the OLD thread when the frame arrives — would drop it, so it is replayed through
+        // the ordinary ingest path once the visit moves.
+        //
+        // The KEY's presence proves nothing on its own: the resume answer that follows
+        // mints the same first-wins key. The recorded PAYLOAD is what tells the two apart —
+        // `announce()` carries `path: "/r/t.jsonl"`, the committed resume answer carries
+        // the fixture's own rollout path, and first-wins means the store holds whichever
+        // arrived first. Without the replay an unresumable switch would leave the thread
+        // with no identity row at all.
+        let identity = events
+            .iter()
+            .find(|e| {
+                e.source_event_id.as_deref()
+                    == Some(format!("{SWITCHED_THREAD}:thread_started").as_str())
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the switch announcement must be RECORDED for the thread it names: \
+                     {ids:?}"
+                )
+            });
+        assert_eq!(
+            identity.payload["rollout_path"].as_str(),
+            Some("/r/t.jsonl"),
+            "the new thread's identity row must come from the ANNOUNCEMENT, which arrives \
+             first — not from the later resume answer, whose presence would mean the \
+             replay is missing"
+        );
+    }
+
+    /// **AN IN-FLIGHT RECOVERY IS CONSUMED BEFORE THE SWITCH IS FOLLOWED** (round-1 P6).
+    ///
+    /// The defect this closes: the link attached mid-turn, so it owes itself one follow-up
+    /// resume — the only thing that can ever name the items which finished before it
+    /// subscribed. If a `thread/started` for a new thread re-points the visit the moment it
+    /// arrives, that outstanding request is marked superseded and its answer is received,
+    /// logged and THROWN AWAY. Those items are then unreachable from both directions for
+    /// ever: no live frame carries them, and the link will never ask about that thread
+    /// again.
+    ///
+    /// So the announcement is held as a CANDIDATE and applied only after the loop has
+    /// settled the answer in flight.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recovery_answer_crossing_a_switch_is_recorded_before_the_link_follows() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::RecoveryCrossingASwitch,
+            None,
+            true,
+            Duration::from_secs(6),
+        )
+        .await;
+
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        // The withheld userMessage — the fact ONLY the crossing answer could carry.
+        let recovered = format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}");
+        assert!(
+            ids.contains(&recovered),
+            "the recovery answer that crossed the switch boundary must be RECORDED before \
+             the link follows; without it the item that finished before this link \
+             subscribed is lost for ever. ids={ids:?} resumes={resumes:?}"
+        );
+        // ...and the link did follow, on the same connection.
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&SWITCHED_THREAD),
+            "the switch must still be followed once the recovery is settled: {targets:?}"
+        );
+        assert_eq!(connections, 1, "and without a reconnect");
+    }
+
+    /// **A NOT-YET-ADOPTED SWITCH TARGET IS RETRIED, NOT ABANDONED** (round-1 P5).
+    ///
+    /// The link re-targets off a `thread/started` BROADCAST; only the broker's own
+    /// correlated verification of that creation makes the thread resumable. In between, a
+    /// `thread/resume` naming it is policy-refused — an ordinary, short window that must
+    /// not be read as "this answer is unreadable, end the connection". Doing so reconnects,
+    /// asks the identical question and is refused again: a loop on every single switch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_switch_target_the_broker_has_not_adopted_yet_is_retried_in_place() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::SwitchThenNotAdoptedYet,
+            None,
+            true,
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert_eq!(
+            connections, 1,
+            "a not-yet-adopted refusal must be retried ON THIS CONNECTION; a reconnect \
+             would ask the same question and be refused again — a loop on every switch"
+        );
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.iter().filter(|t| **t == SWITCHED_THREAD).count() >= 3,
+            "the link must keep asking about the new thread across the refusals: {targets:?}"
+        );
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        assert!(
+            ids.iter().any(|i| i.starts_with(SWITCHED_THREAD)),
+            "and must end up ATTACHED to it once the broker adopts it: {ids:?}"
+        );
+    }
+
+    /// **A HANDSHAKE ANNOUNCEMENT SUPERSEDES THE CARRIED HINT** (closing S8).
+    ///
+    /// A hint is the registration's claim; a `thread/started` is the wire's own evidence.
+    /// The announcement is broadcast ONCE and never repeated, so if it does not replace the
+    /// hint in the slot a reconnect reads, a connection that dies before adopting anything
+    /// comes back asking about the thread the registration guessed — for ever.
+    ///
+    /// Written even when the local target already agrees, because it is the SLOT that
+    /// survives the connection, not the local.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_announcement_supersedes_the_carried_hint_across_a_reconnect() {
+        let (_, connections, resumes, _) = drive(
+            ResumeAnswer::AnnouncedThenDroppedBeforeAdopting,
+            Some("th_STALE_HINT"),
+            true,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(connections >= 2, "the leg drops, so there is a reconnect");
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        // Connection 0 asked about the announced thread and was never answered; the
+        // reconnect gets no announcement at all. So every target from the reconnect onward
+        // comes from the carried slots, and it must be the ANNOUNCED thread rather than the
+        // registration's stale claim.
+        // The hint is asked ONCE, legitimately: on connection 0, before the announcement
+        // that corrects it has arrived. Everything after that must be the announced thread.
+        let first_announced = targets
+            .iter()
+            .position(|t| *t == LIFECYCLE_THREAD)
+            .unwrap_or_else(|| panic!("the announced thread must be asked about: {targets:?}"));
+        assert!(
+            !targets[first_announced..].contains(&"th_STALE_HINT"),
+            "once the wire has named the thread, the registration's stale claim must never \
+             be asked about again — least of all by a reconnect, which gets no announcement \
+             to correct it a second time: {targets:?}"
+        );
+        assert_eq!(
+            targets.last(),
+            Some(&LIFECYCLE_THREAD),
+            "the reconnect must resume the ANNOUNCED thread: {targets:?}"
+        );
+    }
+
+    /// **A CROSSING RECOVERY IS PAID AFTER THE SWITCH, ON DEMAND** (round-3 P7).
+    ///
+    /// The link attaches to A mid-turn, so A owes it a follow-up — the items that finished
+    /// before the subscription existed are reachable from nowhere else. The follow-up goes
+    /// out, a switch is announced, and the follow-up comes back NOT-READY: the recovery
+    /// never lands. The link follows the switch and adopts B.
+    ///
+    /// Round-2 stopped there, and the honest reading of that is that A's history was simply
+    /// lost — the P8 doctrine says "retired threads are recovered on demand", and nothing
+    /// was demanding. Now the obligation outlives the switch and the connection, and is paid
+    /// once after B is adopted.
+    ///
+    /// The assertion is the WITHHELD item, not a count: `capture_tail()` omits the
+    /// userMessage precisely so that only a completed answer about A can supply it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recovery_owed_on_the_thread_left_behind_is_paid_after_the_switch() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::SwitchWithACrossingRecoveryOwed,
+            None,
+            true,
+            Duration::from_secs(14),
+        )
+        .await;
+
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        // B was adopted...
+        assert!(
+            targets.contains(&SWITCHED_THREAD),
+            "the switch must be followed: {targets:?}"
+        );
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        assert!(
+            ids.iter().any(|i| i.starts_with(SWITCHED_THREAD)),
+            "and its turn observed: {ids:?}"
+        );
+        // ...and A was asked about AGAIN, after the switch.
+        let first_b = targets
+            .iter()
+            .position(|t| *t == SWITCHED_THREAD)
+            .expect("B is asked about");
+        assert!(
+            targets[first_b..].contains(&LIFECYCLE_THREAD),
+            "the debt owed on the thread left behind must be paid AFTER the switch — \
+             nothing else will ever ask about it: {targets:?}"
+        );
+        // **The withheld item is there.** Only a completed answer about A can supply it:
+        // no live frame carries it (it finished before the subscription existed) and the
+        // mid-turn answer reported placeholder ids.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "A's pre-subscription item must be RECOVERED, not lost with the switch: {ids:?}"
+        );
+        // **The link is STILL ON B.** A recovery reads a thread the link has left; it does
+        // not return to it. The leg sends a fresh B terminal after answering the recovery,
+        // and it can only be recorded if the visit is still on B — a recovery that re-bound
+        // the visit would have the D4 filter drop it.
+        assert!(
+            ids.contains(&format!("{SWITCHED_THREAD}:turn:{TURN_B}")),
+            "after paying the recovery the link must still be on B, recording B's frames: \
+             {ids:?}"
+        );
+        // And the recovery cost no reconnect: it is an on-demand ask on the live link.
+        assert_eq!(connections, 1, "paid on the connection that owes it");
+        // It is paid ONCE. A second ask would be a loop over a thread nobody is on.
+        assert_eq!(
+            targets[first_b..]
+                .iter()
+                .filter(|t| **t == LIFECYCLE_THREAD)
+                .count(),
+            1,
+            "the debt is paid exactly once: {targets:?}"
+        );
+    }
+
+    /// **A CANDIDATE OUTLIVES THE CONNECTION THAT HEARD IT** (round-2 P6b).
+    ///
+    /// The link adopts A; the leg announces B and drops before the link's next pass can
+    /// apply the candidate. `thread/started` is broadcast once and never replayed, so if
+    /// the candidate died with that connection nothing would ever mention B again and the
+    /// link would sit on A while the user works in B.
+    ///
+    /// Persisting the chase only at APPLY time was not enough, and this is the window that
+    /// proved it: a candidate is held un-applied for as long as a resume is outstanding.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_survives_the_connection_that_heard_it() {
+        let (_, connections, resumes, _) = drive(
+            ResumeAnswer::CandidateAnnouncedThenTheLegDrops,
+            None,
+            true,
+            Duration::from_secs(12),
+        )
+        .await;
+        assert!(connections >= 2, "the leg drops, so there is a reconnect");
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&SWITCHED_THREAD),
+            "the reconnect must resume the thread announced on the connection that died — \
+             nothing will ever announce it again: {targets:?}"
+        );
+        let first_b = targets
+            .iter()
+            .position(|t| *t == SWITCHED_THREAD)
+            .expect("B is asked about");
+        assert!(
+            targets[..first_b].contains(&LIFECYCLE_THREAD),
+            "and only after having adopted the old one: {targets:?}"
+        );
+        // **The candidate was never APPLIED on the connection that heard it.** The
+        // announcement lands while the link's follow-up resume is outstanding, and the
+        // connection dies before that answer arrives — so the apply block never runs. A
+        // chase persisted only at apply time is lost exactly here, and the link would sit
+        // on the old thread for the rest of the session.
+        // **And the FALLBACK was recorded when the candidate was NOTED.** B is refused for
+        // ever, so the reconnect can only get back to the thread it adopted if a fallback
+        // was carried alongside the candidate. The apply block never ran on the connection
+        // that heard the announcement, so note-time is the only place it could come from.
+        assert!(
+            targets[first_b..].contains(&LIFECYCLE_THREAD),
+            "an un-applied candidate must carry its FALLBACK too, or a never-adopted \
+             switch strands the link: {targets:?}"
+        );
+        assert_eq!(
+            connections, 2,
+            "and the return trip is a FALLBACK on connection 2, not another reconnect: \
+             {targets:?}"
+        );
+    }
+
+    /// **A RECONNECT CARRYING AN ADOPTED TARGET TREATS AN ANNOUNCEMENT AS A CANDIDATE**
+    /// (round-2 P6c).
+    ///
+    /// Uniformity: an announcement is never an instant repoint. On a fresh connection the
+    /// link is technically unbound, but a target it ADOPTED is not a guess — it is a thread
+    /// this link demonstrably could read. Binding an announced thread instantly there would
+    /// discard it in favour of one the broker may never adopt, with no way back.
+    ///
+    /// (A registration HINT is deliberately different: it is a claim, the announcement is
+    /// the wire's own evidence, and evidence beats a claim at once. That case is covered by
+    /// `an_announcement_redirects_the_target_and_never_settles_the_attach`.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reconnect_carrying_an_adopted_target_treats_an_announcement_as_a_candidate() {
+        let (_, connections, resumes, _) = drive(
+            ResumeAnswer::ReconnectCarryingAdoptedThenAnnouncedAnother,
+            None,
+            true,
+            Duration::from_secs(14),
+        )
+        .await;
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&SWITCHED_THREAD),
+            "the announced thread must be chased: {targets:?}"
+        );
+        // ...and because it is never adopted, the link must be able to come BACK to the
+        // thread it had adopted. That return trip is only possible if the announcement was
+        // treated as a candidate with a fallback rather than as an instant repoint.
+        let first_b = targets
+            .iter()
+            .position(|t| *t == SWITCHED_THREAD)
+            .expect("B is asked about");
+        assert!(
+            targets[first_b..].contains(&LIFECYCLE_THREAD),
+            "an announcement that is never adopted must leave the link able to return to \
+             the thread it had ADOPTED; an instant repoint would have discarded it: \
+             {targets:?}"
+        );
+        // **The return trip is a FALLBACK, not a reconnect** — which is what isolates this
+        // to the candidate treatment. An instant repoint records no fallback at all, so the
+        // link can only get back to A by exhausting its budget, taking the loud
+        // unreadable-answer path, and reconnecting onto its published target. Counting
+        // connections is what tells those two stories apart.
+        assert_eq!(
+            connections, 3,
+            "conn 0 adopts A, conn 1 chases B and FALLS BACK to A on the same connection, \
+             conn 2 verifies what was published. A fourth connection means the link had to \
+             reconnect to reach A, i.e. no fallback was ever recorded: {targets:?}"
+        );
+        // **And what was PUBLISHED is the ADOPTED thread, never the chased one** (P6a).
+        // Connection 2 starts from the published target, so its first ask is the evidence.
+        let last_b = targets
+            .iter()
+            .rposition(|t| *t == SWITCHED_THREAD)
+            .expect("B is asked about");
+        assert_eq!(
+            targets.get(last_b + 1),
+            Some(&LIFECYCLE_THREAD),
+            "after the chase failed, the next connection must start from the thread this \
+             link ADOPTED — publishing the chased thread would hand a reconnect a target \
+             the broker never adopted, with the readable one discarded: {targets:?}"
+        );
+    }
+
+    /// **TWO SWITCHES IN A ROW: B's FACT SURVIVES, C WINS THE SUBSCRIPTION** (round-2 P8).
+    ///
+    /// The candidate slot holds ONE thread, so a second `/new` while a recovery is
+    /// outstanding replaces the first. The question is what that costs, and the
+    /// measurements answer it: a link that never subscribed to B receives **nothing about B
+    /// but its announcement** — `turn/*` and `item/*` reach only the resume-subscribed
+    /// connection — and B's history is not lost either, because a retired thread stays
+    /// fully resumable and can be recovered on demand.
+    ///
+    /// So the announcement's fact is recorded the moment it arrives (it is verified
+    /// broadcast content from this session's own app-server), and only the SUBSCRIPTION
+    /// chases the latest candidate. The link subscribes to where the user IS; queueing
+    /// candidates would chase threads the user has already left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_switches_in_a_row_keep_both_facts_and_chase_the_latest() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::TwoSwitchesDuringRecovery,
+            None,
+            true,
+            Duration::from_secs(8),
+        )
+        .await;
+
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        // **B's announcement fact is there even though B was never subscribed to.**
+        assert!(
+            ids.contains(&format!("{SWITCHED_THREAD}:thread_started")),
+            "the REPLACED candidate's announcement must still be recorded — it is the only \
+             thing a dropped candidate could otherwise cost: {ids:?}"
+        );
+        assert!(
+            ids.contains(&format!("{THIRD_THREAD}:thread_started")),
+            "and so must the latest one's: {ids:?}"
+        );
+        // **The subscription chased C, not B.**
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&THIRD_THREAD),
+            "the link must chase the LATEST announcement — where the user is: {targets:?}"
+        );
+        assert!(
+            !targets.contains(&SWITCHED_THREAD),
+            "and must not chase the one the user had already left: {targets:?}"
+        );
+        // The recovery that was in flight when the switches landed still got recorded.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "the in-flight recovery must survive TWO announcements, not just one: {ids:?}"
+        );
+        assert_eq!(connections, 1, "and none of it costs a reconnect");
+    }
+
+    /// **AN UNREADABLE ANSWER STILL ENDS THE LEG, AND THE CANDIDATE SURVIVES** (round-2
+    /// P7 + P6b).
+    ///
+    /// The `Refused` bail used to sit at the very bottom of the loop, after the candidate
+    /// block — so a switch announcement arriving on the same pass applied a candidate,
+    /// re-armed the attach, and left `Refused` behind: the loud stop that an unreadable
+    /// answer is supposed to produce was SUPPRESSED by an unrelated event.
+    ///
+    /// Moving the bail earlier does not lose the candidate, and that is the other half of
+    /// this test: `thread/started` is broadcast once and never replayed, so a candidate that
+    /// died with the connection could never be rediscovered. It is carried across the
+    /// reconnect and asked about there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_answer_ends_the_leg_and_the_candidate_survives_the_reconnect() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::UnreadableAnswerBesideASwitch,
+            None,
+            true,
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert!(
+            connections >= 2,
+            "an answer this build cannot read must END the leg, even when a switch \
+             announcement arrives on the same pass: {connections} connections"
+        );
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        assert!(
+            targets.contains(&SWITCHED_THREAD),
+            "the candidate must SURVIVE the reconnect — a thread/started is broadcast once \
+             and never replayed, so a candidate lost with its connection is lost for \
+             ever: {targets:?}"
+        );
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        assert!(
+            ids.iter().any(|i| i.starts_with(SWITCHED_THREAD)),
+            "and the link must end up observing it: {ids:?}"
+        );
+    }
+
+    /// **THE FALLBACK COMPLETES** (round-2 P5).
+    ///
+    /// A followed switch whose target the broker never adopts must not strand the session.
+    /// The link spends its adoption budget on B, gives up, and goes back to A — and the
+    /// going-back has to WORK. It could not before: the bound-target redirect fires on the
+    /// pass after the fallback, rewrites the target from A back to B (the visit is on B),
+    /// and marks the outstanding A-request superseded, so its answer is discarded and the
+    /// cycle repeats for ever. The redirect is suppressed for the duration of a fallback.
+    ///
+    /// Scripted with B refused FOR EVER, so the fallback is genuinely reached — a script
+    /// that relented after a few refusals would let this pass without the fallback ever
+    /// running, which is precisely how the round-1 version masked the defect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_switch_target_that_is_never_adopted_falls_back_and_the_fallback_completes() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::SwitchNeverAdoptedThenFallback,
+            None,
+            true,
+            // Long enough to see what the link asks about AFTER the fallback's first ask
+            // is answered not-ready — which is the window a fallback that failed to bring
+            // the VISIT back would show up in — and no longer. These scripted legs hold
+            // real sockets open for their whole budget, and an over-generous one is not
+            // free: it starves other suites in the same `cargo test --workspace` run of
+            // file descriptors, which surfaces as unrelated tests failing to read the
+            // system trust store.
+            Duration::from_secs(15),
+        )
+        .await;
+
+        let targets: Vec<&str> = resumes
+            .iter()
+            .filter_map(|r| r["params"]["threadId"].as_str())
+            .collect();
+        // The budget was genuinely spent on B...
+        assert!(
+            targets.iter().filter(|t| **t == SWITCHED_THREAD).count() > ADOPTION_RETRIES as usize,
+            "the adoption budget must be spent before the fallback — otherwise the \
+             fallback is never reached and this test proves nothing: {targets:?}"
+        );
+        // ...and then the link went BACK to the thread it could read.
+        //
+        // Anchored on the FIRST fallback, not the last B. Anchoring on the last B was
+        // self-defeating: a retarget back to B simply moved the anchor, so the very defect
+        // this asserts against slid out of the window it was measured in.
+        let first_b = targets
+            .iter()
+            .position(|t| *t == SWITCHED_THREAD)
+            .expect("B was asked about");
+        let first_fallback = targets[first_b..]
+            .iter()
+            .position(|t| *t == LIFECYCLE_THREAD)
+            .map(|i| first_b + i)
+            .unwrap_or_else(|| {
+                panic!(
+                    "after the budget is spent the link must fall back to the thread it \
+                     could read: {targets:?}"
+                )
+            });
+        // **And the fallback COMPLETED**: from the first fallback onward, the link never
+        // went back to chasing B. A single retarget to B here means the redirect was not
+        // suppressed, and the fallback can never structurally complete — it would retarget
+        // B, be refused, fall back, and loop for ever.
+        assert!(
+            !targets[first_fallback..].contains(&SWITCHED_THREAD),
+            "once falling back, the redirect must stay suppressed; a retarget to B after \
+             the fallback began means the fallback cannot complete: {targets:?}"
+        );
+        assert_eq!(connections, 1, "all of it on one connection");
+        // A's facts are there, and nothing was filed under the never-adopted B beyond its
+        // announcement (which is verified broadcast content).
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        assert!(
+            ids.iter().any(|i| i.starts_with(LIFECYCLE_THREAD)),
+            "the fallback thread's facts must be recorded: {ids:?}"
+        );
+        let from_b: Vec<&String> = ids
+            .iter()
+            .filter(|i| i.starts_with(SWITCHED_THREAD))
+            .collect();
+        assert_eq!(
+            from_b,
+            vec![&format!("{SWITCHED_THREAD}:thread_started")],
+            "a thread this link never subscribed to can contribute exactly its \
+             announcement and nothing else"
+        );
+    }
+
+    /// **A DEBT IS KEYED BY (THREAD, TURN)** (round-1 P7).
+    ///
+    /// Turn ids are unique per thread, not per session, and one connection now carries more
+    /// than one thread's turns. A bare turn-id key lets a resume of thread B settle a debt
+    /// owed on thread A — marking A's unrecoverable items recovered when nothing recovered
+    /// them.
+    #[test]
+    fn a_debt_is_scoped_to_its_thread() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000000".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = Connection {
+            daemon: &daemon,
+            session: &session,
+            adapter: &mut adapter,
+            visit: Visit {
+                generation: 1,
+                upstream_epoch: 0,
+                thread_id: Some(LIFECYCLE_THREAD.to_string()),
+            },
+            filtered: 0,
+            next_id: 1,
+            amend: &mut amend,
+            debts: std::collections::BTreeMap::new(),
+            unadopted_retries: 0,
+            fallback_due: false,
+            switch_candidate: None,
+            carried_target: None,
+            carried: Arc::new(Mutex::new(Carried::default())),
+            adopted_thread: None,
+        };
+        // The SAME turn id, owed on two different threads.
+        let turn = "01a0-turn".to_string();
+        conn.debts
+            .insert((LIFECYCLE_THREAD.to_string(), turn.clone()), TurnDebt::Owed);
+        conn.debts
+            .insert((SWITCHED_THREAD.to_string(), turn.clone()), TurnDebt::Owed);
+
+        // While on thread A, only A's debt is visible...
+        assert!(conn.follow_up_owed(), "A owes a follow-up");
+        // ...and a request naming A settles ONLY A's.
+        conn.launch_follow_up(LIFECYCLE_THREAD);
+        assert_eq!(
+            conn.debts.get(&(SWITCHED_THREAD.to_string(), turn.clone())),
+            Some(&TurnDebt::Owed),
+            "a resume of A must NOT settle a debt owed on B — nothing recovered it"
+        );
+        assert_eq!(
+            conn.debts
+                .get(&(LIFECYCLE_THREAD.to_string(), turn.clone())),
+            Some(&TurnDebt::Settled)
+        );
+        assert!(!conn.follow_up_owed(), "A is settled");
+
+        // Follow the switch: now B's debt is the visible one.
+        conn.switch_candidate = Some(SWITCHED_THREAD.to_string());
+        assert_eq!(
+            conn.apply_switch_candidate().as_deref(),
+            Some(LIFECYCLE_THREAD)
+        );
+        assert!(
+            conn.follow_up_owed(),
+            "on B, B's debt is owed and must still be payable"
+        );
+    }
+
+    /// A re-announcement of the thread the link is ALREADY on is not a switch.
+    ///
+    /// It is not a shape the wire has shown — the app-server broadcasts one
+    /// `thread/started` per creation — but reading one as a switch would retire a live
+    /// visit and bump a generation for nothing, so the idempotence is pinned rather than
+    /// assumed.
+    #[test]
+    fn a_re_announcement_of_the_bound_thread_is_not_a_switch() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000000".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = Connection {
+            daemon: &daemon,
+            session: &session,
+            adapter: &mut adapter,
+            visit: Visit {
+                generation: 7,
+                upstream_epoch: 0,
+                thread_id: None,
+            },
+            filtered: 0,
+            next_id: 1,
+            amend: &mut amend,
+            debts: std::collections::BTreeMap::new(),
+            unadopted_retries: 0,
+            fallback_due: false,
+            switch_candidate: None,
+            carried_target: None,
+            carried: Arc::new(Mutex::new(Carried::default())),
+            adopted_thread: None,
+        };
+        let first: Value = serde_json::from_str(&announce(LIFECYCLE_THREAD)).unwrap();
+        conn.note_switch_candidate(&first);
+        assert_eq!(
+            conn.visit.thread_id.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "the FIRST announcement binds immediately — there is no outstanding recovery \
+             to lose and no previous thread to fall back to"
+        );
+        assert_eq!(
+            conn.visit.generation, 7,
+            "a bind does not bump the generation"
+        );
+        conn.note_switch_candidate(&first);
+        assert!(
+            conn.switch_candidate.is_none(),
+            "a re-announcement of the bound thread is not a candidate"
+        );
+        assert_eq!(conn.visit.generation, 7, "and still does not");
+        assert_eq!(conn.visit.thread_id.as_deref(), Some(LIFECYCLE_THREAD));
+
+        // A DIFFERENT thread is a switch — but it is HELD as a candidate first
+        // (round-1 P5/P6), so nothing about the visit moves until the loop applies it.
+        let second: Value = serde_json::from_str(&announce(SWITCHED_THREAD)).unwrap();
+        conn.note_switch_candidate(&second);
+        assert_eq!(
+            conn.visit.thread_id.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "a candidate must NOT re-point the visit: an outstanding recovery for the \
+             current thread would be thrown away, and the new thread may never be adopted"
+        );
+        assert_eq!(conn.visit.generation, 7, "nor bump the generation");
+        assert_eq!(
+            conn.apply_switch_candidate().as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "applying it names what it retired"
+        );
+        assert_eq!(
+            conn.visit.generation, 8,
+            "a switch retires the visit — D4: a generation identifies a VISIT"
+        );
+        assert_eq!(conn.visit.thread_id.as_deref(), Some(SWITCHED_THREAD));
     }
 
     /// **A registration hint targets a resume and binds nothing.**

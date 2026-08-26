@@ -1,0 +1,586 @@
+{
+  "capture": "codex-cli 0.147.0, one TUI session, /model driven four times",
+  "thread_settings_updates": [
+    {
+      "id": 23,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": null,
+        "effort": null,
+        "model": "gpt-5.6-terra",
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    },
+    {
+      "id": 24,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": null,
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": null,
+        "effort": "medium",
+        "model": null,
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    },
+    {
+      "id": 26,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.4",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": null,
+        "effort": null,
+        "model": "gpt-5.4",
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    },
+    {
+      "id": 27,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.4",
+            "reasoning_effort": "high"
+          }
+        },
+        "cwd": null,
+        "effort": "high",
+        "model": null,
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    },
+    {
+      "id": 29,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "high"
+          }
+        },
+        "cwd": null,
+        "effort": null,
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    },
+    {
+      "id": 30,
+      "method": "thread/settings/update",
+      "params": {
+        "approvalPolicy": null,
+        "approvalsReviewer": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": null,
+        "effort": "medium",
+        "model": null,
+        "multiAgentMode": null,
+        "permissions": null,
+        "personality": null,
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      }
+    }
+  ],
+  "turn_starts": [
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": null,
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word alpha and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 48
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": null,
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word bravo and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399e-7504-79f3-8740-233aa08ca259"
+      },
+      "seq": 94
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": null,
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word charlie and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399e-7504-79f3-8740-233aa08ca259"
+      },
+      "seq": 120
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": null,
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word delta and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 198
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": null
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": null,
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word echo and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 237
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "medium",
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word foxtrot and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-terra",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 277
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.4",
+            "reasoning_effort": "high"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "high",
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word golf and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.4",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": "pragmatic",
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 317
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "medium",
+        "environments": null,
+        "input": [
+          {
+            "text": "Reply with the single word hotel and nothing else.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a0399c-d0e3-7642-ab2b-4534b81888fb"
+      },
+      "seq": 371
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "medium",
+        "environments": null,
+        "input": [
+          {
+            "text": "Run the shell command: echo hello. Use your shell tool.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a039a7-4d1a-70d2-9b23-1a6538cf7ff1"
+      },
+      "seq": 460
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "medium",
+        "environments": null,
+        "input": [
+          {
+            "text": "Create a file /work/tmp/probe1.txt containing the word one. Use your shell tool.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a039a7-4d1a-70d2-9b23-1a6538cf7ff1"
+      },
+      "seq": 489
+    },
+    {
+      "params": {
+        "additionalContext": null,
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "clientUserMessageId": null,
+        "collaborationMode": {
+          "mode": "default",
+          "settings": {
+            "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.\n",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "medium"
+          }
+        },
+        "cwd": "/work/proj",
+        "effort": "medium",
+        "environments": null,
+        "input": [
+          {
+            "text": "Create a file /work/tmp/probe2.txt containing the word two. Use your shell tool.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "model": "gpt-5.6-luna",
+        "multiAgentMode": null,
+        "outputSchema": null,
+        "permissions": null,
+        "personality": null,
+        "responsesapiClientMetadata": null,
+        "runtimeWorkspaceRoots": [
+          "/work/proj"
+        ],
+        "sandboxPolicy": null,
+        "summary": null,
+        "threadId": "01a039a9-50f8-7793-80dc-8562e268fc86"
+      },
+      "seq": 543
+    }
+  ]
+}

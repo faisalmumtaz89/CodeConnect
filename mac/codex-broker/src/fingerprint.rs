@@ -497,48 +497,258 @@ fn captured_collaboration_mode() -> &'static Value {
     })
 }
 
-/// `collaborationMode`: JSON `null`, or **byte-for-byte the captured value**.
+/// The captured `collaborationMode.settings.developer_instructions` — the instruction
+/// channel itself, sourced from the same committed fixture.
+fn captured_developer_instructions() -> &'static str {
+    static CAPTURED: OnceLock<String> = OnceLock::new();
+    CAPTURED
+        .get_or_init(|| {
+            let di = captured_collaboration_mode()["settings"]["developer_instructions"]
+                .as_str()
+                .expect(
+                    "the captured turn/start fixture must carry a STRING \
+                     collaborationMode.settings.developer_instructions",
+                )
+                .to_string();
+            assert!(
+                !di.is_empty(),
+                "the captured developer_instructions must be non-empty"
+            );
+            di
+        })
+        .as_str()
+}
+
+/// The captured `collaborationMode.mode`.
+fn captured_mode() -> &'static str {
+    static CAPTURED: OnceLock<String> = OnceLock::new();
+    CAPTURED
+        .get_or_init(|| {
+            captured_collaboration_mode()["mode"]
+                .as_str()
+                .expect("the captured collaborationMode must carry a STRING mode")
+                .to_string()
+        })
+        .as_str()
+}
+
+/// The three `settings` keys the capture carries, in sorted order. The SET is pinned: a
+/// fourth key is an uncaptured channel and refuses.
+const COLLABORATION_SETTINGS_KEYS: [&str; 3] =
+    ["developer_instructions", "model", "reasoning_effort"];
+
+/// `collaborationMode`: JSON `null`, or the measured Default-mode shape.
 ///
-/// MEASURED: the value is identical across two independent live runs of the real codex
-/// 0.147 `--remote` TUI, and it carries `settings.developer_instructions` — i.e. it is an
-/// **instruction channel**, not a UX knob: whatever text sits there is prepended to the
-/// model's developer instructions for the turn. A shape-class check ("null or an object")
-/// therefore proves nothing at all; only exact equality does.
+/// # The 2e-4c re-grounding (A15)
 ///
-/// ## LOUD CONSEQUENCE — this deliberately pins the broker to the captured client build
+/// 2e-4a pinned this field to **byte-for-byte** the captured value. That rule was correct
+/// for what 2e-4a had measured (one model, two runs) and it did exactly what it was
+/// designed to do: the moment a user touched `/model`, turns refused. A13 named that
+/// refusal "the designed 2e-4c re-grounding trigger". This is that re-grounding, and it is
+/// driven by a capture that separates the field's parts rather than by an argument.
 ///
-/// The expected value is one specific client build's Default-mode instruction blob. Two
-/// perfectly innocent events will surface as a REFUSAL here:
+/// MEASURED (2e-4c spike, codex-cli 0.147.0, ELEVEN real `turn/start` frames across
+/// **three** models — `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.4` — and two reasoning
+/// efforts, plus the two independent 2e-4a runs a week earlier on a different sandbox):
+///
+/// | part | behaviour | rule |
+/// |---|---|---|
+/// | `mode` | `"default"` on all 11 | **exact** |
+/// | `settings` key set | exactly the three below on all 11 | **exact set** |
+/// | `settings.developer_instructions` | BYTE-IDENTICAL on all 11 (sha256 `3e7e1681…`, 925 bytes) — *including across the 2e-4a capture* | **exact** |
+/// | `settings.model` | varied: `gpt-5.6-luna` → `gpt-5.6-terra` → `gpt-5.4` | non-empty **string** |
+/// | `settings.reasoning_effort` | varied: `null` → `"medium"` → `"high"` | `null` or non-empty **string** |
+///
+/// The split is not a compromise, it is what the measurement showed the field to BE. The
+/// **effect** channel is `developer_instructions`: whatever text sits there is prepended to
+/// the model's developer instructions for the turn, so it is the only part a policy broker
+/// has any business proving, and it stays pinned exactly. `model` and `reasoning_effort`
+/// select *which model answers and how hard it thinks* — the same class as the top-level
+/// `model` / `effort` params this module has always left **ungated** (see the module
+/// header's "Deliberately NOT gated" list). Pinning them here while leaving their
+/// top-level twins free would have been an incoherence, not a defence.
+///
+/// Deliberately NOT narrowed to a model ALLOWLIST. The picker offers six models this
+/// capture did not exercise; a membership list would refuse `gpt-5.6-sol` — the picker's
+/// own *default* — on no evidence, while the top-level `model` param carrying the identical
+/// string forwards freely. Type plus non-emptiness is the honest boundary.
+///
+/// ## LOUD CONSEQUENCE — the build pin SURVIVES this widening
+///
+/// The instruction blob is still one specific client build's Default-mode text, so two
+/// events still surface as a REFUSAL here, exactly as before:
 ///
 /// * a **codex version bump** that rewords the Default-mode developer instructions, and
 /// * a **user switching collaboration mode** (e.g. to Plan mode), which sends a different
-///   `mode` and a different instruction blob.
+///   `mode` AND a different instruction blob — both parts refuse independently.
 ///
-/// Both are expected to be re-grounded against a FRESH capture — replace the fixture, re-run
-/// the live suites — and not to be "fixed" by loosening this to a shape class or a subset
-/// match. That cost is **accepted by the round-2 review**, not an accident: an unpinned
-/// instruction channel is a policy hole that no other rule in this module covers.
+/// Both are re-grounded against a FRESH capture, never by loosening this to a shape class.
+/// What 2e-4c removed is only the part the capture proved was not a policy surface.
 fn check_collaboration_mode(params: &Value) -> Result<(), FingerprintRefusal> {
-    match params.get("collaborationMode") {
-        Some(Value::Null) => Ok(()),
-        Some(v) if v == captured_collaboration_mode() => Ok(()),
-        Some(v) => Err(refusal(
-            FpRefuseKind::Unprovable,
-            format!(
-                "params.collaborationMode: captured boundary — the only provable values are \
-                 JSON null and the VERBATIM captured collaboration mode (it carries \
-                 settings.developer_instructions, an instruction channel, so a shape class \
-                 proves nothing); got a {} that differs from the capture. A codex version \
-                 bump or a mode switch must be re-grounded against a fresh capture.",
-                shape_class(v)
-            ),
-        )),
-        None => Err(refusal(
-            FpRefuseKind::Unprovable,
-            "params.collaborationMode: captured boundary — the measured TUI always sends this \
-             key; a missing key is as unprovable as an uncaptured one",
-        )),
+    let v = match params.get("collaborationMode") {
+        Some(Value::Null) => return Ok(()),
+        Some(v) => v,
+        None => {
+            return Err(refusal(
+                FpRefuseKind::Unprovable,
+                "params.collaborationMode: captured boundary — the measured TUI always sends \
+                 this key; a missing key is as unprovable as an uncaptured one",
+            ))
+        }
+    };
+    // **There is deliberately NO fast path for the verbatim captured object** (round-1 P8).
+    //
+    // An earlier form short-circuited on `v == captured_collaboration_mode()`, and that
+    // short-circuit was a hole rather than an optimization: the cross-field equality below
+    // is a relation between the NESTED pair and the OUTER `params.model`/`params.effort`,
+    // so a frame carrying the byte-perfect captured `collaborationMode` beside an outer
+    // `model` of the client's choosing satisfied the fast path and was never checked. The
+    // captured object passes the rules below on its own merits — it is what they were
+    // written from — so the fast path bought nothing and skipped the one check the object
+    // alone cannot make.
+    let Some(obj) = v.as_object() else {
+        return Err(collab_refusal(format!(
+            "got a {}; the only provable values are JSON null and the measured \
+             Default-mode OBJECT",
+            shape_class(v)
+        )));
+    };
+    // The top-level key set of the captured object is pinned too: `mode` + `settings` and
+    // nothing else. An extra sibling is an uncaptured channel.
+    let mut top: Vec<&str> = obj.keys().map(String::as_str).collect();
+    top.sort_unstable();
+    if top != ["mode", "settings"] {
+        return Err(collab_refusal(format!(
+            "key set is {top:?}; the measured object carries exactly [\"mode\", \"settings\"]"
+        )));
     }
+    // `mode`: exact. A Plan-mode switch refuses here.
+    match obj.get("mode").and_then(Value::as_str) {
+        Some(m) if m == captured_mode() => {}
+        other => {
+            return Err(collab_refusal(format!(
+                "mode is {}; the only measured mode is {:?} — a collaboration-mode switch \
+                 (e.g. Plan mode) must be re-grounded against a fresh capture",
+                other.map_or_else(
+                    || shape_class(obj.get("mode").unwrap_or(&Value::Null)).to_string(),
+                    |m| format!("{m:?}")
+                ),
+                captured_mode(),
+            )))
+        }
+    }
+    let Some(settings) = obj.get("settings").and_then(Value::as_object) else {
+        return Err(collab_refusal(format!(
+            "settings is a {}; the measured value is an object",
+            shape_class(obj.get("settings").unwrap_or(&Value::Null))
+        )));
+    };
+    // The settings key SET is pinned. Refuse-by-default applies inside the object too: an
+    // uncaptured fourth key could be a second instruction channel.
+    let mut keys: Vec<&str> = settings.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != COLLABORATION_SETTINGS_KEYS {
+        return Err(collab_refusal(format!(
+            "settings key set is {keys:?}; the measured set is exactly \
+             {COLLABORATION_SETTINGS_KEYS:?}"
+        )));
+    }
+    // `developer_instructions`: EXACT. This is the instruction channel and the whole reason
+    // the field is gated at all.
+    match settings
+        .get("developer_instructions")
+        .and_then(Value::as_str)
+    {
+        Some(di) if di == captured_developer_instructions() => {}
+        _ => {
+            return Err(collab_refusal(
+                "settings.developer_instructions differs from the capture. It is an \
+                 INSTRUCTION CHANNEL — whatever text sits there is prepended to the model's \
+                 developer instructions for the turn — so it is pinned byte-for-byte and a \
+                 shape class proves nothing. A codex version bump or a collaboration-mode \
+                 switch must be re-grounded against a fresh capture. (Text withheld from the \
+                 audit log.)"
+                    .to_string(),
+            ))
+        }
+    }
+    // `model`: measured-varying ⇒ TYPE + non-empty. Same class as the ungated top-level
+    // `model` param.
+    match settings.get("model") {
+        Some(Value::String(s)) if !s.is_empty() => {}
+        other => {
+            return Err(collab_refusal(format!(
+                "settings.model is {}; measured as a non-empty string on every captured turn \
+                 (gpt-5.6-luna / gpt-5.6-terra / gpt-5.4)",
+                shape_class(other.unwrap_or(&Value::Null))
+            )))
+        }
+    }
+    // `reasoning_effort`: measured as null before the user ever opens /model, and a
+    // non-empty string after. Same class as the ungated top-level `effort` param.
+    match settings.get("reasoning_effort") {
+        Some(Value::Null) => {}
+        Some(Value::String(s)) if !s.is_empty() => {}
+        other => {
+            return Err(collab_refusal(format!(
+                "settings.reasoning_effort is {}; measured as null or a non-empty string \
+                 (null / \"medium\" / \"high\")",
+                shape_class(other.unwrap_or(&Value::Null))
+            )))
+        }
+    }
+
+    // **CROSS-FIELD EQUALITY — the nested pair must EQUAL the outer pair** (round-1 P8).
+    //
+    // This is what makes type-checking `settings.model` safe instead of merely permissive.
+    // `params.model`/`params.effort` are on this module's ungated list; `collaborationMode`
+    // is gated. Checking each in isolation leaves a SPLIT BRAIN: a turn could name one
+    // model in the ungated outer field and a different one inside the gated instruction
+    // envelope, and every rule above would pass it. Which of the two the server then acts
+    // on is not something this broker has measured — and it must never have to guess,
+    // because the pair travels beside `developer_instructions`, the one field here that is
+    // pinned precisely because it steers the model.
+    //
+    // MEASURED: equal on ALL ELEVEN captured turns, across three models and three effort
+    // values, including the `null` effort of a session that never opened `/model` — so the
+    // relation holds in both the null and the populated case and is checked with `Value`
+    // equality rather than a string compare.
+    //
+    // The outer keys must also be PRESENT. The measured TUI always sends both, so an
+    // absent one is a client this broker has not measured, and treating absence as
+    // "nothing to disagree with" would reopen the split brain by omission.
+    for (outer_key, nested_key) in [("model", "model"), ("effort", "reasoning_effort")] {
+        let outer = params.get(outer_key);
+        let nested = settings.get(nested_key);
+        if outer.is_none() {
+            return Err(collab_refusal(format!(
+                "params.{outer_key} is absent while collaborationMode is an object; the \
+                 measured TUI always sends it, and its absence would leave \
+                 settings.{nested_key} unchecked against anything"
+            )));
+        }
+        if outer != nested {
+            return Err(collab_refusal(format!(
+                "params.{outer_key} and collaborationMode.settings.{nested_key} disagree \
+                 ({} vs {}); measured EQUAL on every captured turn. A turn that names one \
+                 model in the ungated outer field and another inside the gated instruction \
+                 envelope is a split brain this broker will not guess the resolution of — \
+                 values withheld from the audit log",
+                shape_class(outer.unwrap_or(&Value::Null)),
+                shape_class(nested.unwrap_or(&Value::Null)),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One refusal constructor for every `collaborationMode` sub-rule, so the audit note always
+/// names the field and the cause is a single grep.
+fn collab_refusal(detail: impl std::fmt::Display) -> FingerprintRefusal {
+    refusal(
+        FpRefuseKind::Unprovable,
+        format!("params.collaborationMode: captured boundary — {detail}"),
+    )
 }
 
 /// The JSON shape class of a value, for a captured-boundary refusal detail.
@@ -1401,6 +1611,12 @@ mod tests {
     }
 
     /// The fingerprint the captured session actually launched under.
+    ///
+    /// Load-bearing for every test that drives COMPLETE captured params (round-1 M12): the
+    /// real 0.147 TUI asserts `approvalPolicy: "on-request"`, so pairing real params with
+    /// [`fp`]'s `untrusted` refuses on `approvalPolicy` long before any
+    /// `collaborationMode` rule is reached. A12 measured the production consequence of the
+    /// same mismatch — an `untrusted` launch fingerprint kills a real session ~2s in.
     fn captured_fp() -> LaunchFingerprint {
         LaunchFingerprint {
             approval_policy: "on-request".into(),
@@ -1461,15 +1677,30 @@ mod tests {
             assert_fingerprint(&fp(), "turn/start", &full_turn(json!({}))).unwrap(),
             FpVerdict::SandboxDeferredToBoundThread
         );
-        // The VERBATIM captured value passes.
+        // The VERBATIM captured value passes — **when it arrives with the outer pair it
+        // was captured beside**. Round-1 P8 made that qualification real: the nested
+        // model/effort must equal `params.model`/`params.effort`, and the byte-perfect
+        // captured object buys no exemption from it.
+        let cm = captured_collaboration_mode().clone();
+        let outer = json!({
+            "collaborationMode": cm.clone(),
+            "model": cm["settings"]["model"].clone(),
+            "effort": cm["settings"]["reasoning_effort"].clone(),
+        });
         assert_eq!(
+            assert_fingerprint(&fp(), "turn/start", &full_turn(outer)).unwrap(),
+            FpVerdict::SandboxDeferredToBoundThread
+        );
+        // And WITHOUT that outer pair it is refused — the frame is no longer self-proving.
+        assert!(
             assert_fingerprint(
                 &fp(),
                 "turn/start",
-                &full_turn(json!({"collaborationMode": captured_collaboration_mode().clone()}))
+                &full_turn(json!({"collaborationMode": cm}))
             )
-            .unwrap(),
-            FpVerdict::SandboxDeferredToBoundThread
+            .is_err(),
+            "a collaborationMode object with no outer model/effort to agree with must be \
+             refused, not accepted on the strength of being byte-perfect"
         );
         // A materially different object — same `mode`, different instruction text — refuses.
         let mut tampered = captured_collaboration_mode().clone();
@@ -1510,6 +1741,356 @@ mod tests {
                 .kind,
             FpRefuseKind::Unprovable
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 2e-4c (A15) — the model-pin re-grounding, driven by the committed capture.
+    // ---------------------------------------------------------------------------
+
+    /// **The COMPLETE captured `turn/start` params** — every top-level field exactly as the
+    /// real 0.147 TUI sent it, for all eleven frames (round-1 M12).
+    ///
+    /// The tests below used to graft a captured `collaborationMode` onto a synthetic
+    /// `full_turn(...)` skeleton that carried no outer `model`/`effort` at all. That made
+    /// them structurally incapable of exercising the cross-field equality rule — and when
+    /// the rule landed, three of them failed, which is the suite reporting its own gap
+    /// rather than the rule being wrong. Driving the real params fixes it permanently: the
+    /// outer pair and the nested pair now arrive together, as they do on the wire.
+    fn captured_turn_params() -> Vec<Value> {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../fixtures/codex/model-switch.json"))
+                .expect("the model-switch fixture parses");
+        let starts = doc["turn_starts"]
+            .as_array()
+            .expect("model-switch.json carries a turn_starts array");
+        assert_eq!(starts.len(), 11, "the exact captured corpus");
+        starts.iter().map(|s| s["params"].clone()).collect()
+    }
+
+    /// One complete captured params object, for perturbation. Chosen as the first whose
+    /// outer/nested pair is non-null on BOTH fields: perturbing a pair that is `null` on
+    /// either side would leave half the equality rule untested.
+    fn a_captured_turn() -> Value {
+        captured_turn_params()
+            .into_iter()
+            .find(|p| !p["model"].is_null() && !p["effort"].is_null())
+            .expect("a capture with a populated model AND effort")
+    }
+
+    /// Every `collaborationMode` the 2e-4c capture recorded, sourced from the fixture so
+    /// the evidence and the rule can never drift apart in a copy-paste.
+    fn captured_switch_modes() -> Vec<Value> {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../fixtures/codex/model-switch.json"))
+                .expect("the model-switch fixture parses");
+        let starts = doc["turn_starts"]
+            .as_array()
+            .expect("model-switch.json carries a turn_starts array");
+        // The EXACT corpus size. `>=` would let a fixture that lost frames still satisfy
+        // every test below for the boring reason that the survivors happen to pass.
+        assert_eq!(
+            starts.len(),
+            11,
+            "the re-grounding capture carries exactly eleven turn/start frames; a \
+             different count means the fixture changed and the rules built on it must be \
+             re-grounded rather than re-run"
+        );
+        starts
+            .iter()
+            .map(|s| s["params"]["collaborationMode"].clone())
+            .collect()
+    }
+
+    /// **The whole point of the widening.** Every real `turn/start` the spike captured —
+    /// across three models and two reasoning efforts — is accepted. Under the 2e-4a
+    /// byte-exact rule, eight of these eleven refused and the session could not run a turn
+    /// after the user touched `/model`.
+    #[test]
+    fn every_captured_model_switch_turn_start_passes() {
+        // The COMPLETE captured params, outer pair and nested pair together (M12).
+        let params = captured_turn_params();
+        let mut distinct_models = std::collections::BTreeSet::new();
+        let mut distinct_efforts = std::collections::BTreeSet::new();
+        for p in &params {
+            distinct_models.insert(p["model"].to_string());
+            distinct_efforts.insert(p["effort"].to_string());
+            // The pair the rule relates, proven equal in the EVIDENCE before any rule is
+            // asserted over it — otherwise a passing test proves only that the rule and
+            // the fixture agree, not that either matches the wire.
+            assert_eq!(
+                p["model"], p["collaborationMode"]["settings"]["model"],
+                "the capture itself must carry an equal model pair"
+            );
+            assert_eq!(
+                p["effort"], p["collaborationMode"]["settings"]["reasoning_effort"],
+                "the capture itself must carry an equal effort pair"
+            );
+            assert_eq!(
+                assert_fingerprint(&captured_fp(), "turn/start", p).unwrap(),
+                FpVerdict::SandboxDeferredToBoundThread,
+                "a complete captured turn/start must pass: {p}"
+            );
+        }
+        // The corpus is only evidence for a WIDENING if it actually varied.
+        assert!(
+            distinct_models.len() >= 3,
+            "the capture must exercise at least three models, saw {distinct_models:?}"
+        );
+        assert!(
+            distinct_efforts.len() >= 3,
+            "the capture must exercise at least three reasoning-effort values, saw \
+             {distinct_efforts:?}"
+        );
+    }
+
+    /// **The split brain is refused** (round-1 P8): the nested pair must EQUAL the outer
+    /// pair, and the byte-perfect captured object does not buy an exemption.
+    #[test]
+    fn a_model_or_effort_that_disagrees_with_its_outer_field_is_refused() {
+        let base = a_captured_turn();
+        // Sanity: the unperturbed capture passes, so every refusal below is caused by the
+        // one perturbation and not by the skeleton.
+        assert!(assert_fingerprint(&captured_fp(), "turn/start", &base).is_ok());
+
+        let cases: Vec<(&str, Value)> = vec![
+            // Nested says one model, outer says another.
+            ("nested model differs", {
+                let mut p = base.clone();
+                p["collaborationMode"]["settings"]["model"] = json!("gpt-5.6-sol");
+                p
+            }),
+            ("outer model differs", {
+                let mut p = base.clone();
+                p["model"] = json!("gpt-5.6-sol");
+                p
+            }),
+            ("nested effort differs", {
+                let mut p = base.clone();
+                p["collaborationMode"]["settings"]["reasoning_effort"] = json!("low");
+                p
+            }),
+            ("outer effort differs", {
+                let mut p = base.clone();
+                p["effort"] = json!("low");
+                p
+            }),
+            // Null on one side only — the case a naive string compare would miss.
+            ("outer effort null, nested populated", {
+                let mut p = base.clone();
+                p["effort"] = Value::Null;
+                p
+            }),
+            ("nested effort null, outer populated", {
+                let mut p = base.clone();
+                p["collaborationMode"]["settings"]["reasoning_effort"] = Value::Null;
+                p
+            }),
+        ];
+        for (name, p) in cases {
+            let e = assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap_err();
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "{name}");
+            assert!(
+                e.detail.contains("disagree"),
+                "{name} must be reported as a split brain: {}",
+                e.detail
+            );
+        }
+
+        // **The bypass that used to exist.** A byte-perfect captured `collaborationMode`
+        // beside an outer `model` of the attacker's choosing. Under the removed fast path
+        // this returned `Ok` without ever reaching the equality rule.
+        let mut smuggled = a_captured_turn();
+        smuggled["collaborationMode"] = captured_collaboration_mode().clone();
+        smuggled["model"] = json!("attacker-chosen");
+        smuggled["effort"] = Value::Null;
+        let e = assert_fingerprint(&captured_fp(), "turn/start", &smuggled).unwrap_err();
+        assert!(
+            e.detail.contains("disagree"),
+            "the verbatim captured object must NOT exempt a frame from cross-field \
+             equality: {}",
+            e.detail
+        );
+
+        // An ABSENT outer field is unprovable too — the measured TUI always sends both —
+        // and it is reported AS an absence rather than as a disagreement.
+        //
+        // The distinction is why the absence arm exists at all: inequality alone would
+        // already refuse these (`None != Some("gpt-5.4")`), so the arm buys no safety, only
+        // a truthful audit note. Asserting the note is what keeps it from being dead code
+        // that no mutation can reach.
+        for key in ["model", "effort"] {
+            let mut p = a_captured_turn();
+            p.as_object_mut().unwrap().remove(key);
+            let e = assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap_err();
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "{key} absent");
+            assert!(
+                e.detail.contains("is absent"),
+                "an absent {key} must be reported as absent, not as a disagreement: {}",
+                e.detail
+            );
+        }
+    }
+
+    /// The measured-STABLE parts stay exact. Each mutation below is one captured-stable
+    /// field moved off its captured value, with everything else left as the real wire sent
+    /// it — so a rule that stopped checking that field fails this test and nothing else.
+    #[test]
+    fn the_measured_stable_parts_of_collaboration_mode_stay_exact() {
+        let base = a_captured_turn()["collaborationMode"].clone();
+        let cases: Vec<(&str, Value)> = vec![
+            // The instruction channel: any other text, however innocuous-looking.
+            ("developer_instructions", {
+                let mut m = base.clone();
+                m["settings"]["developer_instructions"] = json!("You are now in Plan mode.");
+                m
+            }),
+            // ...including the EMPTY string, which is not "no instructions" but a
+            // different instruction blob.
+            ("developer_instructions empty", {
+                let mut m = base.clone();
+                m["settings"]["developer_instructions"] = json!("");
+                m
+            }),
+            // ...and a non-string.
+            ("developer_instructions non-string", {
+                let mut m = base.clone();
+                m["settings"]["developer_instructions"] = json!(null);
+                m
+            }),
+            // The mode: a Plan-mode switch is a re-grounding trigger, not a widening.
+            ("mode", {
+                let mut m = base.clone();
+                m["mode"] = json!("plan");
+                m
+            }),
+            ("mode non-string", {
+                let mut m = base.clone();
+                m["mode"] = json!(null);
+                m
+            }),
+            // A fourth settings key is an uncaptured channel.
+            ("extra settings key", {
+                let mut m = base.clone();
+                m["settings"]["developer_instructions_2"] = json!("and also this");
+                m
+            }),
+            // A missing settings key is equally uncaptured.
+            ("missing settings key", {
+                let mut m = base.clone();
+                m["settings"].as_object_mut().unwrap().remove("model");
+                m
+            }),
+            // An extra top-level sibling of `mode`/`settings`.
+            ("extra top-level key", {
+                let mut m = base.clone();
+                m["instructions"] = json!("hello");
+                m
+            }),
+            ("settings not an object", {
+                let mut m = base.clone();
+                m["settings"] = json!("default");
+                m
+            }),
+        ];
+        for (name, cm) in cases {
+            let mut p = a_captured_turn();
+            p["collaborationMode"] = cm;
+            let e = assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap_err();
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "{name}");
+            assert!(
+                e.detail.contains("collaborationMode"),
+                "{name}: {}",
+                e.detail
+            );
+        }
+    }
+
+    /// The measured-VARYING parts are validated by TYPE and non-emptiness — no more (a
+    /// model allowlist would refuse the picker's own default on no evidence) and no less
+    /// (a null, a number or an empty string is not a model).
+    #[test]
+    fn the_measured_varying_parts_of_collaboration_mode_are_type_checked() {
+        // Driven from the COMPLETE captured params, so the outer pair moves WITH the
+        // nested one (M12) — otherwise every case below would be refused by cross-field
+        // equality and this test would pass for the wrong reason.
+        //
+        // ACCEPTED: any non-empty model string, including ones this capture never saw. A
+        // model ALLOWLIST is deliberately not the rule — the picker's own default
+        // `gpt-5.6-sol` is not in this corpus, and the ungated outer `model` carrying the
+        // identical string forwards freely, so a nested allowlist would refuse a
+        // legitimate session while proving nothing.
+        for model in ["gpt-5.6-sol", "gpt-5.4-mini", "gpt-9-unreleased"] {
+            let mut p = a_captured_turn();
+            p["model"] = json!(model);
+            p["collaborationMode"]["settings"]["model"] = json!(model);
+            assert_eq!(
+                assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap(),
+                FpVerdict::SandboxDeferredToBoundThread,
+                "an unmeasured but well-typed, AGREEING model must pass: {model}"
+            );
+        }
+        // ACCEPTED: null (never opened /model) and any non-empty effort string.
+        for effort in [json!(null), json!("low"), json!("xhigh")] {
+            let mut p = a_captured_turn();
+            p["effort"] = effort.clone();
+            p["collaborationMode"]["settings"]["reasoning_effort"] = effort.clone();
+            assert_eq!(
+                assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap(),
+                FpVerdict::SandboxDeferredToBoundThread,
+                "a well-typed, AGREEING reasoning_effort must pass: {effort}"
+            );
+        }
+        // REFUSED by TYPE, and the type rule must bite BEFORE equality — so each case sets
+        // both sides to the same ill-typed value. A rule that only had equality would let
+        // `model: 1` through on both sides.
+        for bad in [
+            json!(null),
+            json!(""),
+            json!(1),
+            json!(true),
+            json!({}),
+            json!([]),
+        ] {
+            let mut p = a_captured_turn();
+            p["model"] = bad.clone();
+            p["collaborationMode"]["settings"]["model"] = bad.clone();
+            let e = assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap_err();
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "model {bad}");
+            assert!(
+                e.detail.contains("settings.model"),
+                "model {bad} must be refused by TYPE, not merely by equality: {}",
+                e.detail
+            );
+        }
+        for bad in [json!(""), json!(1), json!(true), json!({}), json!([])] {
+            let mut p = a_captured_turn();
+            p["effort"] = bad.clone();
+            p["collaborationMode"]["settings"]["reasoning_effort"] = bad.clone();
+            let e = assert_fingerprint(&captured_fp(), "turn/start", &p).unwrap_err();
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "effort {bad}");
+            assert!(
+                e.detail.contains("settings.reasoning_effort"),
+                "effort {bad} must be refused by TYPE: {}",
+                e.detail
+            );
+        }
+    }
+
+    /// The 2e-4a fixture and the 2e-4c capture agree on the instruction channel BYTE FOR
+    /// BYTE — two sandboxes, a week apart, eleven extra turns, three models. That agreement
+    /// is what licenses keeping `developer_instructions` exact while everything around it
+    /// widened; if a future capture disagrees, this fails and the pin is re-grounded rather
+    /// than silently loosened.
+    #[test]
+    fn the_two_captures_agree_on_the_instruction_channel() {
+        for cm in captured_switch_modes() {
+            assert_eq!(
+                cm["settings"]["developer_instructions"].as_str(),
+                Some(captured_developer_instructions()),
+                "the 2e-4c capture must carry the same instruction blob as the 2e-4a fixture"
+            );
+            assert_eq!(cm["mode"].as_str(), Some(captured_mode()));
+        }
     }
 
     // ROUND-2 P5 — the EXHAUSTIVE top-level allowlist. An unknown param refuses, and the

@@ -512,10 +512,204 @@ async fn turn_start_in_a_different_workspace_is_refused() {
     assert_eq!(rec, vec![CREATION_REQUEST.to_string()], "zero turn bytes");
 }
 
+/// The measured `/new` switch, END TO END over the relay: unsubscribe ×2 → a second
+/// `thread/start` → the head follows to B, the retired A is resumable but unturnable.
+///
+/// 2e-4c replaces the old `a_second_thread_start_is_refused_over_the_relay`, which pinned
+/// the pre-switch rule ("once one thread is bound the creation slot stays closed") — the
+/// rule that made a real user unable to press `/new`.
 #[tokio::test]
-async fn a_second_thread_start_is_refused_over_the_relay() {
-    // P3, end to end: once one thread is bound the creation slot stays closed.
+async fn the_new_switch_flows_end_to_end_over_the_relay() {
     let h = start_broker();
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        (
+            "thread/unsubscribe".into(),
+            Message::Text(r#"{"id":7,"result":{"status":"unsubscribed"}}"#.into()),
+        ),
+        (
+            "thread/unsubscribe".into(),
+            Message::Text(r#"{"id":8,"result":{"status":"unsubscribed"}}"#.into()),
+        ),
+        (
+            "thread/start".into(),
+            Message::Text(
+                serde_json::json!({
+                    "id": "start-2",
+                    "result": {
+                        "thread": {"id": "01a0-b", "path": "/x"},
+                        "cwd": LAUNCH_CWD,
+                        "runtimeWorkspaceRoots": ["/work"]
+                    }
+                })
+                .to_string(),
+            ),
+        ),
+    ]);
+    let mut ws = connect(&h.tui_sock).await;
+    create_thread(&mut ws, "01a0-a").await;
+
+    // The marker, twice, naming the active head — exactly what `/new` sends. Both forward:
+    // the switch behind them is admissible (round-1 P4).
+    for id in [7, 8] {
+        ws.send(Message::Text(
+            serde_json::json!({"method":"thread/unsubscribe","id":id,
+                               "params":{"threadId":"01a0-a"}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let v = next_frame(&mut ws).await;
+        assert_eq!(
+            v["result"]["status"], "unsubscribed",
+            "unsubscribe #{id} must reach the server and be answered — the real TUI AWAITS \
+             this response before sending the next frame, which is why the prefix cannot be \
+             held"
+        );
+    }
+
+    // The switch.
+    ws.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["result"]["thread"]["id"], "01a0-b",
+        "the switch must be admitted and its response relayed"
+    );
+
+    // The head FOLLOWED: a turn on B forwards...
+    ws.send(Message::Text(turn_frame("01a0-b"))).await.unwrap();
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert!(
+        rec.contains(&turn_frame("01a0-b")),
+        "a turn on the new head must reach the server; recorded: {rec:?}"
+    );
+
+    // ...and a turn on the RETIRED thread is policy-refused with zero upstream bytes.
+    let before = h.state.recorded.lock().unwrap().len();
+    ws.send(Message::Text(turn_frame("01a0-a"))).await.unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["error"]["code"], -32001,
+        "a turn on a retired thread is refused"
+    );
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        before,
+        "zero bytes upstream for the refused turn"
+    );
+}
+
+/// **P4 end to end: the prefix is refused rather than dropping the subscription.**
+///
+/// The defect: `unsubscribe, unsubscribe, thread/start` where the start is doomed leaves
+/// the TUI on the old thread and UNSUBSCRIBED from it — silently blind. Here the switch is
+/// doomed because a creation is already in flight, so the unsubscribe that would have begun
+/// it is refused with ZERO upstream bytes and the subscription is never touched.
+#[tokio::test]
+async fn a_switch_prefix_is_refused_when_the_switch_behind_it_cannot_be_admitted() {
+    let h = start_broker();
+    h.push_replies(vec![(
+        "thread/start".into(),
+        creation_response("01a0-ours"),
+    )]);
+    let mut ws = connect(&h.tui_sock).await;
+    create_thread(&mut ws, "01a0-ours").await;
+
+    // Put a switch in flight and leave it unanswered.
+    ws.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    settle().await;
+    let before = h.state.recorded.lock().unwrap().clone();
+
+    // Now the prefix of ANOTHER switch. It must refuse, not unsubscribe.
+    ws.send(Message::Text(
+        serde_json::json!({"method":"thread/unsubscribe","id":9,
+                           "params":{"threadId":"01a0-ours"}})
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["error"]["code"], -32001,
+        "the prefix is policy-refused: {v}"
+    );
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().clone(),
+        before,
+        "a refused prefix must send ZERO upstream bytes — the whole point is that the \
+         subscription survives a switch that was never going to happen"
+    );
+}
+
+/// **ROUND-3 P4a, end to end: the prefix RESERVES, and a turn cannot slip in behind it.**
+///
+/// The reservation is claimed by the classifier after the prefix's own ledger admission
+/// succeeds. This is the only test that exercises that wiring: the session-level tests call
+/// `reserve_switch` directly, so a classifier that stopped reserving would leave them green
+/// while the window between the prefix and the start stood wide open.
+#[tokio::test]
+async fn the_prefix_reserves_the_switch_and_fences_turns_behind_it() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-ours")),
+        (
+            "thread/unsubscribe".into(),
+            Message::Text(r#"{"id":7,"result":{"status":"unsubscribed"}}"#.into()),
+        ),
+    ]);
+    let mut ws = connect(&h.tui_sock).await;
+    create_thread(&mut ws, "01a0-ours").await;
+
+    // The prefix of a `/new`.
+    ws.send(Message::Text(
+        serde_json::json!({"method":"thread/unsubscribe","id":7,
+                           "params":{"threadId":"01a0-ours"}})
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(v["result"]["status"], "unsubscribed", "the prefix forwards");
+
+    // Now a turn must be REFUSED: the prefix has already had a wire effect and the switch
+    // behind it is expected next, so this turn would be authorized against a head that is
+    // about to move.
+    let before = h.state.recorded.lock().unwrap().len();
+    ws.send(Message::Text(turn_frame("01a0-ours")))
+        .await
+        .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["error"]["code"], -32001,
+        "a turn admitted between the prefix and the start is the exact window the \
+         reservation exists to close: {v}"
+    );
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        before,
+        "and it forwards zero bytes"
+    );
+}
+
+/// One switch at a time, end to end: a second `thread/start` while the first switch is
+/// still in flight is refused with zero upstream bytes. This is the half of the old P3 rule
+/// that 2e-4c KEPT, and it is what stops two creations racing to re-point the head.
+#[tokio::test]
+async fn a_second_switch_while_one_is_in_flight_is_refused_over_the_relay() {
+    let h = start_broker();
+    // Only the FIRST creation is answered; the switch stays pending for the whole test.
     h.push_replies(vec![(
         "thread/start".into(),
         creation_response("01a0-ours"),
@@ -528,12 +722,24 @@ async fn a_second_thread_start_is_refused_over_the_relay() {
     ))
     .await
     .unwrap();
+    settle().await;
+    let after_switch = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(after_switch.len(), 2, "the switch itself forwarded");
+
+    ws.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-3"),
+    ))
+    .await
+    .unwrap();
     let v = next_frame(&mut ws).await;
     assert_eq!(v["error"]["code"], -32001);
 
     settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(rec, vec![CREATION_REQUEST.to_string()], "one creation only");
+    assert_eq!(
+        h.state.recorded.lock().unwrap().clone(),
+        after_switch,
+        "a second switch while one is pending forwards zero bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------

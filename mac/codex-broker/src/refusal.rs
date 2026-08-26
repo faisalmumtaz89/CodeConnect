@@ -85,7 +85,10 @@ use crate::fingerprint::{assert_fingerprint, FpVerdict, LaunchFingerprint};
 use crate::message::{classify_shape, RequestId, Shape, WsPayload};
 use crate::redact;
 use crate::response_capability::ResponseCapabilityRegistry;
-use crate::session::{ConnId, IdAdmission, ThreadBinding, VerifiedThread, CREATION_METHOD};
+use crate::session::{
+    ConnId, IdAdmission, ThreadBinding, TurnAdmission, CREATION_METHOD, MAX_ACTIVE_TURNS,
+    TURN_METHOD,
+};
 
 /// The runtime policy environment the classifier reads: the immutable launch
 /// fingerprint, the one-use response-capability registry (fanout seam), the session
@@ -202,8 +205,67 @@ fn classify_request(
     // `classify_request_disposition`, so a `Forward` always carries one. This is a
     // construction fact, not an assumption.
     let id = id.expect("a forwarded request always carries a usable id");
+    // **`turn/start` and the held switch prefix admit themselves** (round-1 P1/P4). The
+    // turn's admission is atomic with its head-check inside `try_admit_turn`; the hold
+    // registers its id at hold time. Passing either through the generic ledger here would
+    // register the same id twice and be refused as `ReusedInFlight`.
+    if method == TURN_METHOD {
+        return action;
+    }
     match env.threads.try_admit_request(env.conn, &id, method) {
-        IdAdmission::Admitted => action,
+        IdAdmission::Admitted => {
+            // **THE RESERVATION IS CLAIMED HERE, INSIDE THE TRANSACTION** (round-3 P4).
+            //
+            // The prefix has now cleared BOTH gates — the disposition proved it names the
+            // active head and that a switch behind it would be admissible, and the id
+            // ledger has admitted it — so its bytes really are about to go upstream. Only
+            // now may it claim the slot. Claiming inside the disposition, as the first
+            // form did, left a reservation behind for a prefix the ledger then refused:
+            // zero bytes on the wire, yet turns fenced and other connections' creations
+            // blocked until the TTL.
+            // **A re-subscribe ATTEMPT is recorded only now** (closing S4): the fingerprint
+            // has passed and the id ledger has admitted it, so these bytes really are going
+            // upstream and an answer really will come back. Recording it in the disposition
+            // — as the first form did — registered resumes the fingerprint or the ledger
+            // could still refuse: requests that send zero bytes and are never answered,
+            // leaving an entry for the life of the connection that a replayed id could
+            // later satisfy. A refused resume now records nothing.
+            if method == "thread/resume" {
+                if let Some(target) = params.get("threadId").and_then(|t| t.as_str()) {
+                    env.threads.note_resubscribe_attempt(env.conn, target, &id);
+                }
+            }
+            // **TUI leg only** (closing S3). A reservation fences turns and blocks other
+            // connections' creations, and it exists to make the TUI's `/new` prefix and the
+            // `thread/start` behind it one causal unit. ccd never starts a thread — the
+            // allowlist refuses `thread/start` on that leg by role — so a ccd unsubscribe
+            // has no switch behind it and must never fence one.
+            if role == Role::Tui && method == "thread/unsubscribe" {
+                if let Some(target) = params.get("threadId").and_then(|t| t.as_str()) {
+                    if env.threads.head_or_superseded().as_deref() == Some(target) {
+                        env.threads.reserve_switch(env.conn, target);
+                    }
+                }
+            }
+            action
+        }
+        verdict => ledger_refusal(env, method, Some(id), verdict),
+    }
+}
+
+/// Render one id-ledger verdict as a relay action. Shared by the generic request path and
+/// by `turn/start`'s atomic admission (round-1 P1), so the two can never disagree about
+/// what a full ledger or a reused id looks like to a client.
+fn ledger_refusal(
+    env: &Env,
+    method: &str,
+    id: Option<RequestId>,
+    verdict: IdAdmission,
+) -> RelayAction {
+    match verdict {
+        IdAdmission::Admitted => RelayAction::Forward {
+            note: "admitted by the id ledger",
+        },
         // `thread/start` only: a policy refusal the client can act on, so it keeps its
         // synthetic error and its own cause.
         IdAdmission::CreationSlotClosed => {
@@ -212,7 +274,7 @@ fn classify_request(
                  request id on this connection; a second thread is a switch, which D2 owns",
             );
             refuse_request(
-                Some(id),
+                id,
                 E_POLICY_REFUSED,
                 "request refused by session policy",
                 format!("{CREATION_METHOD}: creation slot unavailable — {why}"),
@@ -300,6 +362,12 @@ fn classify_request_disposition(
                         detail,
                     );
                 }
+                // **This connection is RE-SUBSCRIBING** (round-2 P4). If its unsubscribe
+                // prefix outlived a failed switch, its turn authorization was wedged; a
+                // real resume of that thread is what lifts it — but only once the SERVER
+                // has ACCEPTED it (round-3 P6), and only for a resume that was actually
+                // ADMITTED: the attempt is recorded in `classify_request`, after the
+                // fingerprint and the id ledger have both passed (closing S4).
             }
             match assert_fingerprint(env.fingerprint, method, params) {
                 Ok(FpVerdict::Proven) => {
@@ -396,25 +464,108 @@ fn classify_request_disposition(
                     );
                 }
             };
-            if let Err(detail) = check_turn_head(env, params) {
+            // **ONE ATOMIC DECISION** (round-1 P1): head-check, workspace-check, id ledger
+            // and the busy-mark that keeps a switch from being admitted between this
+            // decision and the relay's upstream write — all under a single lock inside
+            // `try_admit_turn`. They used to be three separate lock acquisitions from here,
+            // and a switch admitted between the first and the last left the turn forwarded
+            // against a head that had already moved.
+            //
+            // A turn without a usable id cannot be admitted (nothing could correlate its
+            // answer), and the first check in `classify_request_disposition` already
+            // refused that case — so the id is present here by construction.
+            let Some(turn_id) = id.clone() else {
                 return refuse_request(
                     id,
                     E_POLICY_REFUSED,
                     "turn refused: it does not name this session's bound thread",
-                    detail,
+                    "turn/start without a usable request id".to_string(),
                 );
-            }
-            // P5 — and it must run in the workspace bound at that thread's creation. This
-            // is a DIFFERENT failure from the head-check above (the thread identity is
-            // correct; the workspace is not), so it carries its own message — an operator
-            // reading the audit log must not be sent hunting a thread-identity mismatch.
-            if let Err(detail) = check_turn_workspace(env, params) {
+            };
+            let Some(named) = params.get("threadId").and_then(|t| t.as_str()) else {
                 return refuse_request(
-                    id,
+                    Some(turn_id),
                     E_POLICY_REFUSED,
-                    "turn refused: it does not run in the workspace bound at its thread's creation",
-                    detail,
+                    "turn refused: it does not name this session's bound thread",
+                    "turn/start without a string threadId".to_string(),
                 );
+            };
+            match env.threads.try_admit_turn(
+                env.conn,
+                &turn_id,
+                named,
+                params.get("cwd"),
+                params.get("runtimeWorkspaceRoots"),
+            ) {
+                TurnAdmission::Admitted => {}
+                TurnAdmission::NotTheHead { detail } => {
+                    return refuse_request(
+                        Some(turn_id),
+                        E_POLICY_REFUSED,
+                        "turn refused: it does not name this session's bound thread",
+                        detail,
+                    )
+                }
+                // A DIFFERENT failure from the head-check (the thread identity is correct;
+                // the workspace is not), so it carries its own message — an operator
+                // reading the audit log must not be sent hunting a thread-identity
+                // mismatch.
+                TurnAdmission::WrongWorkspace { detail } => {
+                    return refuse_request(
+                        Some(turn_id),
+                        E_POLICY_REFUSED,
+                        "turn refused: it does not run in the workspace bound at its \
+                         thread's creation",
+                        detail,
+                    )
+                }
+                // Round-2 P3 — a reserved switch's prefix has already had a wire effect.
+                TurnAdmission::SwitchReserved => {
+                    return refuse_request(
+                        Some(turn_id),
+                        E_POLICY_REFUSED,
+                        "turn refused: a thread switch is in progress on this session",
+                        format!(
+                            "{}: a switch is reserved — its unsubscribe prefix has already \
+                             forwarded and its thread/start is expected next, so this turn \
+                             would be authorized against a head that is about to move",
+                            redact::method(method)
+                        ),
+                    )
+                }
+                // Round-2 P2 — the cardinality bound, refused legibly rather than dropped.
+                TurnAdmission::TooManyActiveTurns => {
+                    return refuse_request(
+                        Some(turn_id),
+                        E_POLICY_REFUSED,
+                        "turn refused: too many turns are already in flight",
+                        format!(
+                            "{}: this session already holds {MAX_ACTIVE_TURNS} admitted \
+                             turns whose terminals have not been observed",
+                            redact::method(method)
+                        ),
+                    )
+                }
+                // Round-2 P4 — this connection unsubscribed itself and never came back.
+                TurnAdmission::ConnectionUnsubscribed { thread } => {
+                    return refuse_request(
+                        Some(turn_id),
+                        E_POLICY_REFUSED,
+                        "turn refused: this connection is no longer subscribed to the thread",
+                        format!(
+                            "{}: this connection's thread/unsubscribe for {} forwarded and \
+                             the switch behind it then FAILED at the server, so it is not \
+                             receiving that thread's stream. Its turns stay refused until a \
+                             thread/resume re-subscribes it; the session still owns the \
+                             thread and other connections are unaffected",
+                            redact::method(method),
+                            redact::thread_id(&thread)
+                        ),
+                    )
+                }
+                TurnAdmission::Ledger(verdict) => {
+                    return ledger_refusal(env, method, Some(turn_id), verdict)
+                }
             }
             match verdict {
                 // O14 — **a future proven turn shape.** This arm is UNREACHABLE BY
@@ -446,19 +597,136 @@ fn classify_request_disposition(
                 format!("{}: refused ({reason:?})", redact::method(method)),
             )
         }
-        // Deferred dispositions fail closed until the switch/fanout sub-chunk lands.
-        Disposition::HoldSerialize | Disposition::HeadCheck | Disposition::ConsumeLocally => {
-            refuse_request(
-                id,
-                E_METHOD_UNAVAILABLE,
-                "method not available yet through the broker",
-                format!(
-                    "{}: disposition deferred to switch sub-chunk",
-                    redact::method(method)
-                ),
-            )
+        // The measured `/new` switch marker (2e-4c). Scoped exactly like `thread/resume`:
+        // it may only name a thread of THIS session — the active head or one it retired.
+        //
+        // It is NOT head-scoped, and that is measured rather than lax. `/new` sends its two
+        // `thread/unsubscribe{active}` frames BEFORE the `thread/start`, so at that instant
+        // the named thread IS the head; but `/resume`-shaped affordances send theirs AFTER
+        // the switch, when the named thread has already been retired. Restricting this to
+        // the head would refuse the second ordering while proving nothing extra — an
+        // unsubscribe carries no ownership fields, cannot start or steer anything, and was
+        // measured to affect only the calling connection's own subscription.
+        Disposition::UnsubscribeSessionThread => {
+            // P10 — the params shape is PINNED to the capture: exactly `{threadId}`, a
+            // string, and nothing else. Every measured `thread/unsubscribe` (four of them,
+            // from the TUI and from an observer) carries that one key. An extra key is an
+            // uncaptured channel on a method that is now forwarded rather than refused, so
+            // refuse-by-default applies to its params exactly as it does to `turn/start`'s.
+            if let Err(detail) = check_unsubscribe_shape(params) {
+                return refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    "unsubscribe refused: it does not name a thread of this session",
+                    format!("{}: {detail}", redact::method(method)),
+                );
+            }
+            if let Err(detail) = check_resume_binding(env, params) {
+                return refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    "unsubscribe refused: it does not name a thread of this session",
+                    format!("{}: {detail}", redact::method(method)),
+                );
+            }
+            // **THE SWITCH BEHIND IT MUST BE ADMISSIBLE** (round-1 P4, as re-grounded).
+            //
+            // `/new` is `unsubscribe, unsubscribe, thread/start`. If the prefix forwards
+            // and the start is then refused, the TUI is left on the old thread and
+            // UNSUBSCRIBED from it — silently blind. Holding the prefix was built and
+            // MEASURED TO DEADLOCK the real TUI, which awaits each unsubscribe's response
+            // before sending the next frame (see `ThreadBinding::switch_admissibility`), so
+            // the failure is moved earlier instead: every cause the broker can know in
+            // advance refuses HERE, with zero wire effect and the subscription intact.
+            // The prefix is admitted ONLY against a valid RESERVATION (round-2 P3). The
+            // same call checks every precondition the `thread/start` behind it will face —
+            // from the one shared definition, including the per-connection creation-id
+            // arithmetic — and CLAIMS the slot, so a turn or a competing connection's
+            // creation cannot be admitted between the prefix and the start and turn a
+            // then-valid check into a then-invalid one.
+            // **Admissibility is checked here; the RESERVATION is claimed later**
+            // (round-3 P4). A prefix the id ledger goes on to refuse sends zero bytes, so
+            // it must leave no reservation behind — the claim happens in
+            // `classify_request`, after that ledger admission succeeds.
+            //
+            // Only an unsubscribe naming the ACTIVE HEAD is a switch prefix (round-3 P5);
+            // a retired thread's cleanup begins no switch and reserves nothing.
+            let names_head = params
+                .get("threadId")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| env.threads.head_or_superseded().as_deref() == Some(t));
+            if names_head {
+                if let Err(why) = env.threads.switch_prefix_admissible(
+                    env.conn,
+                    params
+                        .get("threadId")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default(),
+                ) {
+                    return refuse_request(
+                        id,
+                        E_POLICY_REFUSED,
+                        "unsubscribe refused: this session cannot switch threads right now",
+                        format!(
+                            "{}: the switch behind this unsubscribe could not be reserved \
+                             — {why}; refusing the prefix keeps the subscription rather \
+                             than dropping it and then failing",
+                            redact::method(method)
+                        ),
+                    );
+                }
+                RelayAction::Forward {
+                    note: "thread/unsubscribe: the active head; the switch behind it is \
+                           admissible",
+                }
+            } else {
+                RelayAction::Forward {
+                    note: "thread/unsubscribe: a retired session thread; no switch begins",
+                }
+            }
         }
+        // Deferred dispositions fail closed until their machinery (and, for D2/D3, their
+        // subject) lands in Phase 3.
+        Disposition::HeadCheck | Disposition::ConsumeLocally => refuse_request(
+            id,
+            E_METHOD_UNAVAILABLE,
+            "method not available yet through the broker",
+            format!(
+                "{}: disposition deferred to switch sub-chunk",
+                redact::method(method)
+            ),
+        ),
     }
+}
+
+/// **`thread/unsubscribe`'s params are pinned to the capture** (round-1 P10): exactly
+/// `{"threadId": "<string>"}`.
+///
+/// Refuse-by-default applies to params, not just to methods — the same rule
+/// `TURN_START_CAPTURED_PARAMS` enforces for a turn. This method moved from "deferred, fails
+/// closed" to "forwarded when scoped", so its params became a surface for the first time,
+/// and every one of the four measured frames carries this one key and no other.
+fn check_unsubscribe_shape(params: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Err(format!(
+            "params is a {}; the measured value is an object",
+            redact::value_shape(Some(params))
+        ));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != ["threadId"] {
+        return Err(format!(
+            "params key set is {keys:?}; the measured frame carries exactly [\"threadId\"]"
+        ));
+    }
+    if !obj
+        .get("threadId")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Err("params.threadId is not a string".to_string());
+    }
+    Ok(())
 }
 
 /// A `thread/resume` may only target a thread bound to this session (finding 5).
@@ -472,46 +740,6 @@ fn check_resume_binding(env: &Env, params: &serde_json::Value) -> Result<(), Str
         Some(id) => Err(format!(
             "thread {} was not observed as a session thread",
             redact::thread_id(id)
-        )),
-    }
-}
-
-/// The pre-D2 head-check: a `turn/start` may only name the session's ONE **verified**
-/// thread — one whose creation this broker admitted and whose creation response it
-/// correlated and verified (see [`crate::session`]). A thread the broker merely *heard
-/// announced* is not bound and never was a valid head.
-///
-/// Deliberately NOT D2. There is no latch, no acknowledged quiesce, no acceptance fence
-/// and no upstream seal here — just single-thread head equality, which is all a session
-/// that has never switched threads needs. A session with no verified thread refuses;
-/// a session with two is now unrepresentable (P3 closes creation once one binds), which
-/// is strictly stronger than the old "refuse when two are bound". D2 (appendix D2) is
-/// what replaces this subset wholesale when it lands.
-///
-/// ## P4 (round 3) — the ids are grammar-checked BEFORE they are logged
-///
-/// `params.threadId` is client-chosen and this detail lands in a durable `broker.log`, so
-/// echoing it raw is a log-injection channel. MEASURED across every captured frame: a thread
-/// id is a strict LOWERCASE UUID (`8-4-4-4-12` hex, exactly 36 bytes). An id matching that
-/// grammar is echoed — an operator needs to know *which* thread was named, and the grammar
-/// admits no newline, quote or control byte; anything else is reported by byte length only.
-/// The BOUND head goes through the same renderer: it is only ever installed from a creation
-/// response, which is likewise not this broker's own text.
-fn check_turn_head(env: &Env, params: &serde_json::Value) -> Result<(), String> {
-    let Some(id) = params.get("threadId").and_then(|t| t.as_str()) else {
-        return Err("turn/start without a string threadId".to_string());
-    };
-    let requested = redact::thread_id(id);
-    match env.threads.sole_session_thread() {
-        None => Err(format!(
-            "turn/start names thread {requested} but this session has no verified bound \
-             thread (no creation this broker admitted has been answered by a correlated, \
-             fully verified creation response)"
-        )),
-        Some(head) if head == id => Ok(()),
-        Some(head) => Err(format!(
-            "turn/start names thread {requested} but this session's bound thread is {}",
-            redact::thread_id(&head)
         )),
     }
 }
@@ -541,61 +769,6 @@ fn check_start_workspace(env: &Env, params: &serde_json::Value) -> Result<(), St
             )),
         },
     }
-}
-
-/// P5 — a `turn/start` must run in the EXACT workspace bound at its thread's creation.
-///
-/// `cwd` and `runtimeWorkspaceRoots` are compared by **exact `serde_json::Value`
-/// equality** against the values recorded from the creation RESPONSE — which
-/// [`crate::session`] only installs after proving that response's `cwd` equals the
-/// coordinator-owned launch cwd, so this equality transitively anchors the turn to the
-/// launch workspace. Two deliberate choices:
-///
-/// * **Response, not request.** The 2e-4a review said to bind the creation *request*'s
-///   cwd+roots. Measured: the `thread/start` request sends `"cwd": null` while the turn
-///   sends a concrete path, so that rule would refuse every real turn. The creation
-///   RESPONSE carries the server-resolved values, and those compare equal to the turn's.
-/// * **Exact equality, not normalization.** The review said "normalized". A path
-///   canonicalizer is speculative until a real client is *observed* varying its
-///   representation, and it can only ever make the check accept more; exact equality is
-///   strictly stricter, so it cannot under-refuse. The ONE canonicalization in the system
-///   happens at the coordinator, before the launch cwd enters the host argv. There is
-///   deliberately no scope-*subset* reasoning either (a turn under a narrower root is still
-///   a different workspace than the one the policy was proven over).
-///
-/// ## P7 — refusal details name the FIELD, never the value
-///
-/// A workspace refusal is written to `broker.log`, which is durable and read by operators
-/// and gates. The requested and bound paths are attacker-supplied strings and (for the
-/// bound side) filesystem layout, so the detail carries only WHICH field mismatched plus
-/// shape metadata — JSON type, string length, array element count — and never the values.
-fn check_turn_workspace(env: &Env, params: &serde_json::Value) -> Result<(), String> {
-    let Some(VerifiedThread { id: _, cwd, roots }) = env.threads.bound_thread() else {
-        // A DIFFERENT cause from the head-check's "does not name this session's thread":
-        // there is no binding at all to compare a workspace against.
-        return Err(
-            "turn/start: this session has no verified bound thread to check the workspace \
-             against"
-                .to_string(),
-        );
-    };
-    if params.get("cwd") != Some(&cwd) {
-        return Err(format!(
-            "turn/start: params.cwd does not equal the cwd bound at this thread's creation \
-             (turn: {}; bound: {}) — values withheld from the audit log",
-            redact::value_shape(params.get("cwd")),
-            redact::value_shape(Some(&cwd))
-        ));
-    }
-    if params.get("runtimeWorkspaceRoots") != Some(&roots) {
-        return Err(format!(
-            "turn/start: params.runtimeWorkspaceRoots does not equal the roots bound at this \
-             thread's creation (turn: {}; bound: {}) — values withheld from the audit log",
-            redact::value_shape(params.get("runtimeWorkspaceRoots")),
-            redact::value_shape(Some(&roots))
-        ));
-    }
-    Ok(())
 }
 
 fn classify_response(
@@ -719,6 +892,12 @@ mod tests {
 
     /// A full, fingerprint-matching thread/start params body (satisfies the presence rule).
     const OK_START: &str = r#"{"method":"thread/start","id":"s","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#;
+    /// The `/new` switch's second creation. MEASURED: its params are BYTE-IDENTICAL to the
+    /// session's first `thread/start`; only the JSON-RPC id differs (the TUI mints a fresh
+    /// one per request). That identity is the whole reason the switch can be admitted under
+    /// the same fingerprint rule — so this constant differs from [`OK_START`] in exactly the
+    /// id and nothing else.
+    const OK_START_SWITCH: &str = r#"{"method":"thread/start","id":"s2","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#;
 
     /// The captured `turn/start` shape class (P4/P6) naming `thread`, in the workspace
     /// `cwd` / `roots`. Every turn/start test starts from this and perturbs ONE thing, so a
@@ -908,7 +1087,8 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
         assert!(refused_note(&a).contains("creation in flight"), "{a:?}");
 
-        // Bound: the correlated response lands, and the slot stays closed.
+        // Bound: the correlated response lands. The slot RE-OPENS as a SWITCH (2e-4c) —
+        // this is the half of the old rule that changed.
         threads.observe_server_frame(
             CONN_A,
             &json!({"id": "s", "result": {
@@ -918,12 +1098,120 @@ mod tests {
             }})
             .to_string(),
         );
-        let b = go_env(
+        assert!(
+            matches!(
+                go_env(
+                    Role::Tui,
+                    &threads,
+                    r#"{"method":"thread/start","id":"s3","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#,
+                ),
+                RelayAction::Forward { .. }
+            ),
+            "a second thread/start while one is BOUND is the measured /new switch and must \
+             be admitted"
+        );
+        // ...and the one-at-a-time half is still enforced ON the switch: a third creation
+        // while the switch is in flight is refused.
+        let c = go_env(
             Role::Tui,
             &threads,
-            r#"{"method":"thread/start","id":"s3","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#,
+            r#"{"method":"thread/start","id":"s4","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#,
         );
-        assert_eq!(refused_code(&b), E_POLICY_REFUSED);
+        assert_eq!(refused_code(&c), E_POLICY_REFUSED);
+        assert!(refused_note(&c).contains("creation in flight"), "{c:?}");
+    }
+
+    /// 2e-4c — the measured `/new` shape, end to end through the classifier: two
+    /// `thread/unsubscribe` frames naming the active head, then a `thread/start` whose
+    /// params are byte-identical to the first, then turns follow the NEW head while the old
+    /// one stays resumable and unturnable.
+    #[test]
+    fn the_measured_new_switch_flows_through_the_classifier() {
+        let threads = SessionThreads::new(BOUND_CWD);
+        assert!(matches!(
+            go_env(Role::Tui, &threads, OK_START),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": "s", "result": {
+                "thread": {"id": "01a0-head"},
+                "cwd": BOUND_CWD,
+                "runtimeWorkspaceRoots": [BOUND_ROOT]
+            }})
+            .to_string(),
+        );
+        // The marker: `/new` sends it TWICE, both naming the active head. Each is HELD —
+        // zero upstream bytes — until the switch behind it is admitted (round-1 P4).
+        for id in [7, 8] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/unsubscribe","id":id,
+                        "params":{"threadId":"01a0-head"}})
+                .to_string(),
+            );
+            assert!(
+                matches!(a, RelayAction::Forward { .. }),
+                "unsubscribe #{id} of the active head must forward — the switch behind it \
+                 is admissible (round-1 P4): {a:?}"
+            );
+        }
+        // The switch itself — byte-identical params to the first creation.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, OK_START_SWITCH),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": "s2", "result": {
+                "thread": {"id": "01a0-next"},
+                "cwd": BOUND_CWD,
+                "runtimeWorkspaceRoots": [BOUND_ROOT]
+            }})
+            .to_string(),
+        );
+        // The head FOLLOWED the switch: turns run on B...
+        assert!(
+            matches!(
+                go_env(Role::Tui, &threads, &turn("01a0-next")),
+                RelayAction::Forward { .. }
+            ),
+            "a turn on the new active thread must forward"
+        );
+        // ...and are REFUSED on the retired one. Retired is unturnable.
+        let stale = go_env(Role::Tui, &threads, &turn("01a0-head"));
+        assert_eq!(refused_code(&stale), E_POLICY_REFUSED);
+        assert!(
+            refused_note(&stale).contains("bound thread is"),
+            "{}",
+            refused_note(&stale)
+        );
+        // But retired is NOT forgotten: a resume of it still forwards (measured — the real
+        // app-server answers it with that thread's own full history).
+        for tid in ["01a0-head", "01a0-next"] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/resume","id":format!("r-{tid}"),
+                        "params":{"threadId":tid}})
+                .to_string(),
+            );
+            assert!(
+                matches!(a, RelayAction::Forward { .. }),
+                "a resume of {tid} must forward after the switch: {a:?}"
+            );
+        }
+        // And a thread this session never bound is still refused on both scoped methods.
+        for method in ["thread/resume", "thread/unsubscribe"] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":method,"id":"x","params":{"threadId":"01a0-stranger"}})
+                    .to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{method}");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1816,18 +2104,164 @@ mod tests {
         assert!(!note.contains('\n'), "{note:?}");
     }
 
+    /// 2e-4c — the switch marker is scoped, not deferred, and it fails closed on every
+    /// shape the measured `/new` does not send.
     #[test]
-    fn deferred_switch_marker_fails_closed() {
+    fn the_switch_marker_is_scoped_to_a_session_thread() {
+        // No binding at all: nothing is a session thread, so nothing unsubscribes.
         let a = go(
             Role::Tui,
-            r#"{"method":"thread/unsubscribe","id":3,"params":{}}"#,
+            r#"{"method":"thread/unsubscribe","id":3,"params":{"threadId":"01a0-head"}}"#,
         );
-        match a {
-            RelayAction::SyntheticError { frame, .. } => {
-                let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                assert_eq!(v["error"]["code"], E_METHOD_UNAVAILABLE);
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+
+        // With a bound head: that head unsubscribes; a stranger does not; and a malformed
+        // or absent `threadId` does not (the measured frame always carries a string).
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(
+                Role::Tui,
+                &threads,
+                r#"{"method":"thread/unsubscribe","id":3,"params":{"threadId":"01a0-head"}}"#,
+            ),
+            RelayAction::Forward { .. }
+        ));
+        // P10 — the params shape is PINNED: exactly `{threadId}`, a string. An EXTRA key
+        // is an uncaptured channel on a method that is now forwarded rather than refused.
+        for params in [
+            json!({"threadId": "01a0-stranger"}),
+            json!({}),
+            json!({"threadId": null}),
+            json!({"threadId": 7}),
+            json!({"threadId": ["01a0-head"]}),
+            json!({"threadId": "01a0-head", "cascade": true}),
+            json!({"threadId": "01a0-head", "threadid": "01a0-head"}),
+        ] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/unsubscribe","id":3,"params":params}).to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "params {params}");
+        }
+    }
+
+    /// **CLOSING S3 — a ccd unsubscribe never reserves.**
+    ///
+    /// A reservation fences turns and blocks other connections' creations, and it exists to
+    /// bind the TUI's `/new` prefix to the `thread/start` behind it. ccd never starts a
+    /// thread — the allowlist refuses `thread/start` on that leg by role — so a ccd
+    /// unsubscribe has no switch behind it and must fence nothing.
+    #[test]
+    fn a_ccd_unsubscribe_reserves_nothing() {
+        let threads = bound_session("01a0-head");
+        let unsub = r#"{"method":"thread/unsubscribe","id":3,"params":{"threadId":"01a0-head"}}"#;
+        // Today the allowlist refuses it on that leg outright — `thread/unsubscribe` has no
+        // ccd cell — so this is the FIRST line, and the role check in `classify_request` is
+        // the second. Both are asserted here because the disposition table is a table: a
+        // future cell for ccd (a link retiring its own subscription, say) must not silently
+        // acquire the power to fence the TUI's turns along with it.
+        assert_eq!(
+            refused_code(&go_env(Role::Ccd, &threads, unsub)),
+            E_POLICY_REFUSED
+        );
+        // Whatever the disposition, nothing was reserved: a turn on the TUI leg still goes.
+        assert!(
+            matches!(
+                go_env(Role::Tui, &threads, &turn("01a0-head")),
+                RelayAction::Forward { .. }
+            ),
+            "a ccd unsubscribe must not fence the TUI's turns"
+        );
+    }
+
+    /// **CLOSING S4 — a REFUSED resume records no re-subscribe attempt.**
+    ///
+    /// The attempt is what a later success is correlated against to lift a wedge. Recording
+    /// one for a request the fingerprint or the id ledger refuses registers a resume that
+    /// sends zero bytes and is never answered — an entry that lives for the connection's
+    /// lifetime and that a replayed id could later satisfy.
+    #[test]
+    fn a_refused_resume_records_no_resubscribe_attempt() {
+        let threads = bound_session("01a0-head");
+        // (a) A resume naming a thread this session never bound: refused before anything.
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            r#"{"method":"thread/resume","id":9,"params":{"threadId":"01a0-stranger"}}"#,
+        );
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+        assert_eq!(threads.resubscribe_attempts(), 0);
+
+        // (b) The case that isolates WHERE the attempt is recorded. An attempt is only ever
+        //     recorded for a WEDGED connection, so the connection must first be wedged: its
+        //     unsubscribe prefix lands and the switch behind it fails.
+        assert!(threads
+            .switch_prefix_admissible(CONN_A, "01a0-head")
+            .is_ok());
+        assert_eq!(
+            threads.try_admit_request(CONN_A, &RequestId::Int(50), "thread/unsubscribe"),
+            IdAdmission::Admitted
+        );
+        threads.reserve_switch(CONN_A, "01a0-head");
+        assert_eq!(
+            threads.try_admit_request(CONN_A, &RequestId::Int(51), CREATION_METHOD),
+            IdAdmission::Admitted
+        );
+        threads.observe_server_frame(CONN_A, r#"{"id":51,"error":{"code":-1,"message":"boom"}}"#);
+        assert_eq!(threads.resubscribe_attempts(), 0, "nothing attempted yet");
+
+        //     Now a resume naming the session's own thread — so the binding check PASSES —
+        //     that the FINGERPRINT then refuses. Recording at the old site (right after the
+        //     binding check) logs an attempt for a request that sends zero bytes and will
+        //     never be answered.
+        let b = go_env(
+            Role::Tui,
+            &threads,
+            r#"{"method":"thread/resume","id":11,"params":{"threadId":"01a0-head","approvalPolicy":"never"}}"#,
+        );
+        assert_eq!(refused_code(&b), E_POLICY_REFUSED);
+        assert_eq!(
+            threads.resubscribe_attempts(),
+            0,
+            "a resume the FINGERPRINT refuses must register no attempt — it forwards zero \
+             bytes, so no answer will ever arrive to release the entry, and a replayed id \
+             could later satisfy it"
+        );
+        // The ADMITTED one does register — which is what makes the zero above a fact about
+        // the refusal rather than about the plumbing being inert.
+        assert!(matches!(
+            go_env(
+                Role::Tui,
+                &threads,
+                r#"{"method":"thread/resume","id":10,"params":{"threadId":"01a0-head"}}"#,
+            ),
+            RelayAction::Forward { .. }
+        ));
+        assert_eq!(
+            threads.resubscribe_attempts(),
+            1,
+            "an admitted resume from a wedged connection IS recorded"
+        );
+    }
+
+    /// The deferred cells that REMAIN deferred still fail closed with the
+    /// method-unavailable code — `turn/steer` and `turn/interrupt`, whose D2 head-check
+    /// machinery is Phase 3's.
+    #[test]
+    fn the_still_deferred_actuations_fail_closed() {
+        for method in ["turn/steer", "turn/interrupt"] {
+            let a = go(
+                Role::Tui,
+                &json!({"method":method,"id":3,"params":{"threadId":"01a0-head"}}).to_string(),
+            );
+            match a {
+                RelayAction::SyntheticError { frame, .. } => {
+                    let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                    assert_eq!(v["error"]["code"], E_METHOD_UNAVAILABLE, "{method}");
+                }
+                other => panic!("{method}: {other:?}"),
             }
-            other => panic!("{other:?}"),
         }
     }
 }

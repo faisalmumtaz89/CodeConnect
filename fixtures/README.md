@@ -19,6 +19,8 @@ failing silently in production.
 | `codex/lifecycle.jsonl` (14) | One live-observed Codex app-server turn — the real 0.147 notification stream (`thread/started`, `item/started`/`completed` for a userMessage and an agentMessage, the streamed `item/agentMessage/delta`, `thread/tokenUsage/updated`, `turn/completed{completed}`), plus the observation-noise frames the adapter deliberately drops. Each line is one JSON-RPC frame, exactly as a connection delivers it. Captured from `captures/subscribed/`; from a throwaway project, absolute user paths scrubbed to `/work/…`. Drives `codex_adapter.rs`. |
 | `codex/command-execution.jsonl` (30) | A turn that runs a shell command — `commandExecution` `item/started`(inProgress)→`item/completed`(exitCode 0), with `reasoning` items and the `item/commandExecution/requestApproval` + `serverRequest/resolved` frames (approvals are Phase 3; the observation adapter drops them). From `captures/approvals-accept/`. |
 | `codex/file-change.jsonl` (44) | A `fileChange` item (`changes[].{path,kind,diff}`) started, approval-requested, and completed. From `captures/approvals-fc-readonly/`. |
+| `codex/thread-switch.jsonl` (169) | **The `/new` thread switch, measured on four connections at once** (chunk 2e-4c). One live 0.147 session driven through: a turn on thread A, an observer resumed to A, `/new`, a turn on B, that same observer resumed to B, a `/resume` back to A, and an `thread/unsubscribe`. Each line carries `conn` (which connection delivered it) and `dir` (`c2s`/`s2c`), plus `note` markers naming each step, because the whole point of the capture is *who got what*: the switch signal, the frames a subscription does and does not receive, and the ordering of the `thread/unsubscribe` markers. Observation noise (`plugin/list`, `app/list`, skills, account) and the multi-MB frames are excluded; absolute paths scrubbed to `/work/…`. |
+| `codex/model-switch.json` | **Eleven real `turn/start` frames across three models** (chunk 2e-4c), plus the six `thread/settings/update` frames the TUI's `/model` flow emits. The evidence behind the `collaborationMode` re-grounding: `mode` and `settings.developer_instructions` byte-identical on all eleven (and identical to `turn-start-request.json`, captured a week earlier on a different sandbox), while `settings.model` and `settings.reasoning_effort` simply carry whatever the picker last set. `codex-broker/src/fingerprint.rs` reads this file directly in its tests, so the rule and its evidence cannot drift apart. |
 | `codex/interrupt.jsonl` (36) | Two turns; the second interrupts a `commandExecution` mid-flight — `turn/completed{status:"interrupted", items:[]}` (D14) leaves the exec non-terminal, so the adapter must synthesize its terminal from what it saw live. From `captures/steer-abort-pending/`. |
 
 The pane captures come from `tmux capture-pane -p -J` against live `claude`
@@ -39,6 +41,14 @@ rather than assumed and all four drive the design:
   `← for agents` becomes `← 1 agent` once a subagent exists. The box is the
   invariant: at 3, 10 and 20 columns the composer keeps the same rule / `❯`
   prompt row / rule structure, so the check that reads it is width-invariant.
+* A Codex `thread/started` is a **global broadcast**: every initialized connection
+  receives it, subscribed or not, and it is the ONLY frame about a new thread that a
+  connection subscribed elsewhere receives. That is what makes it usable as a switch
+  signal and what makes ignoring it fatal.
+* `thread/resume` **adds** a subscription rather than replacing one. One connection
+  resumed thread A, followed a `/new` to B, resumed B on the same socket, and thereafter
+  received both threads' streams. Following a switch therefore costs no reconnect — and
+  the per-thread filter is what keeps the two apart.
 * Both rows of that box start at **column zero**. An indented one is a
   quotation — agents print captured panes into their own output, and Claude
   indents tool results — so the anchor is what separates a composer that is

@@ -255,6 +255,8 @@ fn resolve_codex() -> Option<PathBuf> {
 /// exercised from a unit test here. A missing launcher is a **failure** with the
 /// command that fixes it, never a skip.
 fn resolve_codeconnect() -> PathBuf {
+    // Round-1 M13: build it before looking for it.
+    build_launcher();
     let exe = std::env::current_exe().expect("this test binary's own path");
     let profile_dir = exe
         .parent()
@@ -268,6 +270,48 @@ fn resolve_codeconnect() -> PathBuf {
         bin.display()
     );
     bin
+}
+
+/// **Build the launcher, then use it** (round-1 M13).
+///
+/// Found the hard way, in 2e-4c, while mutation-testing a live gate: `cargo test -p ccd`
+/// does not rebuild `codeconnect`, and this harness drives `codeconnect` — which is what
+/// carries the broker into the pane. A deliberate, load-bearing mutation of
+/// `codex-broker/src/fingerprint.rs` was therefore invisible to the live run, and the gate
+/// PASSED against a binary built before the mutation existed. A live gate that can pass
+/// against a stale binary is not a gate; it will just as happily pass against a broken
+/// change nobody rebuilt.
+///
+/// The first fix here was an mtime scan over the workspace sources, which only DETECTED
+/// staleness and then failed. Building is the complete fix: the gate cannot run against
+/// anything but the current tree, and there is no third state where the binary is stale
+/// and the scan happens to agree with it (a touched file, a clock skew, a
+/// `--offline` edit). `cargo build` is a no-op when nothing changed, so the cost on the
+/// common path is a lock acquisition.
+///
+/// It inherits this process's `CARGO_TARGET_DIR`, so the binary it produces is the one
+/// [`resolve_codeconnect`] then finds beside this test binary.
+fn build_launcher() {
+    let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "-p", "codeconnect"])
+        // The workspace root, derived from this crate rather than from the cwd — a test
+        // binary's cwd is the crate dir, and `cargo` would find the same workspace either
+        // way, but naming it makes the invocation independent of how the test was launched.
+        .current_dir(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("mac/ccd -> mac"),
+        )
+        .stdin(Stdio::null())
+        .output()
+        .expect("run cargo build -p codeconnect");
+    assert!(
+        out.status.success(),
+        "the live gate could not build the launcher it drives, so it would otherwise run \
+         against a stale binary and could pass against a change it never contained.\n\
+         stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn is_native_executable(path: &Path) -> bool {
@@ -1185,6 +1229,33 @@ impl LiveSandbox {
         self.run_dir.to_str().expect("short /tmp path is utf-8")
     }
 
+    /// Pin this sandbox's codex to a specific model and reasoning effort, by writing the
+    /// `config.toml` a real operator's `~/.codex` would carry (2e-4c).
+    ///
+    /// **This is the only way a brokered session's model can differ from the default**, and
+    /// that is a MEASURED constraint rather than a harness convenience: the TUI's `/model`
+    /// affordance drives `thread/settings/update` (plus a `config/batchWrite` to persist
+    /// it), and the broker refuses `thread/settings/update` outright as
+    /// `OwnershipAdjacent` — it is the same method that can move `approval_policy`, and it
+    /// durably widens policy with a bare `result:{}`. So within a brokered session the
+    /// model is FIXED at launch, and the population the 2e-4c pin widening actually serves
+    /// is "an operator whose configured model is not the one the fixture captured".
+    ///
+    /// Must be called before `spawn_coordinator`: the app-server reads the config once, at
+    /// start.
+    fn pin_model(&self, model: &str, effort: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.codex_home.join("config.toml"))
+            .expect("create the sandbox config.toml");
+        writeln!(f, "model = \"{model}\"").expect("write model");
+        writeln!(f, "model_reasoning_effort = \"{effort}\"").expect("write effort");
+    }
+
     /// The base and the credential it holds, so a test can prove they are GONE
     /// after `Drop`. A sweep nobody checks is one that can silently stop happening,
     /// and this one is what keeps the operator's token out of `/tmp`.
@@ -1571,7 +1642,120 @@ async fn the_sandbox_credential_is_written_privately_and_removed_on_drop() {
     println!("CREDENTIAL CLEANUP PASS — {} is gone", base.display());
 }
 
-/// The whole control link, live: handshake, bind, observe, reconnect, resume.
+/// **A session launched on a model the fixture never captured still runs a turn** (2e-4c).
+///
+/// The live subject of the model-pin widening, and the reason it needed one.
+///
+/// 2e-4a pinned `turn/start`'s `collaborationMode` to the captured value BYTE FOR BYTE.
+/// That field carries `settings.model` and `settings.reasoning_effort`, so the pin bound
+/// the whole broker to one specific model: an operator whose `~/.codex/config.toml` says
+/// `model = "gpt-5.6-terra"` got a policy refusal on their very first turn, with an audit
+/// note about a captured boundary. A13 recorded that refusal as "the designed 2e-4c
+/// re-grounding trigger", and this is the gate that proves the trigger was discharged
+/// against a real wire rather than against an argument.
+///
+/// The spike measured eleven real `turn/start` frames across three models and found the
+/// field splits cleanly: `mode` and `developer_instructions` byte-identical every time —
+/// including against the 2e-4a fixture captured a week earlier on a different sandbox —
+/// while `model` and `reasoning_effort` simply carried whatever the picker last set. The
+/// instruction channel stays pinned exactly; the two knobs are type-checked. This gate
+/// runs a session on `gpt-5.6-terra` at `high`, neither of which appears in the fixture,
+/// and requires the turn to REACH THE MODEL.
+///
+/// Failure here is unambiguous and is the point: under the old rule the pane shows a
+/// policy refusal and no reply ever arrives.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_session_launched_on_an_uncaptured_model_still_runs_a_turn() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("model");
+    // Neither value appears anywhere in `fixtures/codex/turn-start-request.json`.
+    sb.pin_model("gpt-5.6-terra", "high");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.tui_running()).await,
+        "the host must launch the real codex TUI. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    // The pin took: the TUI's own footer names the model it will send.
+    let pane_shows_model = wait_until(Duration::from_secs(60), || {
+        sb.capture_pane().contains("gpt-5.6-terra")
+    })
+    .await;
+    println!("pane after launch:\n{}", sb.capture_pane());
+    assert!(
+        pane_shows_model,
+        "the TUI is not on gpt-5.6-terra, so this gate would pass vacuously on the \
+         captured model. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    sb.send_keys(&["Reply with the single word amber and nothing else."]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let replied = wait_until(Duration::from_secs(180), || {
+        sb.capture_pane().to_lowercase().contains("• amber")
+    })
+    .await;
+    println!("pane after the turn:\n{}", sb.capture_pane());
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    assert!(
+        replied,
+        "a turn on an uncaptured model did not complete. If broker.log carries a \
+         `collaborationMode: captured boundary` refusal, the widening did not take and \
+         the pin is still model-bound. broker.log:\n{broker_log}\npane:\n{}",
+        sb.capture_pane()
+    );
+    // And prove it forwarded rather than being refused-then-somehow-answered.
+    assert!(
+        !broker_log.contains("collaborationMode"),
+        "the broker refused something about collaborationMode during a session whose \
+         turn nevertheless completed — that combination needs explaining before this \
+         gate can be believed. broker.log:\n{broker_log}"
+    );
+    // **M12 — the turn actually carried the uncaptured PAIR, and HIGH effort.**
+    //
+    // "The turn completed" alone is compatible with a codex that silently ignored the
+    // config and ran the captured model, in which case this gate would prove nothing about
+    // the widening. The TUI's footer is the observable: it renders the model and effort it
+    // is sending, and `high` in particular is a value the fixture does not contain anywhere
+    // — the capture's efforts are `null` and `medium`.
+    let pane = sb.capture_pane();
+    assert!(
+        pane.contains("gpt-5.6-terra") && pane.contains("high"),
+        "the session must have run on the uncaptured model AND the uncaptured effort; \
+         without both, a broker that still refused one half of the pair would pass this \
+         gate. pane:\n{pane}"
+    );
+    // And the broker FORWARDED a turn — named in its own log — rather than merely not
+    // refusing one.
+    assert!(
+        broker_log.contains("turn/start: head-checked"),
+        "broker.log must show the turn/start FORWARDING through the head-check; its \
+         absence would mean the turn never reached the broker at all. \
+         broker.log:\n{broker_log}"
+    );
+    println!(
+        "PASS a_session_launched_on_an_uncaptured_model_still_runs_a_turn — a real turn \
+         on gpt-5.6-terra/high forwarded through the broker's widened collaborationMode \
+         boundary, with the instruction channel still pinned byte-for-byte."
+    );
+
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// The whole control link, live: handshake, bind, observe, reconnect, resume, SWITCH.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
 async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume() {
@@ -2912,6 +3096,154 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         after_third.len(),
         usage_facts.len(),
         added.len()
+    );
+
+    // --- 13. CLAIM 9: THE THREAD SWITCH, FOLLOWED LIVE ----------------------------
+    //
+    // The 2e-4c milestone. Everything above happened on ONE thread; a real operator
+    // presses `/new`. Three things have to be true at once, and each was measured on the
+    // wire before any of it was written:
+    //
+    //   * the BROKER admits the second `thread/start` as a SWITCH — before 2e-4c its
+    //     single-thread invariant refused it, so a real user could not start a new chat
+    //     at all;
+    //   * the LINK follows, on the connection it already has: `thread/started` for the
+    //     new thread is broadcast to every connection (measured), and it is the ONLY
+    //     frame about the new thread a connection subscribed elsewhere receives, so
+    //     acting on it is the difference between observing the new thread and observing
+    //     nothing for the rest of the session;
+    //   * the old thread's timeline is INTACT and no fact crosses between them.
+    //
+    // Asserted on `third` — the link that is currently attached — with no restart.
+    let before_switch = recorded(&daemon, &uid);
+    let threads_before: std::collections::BTreeSet<String> = before_switch
+        .iter()
+        .filter_map(|(key, _)| key.split(':').next().map(str::to_string))
+        .collect();
+    assert_eq!(
+        threads_before.len(),
+        1,
+        "everything so far must belong to ONE thread, or the switch claim below is \
+         measuring something that had already happened: {threads_before:?}"
+    );
+    println!("--- CLAIM 9: pressing /new in the real TUI ---");
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    sb.send_keys(&["Enter"]);
+
+    // The switch itself is observable before any turn: `thread/started` is a fact, and
+    // the link records it under the NEW thread's own namespace.
+    let switched = wait_until(Duration::from_secs(90), || {
+        recorded(&daemon, &uid)
+            .iter()
+            .any(|(key, _)| !threads_before.iter().any(|t| key.starts_with(t.as_str())))
+    })
+    .await;
+    println!("pane after /new:\n{}", sb.capture_pane());
+    print_events(&daemon, &uid, "after /new");
+    assert!(
+        switched,
+        "the link recorded nothing under a new thread after /new. Either the broker \
+         refused the second thread/start (the pre-2e-4c single-thread invariant) or the \
+         link ignored the announcement and is still watching the old thread. \
+         broker.log:\n{}",
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    let new_thread = recorded(&daemon, &uid)
+        .into_iter()
+        .filter_map(|(key, _)| key.split(':').next().map(str::to_string))
+        .find(|t| !threads_before.contains(t))
+        .expect("the switch named a new thread");
+    println!(
+        "CLAIM 9a PASS — the broker admitted the switch and the link followed it to {new_thread}"
+    );
+
+    // --- CLAIM 9b: a turn on the NEW thread is observed LIVE ----------------------
+    //
+    // Following a switch is only worth anything if the link is SUBSCRIBED to what it
+    // followed to. The usage fact is the discriminator again: token totals ride only the
+    // notification wire, so a usage fact under the new thread cannot have come from a
+    // resume answer.
+    sb.send_keys(&["Reply with the single word green and nothing else."]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let replied = wait_until(Duration::from_secs(150), || {
+        sb.capture_pane().to_lowercase().contains("• green")
+    })
+    .await;
+    println!("pane after the post-switch turn:\n{}", sb.capture_pane());
+    assert!(
+        replied,
+        "the post-switch turn never completed in the TUI, so there is no live turn for \
+         the link to have observed. If the pane shows a policy refusal, the broker's \
+         head-check did not follow the switch. broker.log:\n{}",
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    let observed = wait_until(Duration::from_secs(90), || {
+        recorded(&daemon, &uid)
+            .iter()
+            .any(|(key, _)| key.starts_with(&new_thread) && key.contains(":usage:"))
+    })
+    .await;
+    print_events(&daemon, &uid, "after the post-switch turn");
+    let after_switch = recorded(&daemon, &uid);
+    assert!(
+        observed,
+        "the link recorded no USAGE fact under {new_thread}. A usage total exists only \
+         on the notification wire, so its absence means the link followed the switch in \
+         name (it learned the id) but was never SUBSCRIBED to the new thread — which is \
+         the whole thing the re-targeted resume buys: {after_switch:?}"
+    );
+    for kind in [":turn:", ":item:"] {
+        assert!(
+            after_switch
+                .iter()
+                .any(|(key, _)| key.starts_with(&new_thread) && key.contains(kind)),
+            "no {kind} fact under the new thread {new_thread}: {after_switch:?}"
+        );
+    }
+    println!("CLAIM 9b PASS — a turn on the switched-to thread was observed LIVE");
+
+    // --- CLAIM 9c: the old timeline is INTACT and NOTHING crossed -----------------
+    //
+    // The switch retired a VISIT, not a thread's history (D4). Every fact recorded
+    // before the switch must still be present, at the same seq — a switch that quietly
+    // renumbered or dropped the old thread's timeline would be worse than one that
+    // refused. And every fact in the store must belong to exactly one of the two
+    // threads, which is the D4 filter proven on live traffic rather than in a unit test.
+    for (key, seq) in &before_switch {
+        assert!(
+            after_switch.contains(&(key.clone(), *seq)),
+            "the pre-switch fact {key} (seq {seq}) is gone or moved after the switch. \
+             A switch retires a VISIT; it never retracts a recorded fact."
+        );
+    }
+    let old_thread = threads_before.iter().next().expect("one thread before");
+    let mut foreign = Vec::new();
+    for (key, _) in &after_switch {
+        if !key.starts_with(old_thread.as_str()) && !key.starts_with(&new_thread) {
+            foreign.push(key.clone());
+        }
+    }
+    assert!(
+        foreign.is_empty(),
+        "every fact must be namespaced to one of this session's two threads; these are \
+         neither: {foreign:?}"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for (key, _) in &after_switch {
+        assert!(
+            seen.insert(key.clone()),
+            "duplicate fact across the switch: {key}"
+        );
+    }
+    println!(
+        "CLAIM 9c PASS — {} pre-switch facts intact at their original seq, {} facts \
+         total across exactly two threads ({old_thread} then {new_thread}), zero \
+         cross-thread contamination, zero duplicates. The D4 filter is proven on live \
+         traffic.",
+        before_switch.len(),
+        after_switch.len()
     );
 
     third.abort();
