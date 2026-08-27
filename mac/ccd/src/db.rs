@@ -348,20 +348,13 @@ impl Db {
             .await
     }
 
-    pub async fn set_device_features(
+    /// See [`crate::store::Store::turn_terminal_filed`].
+    pub async fn turn_terminal_filed(
         &self,
-        device_id: String,
-        features_json: Option<String>,
-        epoch: String,
-    ) -> Result<()> {
-        self.run(move |store| {
-            store.set_device_features(&device_id, features_json.as_deref(), &epoch)
-        })
-        .await
-    }
-
-    pub async fn invalidate_device_features(&self, current_epoch: String) -> Result<u64> {
-        self.run(move |store| store.invalidate_device_features(&current_epoch))
+        session_uid: String,
+        terminal_source_event_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.turn_terminal_filed(&session_uid, &terminal_source_event_id))
             .await
     }
 

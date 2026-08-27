@@ -1261,7 +1261,18 @@ fn report_exit(socket: &std::path::Path, registration: &RegisterSession) -> Resu
     // Best-effort: a daemon that rejects the introduction may still accept the
     // exit for a session it already knows about, so a failure here must not
     // stop the news getting through.
-    if let Err(err) = send(&writer, &ClientFrame::Register(registration.clone())) {
+    // **Marked as the replay it is.** The frame is otherwise byte-identical to the
+    // one this supervisor sent when it was alive, which is what the daemon needs
+    // told: a registration it cannot tell from a live one is a registration it hands
+    // the session to, and this process is already dead. Saying so is what stops the
+    // replay taking the session away from whatever supervisor has resumed it in the
+    // meantime — and, one frame later, ending that supervisor's run instead of this
+    // one. See `RegisterSession::exit_replay`.
+    let replay = RegisterSession {
+        exit_replay: true,
+        ..registration.clone()
+    };
+    if let Err(err) = send(&writer, &ClientFrame::Register(replay)) {
         log_for(
             &registration.session_id,
             registration.session_uid.as_deref(),
@@ -1303,6 +1314,7 @@ fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSessio
         // approval may be actuated through us at all: a supervisor that
         // silently ignores the prompt fingerprint must not be handed one.
         protocol_minor: protocol::PROTOCOL_MINOR,
+        exit_replay: false,
     }
 }
 
@@ -3370,6 +3382,16 @@ means the full history gets re-read on your next message.
         // merely name it: a row with no working directory is not a session.
         assert_eq!(frames[0]["cwd"], "/tmp/project");
         assert_eq!(frames[0]["tmux_session"], "cc-7");
+        // **And it says on the wire that it is a replay.** Everything else here
+        // is a copy of the live registration, which is the point and also the
+        // danger: a frame the daemon cannot tell from a supervisor arriving is
+        // one it hands the session to, and the process behind this one is
+        // already dead. A daemon that adopts it then ends whichever run has
+        // since resumed the uid instead of this one — measured, round-10 F1.
+        assert_eq!(
+            frames[0]["exit_replay"], true,
+            "the replay must identify itself: {frames:?}"
+        );
         assert_eq!(frames[1]["type"], "session_exited");
         assert_eq!(frames[1]["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
 
@@ -3395,6 +3417,10 @@ means the full history gets re-read on your next message.
         assert_eq!(frame.claude_bin, args.claude_bin);
         assert_eq!(frame.tmux_socket, protocol::TMUX_SOCKET_NAME);
         assert_eq!(frame.protocol_minor, protocol::PROTOCOL_MINOR);
+        // The frame a *living* supervisor registers with. `report_exit` sets
+        // this on its copy and only there; a live registration that claimed to
+        // be a replay would be refused the session it is asking to host.
+        assert!(!frame.exit_replay);
     }
 
     #[test]

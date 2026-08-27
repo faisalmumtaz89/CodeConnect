@@ -46,6 +46,15 @@
 //!   7. **The attached link observes the next turn LIVE.** A second real turn runs and
 //!      lands as facts of its own turn — including the token usage, which exists only
 //!      on the notification wire and therefore cannot have been recovered.
+//!   7b. **That turn rings, and the link says what it is** (2e-5). The terminal claim 7
+//!      just proved live is the only one in this run that was WATCHED arriving — turn 1
+//!      came back through a resume answer, and an answer never rings — so the doorbell
+//!      here is that turn's. It carries `Completed`, the Codex agent (what narrows the
+//!      fan-out to phones that can open such a run) and this run's uid, and nothing the
+//!      agent wrote. Beside it, the same connection publishes
+//!      `Subscribed{thread}` — the state the inbound resolver reads, on the link that
+//!      has been open since before the TUI existed. **Bound is not subscribed**, and
+//!      only the latter is an addressee.
 //!   8. **Two turns, re-described, still one set of facts.** The answer now describes
 //!      both turns under the ids this gate watched them run with; a fresh link — the
 //!      one place a restart happens, and deliberately the *daemon-restart* question
@@ -1525,7 +1534,34 @@ fn observed(methods: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 
 /// A daemon on its own database, with the live run already in the session table.
 /// The [`TempDb`] goes with the test, so a live run leaves no database behind.
-fn live_daemon(session: &SessionKey) -> (Arc<crate::state::Daemon>, TempDb) {
+/// The daemon this gate's link records into, with its push sender kept.
+///
+/// [`crate::apns::LoggingPushSender`] records the last hint it was handed, which is
+/// all claim 7b needs: whether a real turn, finishing on a real app-server, rang a
+/// real doorbell.
+///
+/// **Where that evidence stops, said out loud.** It records the hint at the
+/// `PushSender` seam — *before* either real sender reads a device row — so it
+/// proves the trigger and the subject, and nothing about delivery. Two further
+/// things stand between this and a phone that buzzes, and both are deliberate
+/// state of the build rather than gaps here: the daemon still refuses a Codex
+/// registration ([`crate::state::Daemon::supported_agents`]), and no device can
+/// be Codex-eligible yet — the shipping iOS client advertises a feature set on
+/// neither `hello` nor `register_push`, and nothing in this phase writes the
+/// column at all, so every stored device decodes as the Claude-only floor and
+/// [`crate::push_queue::recipients`] narrows a Codex doorbell to nobody. That
+/// narrowing is the read side standing on its own, which is precisely why the
+/// write side was deleted rather than repaired. Claim 7b
+/// is therefore the staged half — the doorbell rings, correctly addressed — and
+/// the delivery half arrives with the phone work that can render what it opens
+/// onto.
+fn live_daemon(
+    session: &SessionKey,
+) -> (
+    Arc<crate::state::Daemon>,
+    TempDb,
+    Arc<crate::apns::LoggingPushSender>,
+) {
     let db = TempDb::new(&format!(
         "ccd-link-live-{}-{}",
         std::process::id(),
@@ -1553,10 +1589,11 @@ fn live_daemon(session: &SessionKey) -> (Arc<crate::state::Daemon>, TempDb) {
         .assert_present();
     let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
     Box::leak(Box::new(tail_rx));
+    let push = Arc::new(crate::apns::LoggingPushSender::new());
     let daemon = crate::state::Daemon::new(
         protocol::config::Config::default(),
         store,
-        Arc::new(crate::apns::LoggingPushSender::new()),
+        Arc::clone(&push) as Arc<dyn crate::apns::PushSender>,
         crate::state::Endpoint {
             host: "test.ts.net".into(),
             port: 8787,
@@ -1564,7 +1601,7 @@ fn live_daemon(session: &SessionKey) -> (Arc<crate::state::Daemon>, TempDb) {
         },
         tail_tx,
     );
-    (daemon, db)
+    (daemon, db, push)
 }
 
 /// Every fact the daemon holds for this run, as `(source_event_id, seq)`.
@@ -1785,7 +1822,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // which is precisely who `thread/started` is broadcast to (A1/D1/D2). Nothing
     // is handed to the link: it must learn the identity off the wire.
     let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
-    let (daemon, _db) = live_daemon(&session);
+    let (daemon, _db, push) = live_daemon(&session);
     let uid = session.uid.clone();
     // **Capture what production LOGS, from before it logs anything.** `crate::log::emit`
     // writes to stderr, which the harness does not capture, so the attach evidence every
@@ -1793,6 +1830,9 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // reconstructed. Installed before the link exists, because the attach it has to
     // witness can happen as soon as the first turn creates the rollout.
     crate::log::capture::install();
+    // The link's published connection state, held so claim 5b can assert what a
+    // resolver would have been told at the moment the turn landed.
+    let first_presence = crate::codex_link::LinkPresence::new();
     let first = tokio::spawn(crate::codex_link::run(
         Arc::clone(&daemon),
         session.clone(),
@@ -1801,6 +1841,8 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             generation: 1,
             thread_id: None,
         },
+        first_presence.clone(),
+        crate::codex_link::LinkCarry::new(),
     ));
 
     // The measuring instrument for claim 5, attached HERE rather than later: it has
@@ -2858,6 +2900,56 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         turn_two.len()
     );
 
+    // --- 11b. CLAIM 7b: that turn RANG, and the link says what it is ---------------
+    //
+    // The doorbell hangs off a terminal this link watched arrive, and the turn above
+    // is the only one in this run that qualifies — turn 1 was recovered through a
+    // resume answer, and a resume answer never rings. So a doorbell here is a
+    // doorbell for the turn claim 7 just proved was live, and its absence would mean
+    // the trigger is wired to something a real app-server does not produce.
+    //
+    // Past the dispatch grace first: `dispatch_push` waits out a window before it
+    // rings, and reading the probe too early would report silence for a push that was
+    // merely still in flight.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let rang = push
+        .last()
+        .expect("a turn observed finishing live must ring the doorbell");
+    assert_eq!(
+        rang.kind,
+        crate::apns::PushKind::Completed,
+        "the doorbell says a turn finished and carries nothing the agent wrote: {rang:?}"
+    );
+    assert_eq!(
+        rang.agent,
+        protocol::agent::AgentKind::Codex,
+        "without the agent the fan-out cannot narrow to phones that can open a Codex \
+         run, and every Claude-only device would be rung: {rang:?}"
+    );
+    assert_eq!(
+        rang.session_uid, session.uid,
+        "the doorbell must be about this run: {rang:?}"
+    );
+    // And the resolver's own view of the same connection, taken from the link that
+    // has been open since before the TUI existed. **Bound is not subscribed**, and
+    // this is the state that says an inbound request would have an addressee.
+    assert_eq!(
+        first_presence.get(),
+        crate::codex_link::CodexAddressee::Subscribed {
+            thread_id: thread_id.clone()
+        },
+        "the link that observed the turn must publish itself as subscribed to the \
+         thread it observed it on — that published state is what the inbound resolver \
+         reads, and anything weaker would resolve a request to nowhere"
+    );
+    println!(
+        "CLAIM 7b PASS — the live turn rang a content-free {:?} doorbell for agent \
+         {}, and the link publishes Subscribed{{{thread_id}}} — the addressee an \
+         inbound request resolves to.",
+        rang.kind,
+        rang.agent.as_str()
+    );
+
     // --- 12. CLAIM 8: two turns, re-described, and every fact still ONE ------------
     //
     // The completeness premise, asserted rather than assumed: after two turns the answer
@@ -2922,6 +3014,8 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             generation: 1,
             thread_id: Some(thread_id.clone()),
         },
+        crate::codex_link::LinkPresence::new(),
+        crate::codex_link::LinkCarry::new(),
     ));
     let mut third_log: Vec<String> = Vec::new();
     let reattached = wait_until(Duration::from_secs(60), || {

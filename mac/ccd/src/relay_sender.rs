@@ -580,7 +580,7 @@ impl PushSender for RelayPushSender {
             );
             return;
         }
-        for target in recipients(targets, excluded) {
+        for target in recipients(targets, excluded, &hint.agent) {
             let document = doorbell_document(&target, hint);
             // The collapse id is passed for the queue's vocabulary and applied
             // by the relay, which is the party that talks to Apple.
@@ -659,6 +659,7 @@ mod tests {
             environment: ApnsEnvironment::Sandbox,
             device_id: "phone".into(),
             credential: Some(Redacted::from("bearer-value")),
+            features: Default::default(),
         }
     }
 
@@ -668,6 +669,18 @@ mod tests {
             kind: PushKind::Approval,
             blocked_sessions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            agent: protocol::agent::AgentKind::Claude,
+        }
+    }
+
+    /// The same doorbell, raised by a Codex run.
+    ///
+    /// Beside [`hint`] rather than a parameter on it, so every test that is not
+    /// about agent eligibility goes on reading as though it were not.
+    fn codex_hint(blocked: usize) -> PushHint {
+        PushHint {
+            agent: protocol::agent::AgentKind::Codex,
+            ..hint(blocked)
         }
     }
 
@@ -1257,6 +1270,7 @@ mod tests {
                 environment: ApnsEnvironment::Sandbox,
                 device_id: (*device).into(),
                 credential: Some(Redacted::from(format!("bearer-{device}"))),
+                features: Default::default(),
             })
             .collect();
         let relay = FakeRelay::answering(vec![
@@ -1303,6 +1317,109 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// **The relayed doorbell asks the hint's agent, and this is the only test
+    /// that can tell.**
+    ///
+    /// Every assertion about agent eligibility lives beside
+    /// [`crate::push_queue::recipients`] and calls it directly, which proves what
+    /// the filter answers and nothing about what the sender asks it. There are two
+    /// independent senders, so a constant hard-coded at either call site is a
+    /// fleet-wide authorization change that every direct test of the filter
+    /// survives — and the doorbell test above cannot see it either, because its
+    /// hint is Claude and its fleet is the Claude floor throughout. This one raises
+    /// a Codex doorbell over a fleet where the answer differs, and reads the
+    /// recipients off the requests the relay was actually asked to carry.
+    ///
+    /// The relay is given exactly as many answers as there are eligible phones:
+    /// the count is a claim, not a convenience.
+    ///
+    /// **The hint is the shape production can actually raise** (round-9 F6). It used
+    /// to be `codex_hint(2)` — Codex, `Approval`, two runs blocked — and that hint
+    /// cannot exist: the only production caller of `send` passes a
+    /// [`crate::apns::PushHint::describing`] result, and `describing` forces the
+    /// subject to Claude whenever `blocked > 0`, a Codex approval deck being
+    /// unraisable in this build. So every Codex-carrying hint is `Completed` with
+    /// zero blocked — the shape the direct sender's twin of this test already uses,
+    /// and mirrored here for the reason a test over an unreachable shape is worth
+    /// less than it looks: a sender that chose Claude *except* when
+    /// `blocked_sessions == 0` passed the old assertion while misrouting every Codex
+    /// push the build can produce.
+    ///
+    /// **Mutations:** filter on a hard-coded `AgentKind::Claude` at this sender's
+    /// call to [`crate::push_queue::recipients`], filter on Claude only when
+    /// `blocked_sessions == 0`, or drop the agent filter from `recipients`
+    /// altogether, and the two phones that never named Codex join the fan-out.
+    #[tokio::test]
+    async fn a_codex_doorbell_is_relayed_only_to_the_phones_that_advertised_codex() {
+        let phone = |device: &str, features: crate::store::DeviceFeatures| PushTarget {
+            token: TOKEN.into(),
+            environment: ApnsEnvironment::Sandbox,
+            device_id: device.into(),
+            credential: Some(Redacted::from(format!("bearer-{device}"))),
+            features,
+        };
+        let advertising = |agents: Vec<protocol::agent::AgentKind>| {
+            crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures { agents })
+        };
+        let claude = protocol::agent::AgentKind::Claude;
+        let codex = protocol::agent::AgentKind::Codex;
+        let relay = FakeRelay::answering(vec![
+            reply(200, r#"{"outcome":"accepted","environment":"sandbox"}"#),
+            reply(200, r#"{"outcome":"accepted","environment":"sandbox"}"#),
+        ]);
+        let sender = RelayPushSender::new(
+            Arc::clone(&relay) as Arc<dyn RelayTransport>,
+            FakeRegistry::over_all(vec![
+                // The legacy shape: advertised nothing at all, which is the Claude
+                // floor and exactly what a widened filter would sweep back in.
+                phone("claude-floor", Default::default()),
+                phone("claude-only", advertising(vec![claude.clone()])),
+                phone("codex-only", advertising(vec![codex.clone()])),
+                phone("both", advertising(vec![claude, codex.clone()])),
+            ]),
+        );
+
+        sender.send(
+            &PushHint {
+                // The production shape, and the only one: a finished Codex turn,
+                // nothing blocked. See the note above.
+                kind: PushKind::Completed,
+                ..codex_hint(0)
+            },
+            &[],
+        );
+
+        for _ in 0..200 {
+            if relay.asked.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // **Settled before it is read.** `send` files every recipient in one
+        // synchronous pass, so a widened filter puts four workers on the runtime
+        // rather than two — and stopping at the first instant two requests exist
+        // could read the wrong two and call that a pass.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Sorted, because four workers race and the set of devices is the claim.
+        let mut rung: Vec<String> = relay
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(bearer, _)| bearer.clone())
+            .collect();
+        rung.sort();
+        assert_eq!(
+            rung,
+            vec!["bearer-both".to_string(), "bearer-codex-only".to_string()],
+            "a Codex doorbell is relayed to exactly the phones that said the word. \
+             Either Claude phone appearing here means the sender asked about an agent \
+             the run is not, and paid a relay to tell a device about a session it has \
+             no screen to open"
+        );
     }
 
     /// A fleet with nobody left after the gate composes nothing at all.

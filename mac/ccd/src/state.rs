@@ -181,18 +181,24 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// One gate per session, held across a control link's whole
-    /// take → retire → spawn → install sequence.
+    /// One gate per session, held across a registration's whole **acceptance** —
+    /// stake → row → relabel → publish → control-link transaction — and across the
+    /// disconnect that undoes it.
     ///
     /// The same shape as [`Daemon::publish_gate`], for the same reason: a per-uid
     /// `Arc<Mutex<()>>` in its own map, so the lock ordering stays one-way — gate,
     /// then `inner`, never the reverse. It is what makes the sequence *one* step:
-    /// without it, "take" and "install" are two acquisitions of `inner` with a
-    /// spawn and a bounded join between them, and every interleaving of two
-    /// registrations for the same session has to be reasoned about separately.
-    /// With it there is one state (a link, or none) instead of a reservation
+    /// without it the acceptance is several acquisitions of `inner` with a row
+    /// upsert, a card relabel, a spawn and a bounded join between them, and every
+    /// interleaving of two registrations for the same session has to be reasoned
+    /// about separately. With it there is one state instead of a reservation
     /// protocol, and no third claimant can arrive mid-retirement.
-    codex_link_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    ///
+    /// **It covers the durable half too**, which is what the epoch check alone could
+    /// not: a check happens at an instant, while the row upsert and the relabel are
+    /// awaits a rival registration can run the whole of itself inside. See
+    /// `register_supervisor`.
+    registration_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Held for the duration of a liveness sweep, so two never overlap.
     ///
     /// Taken with `try_lock`, which makes a slow sweep skip the next tick
@@ -210,68 +216,6 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
-    /// Fail-closed record of Codex push eligibility for this run — see
-    /// [`CodexPushGuard`]. Written when a device feature write cannot be trusted
-    /// or startup invalidation fails; read by the push projection (Phase 2).
-    pub codex_push_guard: CodexPushGuard,
-}
-
-/// Session-scoped, fail-closed record of which devices' persisted feature sets
-/// may be trusted for a Codex push this run.
-///
-/// It exists to close the two windows a purely DB-backed eligibility leaves
-/// open: a device feature **write that failed** (a stale same-epoch Codex set
-/// could otherwise stay eligible until the next restart), and a **startup
-/// invalidation that failed** (leaving every device's eligibility unproven). In
-/// both cases the DB alone cannot be trusted, so this out-of-band record forces
-/// Claude-only until a device successfully re-advertises. The push projection
-/// consumes [`device_features_trusted`](CodexPushGuard::device_features_trusted)
-/// in Phase 2; the setters are live now so a failure is never silently ignored.
-#[derive(Default)]
-pub struct CodexPushGuard {
-    all_untrusted: std::sync::atomic::AtomicBool,
-    untrusted_devices: std::sync::Mutex<std::collections::HashSet<String>>,
-}
-
-impl CodexPushGuard {
-    /// Startup invalidation failed: no device's persisted feature set can be
-    /// trusted for a Codex push this run.
-    pub fn distrust_all(&self) {
-        self.all_untrusted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// A device's feature write failed and a stale set may survive: it is not
-    /// Codex-eligible this run until it re-advertises successfully.
-    pub fn distrust_device(&self, device_id: &str) {
-        self.untrusted_devices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(device_id.to_string());
-    }
-
-    /// A successful (re-)advertisement clears a device's distrust.
-    pub fn retrust_device(&self, device_id: &str) {
-        self.untrusted_devices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(device_id);
-    }
-
-    /// True when this device's persisted feature set may be trusted for a Codex
-    /// push. Consumed by the push projection in Phase 2; until then only the
-    /// setters run, so a failure is recorded rather than lost.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn device_features_trusted(&self, device_id: &str) -> bool {
-        if self.all_untrusted.load(std::sync::atomic::Ordering::SeqCst) {
-            return false;
-        }
-        !self
-            .untrusted_devices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(device_id)
-    }
 }
 
 /// How a `hello` was (or was not) authenticated.
@@ -298,6 +242,38 @@ pub enum AuthOutcome {
 pub struct RevokeOutcome {
     pub device: DeviceSummary,
     pub token_revoked: bool,
+}
+
+/// **What an end was established AGAINST** — the observation
+/// [`Daemon::mark_exited`] re-checks under the gate before it commits (round-8 F3,
+/// round-9 F3).
+///
+/// Both paths that establish an end do so at one moment and record it at a later
+/// one, and a registration for the same uid can complete in between. What separates
+/// them is the *kind* of evidence, so each carries the identity its own evidence is
+/// about and leaves the other `None`:
+///
+///   * a **supervisor** watched its own process end. That is a fact about the run
+///     its connection registered, so `owner` is that connection's own epoch
+///     ([`Registration::epoch`]) and nothing about the row's contents can withdraw
+///     it: `row_writes` is `None`.
+///   * a **sweep** proved a row's recorded tmux location empty. That is a fact about
+///     the row it read, so it carries the row's write count as well — a row written
+///     since it looked is a row it never examined, whether or not the session
+///     changed hands.
+///
+/// `None` in either field means "this evidence makes no claim of that kind", never
+/// "the claim is zero": the comparisons below are skipped for it rather than made
+/// against a default.
+#[derive(Debug, Clone, Copy)]
+struct EndEstablishedAgainst {
+    /// The registration this end is about, or `None` when the evidence carries no
+    /// registration identity — an older supervisor, or a run nothing ever
+    /// registered.
+    owner: Option<u64>,
+    /// [`Inner::row_writes`] for this uid at the moment the evidence began, for
+    /// evidence that is about the row itself.
+    row_writes: Option<u64>,
 }
 
 /// What one liveness sweep established, counted in *sessions* rather than in
@@ -362,6 +338,108 @@ struct Inner {
     /// Keyed by `session_uid`. A second run of the same name gets its own slot
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
+    /// **The epoch of the newest registration that has BEGUN for this session** —
+    /// staked before its first persistent write, and long before its handle or its
+    /// control link are installed.
+    ///
+    /// It exists because those three moments are not one moment and cannot be. A
+    /// registration writes the session row, then publishes its supervisor handle,
+    /// then — under a separate gate, because the link's lifecycle needs awaits that
+    /// must not run under `Inner` — retires the incumbent link and installs its own.
+    /// Between the first and the second, the row already describes the *incoming*
+    /// registration while `supervisors` and `codex_links` still describe the
+    /// outgoing one, and their epochs agree with each other. A resolver comparing
+    /// those two would pair the row one registration just wrote with the connection
+    /// another one is holding — the single thing
+    /// [`Daemon::codex_addressee_locked`] exists to make impossible.
+    ///
+    /// So the claim is what the resolver compares against: it moves at the same
+    /// moment the row does. A registration that then fails leaves the claim standing
+    /// and no link matching it, which reports
+    /// [`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink) — fail
+    /// closed, and replaced by the next registration that succeeds.
+    ///
+    /// # It is a TOMBSTONE, not a slot: a disconnect leaves the last epoch behind
+    /// (round-9 F3)
+    ///
+    /// A disconnect used to delete the entry, which made two different histories
+    /// spell the same thing. `A → B → B disconnects` and `A → A disconnects` both
+    /// left the map empty, so an end established against A could no longer be told
+    /// from an end established against a run that had since been REPLACED —
+    /// [`Daemon::mark_exited`] compares against this map, and an absent entry read
+    /// as "nobody owns it" let A's stale evidence commit over B's row.
+    ///
+    /// So the entry survives the disconnect and names the last registration to have
+    /// staked this uid. The two readers both want that reading rather than the old
+    /// one: [`Daemon::codex_addressee_locked`] pairs it with `codex_links`, which a
+    /// disconnect empties in the same breath (so a tombstone matches nothing and
+    /// still answers `NoLink`), and the acceptance check in
+    /// [`Daemon::register_supervisor`] asks only whether the entry is still *this*
+    /// registration's. The disconnect's ownership test is unchanged and still
+    /// load-bearing for the other direction: for the length of the window above, the
+    /// claim and `supervisors` name different registrations, so a disconnect that
+    /// wrote its own epoch by uid alone would erase a claim it never made.
+    ///
+    /// It therefore grows by one entry per uid ever registered and never shrinks —
+    /// the same bound `last_seen_ms` below has always had, for the same reason: a
+    /// uid is not reused, and a `u64` beside a uid is not what a daemon's memory is
+    /// spent on.
+    registration_epochs: HashMap<String, u64>,
+    /// **WHICH SUPERVISOR PROCESS staked the claim above** (round-10 F1).
+    ///
+    /// The epoch says which *registration* owns the session. It cannot say which
+    /// *process* does, and for one caller that is the only question there is: a
+    /// supervisor reporting its own exit replays its registration first, so the
+    /// epoch it is compared against is one that same frame just minted. Compared
+    /// against itself it always agrees, which is how an exit report from a run
+    /// that died came to end the run that had replaced it.
+    ///
+    /// So the claim also records the incarnation behind it — the one identity that
+    /// exists *before* the replay, because a supervisor builds its registration
+    /// frame once at launch and the replay is that frame, re-sent unchanged. See
+    /// [`Incarnation`], and [`protocol::ipc::RegisterSession::exit_replay`] for what the
+    /// replay is and why it has to say so out loud.
+    ///
+    /// Written only by [`Inner::stake`], in the same statement as the epoch, and
+    /// removed by nothing — exactly as `registration_epochs` is, and for the same
+    /// reason it is a tombstone. One writer is what makes "these two always
+    /// describe the same registration" a property of the type rather than a habit
+    /// two call sites happen to share.
+    registration_incarnations: HashMap<String, Incarnation>,
+    /// **How many times this session's ROW has been written**, by any of its three
+    /// production writers (round-9 F3).
+    ///
+    /// The epoch above answers "whose session is this", and that is not the same
+    /// question as "is the row still the row I read". Two traces separate them, and
+    /// both defeat an epoch-only guard:
+    ///
+    ///   * a registration stakes its epoch one await BEFORE its row write, so an
+    ///     observer can snapshot the *new* epoch and then read the *old* row — the
+    ///     two compare equal at the commit and the stale read wins;
+    ///   * [`Daemon::ensure_session`] writes `Lifecycle::Live` without staking
+    ///     anything at all, so a hook can revive a row after it was read and the
+    ///     epoch will not have moved.
+    ///
+    /// A count is enough to see both: it is bumped by each writer *under the same
+    /// per-uid [`Daemon::registration_gate`] that writer already holds*, so a
+    /// reader that captured it before its row read and compares it under the gate
+    /// learns exactly one thing — whether anything wrote this row in between. It
+    /// never decreases, so the comparison cannot be fooled by a value that came
+    /// back round.
+    ///
+    /// Captured *before* the row read rather than beside it, which makes the
+    /// comparison conservative in the safe direction: a write landing between the
+    /// capture and the read refuses a commit whose evidence was in fact fresh, and
+    /// the cost of that is one sweep tick. Making it coherent *with* the row would
+    /// mean carrying a revision in the row itself, which is a schema change and a
+    /// migration for an answer that is already correct in the direction that matters.
+    ///
+    /// **Its bound, stated: it counts writes made by THIS process.** A row written by
+    /// a second `ccd` against the same database would be invisible to it — as it is
+    /// to `registration_epochs`, `supervisors` and every other in-memory answer this
+    /// type gives. One daemon per database is the assumption the whole file rests on;
+    /// this adds nothing to it and does not repair it.
+    row_writes: HashMap<String, u64>,
     pending: HashMap<ApprovalId, PendingApproval>,
     /// Monotonic, so a supervisor's old connection cannot release the slot its
     /// new one has taken. Never reused; a `u64` of registrations is not a
@@ -425,6 +503,69 @@ struct Inner {
     /// transaction for that session joins it before doing anything else. Bounded: a
     /// turn joins what is parked and re-parks only what still refuses to die.
     parked_codex_links: HashMap<String, Vec<OwnedLink>>,
+    /// **The last thread a link for this session ADOPTED, kept across the
+    /// registration boundary.**
+    ///
+    /// A `/new` in the TUI moves the session to another thread and the link follows
+    /// it; the row does not, because the registration frame is its only writer and
+    /// what it carries is the launcher's launch-time belief and nothing since. The
+    /// link holds the newer fact — `Carried::adopted`, published into
+    /// [`CodexLinkHandle::presence`] — and that survives a dropped *connection*,
+    /// because the link outlives one.
+    ///
+    /// It did not survive a dropped *registration*. A supervisor reconnect retires
+    /// the link and takes its presence cell out of the map with it (which is the
+    /// point — a stale task must not keep writing into a cell a lookup can reach),
+    /// and the replacement is built from the registration hint alone. So `A → /new
+    /// → B → supervisor reconnect` resumed retired thread `A`, and the fleet and the
+    /// resolver reported it, for the rest of the run.
+    ///
+    /// This is the fact rescued from the handle on its way out, so the replacement
+    /// can be seeded with it. **In memory, deliberately.** The row is not written
+    /// back after a `/new` by design, and the thing this repairs is a
+    /// process-lifetime gap between two registrations of the same run — a durable
+    /// column would be a second writer for the row's single-writer rule to argue
+    /// with, and it would outlive the only reader it has.
+    ///
+    /// **Only ever overwritten by a link that learned something.** A link retired
+    /// before it heard anything leaves this untouched rather than clearing it: it
+    /// learned nothing, and forgetting on its behalf is the same regression by a
+    /// slower route. See [`crate::codex_link::Carried::is_informative`].
+    ///
+    /// **The whole of the departing link's [`crate::codex_link::Carried`], not the
+    /// one thread it published.** It used to be a single adopted id read off
+    /// [`CodexLinkHandle::presence`], and that projection is lossy by design: during
+    /// an `A → /new → B` chase it reads
+    /// [`crate::codex_link::CodexAddressee::Bound`], which names no adopted thread at
+    /// all — so `A` was dropped, *and* the pending candidate `B` was never carryable
+    /// at all even though `thread/started` is broadcast once and never replayed. Copying
+    /// the link's own state instead makes a registration boundary cost the session
+    /// exactly what a reconnect costs it, which is nothing.
+    ///
+    /// **Scoped to one Codex LAUNCH, not to the uid.** A uid outlives the process it
+    /// names: the supervisor can relaunch Codex under the same session (a new
+    /// `codex_generation`), and the same uid can change agent entirely. Threads do not
+    /// survive either. Keyed by uid but stamped with the generation that learned them,
+    /// and dropped outright when the session registers as something other than Codex —
+    /// so a generation-2 link claiming `C` cannot resume generation 1's `B`, and a
+    /// `Codex → Claude → Codex` sequence cannot resurrect pre-Claude state.
+    ///
+    /// One entry per session whose link has learned anything in this process — empty
+    /// in production today, where `supported_agents()` refuses every Codex
+    /// registration.
+    retained_codex_carry: HashMap<String, RetainedCarry>,
+}
+
+/// A departing link's [`crate::codex_link::Carried`], with the launch it belongs to.
+///
+/// The generation is the whole reason this is a struct rather than the bare `Carried`:
+/// retention answers "where did the link for THIS launch leave the session", and a
+/// carry whose generation the incoming registration does not match is an answer to a
+/// different question.
+struct RetainedCarry {
+    /// The [`crate::codex_link::ControlLink::generation`] of the link that learned it.
+    generation: u64,
+    carried: crate::codex_link::Carried,
 }
 
 /// A running Codex control link, and the registration epoch that owns it.
@@ -435,12 +576,46 @@ struct Inner {
 /// registration had just installed.
 struct CodexLinkHandle {
     epoch: u64,
+    /// The [`crate::codex_link::ControlLink::generation`] this link speaks for — the
+    /// Codex launch its threads belong to. Kept so retention can stamp what the link
+    /// learned with the launch that learned it; see [`Inner::retained_codex_carry`].
+    generation: u64,
     task: tokio::task::JoinHandle<()>,
+    /// **What the link publishes about the connection it is holding** — see
+    /// [`crate::codex_link::LinkPresence`]. Read by the inbound resolver.
+    ///
+    /// It lives on the *handle* rather than in a map of its own, so a link released
+    /// or parked by a newer registration takes its cell out of the map with it: a
+    /// stale task still winding down keeps writing — into a cell no lookup can
+    /// reach. What that does **not** settle is whether the handle still in the slot
+    /// belongs to the registration that owns the session now, because the two are
+    /// published at different moments; [`Daemon::codex_addressee_locked`] compares
+    /// this handle's `epoch` against [`Inner::registration_epochs`] for exactly that
+    /// reason. **Not against the supervisor's epoch** — that comparison agrees with
+    /// itself across the window where the row already describes an incoming
+    /// registration whose handles are not published yet.
+    presence: crate::codex_link::LinkPresence,
+    /// **What the link itself knows** — see [`crate::codex_link::LinkCarry`]. The
+    /// other cell, on the handle for the same lifetime reason as the presence one,
+    /// and read by exactly one caller: [`Inner::retain_codex_carry`]. **Not when
+    /// this handle leaves the map** — it travels into the park and is read once the
+    /// task writing into it is proven stopped, for the reason retention states.
+    carry: crate::codex_link::LinkCarry,
 }
 
 /// How long a superseded control link may take to stop. Bounded: a task that will
 /// not die must not hold a registration open, and the link's own awaits are short.
 const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many times [`Daemon::resolve_codex_inbound`] may re-resolve a reference whose
+/// run changed underneath it.
+///
+/// Not a race budget — the pairing it returns is made coherent by holding the
+/// session's registration gate, not by retrying. This bounds the one thing that gate
+/// cannot settle: a tmux *name* resolving to a different run than the one whose gate
+/// was taken. That needs a new run to be registered under the same name between two
+/// reads, so three failures running is not contention, it is a fault worth reporting.
+const PAIRING_ATTEMPTS: u32 = 3;
 
 /// A control-link task that is **out of the slot and owned by nobody else**.
 ///
@@ -461,16 +636,42 @@ const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
 /// **Abort-not-detach is the floor; proven-join is the goal.** `Drop` cannot await,
 /// so the most it can do is request cancellation — which is why a guard is only
 /// dropped once [`OwnedLink::is_finished`] says the task is genuinely gone.
-struct OwnedLink(Option<tokio::task::JoinHandle<()>>);
+struct OwnedLink {
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// **What this link knows, to be retained the moment its task is proven
+    /// stopped** — see [`Inner::retain_codex_carry`].
+    ///
+    /// The cells ride into the park with the task rather than being read on the
+    /// way in, because reading them on the way in reads them too early: a worker
+    /// that has consumed `thread/started(B)` and not yet reached the write is
+    /// running synchronous code no `abort` can interrupt, and a snapshot taken
+    /// while it is there is a snapshot of the moment before the only announcement
+    /// B will ever get. `None` for a link whose cells nobody kept — an orphan
+    /// handed back by [`Inner::install_codex_link`], which never became this
+    /// session's link — and for one whose session has since changed agent
+    /// ([`Inner::forget_codex_carry`]).
+    retain: Option<ParkedCarry>,
+}
+
+/// A parked link's cells, with the launch they belong to — the same two facts
+/// [`RetainedCarry`] holds, before the task that is still writing into them has
+/// stopped.
+struct ParkedCarry {
+    generation: u64,
+    carry: crate::codex_link::LinkCarry,
+}
 
 impl OwnedLink {
-    fn new(task: tokio::task::JoinHandle<()>) -> OwnedLink {
-        OwnedLink(Some(task))
+    fn new(task: tokio::task::JoinHandle<()>, retain: Option<ParkedCarry>) -> OwnedLink {
+        OwnedLink {
+            task: Some(task),
+            retain,
+        }
     }
 
     /// Request cancellation without waiting.
     fn abort(&self) {
-        if let Some(task) = self.0.as_ref() {
+        if let Some(task) = self.task.as_ref() {
             task.abort();
         }
     }
@@ -478,13 +679,13 @@ impl OwnedLink {
     /// Has the task actually finished? The only proof of completion this type
     /// accepts — an `abort()` that has returned proves nothing.
     fn is_finished(&self) -> bool {
-        self.0.as_ref().is_none_or(|task| task.is_finished())
+        self.task.as_ref().is_none_or(|task| task.is_finished())
     }
 }
 
 impl Drop for OwnedLink {
     fn drop(&mut self) {
-        if let Some(task) = self.0.take() {
+        if let Some(task) = self.task.take() {
             task.abort();
         }
     }
@@ -507,24 +708,99 @@ impl Inner {
         &mut self,
         session_uid: &str,
         epoch: u64,
+        generation: u64,
+        presence: crate::codex_link::LinkPresence,
+        carry: crate::codex_link::LinkCarry,
         spawn: impl FnOnce() -> tokio::task::JoinHandle<()>,
     ) -> Result<Option<tokio::task::JoinHandle<()>>, Option<u64>> {
-        let owner = self.supervisors.get(session_uid).map(|handle| handle.epoch);
+        let owner = self.owner_of(session_uid);
         if owner != Some(epoch) {
             return Err(owner);
         }
-        Ok(self.install_codex_link(session_uid, epoch, spawn()))
+        Ok(self.install_codex_link(session_uid, epoch, generation, presence, carry, spawn()))
+    }
+
+    /// **Which registration this session BELONGS to** — the one question every
+    /// step of the link transaction is asking, in one place.
+    ///
+    /// [`Inner::registration_epochs`] and not `supervisors`, and the two are not
+    /// interchangeable. The claim is staked in the same breath as the row; the
+    /// handle is published several awaits later. So in the window between them
+    /// `supervisors` still names the *previous* registration, and a check written
+    /// against it answers "nobody newer has finished yet" — which is a later and
+    /// weaker question than "is this session still mine", and one that says yes to
+    /// a registration that has already been superseded.
+    ///
+    /// It is also the map [`Daemon::codex_addressee_locked`] resolves an installed
+    /// link against, so asking it here makes the condition for installing a link
+    /// and the condition for *reading* one the same condition. A link installed
+    /// against the other map can be one the resolver refuses to answer with for
+    /// the rest of the session's life.
+    fn owner_of(&self, session_uid: &str) -> Option<u64> {
+        self.registration_epochs.get(session_uid).copied()
+    }
+
+    /// **Stake a registration's claim**: mint its epoch, and record the supervisor
+    /// process it belongs to, in one statement.
+    ///
+    /// The only writer of either map. They answer two halves of one question — which
+    /// registration owns this session, and which process that registration came from
+    /// — and a claim that carried only the first is what round-10 F1 defeated. Minting
+    /// and recording separately would mean a window in which the claim exists and its
+    /// owner does not, which is precisely the state the guard reading it must never
+    /// see.
+    fn stake(&mut self, session_uid: &str, incarnation: Incarnation) -> u64 {
+        self.next_epoch += 1;
+        let epoch = self.next_epoch;
+        self.registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        self.registration_incarnations
+            .insert(session_uid.to_string(), incarnation);
+        epoch
+    }
+
+    /// **Which supervisor process the standing claim belongs to.**
+    ///
+    /// `None` means no claim has ever been staked for this uid — the state a daemon
+    /// restart leaves behind, and the one an exit replay is *for*. It is deliberately
+    /// not the same answer as "a claim exists whose incarnation this is not": the one
+    /// caller treats them differently, because there is nothing to displace in the
+    /// first case and a live run to protect in the second.
+    fn claimant_of(&self, session_uid: &str) -> Option<&Incarnation> {
+        self.registration_incarnations.get(session_uid)
+    }
+
+    /// **How many times this session's row has been written** — see
+    /// [`Inner::row_writes`]. A uid nothing has written yet reads `0`, which is the
+    /// same answer its first writer moves off, so an absent entry and a present one
+    /// are one number rather than two cases.
+    fn row_writes_of(&self, session_uid: &str) -> u64 {
+        self.row_writes.get(session_uid).copied().unwrap_or(0)
+    }
+
+    /// **Count one write of this session's row.** Called by each of the row's three
+    /// production writers, from inside the per-uid
+    /// [`Daemon::registration_gate`] that writer holds across its write — which is
+    /// what makes the count and the row move together as far as any reader holding
+    /// the same gate can tell.
+    fn note_row_write(&mut self, session_uid: &str) {
+        *self.row_writes.entry(session_uid.to_string()).or_insert(0) += 1;
     }
 
     /// Put a link in the slot — **and this is the transaction's linearization
     /// point.**
     ///
-    /// Ownership is re-checked here, under the very lock that guards
-    /// `supervisors`, because the gated check earlier is a time-of-check the world
-    /// can move past: a second connection publishes its supervisor epoch without
-    /// taking the per-uid gate, so between that check and this one the session can
-    /// have changed hands. Checking again *here* makes the install itself the
-    /// moment ownership is decided, and the earlier check merely a cheap early-out.
+    /// Ownership is re-checked here — through [`Inner::owner_of`], under the very
+    /// lock that guards the claim. It was written when a second registration could
+    /// stake its claim without taking the per-uid gate, so the earlier check was a
+    /// time-of-check the world could move past; checking again *here* made the install
+    /// itself the moment ownership is decided.
+    ///
+    /// **The stake now happens under the acceptance gate too**, so no rival can stake
+    /// for this uid while this transaction runs and the two checks can no longer
+    /// disagree. Kept as the linearization point anyway: it is where the slot is
+    /// actually written, one uncontended comparison, and fail-closed. Like its two
+    /// siblings in `register_supervisor`, it is no longer separately observable.
     ///
     /// Returns the task back when this registration no longer owns the session, or
     /// when a newer one already holds the slot. The caller must then cancel and
@@ -533,10 +809,12 @@ impl Inner {
         &mut self,
         session_uid: &str,
         epoch: u64,
+        generation: u64,
+        presence: crate::codex_link::LinkPresence,
+        carry: crate::codex_link::LinkCarry,
         task: tokio::task::JoinHandle<()>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        let owner = self.supervisors.get(session_uid).map(|handle| handle.epoch);
-        if owner != Some(epoch) {
+        if self.owner_of(session_uid) != Some(epoch) {
             return Some(task);
         }
         if self
@@ -546,10 +824,16 @@ impl Inner {
         {
             return Some(task);
         }
-        match self
-            .codex_links
-            .insert(session_uid.to_string(), CodexLinkHandle { epoch, task })
-        {
+        match self.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation,
+                task,
+                presence,
+                carry,
+            },
+        ) {
             // Nothing should be here — the gate serializes this sequence and the
             // take above emptied it — but if something is, it is handed back rather
             // than dropped.
@@ -567,6 +851,160 @@ impl Inner {
             Some(held) if held.epoch == epoch => self.codex_links.remove(session_uid),
             _ => None,
         }
+    }
+
+    /// **Take what a departing link knows and the daemon does not** — see
+    /// [`Inner::retained_codex_carry`].
+    ///
+    /// Reads the link's own [`crate::codex_link::LinkCarry`] and **not** its
+    /// presence. The presence cell is what the *fleet* may be told, and it is lossy
+    /// on purpose — a merely-`Bound` thread is a candidate nobody confirmed, so it
+    /// is not published as the session's thread. Retention is not a reader: it is
+    /// the last moment this link's memory exists, and a link mid-chase knows both
+    /// the thread it adopted and the one it is chasing while the projection can name
+    /// neither.
+    ///
+    /// # Read once the task is PROVEN STOPPED, not when the handle leaves the slot
+    ///
+    /// The two moments are different, and the difference is a lost thread. A worker
+    /// that has consumed `thread/started(B)` writes it into the carry with no await
+    /// in between ([`crate::codex_link::Connection::bind_or_follow`]) — but "no
+    /// await" only closes cancellation of that task, not the scheduler running
+    /// another one. Snapshotting at the departure site races a worker that is inside
+    /// exactly that synchronous stretch on another thread: the snapshot wins, and B's
+    /// write lands a moment later in a cell nothing will ever read again. `/new` then
+    /// costs the session its new thread, permanently, because `thread/started` is
+    /// broadcast once and never replayed.
+    ///
+    /// So both departure sites hand the cells to the park instead, and this is called
+    /// from [`Daemon::join_parked_codex_links`] against a task that `is_finished`
+    /// reports gone. There is no writer left to lose a race to. The abort that got it
+    /// there cannot truncate the write either: cancellation lands at an await point,
+    /// and the stretch between reading the frame and writing the cell has none.
+    fn retain_codex_carry(&mut self, session_uid: &str, parked: ParkedCarry) {
+        let carried = parked.carry.snapshot();
+        if carried.is_informative() {
+            self.retained_codex_carry.insert(
+                session_uid.to_string(),
+                RetainedCarry {
+                    generation: parked.generation,
+                    carried,
+                },
+            );
+        }
+    }
+
+    /// **Forget where a Codex link left this session.** Called when the session
+    /// registers as something that is not Codex: the uid is the same, the run is not,
+    /// and threads belong to the run. Without this a `Codex → Claude → Codex`
+    /// sequence would seed the third registration from the first one's chase.
+    ///
+    /// **Both tenses of it.** What has already been retained is dropped, and so is
+    /// what is still owed: a link parked and not yet proven stopped is holding cells
+    /// [`Daemon::join_parked_codex_links`] would retain later, and a retention landing
+    /// *after* the forgetting would put the pre-Claude chase back where the next Codex
+    /// registration reads it. Which agent registered is settled now; when a retired
+    /// task happens to die is not this fact's business.
+    fn forget_codex_carry(&mut self, session_uid: &str) {
+        self.retained_codex_carry.remove(session_uid);
+        if let Some(parked) = self.parked_codex_links.get_mut(session_uid) {
+            for link in parked.iter_mut() {
+                link.retain = None;
+            }
+        }
+    }
+
+    /// **Start a fresh link from what its predecessor knew**, and answer with the
+    /// thread it will resume when that is not the one the registration named.
+    ///
+    /// The registration hint is by construction the oldest fact in the system: the
+    /// frame is built once at supervisor start and re-sent byte-identical on every
+    /// reconnect, and nothing on the launcher side ever learns a `/new`. So it can
+    /// never be the *newer* of the two, and there is no arbitration to do — which is
+    /// why it is seeded as the hint, underneath everything retained, and
+    /// [`crate::codex_link::Carried::first_target`] does the rest. The frame's own
+    /// `thread_id` is left alone: the claim is a fact about the registration, and
+    /// overwriting it would leave nothing able to say what was displaced.
+    ///
+    /// A named step rather than three lines inside the registration, because the
+    /// registration reaches it only through a gate that is currently closed
+    /// (`supported_agents()` refuses every Codex registration), and the rule is
+    /// worth proving against the frame directly rather than through a path nothing
+    /// can drive — the same way [`crate::codex_link::ControlLink::from_registration`]
+    /// and the generation guard beside it are proven.
+    ///
+    /// **Only from the SAME launch.** The retained carry names threads, and a thread
+    /// belongs to the Codex process that created it. A registration arriving at a
+    /// later `codex_generation` is a relaunch — its threads are new ones, and its own
+    /// claim is the newest fact about it — so a mismatch seeds nothing and leaves the
+    /// registration's hint to stand. See [`Inner::retained_codex_carry`].
+    fn seed_codex_carry(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+        carry: &crate::codex_link::LinkCarry,
+    ) -> Option<String> {
+        let retained = self.retained_codex_carry.get(session_uid)?;
+        if retained.generation != link.generation {
+            return None;
+        }
+        carry.resume_from(&retained.carried);
+        carry
+            .first_target()
+            .filter(|target| Some(target.as_str()) != link.thread_id.as_deref())
+    }
+
+    /// **Tell the fleet where the session is before the replacement link can.**
+    ///
+    /// A fresh [`crate::codex_link::LinkPresence`] says `Offline { thread_id: None }`,
+    /// and a threadless `Offline` sends every reader to the session row — which after
+    /// a `/new` names the thread the session LEFT, because the registration frame is
+    /// the row's only writer. The replacement does not correct that until its first
+    /// connection attempt returns, so the dial, the upgrade and the handshake were all
+    /// a window in which the fleet regressed to exactly the launch-time claim the
+    /// adoption exists to supersede.
+    ///
+    /// **From `adopted` alone, never from
+    /// [`crate::codex_link::Carried::first_target`].** This feeds the cell the fleet is
+    /// TOLD, and only an adopted thread has had a resume accepted for it. Publishing a
+    /// merely-pending candidate here is the one thing "published implies adopted"
+    /// forbids — see [`crate::codex_link::CodexAddressee`].
+    ///
+    /// A named step rather than four lines inside the registration, for the same reason
+    /// [`Inner::seed_codex_carry`] is one: the registration reaches it only through a
+    /// gate that is currently closed (`supported_agents()` refuses every Codex
+    /// registration), so a rule left inline there is a rule nothing can drive and
+    /// nothing can prove. Asked of the frame directly instead.
+    fn seed_codex_presence(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+        presence: &crate::codex_link::LinkPresence,
+    ) {
+        if let Some(adopted) = self.retained_codex_adoption(session_uid, link) {
+            presence.publish_seed(crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some(adopted),
+            });
+        }
+    }
+
+    /// **The thread the previous link had ADOPTED**, for seeding the replacement's
+    /// presence — scoped to the launch on the same terms as
+    /// [`Inner::seed_codex_carry`], because it answers out of the same entry.
+    ///
+    /// Adopted and not [`crate::codex_link::Carried::first_target`]: this feeds the
+    /// cell the *fleet* reads, and only an adopted thread is one a resume has been
+    /// accepted for. A pending candidate is a thread nobody has confirmed.
+    fn retained_codex_adoption(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+    ) -> Option<String> {
+        let retained = self.retained_codex_carry.get(session_uid)?;
+        if retained.generation != link.generation {
+            return None;
+        }
+        retained.carried.adopted()
     }
 }
 
@@ -615,6 +1053,34 @@ impl Drop for InflightSlot {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&self.id);
+    }
+}
+
+/// **A supervisor process, as it identified itself at launch.**
+///
+/// The pid it is running as and the instant it started, both stamped once —
+/// before its first `Register` — into the frame it holds for the rest of its life.
+/// That is the whole point of taking these two and not something the daemon mints:
+/// they are the only identity that already exists when a *dead* supervisor replays
+/// that same frame to report its exit, so they are the only thing that can say
+/// whether the run being reported is the run the session still belongs to.
+///
+/// The pair rather than the pid: pids are reused, and a reused pid under one uid is
+/// not the fanciful case — a supervisor is spawned per run and a machine that
+/// churns them will hand the number back. The start instant separates two processes
+/// that share a number; the pid separates two runs started in the same millisecond.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Incarnation {
+    pid: u32,
+    started_at: String,
+}
+
+impl Incarnation {
+    fn of(info: &RegisterSession) -> Self {
+        Self {
+            pid: info.supervisor_pid,
+            started_at: info.started_at.clone(),
+        }
     }
 }
 
@@ -951,15 +1417,77 @@ fn snapshot_command(text: &str) -> bool {
 }
 
 /// This daemon run's **feature epoch** — a value unique to the process, so a
-/// stored device feature set is trusted only when it was confirmed during this
-/// run. A restarted daemon is a new process with a new epoch, which is why
-/// [`recover`](Daemon::recover) can invalidate every stale set to Claude-only:
-/// an old daemon that only bumped `last_seen_at` across a rollback cannot leave
-/// Codex eligibility standing until the device re-advertises it. Process id plus
-/// start time, so two runs never share one.
+/// stored device feature set authorizes a push only when it was confirmed during
+/// this run. A restarted daemon is a new process with a new epoch, so a set left
+/// by an earlier one is [`crate::store::DeviceFeatures::Unconfirmable`] and that
+/// device hears nothing until it re-advertises: an old daemon that only bumped
+/// `last_seen_at` across a rollback cannot leave Codex eligibility standing.
+///
+/// **Nothing writes a feature set in this phase**, so today every row's column is
+/// `NULL` — the Claude floor — and this value is only ever compared against, never
+/// stamped on anything. It is minted anyway, and at startup, because it is the
+/// authorization epoch [`crate::store::Store::push_targets`] reads against, and
+/// because the write Phase 5 turns on must find a value that already exists rather
+/// than mint one on a push path.
+///
+/// **Uniqueness is structural, not circumstantial.** This value is what
+/// [`crate::store::Store::push_targets`] compares a stored set against, so a
+/// repeat would silently re-authorize another process's advertisement. Process id
+/// and start time alone cannot promise that — pids are reused and a clock can
+/// move backwards — so the identity comes from a uid's ten random bytes, with the
+/// pid and the timestamp kept in front of it for a human reading the column.
+///
+/// # No entropy, no daemon
+///
+/// The earlier form fell back to `pid-millis-no-entropy`, which is **fail-open**
+/// at the exact point that decides authorization: two runs that shared a pid and a
+/// millisecond would share an epoch, and the second would inherit the first's
+/// confirmed advertisements without a phone saying anything. So the fallback is
+/// gone and the failure is loud.
+///
+/// Panicking is the honest answer rather than a harsh one. Every other production
+/// caller of [`protocol::uid::new`] already propagates its failure — a session uid,
+/// a device token, a pairing code — so a machine whose `getrandom` is failing
+/// cannot register a session or pair a phone either. This one call site was alone
+/// in swallowing it, and it was the one call site where swallowing it made a
+/// security claim the daemon could not keep.
+///
+/// **It lands at startup, not at a push, and the wiring is the whole point.**
+/// [`Daemon::recover`] evaluates it before any socket is open. Left to the push
+/// path — which is where every other caller is, and where the only production one
+/// still is — the first evaluation happens inside a task
+/// [`Daemon::dispatch_push`] spawned, and tokio absorbs a panic in a spawned task:
+/// the daemon would go on serving, silently unable to authorize a push, instead of
+/// refusing to come up.
 pub fn feature_epoch() -> &'static str {
-    static EPOCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    EPOCH.get_or_init(|| format!("{}-{}", std::process::id(), protocol::time::now_unix_ms()))
+    FEATURE_EPOCH.get_or_init(|| epoch_from(protocol::uid::new()))
+}
+
+/// The cell [`feature_epoch`] fills, hoisted out of the function body.
+///
+/// Not for a second reader — [`feature_epoch`] is the only way to *get* the value.
+/// It is out here so a test can ask **whether the epoch has been minted yet
+/// without minting it**, which is the entire question when what is under test is
+/// where the minting happens: a check written through `feature_epoch()` mints it
+/// on the spot and then reports, truthfully and uselessly, that it is minted.
+static FEATURE_EPOCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The epoch, from an entropy source that may have failed.
+///
+/// Taken apart from [`feature_epoch`] so the refusal is assertable: nothing in a
+/// test can make `getrandom` fail, and "what this daemon does when it cannot mint
+/// an identity" is exactly the rule worth pinning rather than assuming.
+fn epoch_from(nonce: std::io::Result<String>) -> String {
+    let nonce = nonce.expect(
+        "this daemon cannot mint a feature epoch without kernel entropy, and without \
+         one it cannot say which device advertisements belong to this run — refusing \
+         to start rather than authorizing pushes on a value another run could repeat",
+    );
+    format!(
+        "{}-{}-{nonce}",
+        std::process::id(),
+        protocol::time::now_unix_ms()
+    )
 }
 
 impl Daemon {
@@ -988,11 +1516,10 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
-            codex_link_gates: Mutex::new(HashMap::new()),
+            registration_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
-            codex_push_guard: CodexPushGuard::default(),
         })
     }
 
@@ -1021,34 +1548,37 @@ impl Daemon {
     pub async fn recover(&self) {
         let now = protocol::time::now_rfc3339();
 
-        // Fail-closed after a rollback: invalidate every device feature set not
-        // confirmed under this run's epoch to Claude-only. A phone re-advertises
-        // its set on the next hello/registration, so this costs nothing in the
-        // steady state and closes the window where a stale set could survive a
-        // daemon that only bumped `last_seen_at`.
-        match self
-            .db
-            .invalidate_device_features(feature_epoch().to_string())
-            .await
-        {
-            Ok(0) => {}
-            Ok(cleared) => crate::log_info!(
-                "recovery: {cleared} device feature set(s) predate this daemon run; \
-                 reset to Claude-only until re-advertised"
-            ),
-            Err(err) => {
-                // Fail closed: if stale sets could not be invalidated, no device's
-                // persisted eligibility can be trusted this run. The push
-                // projection treats every device as Claude-only until it
-                // successfully re-advertises, rather than continuing on
-                // possibly-stale eligibility.
-                crate::log_error!(
-                    "recovery: could not invalidate device features; treating all devices as \
-                     Claude-only this run: {err:#}"
-                );
-                self.codex_push_guard.distrust_all();
-            }
-        }
+        // **The feature epoch is minted here, and this is the only reason it is
+        // evaluated at startup at all.** Nothing writes a device feature set in
+        // this phase, so it stamps nothing; it is the value
+        // [`crate::store::Store::push_targets`] compares every stored set against,
+        // and minting it needs kernel entropy that [`epoch_from`] refuses to fake.
+        // Every other caller is on the push path, and a push runs in a task
+        // `dispatch_push` spawned — where tokio absorbs the panic and a daemon that
+        // cannot authorize anything keeps serving as though it could. Asked here it
+        // is a startup failure, which is the honest one.
+        //
+        // **No sweep, and the absence is deliberate.** A startup step used to clear
+        // every set not stamped with this run's epoch. The read refuses those rows
+        // on its own — another process's stamp is
+        // [`crate::store::DeviceFeatures::Unconfirmable`] — so the sweep never made
+        // a device less eligible; and once the read learned to tell an unconfirmable
+        // set from a `NULL` one, the sweep could only make a device MORE eligible,
+        // because clearing writes the empty legacy set, which is the Claude floor.
+        //
+        // **A statement of its own, and not an argument to the line below.**
+        // `log_info!` formats its arguments only when INFO is enabled, so a mint
+        // written inside one is a mint an operator turns off: under
+        // `CODECONNECT_LOG=warn` the first `feature_epoch()` call goes back to
+        // being the one inside a task `dispatch_push` spawned, where tokio absorbs
+        // the panic — which is the whole of what asking here was for. Measured, not
+        // supposed: the wiring test's child runs at `warn` for exactly this reason.
+        let epoch = feature_epoch();
+        crate::log_info!(
+            "recovery: this run authorizes device feature sets under epoch {epoch}; \
+             nothing writes one in this phase, so every device is at the Claude floor \
+             until a phone re-advertises to a daemon that records it"
+        );
 
         match self.db.unresolved_answer_claims().await {
             Ok(claims) if !claims.is_empty() => {
@@ -1263,11 +1793,12 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
-    /// The gate serializing one session's control-link lifecycle. Same eviction
-    /// rule as [`Daemon::publish_gate`]: an entry nobody holds is dropped, so this
-    /// map is bounded by live sessions rather than by every session ever seen.
-    async fn codex_link_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
-        let mut gates = self.codex_link_gates.lock().await;
+    /// The gate serializing one session's registrations — the acceptance and the
+    /// disconnect that undoes it. Same eviction rule as [`Daemon::publish_gate`]: an
+    /// entry nobody holds is dropped, so this map is bounded by live sessions rather
+    /// than by every session ever seen.
+    async fn registration_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.registration_gates.lock().await;
         gates.retain(|_, gate| Arc::strong_count(gate) > 1);
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
@@ -1278,6 +1809,11 @@ impl Daemon {
     /// neither. That is the point: parking is what records "this task's completion
     /// is unproven", and a window between the two would be a window in which a
     /// dropped transaction leaves nothing recorded at all.
+    ///
+    /// **The cells travel with the task; they are not read here.** What the link
+    /// knows is retained by [`Daemon::join_parked_codex_links`], once the task is
+    /// proven stopped — see [`Inner::retain_codex_carry`] for why that moment and
+    /// not this one.
     async fn park_current_codex_link(&self, session_uid: &str) {
         let mut inner = self.inner.lock().await;
         if let Some(handle) = inner.codex_links.remove(session_uid) {
@@ -1285,7 +1821,13 @@ impl Daemon {
                 .parked_codex_links
                 .entry(session_uid.to_string())
                 .or_default()
-                .push(OwnedLink::new(handle.task));
+                .push(OwnedLink::new(
+                    handle.task,
+                    Some(ParkedCarry {
+                        generation: handle.generation,
+                        carry: handle.carry,
+                    }),
+                ));
         }
     }
 
@@ -1308,6 +1850,9 @@ impl Daemon {
     /// A survivor is a task still running under this session's uid. Installing a
     /// link beside it would put two observers on one timeline, so a uid with
     /// anything parked gets no new link until this returns true.
+    ///
+    /// **And it is where a departing link's memory is taken**, in the same lock
+    /// acquisition that proves the task stopped — see [`Inner::retain_codex_carry`].
     async fn join_parked_codex_links(&self, session: &SessionKey) -> bool {
         let deadline = std::time::Instant::now() + CODEX_LINK_STOP_BUDGET;
         loop {
@@ -1317,16 +1862,32 @@ impl Daemon {
                     return true;
                 };
                 // Dropped ONLY on proof. A finished task's guard aborts a corpse,
-                // which is a no-op.
-                parked.retain(|link| !link.is_finished());
-                if parked.is_empty() {
+                // which is a no-op. **A dropped guard's cells are read on the way
+                // out**, oldest first, so a session that parked twice is left with
+                // what its newest link knew.
+                let mut stopped = Vec::new();
+                parked.retain_mut(|link| {
+                    if !link.is_finished() {
+                        return true;
+                    }
+                    stopped.extend(link.retain.take());
+                    false
+                });
+                let empty = parked.is_empty();
+                if !empty {
+                    for link in parked.iter() {
+                        link.abort();
+                    }
+                }
+                let remaining = parked.len();
+                for parked in stopped {
+                    inner.retain_codex_carry(&session.uid, parked);
+                }
+                if empty {
                     inner.parked_codex_links.remove(&session.uid);
                     return true;
                 }
-                for link in parked.iter() {
-                    link.abort();
-                }
-                parked.len()
+                remaining
             };
             if std::time::Instant::now() >= deadline {
                 crate::log_warn!(
@@ -1713,6 +2274,10 @@ impl Daemon {
                     // ringing, not the moment of admission.
                     blocked_sessions: 0,
                     session_uid: session.uid.clone(),
+                    // A `PermissionRequest` is a Claude hook. Codex approval
+                    // cards arrive in Phase 3 through the app-server's request
+                    // families, and will compose their own hint.
+                    agent: protocol::agent::AgentKind::Claude,
                 },
                 ticket,
                 // A pending decision outlives other tools' progress; only the
@@ -1991,6 +2556,57 @@ impl Daemon {
     /// banner. Closing the sliver itself needs client delivery
     /// acknowledgements — a protocol change deliberately not taken for a
     /// doorbell whose whole content is four words and a count.
+    ///
+    /// # The grace is also a best-effort CANCELLATION window, and it is not
+    /// coordinated with anything
+    ///
+    /// A cancel that arrives after `GRACE` has elapsed does not stop the push: the
+    /// task has already woken, taken its exclusion snapshot and sent. Nothing waits
+    /// for a cancel that might be in flight, and nothing is going to — the failure
+    /// direction is one stale doorbell, and the coordination that would close it
+    /// (making the dispatcher wait on a signal from a control link that may not
+    /// exist) trades a bounded, occasional annoyance for a completion that can be
+    /// held up indefinitely.
+    ///
+    /// The two things that could plausibly land late were **measured** rather than
+    /// argued about, on this machine, against the fixture workload:
+    ///
+    ///   * [`Daemon::note_codex_turn_running`] via the store's novelty read
+    ///     ([`crate::store::Store::turn_terminal_filed`]) — a point query on the
+    ///     unique dedup index, over WAL, on the DB executor: **p50 24 µs, p99 36 µs,
+    ///     worst single sample 0.39 ms** over a 2,000-event log, and **p99 46 µs**
+    ///     with eight tasks writing concurrently. Three to four orders of magnitude
+    ///     inside 400 ms;
+    ///   * a recovery's serial event writes, which is what keeps the control link
+    ///     from reading a `turn/started` already queued on its socket: **0.094
+    ///     ms/event**, so the grace is exhausted only by a single `thread/resume`
+    ///     answer describing more than ~4,250 facts.
+    ///
+    /// The cancel is issued before those writes for exactly this reason — see
+    /// `codex_link::Connection::attach_from_seed`, where the ordering is pinned by a
+    /// test that fails every write and still expects the cancel.
+    ///
+    /// If a resume answer that large is ever observed, the fix is to bound the
+    /// recovery, not to build a rendezvous around the doorbell.
+    ///
+    /// **What is still AHEAD of the cancel, stated rather than implied.** The novelty
+    /// loop stops at the first turn the log holds no terminal for, so the reads it
+    /// makes are no longer bounded by the number of running turns the answer reports —
+    /// but two costs remain in front of it, and neither is a constant:
+    ///
+    ///   * **parsing the answer**, which must happen before anything can know a turn is
+    ///     running at all. A single notification reached 4.0 MB on the live gate and the
+    ///     frame limit is far above that, so this is the dominant term and it is
+    ///     irreducible: the evidence the cancel acts on is inside the thing being
+    ///     parsed;
+    ///   * **the reads for turns the answer describes running that the log has already
+    ///     settled**, which come before the first novel one. Each is the 24–36 µs point
+    ///     query measured above, so a stale prefix of even a hundred turns is ~4 ms.
+    ///
+    /// Both are inside the grace by orders of magnitude at every size the wire has been
+    /// measured at, and both scale with the answer rather than with anything this
+    /// daemon controls — which is the same honest bound the recovery writes have, and
+    /// has the same honest remedy if an answer ever arrives large enough to matter.
     fn dispatch_push(
         &self,
         session_uid: String,
@@ -2058,7 +2674,24 @@ impl Daemon {
                 [(_, label)] => Some(label.clone()),
                 _ => None,
             };
-            sender.send(&hint.describing(blocked.len(), named), &excluded);
+            let described = hint.describing(blocked.len(), named);
+            // **The exclusion list is one thing: who already knows.** It carries
+            // the devices whose live socket wrote this event to them during the
+            // grace, and nothing else — a doorbell must not ring a phone that is
+            // already looking at the fact.
+            //
+            // **Per-device authorization is not here, and deliberately not.** Which
+            // agents a device can render is decided inside `send`, in `recipients`,
+            // from the same row read that produces the token — one read, so a
+            // registration cannot be assembled from two. Expressing it here as a
+            // second exclusion list would be a copy of that decision taken a
+            // database read earlier, and the two senders would each need their own.
+            //
+            // **The subject is the one `describing` settled on**, not the one that
+            // rang: a doorbell re-described to speak for the fleet's decisions is
+            // authorized as that deck, so the audience can never be narrowed to
+            // devices that cannot render what the alert actually says.
+            sender.send(&described, &excluded);
         });
     }
 
@@ -2139,6 +2772,10 @@ impl Daemon {
                 // fleet as it is when the doorbell actually goes.
                 blocked_sessions: 0,
                 session_uid: session.uid.clone(),
+                // The hook path is Claude's, and only Claude's: Codex carries no
+                // hooks at all (`turn/completed` is its completion signal), so a
+                // frame reaching here is a Claude run by construction.
+                agent: protocol::agent::AgentKind::Claude,
             },
             ticket,
             // **A decision outlives other tools' progress wherever it was
@@ -2156,6 +2793,184 @@ impl Daemon {
                 crate::apns::PushKind::Approval => input.prompt_id.clone().map(CardKey::Prompt),
                 _ => None,
             },
+        );
+    }
+
+    /// **A Codex turn is running, which is the run demonstrably moving.**
+    ///
+    /// Codex's analogue of Claude's `Stop`/`PreToolUse` progress: the hooks Claude
+    /// records movement from do not exist here, so the movement has to be read off
+    /// the wire.
+    ///
+    /// **What it buys is the cancellation, not a notification.** A turn ending
+    /// admits a quiet-state doorbell that then waits out its dispatch grace; if the
+    /// next turn *starts* inside that window, the ticket describes a run that is
+    /// working again, and the ring would announce a completion the reader can no
+    /// longer act on. Without this, only a second turn *ending* inside the grace
+    /// cancelled the first — a turn that merely started did not, and the doorbell
+    /// went out while the agent was mid-turn.
+    ///
+    /// # Two witnesses, and why recovery is allowed to be one of them
+    ///
+    /// The wire says a turn is running in two ways, and both call this:
+    ///
+    ///   * a live `turn/started` frame in the **measured shape the real wire always
+    ///     carries** — the flat `threadId` naming the thread this connection is
+    ///     bound to, plus the turn body and running status every captured frame has.
+    ///     `crate::codex_link::Connection::note_turn_start` is where that is
+    ///     enforced and where the measurement is written down; the visit filter
+    ///     admits strictly more than this, because it is answering a different
+    ///     question;
+    ///   * a `thread/resume` answer that describes a turn as still running **and
+    ///     that this daemon has no terminal filed for** — the only witness a link
+    ///     that was **disconnected** when the turn began can ever have, since
+    ///     `turn/started` is broadcast once and never replayed. An answer that
+    ///     rewinds a turn already watched finishing is a stale snapshot, not a
+    ///     witness, and it cancels nothing.
+    ///
+    /// The second is a *recovery* path, and the completion doorbell this cancels is
+    /// deliberately live-only ([`Daemon::push_codex_turn_complete`]). That is not
+    /// an inconsistency but the same rule read in the right direction: recovery may
+    /// never *ring*, because a re-attach is not news; recovery may always
+    /// **silence**, because the failure direction of a cancellation is a doorbell
+    /// that does not sound. A drop-and-reconnect straddling the dispatch grace is
+    /// exactly the case where the daemon learns the run is mid-turn from the only
+    /// evidence there is, and ringing anyway would announce a completion the reader
+    /// can no longer act on.
+    pub(crate) fn note_codex_turn_running(&self, session_uid: &str) {
+        self.push_gate.note_progress(session_uid);
+    }
+
+    /// **The operator started a new thread on this session, which is the person the
+    /// doorbell is for, at the machine** (round-9 F4).
+    ///
+    /// The same cancellation as [`Daemon::note_codex_turn_running`] and for the same
+    /// reason, reached by the one movement that is not a turn. A completion doorbell
+    /// admitted moments ago is waiting out its dispatch grace; a `/new` inside that
+    /// window means the reader is sitting in front of the machine having already
+    /// moved on, so the quiet state the ticket describes is over whatever the new
+    /// thread's turn is doing.
+    ///
+    /// **It is the switch that is the evidence, not the new thread's turn.** That
+    /// distinction is measured rather than tidy: `fixtures/codex/thread-switch.jsonl`
+    /// shows the old subscription receiving `thread/started` for the new thread and
+    /// then, when a turn begins on it, only `thread/status/changed` — the
+    /// `turn/started` this daemon reads movement from goes to the TUI's connection
+    /// alone. So a link waiting to be told the new thread is busy would wait for a
+    /// frame it is measurably never sent, and the stale "Finished a turn" push would
+    /// go out while the agent is demonstrably mid-turn. Reading
+    /// `thread/status/changed` into turn state instead would be building on
+    /// semantics nobody has measured; the switch itself is a frame this build already
+    /// understands, already acts on, and already knows is broadcast to every
+    /// connection.
+    ///
+    /// Live-only by the same call-site discipline the doorbell uses: the one caller
+    /// is `codex_link`'s switch ingest, reached only from a frame read off the wire.
+    /// A recovery may silence and may not ring, which is why a silencing path needs
+    /// no provenance flag of its own.
+    pub(crate) fn note_codex_switch(&self, session_uid: &str) {
+        self.push_gate.note_progress(session_uid);
+    }
+
+    /// **The doorbell for a Codex turn this daemon watched finish.**
+    ///
+    /// Codex's analogue of Claude's `agent_completed` notification, and the only
+    /// completion signal it has: the plan refuses Codex's `notify` hook and its
+    /// `PermissionRequest` hook precisely so that `turn/completed` is the one thing
+    /// that means a turn ended. So the same gate, the same ticket, the same
+    /// dispatch, the same content-free `PushKind::Completed` sentence — what
+    /// differs is only where the fact came from.
+    ///
+    /// # Live-only, and how that is guaranteed rather than checked
+    ///
+    /// A turn terminal reaches the store from two places, and by deliberate design
+    /// they are byte-identical facts under one dedup key: the live
+    /// `turn/completed` frame, and a `thread/resume` answer describing a turn that
+    /// finished while this daemon was not subscribed. Ringing about the second
+    /// would be a doorbell for news that is already old — the exact thing the whole
+    /// push design exists to avoid.
+    ///
+    /// Nothing distinguishes the two *facts*, so nothing tries to. The two **call
+    /// sites** are distinct instead, and only the live one calls this:
+    /// `codex_link`'s `record_minted` — reached only from `observe_notification`,
+    /// and so only from a frame read off the wire — while the recovery paths hand
+    /// their events to [`Daemon::ingest`] and stop
+    /// there. Adding a provenance field to the event would have been the wrong fix
+    /// twice over: it would break the identity that makes recovery dedup-safe, and
+    /// under first-wins the marker of whichever copy arrived first would become
+    /// permanent.
+    ///
+    /// **The dedup answer is the second guarantee, and it is free.** `ingest`
+    /// returns `None` for a key already filed, so a live terminal for a turn some
+    /// earlier resume already described never reaches this call — a re-attach
+    /// cannot re-ring a turn the reader was told about when it happened.
+    ///
+    /// # Only `completed`
+    ///
+    /// An `interrupted` or `failed` terminal deliberately does not ring.
+    /// `interrupted` means a human stopped the turn at the keyboard, and the person
+    /// who did it is the person the doorbell would wake. `failed` has no honest
+    /// sentence in [`crate::apns::PushKind`]'s closed vocabulary — "Finished a
+    /// turn" would report a failure as a success — and widening that vocabulary is
+    /// a change to what a lock screen may say, which belongs with the phone work
+    /// that renders it. Both are legible gaps, not oversights.
+    ///
+    /// # One ring per turn, except when two turns share a dispatch grace
+    ///
+    /// Each terminal is admitted on its own — the latch is reopened by the very
+    /// event that closes it — so nothing here collapses turns. What collapses them
+    /// is the 400 ms grace every push waits out: a second turn finishing inside the
+    /// first's grace records progress, and progress after an admission is what
+    /// cancels a quiet-state push. Two turns 300 ms apart therefore produce one
+    /// notification, and it is the *later* one — the state the run is actually in.
+    ///
+    /// A second turn merely **starting** inside the grace cancels it too, and
+    /// nothing rings: the run is working again, so there is no completion left to
+    /// announce. See [`Daemon::note_codex_turn_running`].
+    ///
+    /// **This is the Claude path's behaviour, not a Codex divergence, and it was
+    /// measured rather than assumed.** Claude's `Stop` hook records the same
+    /// progress its `agent_completed` notification is admitted beside, so two
+    /// Claude turns 100 ms apart ring once as well; with the notification alone and
+    /// no `Stop` between them, the `Done` latch collapses them to one ring too. All
+    /// three shapes were run against the real hook path and all three rang once.
+    ///
+    /// Which is the right answer for the thing this is: a doorbell whose whole
+    /// content is four words and a count. Two rings 300 ms apart saying "Finished a
+    /// turn" are one fact told twice to somebody whose phone is on a table. The
+    /// contract is therefore *one ring per turn the reader could act on
+    /// separately*, and a turn superseded before its doorbell left the building is
+    /// not one of those.
+    pub(crate) async fn push_codex_turn_complete(&self, session: &SessionKey, trigger: &Event) {
+        // **The movement and the news are one transition** — see
+        // `PushGate::admit_turn_end`. Recorded apart, an unrelated progress landing
+        // between them folds into this ticket and the push it should have cancelled
+        // survives its grace.
+        let ticket = self.push_gate.admit_turn_end(&session.uid);
+        self.dispatch_push(
+            session.uid.clone(),
+            trigger.seq,
+            PushHint {
+                project_label: self.effective_project_label(&session.uid).await,
+                // **Content-free, from the fact's type alone.** The terminal's
+                // payload carries the turn's status, timings and any error text;
+                // none of it is read here. An APNs payload passes through Apple,
+                // and nothing an agent produced ever does.
+                kind: crate::apns::PushKind::Completed,
+                // Overwritten at ring time by `describing`.
+                blocked_sessions: 0,
+                session_uid: session.uid.clone(),
+                // What makes this push reach only the phones that can open a Codex
+                // run — see `crate::push_queue::recipients`.
+                agent: protocol::agent::AgentKind::Codex,
+            },
+            ticket,
+            // A quiet-state push: progress landing during the grace means the run
+            // has moved on from the state this announces, and it should not ring.
+            true,
+            // No card behind it. A Codex approval push is Phase 3's, and it will
+            // carry its own.
+            None,
         );
     }
 
@@ -2265,6 +3080,46 @@ impl Daemon {
             }
         };
 
+        // **From here the write is serialized against this session's registrations**
+        // (round-7 F4).
+        //
+        // The row has exactly three production writers: this one,
+        // [`Daemon::register_supervisor`], and [`Daemon::mark_exited`] — which writes
+        // only `lifecycle`, and holds this same gate for it (round-8 F3), because an
+        // end established before a registration completed would otherwise be recorded
+        // over the run that registration installed. All three count their write into
+        // [`Inner::row_writes`] under this gate (round-9 F3), which is what lets a
+        // reader that looked at the row earlier find out that it has since moved.
+        // The two that write the identity
+        // columns are this one and the registration, and they are what the rest of
+        // this comment is about. Unguarded, they compose into a lost agent:
+        // a hook reads a Claude row, a Codex registration accepts — row, relabel,
+        // publish, link — and the hook then writes the agent it read back over the
+        // one the registration just set, because `agent` is the one identity column
+        // the upsert takes from `excluded` rather than COALESCE-ing. The row says
+        // Claude while a Codex link holds the session, which is precisely the pair
+        // [`Daemon::resolve_codex_inbound`] promises never to return. A resolver
+        // holding the registration gate against registrations alone was guarding one
+        // of the two writers and claiming both.
+        //
+        // **Per session, and only against acceptance.** This is the hot hook path —
+        // every hook every run posts arrives here — so it takes this uid's gate and no
+        // other: a hook waits out an acceptance for its OWN session, which is the wait
+        // that makes its write correct, and never one anywhere else in the fleet.
+        // Measured at 38µs against a 327µs hook (a re-read at 37µs, the uncontended
+        // gate at 2µs) on this machine.
+        //
+        // The row is read twice for the reason the resolver reads it twice: the first
+        // read answers WHICH run this hook belongs to — a hook that carries no uid
+        // names a tmux session, and that resolves to whichever run is live — so there
+        // is no gate to take until something has been read. The only thing it
+        // contributes to the write is the identity it resolved — `uid`, the conflict
+        // key, which is what the gate below is keyed by. Every mutable field the row
+        // carries forward comes from the guarded read, which shadows it.
+        let gate = self.registration_gate(&uid).await;
+        let _coherent = gate.lock().await;
+        let existing = self.db.get_session(uid.clone()).await?;
+
         // **An adopted run gets no tmux location, because it has none we know
         // of.** `claude:` is the prefix cc-hook mints for a session CodeConnect
         // did not launch; recording `codeconnect`/`<name>` for one — a server
@@ -2316,6 +3171,10 @@ impl Daemon {
             // Claude by a stray hook) and defaults a brand-new one to Claude,
             // which every hook-adopted run is. Codex identity is COALESCE-kept by
             // the upsert, so `None` here does not blank it.
+            //
+            // **`agent` is not**: the upsert writes `excluded.agent` outright, so
+            // this preservation is entirely the read above — which is why that read
+            // is inside the gate.
             agent: existing
                 .as_ref()
                 .map(|r| r.agent.clone())
@@ -2335,6 +3194,13 @@ impl Daemon {
             );
             return Ok(None);
         }
+        // **Counted, under the gate this write is already holding** (round-9 F3).
+        // This writer moves `lifecycle` to `Live` without staking any registration
+        // epoch, so it is invisible to a guard that watches only who owns the
+        // session — and an end established against the row as it was before this
+        // hook would otherwise commit straight over the liveness it just recorded.
+        // See [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&uid);
 
         self.relabel_open_cards(&uid, &row.cwd).await;
 
@@ -2390,9 +3256,24 @@ impl Daemon {
     /// observed exiting, so `lifecycle` says `Live` forever and ranking on it
     /// would put that ghost above the run that is genuinely there.
     pub async fn resolve(&self, reference: &str) -> Result<SessionRow> {
+        self.resolve_optional(reference)
+            .await?
+            .ok_or_else(|| anyhow!("unknown session {reference}"))
+    }
+
+    /// The same resolution, with **"named nothing" as a value and a broken store
+    /// as an error**.
+    ///
+    /// [`Daemon::resolve`] folds the two together because its callers answer both
+    /// the same way — with a refusal carrying a message. A caller that has to act
+    /// differently on them (a client error versus an operational fault) cannot
+    /// recover the distinction from the outside: asking the store a second time to
+    /// tell them apart is a race, and treating every error as absence is how a
+    /// failing database comes to look like an empty fleet.
+    async fn resolve_optional(&self, reference: &str) -> Result<Option<SessionRow>> {
         if protocol::uid::is_well_formed(reference) {
             if let Some(row) = self.db.get_session(reference.to_string()).await? {
-                return Ok(row);
+                return Ok(Some(row));
             }
         }
         let attached: Option<SessionRow> = {
@@ -2405,12 +3286,10 @@ impl Daemon {
                 })
                 .max_by(|a, b| a.session_uid.cmp(&b.session_uid))
         };
-        if let Some(row) = attached {
-            return Ok(row);
+        if attached.is_some() {
+            return Ok(attached);
         }
-        self.store
-            .find_session(reference)?
-            .ok_or_else(|| anyhow!("unknown session {reference}"))
+        self.store.find_session(reference)
     }
 
     // --------------------------------------------------------------- answers
@@ -3511,6 +4390,40 @@ impl Daemon {
         // currently closes.
         let control_link = crate::codex_link::ControlLink::from_registration(&info)?;
 
+        // **ONE REGISTRATION FOR THIS SESSION AT A TIME, from here to the end of the
+        // acceptance.**
+        //
+        // The gate the control-link transaction below already used, taken earlier and
+        // held across the whole of it. The epoch check before the supervisor publish is
+        // a real guard and it protected the wrong span: everything past this point is
+        // the acceptance — the generation refusal, the stake, the row, the card
+        // relabel, the supervisor handle and the link — and only the last two were
+        // behind it.
+        //
+        // The row upsert and `relabel_open_cards` are awaits, and a second registration
+        // for the same uid could run the whole of itself inside either one. The loser
+        // then wrote ITS cwd, session id, thread id and socket over the winner's row,
+        // and stamped ITS project label onto cards belonging to a session the winner
+        // owns — and only afterwards reached the check and refused. Neither write is
+        // repaired by anything downstream: the registration frame is the row's single
+        // writer, and the relabel is a fire-once edit. The ordering does not even need
+        // the two futures to interleave at an await to go wrong, because
+        // `Db::upsert_session` hands the write to the blocking pool: two registrations
+        // that call it in order can still reach SQLite's one writer in the other order.
+        //
+        // **Taken above the generation refusal, not below it.** Every refusal above
+        // reads only the frame, so serializing them would buy nothing; that one reads
+        // `supervisors`, which is exactly the shared state this gate protects. Left
+        // outside, two Codex registrations at generations 5 and 6 could both read an
+        // empty high-water, both pass, and the session could settle on the OLDER
+        // launch. It is the one refusal the gate closes for free.
+        //
+        // Serializing is what makes "a loser mutated nothing" true of the whole
+        // acceptance rather than of its in-memory tail. Taken BEFORE `inner` on every
+        // path, which is the lock ordering this type already uses.
+        let gate = self.registration_gate(&uid).await;
+        let _acceptance = gate.lock().await;
+
         // **Stale generation is rejected BEFORE any persistent mutation (D4).**
         // The upsert and the card relabel below are persistent writes, so the
         // accept/reject decision — including this generation check — must come
@@ -3541,6 +4454,102 @@ impl Daemon {
                 }
             }
         }
+
+        // **The claim is staked here, in the same breath as the row.**
+        //
+        // Every rejection is behind us — an unsupported agent, an inconsistent
+        // identity, a stale generation — so D4 still holds: a refused frame has
+        // mutated nothing, in memory or on disk. What follows is the acceptance, and
+        // its first act is to say which registration the session now belongs to.
+        //
+        // It cannot wait for the handle below. The row write and the handle publish
+        // are separated by an await, and in that interval the row already describes
+        // *this* registration while the supervisor and link slots still describe the
+        // previous one, agreeing with each other. See
+        // [`Inner::registration_epochs`], which is what the resolver compares
+        // against, and [`Daemon::codex_addressee_locked`].
+        //
+        // Staking early is therefore what makes the window safe to *read* through,
+        // and it is also what makes the publish below conditional: a registration
+        // that comes back to find this entry naming somebody else has been overtaken
+        // inside its own window, and must not publish a handle for a session it no
+        // longer owns.
+        // **A CORPSE'S REPLAY MAY NOT TAKE A SESSION AWAY FROM A LIVING SUPERVISOR**
+        // (round-10 F1).
+        //
+        // `report_exit` opens a fresh connection and replays this frame immediately
+        // before `SessionExited`, so that a run which started *and* ended while `ccd`
+        // was down still has a row to record its end against. That is the only thing
+        // the replay is for, and it is worth keeping. But the frame it sends is the
+        // registration the supervisor built at launch, byte for byte, so up to here
+        // it is indistinguishable from a live supervisor arriving — and treating it
+        // as one is what defeated the round-9 guard from the other end.
+        //
+        // Traced: A registers, A's session dies, B resumes the same uid, and A's
+        // supervisor then replays. The replay staked a *third* epoch and became the
+        // owner, so the exit that followed was established against an identity the
+        // replay itself had just minted; `mark_exited` compared it with the standing
+        // claim, found the same number on both sides, and ended B's run. The epoch
+        // could not see it, because by then the epoch was the replay's own.
+        //
+        // The incarnation can, because it is older than the replay: it is stamped into
+        // the frame at launch and the replay does not restamp it. So a replay whose
+        // incarnation is not the one holding the claim is refused the claim. It is
+        // refused *only* that — the frame is not rejected, because the connection that
+        // sent it still has an exit to report and an exit refused here would fall back
+        // to the identity-less path, which reads the current owner and would end B's
+        // run for a second reason. Instead the epoch below is minted and never staked:
+        // unique, so it matches no standing claim, which is exactly what
+        // `mark_exited` needs to see to refuse the report — and what
+        // `unregister_supervisor` needs to see to leave B's slots alone when this
+        // connection closes.
+        //
+        // Narrow by construction. `exit_replay` is set by `report_exit` and nowhere
+        // else, so no live supervisor introducing a run it is about to host can reach
+        // this; a genuine hand-over is a different frame with the flag clear and
+        // supersedes as it always has. A claim that has never been staked (a daemon
+        // restart) is not a rival — there is nothing to displace, and adopting is the
+        // replay's whole purpose — so only a *standing* claim from *another*
+        // incarnation refuses. A supervisor too old to set the flag behaves exactly as
+        // it did before, which is the same narrowing the identity-less report path
+        // already carries.
+        let incarnation = Incarnation::of(&info);
+        let epoch = {
+            let mut inner = self.inner.lock().await;
+            // **"A claim stands, and it is not mine"** — two questions of two maps,
+            // because they fail in opposite directions. Whether a claim exists at all
+            // is the epoch's, and an absent one adopts (above). Whether it is *this*
+            // supervisor's is the incarnation's, and an unrecognised answer there
+            // refuses rather than adopts: a standing claim this cannot account for is
+            // the case where taking the session would be worst.
+            let displaces_a_living_owner = info.exit_replay
+                && inner.owner_of(&uid).is_some()
+                && inner.claimant_of(&uid) != Some(&incarnation);
+            if displaces_a_living_owner {
+                // Minted and deliberately never staked. Unique, so it equals no
+                // standing claim: `mark_exited` refuses the exit that follows on
+                // this connection, and `unregister_supervisor` leaves the living
+                // owner's slots alone when it closes. Both of those already ask
+                // exactly this question of exactly this map — nothing new decides
+                // anything, which is why the refusal cannot be forgotten by a
+                // caller that has not heard of it.
+                inner.next_epoch += 1;
+                let unstaked = inner.next_epoch;
+                drop(inner);
+                crate::log_info!(
+                    "not adopting the exit replay for {uid} from supervisor pid {} started at \
+                     {}: a different supervisor holds the session now, so the run this report \
+                     is about is not the run the row describes",
+                    incarnation.pid,
+                    incarnation.started_at
+                );
+                return Ok(Registration {
+                    session: SessionKey::new(uid, info.session_id.clone()),
+                    epoch: unstaked,
+                });
+            }
+            inner.stake(&uid, incarnation)
+        };
 
         let wrote = self
             .db
@@ -3580,15 +4589,64 @@ impl Daemon {
                 "session {uid} was deleted; refusing the registration that raced the deletion"
             );
         }
+        // **Counted the moment the row has actually moved, and not when the epoch
+        // was staked** (round-9 F3). The stake is two awaits earlier, so an observer
+        // can hold the new epoch and the OLD row at the same instant — the count is
+        // what closes that gap, because it moves with the write rather than ahead of
+        // it. Below the tombstone check, because a `Tombstoned` upsert wrote nothing
+        // and a count that includes it is not a count of writes. Taken under the
+        // acceptance gate, which this function holds throughout. See
+        // [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&uid);
 
         let session = SessionKey::new(uid, info.session_id.clone());
-        let epoch = {
+        {
             let mut inner = self.inner.lock().await;
+            // **Publish only if this registration still owns the stake.**
+            //
+            // The damage this prevents is two-sided and neither half is recoverable:
+            // the *live* supervisor channel becomes this registration's, whose
+            // connection the winner is not on, and `registration_epochs` still names
+            // the winner — so [`Daemon::codex_addressee_locked`] compares the winner's
+            // link against this handle's older epoch, disagrees, and answers `NoLink`
+            // for the rest of the session's life.
+            //
+            // **Now a second line of defence rather than the first.** It used to be
+            // the only thing standing between two registrations for one uid, and it
+            // could only ever guard what came after it: the stake and this publication
+            // are separated by two awaits — the row upsert and `relabel_open_cards` —
+            // and a rival could run the whole of itself inside either, leaving its row
+            // and its card labels behind before this check turned it away. The
+            // acceptance gate at the top of this function is what makes the whole
+            // sequence exclusive, so a rival can no longer be *inside* it at all.
+            //
+            // Kept because it is cheap and fail-closed, and because it asks a question
+            // no gate answers: the gate serializes registrations, while this compares
+            // the identity the row was written under against the map the resolver
+            // reads. Asked under the same lock the stake is taken under, so the answer
+            // cannot go stale between the compare and the install. The stake is not
+            // re-taken: it moves with the row on purpose (see above), and a
+            // registration that has lost it has lost the session.
+            //
+            // Refused on the same terms as the tombstone above and at the same
+            // point — after the row, before any in-memory install — so the
+            // abandonment leaves nothing of this registration behind: no supervisor,
+            // no `last_seen_ms`, no link (the transaction below re-checks this very
+            // epoch), and no stake, because the stake is already the winner's.
+            // `unregister_supervisor` removes a claim only when it owns the epoch,
+            // so a late disconnect for this registration cannot erase it either.
+            if inner.registration_epochs.get(&session.uid) != Some(&epoch) {
+                anyhow::bail!(
+                    "registration for {} at epoch {epoch} was superseded while its row was \
+                     being written; refusing to publish a supervisor the session no longer \
+                     belongs to",
+                    session.uid
+                );
+            }
             // The generation was accepted before any write (above); this block
-            // only installs the handle carrying it. Making the compare and the
-            // install one atomic step across a restart is the Phase-2 gate (A5).
-            inner.next_epoch += 1;
-            let epoch = inner.next_epoch;
+            // only installs the handle carrying the epoch staked with the row.
+            // Making the compare and the install one atomic step across a restart
+            // is the Phase-2 gate (A5).
             inner.supervisors.insert(
                 session.uid.clone(),
                 SupervisorHandle {
@@ -3609,35 +4667,83 @@ impl Daemon {
             // very epoch under the lock before it builds anything. The two are
             // deliberately NOT one step — the link's lifecycle needs awaits (a
             // bounded join) that must not run under `inner`.
-            epoch
-        };
+        }
 
-        // **The control link's whole lifecycle, serialized per session.** Join any
-        // parked corpse, take the incumbent, retire it, spawn the replacement,
-        // install it — one transaction, under one gate, so no second registration
-        // for this session can interleave with any part of it. Held across awaits,
-        // and taken *before* `inner` on every path, which is the lock ordering the
-        // rest of this type already uses.
+        // **The control link's whole lifecycle.** Join any parked corpse, take the
+        // incumbent, retire it, spawn the replacement, install it — one transaction, so
+        // no second registration for this session can interleave with any part of it.
+        //
+        // Under the acceptance gate taken at the top of this function, which is the same
+        // gate this block used to take for itself; widening its span is what put the row
+        // and the card relabel behind the same serialization. Still held across awaits,
+        // and still taken before `inner` on every path.
         {
-            let gate = self.codex_link_gate(&session.uid).await;
-            let _transaction = gate.lock().await;
+            // **Asked BEFORE anything is destroyed, and asked of the claim.**
+            //
+            // The stake check above the supervisor publish is not the last word: a
+            // registration that passes it releases `inner` and then queues here, and
+            // a later one can stake, publish and install its link inside that wait.
+            // A transaction that parked first and asked afterwards therefore retired
+            // the WINNER's link — out of the slot, aborted — before finding out it
+            // had lost, and then installed nothing in its place. The session stayed
+            // registered and permanently unobserved, which nothing downstream can
+            // repair: `thread/started` is broadcast once, and the next transaction
+            // for this uid is the next registration.
+            //
+            // Through [`Inner::owner_of`], which is the one place that question is
+            // answered — the install below asks it again, under the lock that guards
+            // the map, and the two must not be able to answer differently.
+            //
+            // **Second line of defence now, like the publish check above.** The window
+            // it was written for — stake, release `inner`, queue on the gate, and lose
+            // the session inside that wait — is closed by construction since the gate
+            // is taken before the stake rather than here: nothing else can stake for
+            // this uid while this registration holds it, and `unregister_supervisor`
+            // takes the same gate. Kept because it is fail-closed and costs one
+            // uncontended lock, and because the alternative to a cheap redundant check
+            // on a destructive step is trusting a comment. **No test can distinguish it
+            // from a constant `true` any more**, which is the honest price of making
+            // the race structurally impossible instead of merely guarded.
+            let owns = self.inner.lock().await.owner_of(&session.uid) == Some(epoch);
             // The incumbent moves from the slot into the park in one lock
-            // acquisition, so its unproven completion is recorded before anything
-            // can be dropped. Everything parked — this one and any survivor from an
-            // earlier turn — is then retired together, in place.
-            self.park_current_codex_link(&session.uid).await;
+            // acquisition, so its unproven completion is recorded before anything can
+            // be dropped. **Only if this registration owns the session** — that is
+            // the whole of the guard above.
+            if owns {
+                self.park_current_codex_link(&session.uid).await;
+            }
+            // Everything parked — anything this transaction just retired, and any
+            // survivor from an earlier turn — is joined together, in place. Run on
+            // every path because it destroys nothing that was not already aborted:
+            // a parked handle is a handle somebody already gave up on, and this only
+            // re-aborts it and drops the ones that have proven they stopped.
             let park_clear = self.join_parked_codex_links(&session).await;
 
-            // A cheap early-out only — the authoritative check is inside
-            // `install_codex_link`, under the lock that guards the map.
-            let owns = self
-                .inner
-                .lock()
-                .await
-                .supervisors
-                .get(&session.uid)
-                .is_some_and(|handle| handle.epoch == epoch);
-            if !park_clear {
+            // **The agent boundary is settled first, and it is not conditional on
+            // anything above.** A Claude registration forgets where the Codex link
+            // left the session: the same uid can change agent, and a later Codex
+            // registration seeded from a chase belonging to neither run would resume
+            // a thread two agents ago. See [`Inner::forget_codex_carry`].
+            //
+            // Guarded by `owns` because a stale registration mutates nothing, and by
+            // **nothing else** — least of all by the join. Which agent registered is a
+            // fact about this frame; whether a retired task stopped inside its budget
+            // is a fact about that task, and hanging the first on the second means a
+            // link that outlives the budget leaves the pre-Claude chase to be retained
+            // afterwards and read by the next Codex registration. That is why the
+            // forgetting reaches the park as well as the retained map.
+            if owns && control_link.is_none() {
+                self.inner.lock().await.forget_codex_carry(&session.uid);
+            }
+
+            if !owns {
+                crate::log_debug!(
+                    "not touching the codex link slot for {} at epoch {epoch}: a newer \
+                     registration owns the session, and retiring its link would leave \
+                     it registered and unobserved",
+                    session.name
+                );
+            } else if !park_clear {
                 crate::log_error!(
                     "codex link for {} at epoch {epoch}: a previous link is still \
                      running after an abort, so this registration has NO link \
@@ -3645,62 +4751,98 @@ impl Daemon {
                      later transaction can join it.",
                     session.name
                 );
-            } else if !owns {
-                crate::log_debug!(
-                    "not installing a codex link for {} at epoch {epoch}: a newer \
-                     registration owns the session",
-                    session.name
-                );
             } else {
-                match control_link {
-                    // A Claude registration reclaims the slot and leaves it empty:
-                    // the same uid can change agent, and a link left running under
-                    // an epoch no later release can match would never be stopped.
-                    None => {}
-                    Some(link) => {
-                        // **Validated, then spawned, then installed — all under one
-                        // lock, with no await between them.** The spawn is a closure
-                        // this call may decline to run: a task that exists is a task
-                        // that is already running, and on a multithreaded runtime a
-                        // stale transaction's link would dial and ingest long before
-                        // a later rejection could matter.
-                        let mut inner = self.inner.lock().await;
-                        let outcome = inner.spawn_codex_link_if_owner(&session.uid, epoch, || {
+                // A Claude registration reclaims the slot and leaves it empty: a link
+                // left running under an epoch no later release can match would never
+                // be stopped. The forgetting that goes with it happened above.
+                if let Some(link) = control_link {
+                    // **Validated, then spawned, then installed — all under one
+                    // lock, with no await between them.** The spawn is a closure
+                    // this call may decline to run: a task that exists is a task
+                    // that is already running, and on a multithreaded runtime a
+                    // stale transaction's link would dial and ingest long before
+                    // a later rejection could matter.
+                    let mut inner = self.inner.lock().await;
+                    // **The daemon owns both cells, the link only writes to
+                    // them.** Minted here so they are installed in the same
+                    // statement as the task they belong to: a cell the *link*
+                    // created would have to be handed back out of the spawn, and
+                    // a spawn this call may decline to run has nothing to hand.
+                    let presence = crate::codex_link::LinkPresence::new();
+                    let carry = crate::codex_link::LinkCarry::new();
+                    // **The replacement starts from what its predecessor knew,
+                    // not from the launcher's launch-time claim** — see
+                    // [`Inner::seed_codex_carry`]. The JOIN above is what put
+                    // that here, a lock acquisition ago: whatever this
+                    // transaction parked, and anything a supervisor that
+                    // disconnected first parked on its way out, was retained the
+                    // moment its task was proven stopped.
+                    if let Some(resumed) = inner.seed_codex_carry(&session.uid, &link, &carry) {
+                        crate::log_info!(
+                            "codex link for {} at epoch {epoch}: resuming {resumed}, \
+                                 where the previous link left the session, rather than \
+                                 the registration's claim ({}); the row is not written \
+                                 back after a /new, so the claim names where the session \
+                                 started, not where it is",
+                            session.name,
+                            link.thread_id.as_deref().unwrap_or("none")
+                        );
+                    }
+                    // **And so does the presence** — see
+                    // [`Inner::seed_codex_presence`], a named step for the same
+                    // reason its sibling above is one.
+                    inner.seed_codex_presence(&session.uid, &link, &presence);
+                    let outcome = inner.spawn_codex_link_if_owner(
+                        &session.uid,
+                        epoch,
+                        link.generation,
+                        presence.clone(),
+                        carry.clone(),
+                        || {
                             tokio::spawn(crate::codex_link::run(
                                 Arc::clone(self),
                                 session.clone(),
                                 link,
+                                presence,
+                                carry,
                             ))
-                        });
-                        let orphan = match outcome {
-                            Err(owner) => {
-                                let now = owner
-                                    .map(|e| format!("now epoch {e}"))
-                                    .unwrap_or_else(|| "now unowned".to_string());
-                                crate::log_debug!(
-                                    "not installing a codex link for {} at epoch \
+                        },
+                    );
+                    let orphan = match outcome {
+                        Err(owner) => {
+                            let now = owner
+                                .map(|e| format!("now epoch {e}"))
+                                .unwrap_or_else(|| "now unowned".to_string());
+                            crate::log_debug!(
+                                "not installing a codex link for {} at epoch \
                                      {epoch}: the session changed hands ({now}) while \
                                      this transaction was retiring the previous one — \
                                      nothing was spawned",
-                                    session.name
-                                );
-                                None
-                            }
-                            Ok(orphan) => orphan,
-                        };
-                        if let Some(orphan) = orphan {
-                            // Parked rather than retired in hand — for the same
-                            // reason everything else is: a handle held across an
-                            // await is a handle a cancelled transaction loses
-                            // without recording that its completion is unproven.
-                            inner
-                                .parked_codex_links
-                                .entry(session.uid.clone())
-                                .or_default()
-                                .push(OwnedLink::new(orphan));
-                            drop(inner);
-                            let _ = self.join_parked_codex_links(&session).await;
+                                session.name
+                            );
+                            None
                         }
+                        Ok(orphan) => orphan,
+                    };
+                    if let Some(orphan) = orphan {
+                        // Parked rather than retired in hand — for the same
+                        // reason everything else is: a handle held across an
+                        // await is a handle a cancelled transaction loses
+                        // without recording that its completion is unproven.
+                        //
+                        // **Nothing to retain from it.** An orphan is a task that
+                        // never became this session's link — it was handed back
+                        // because the session changed hands, or because a newer
+                        // link already held the slot — so what it may have heard
+                        // is not an answer to "where did this session's link
+                        // leave it".
+                        inner
+                            .parked_codex_links
+                            .entry(session.uid.clone())
+                            .or_default()
+                            .push(OwnedLink::new(orphan, None));
+                        drop(inner);
+                        let _ = self.join_parked_codex_links(&session).await;
                     }
                 }
             }
@@ -3745,14 +4887,45 @@ impl Daemon {
     /// to be typed into and a `detached` link that never recovers.
     pub async fn unregister_supervisor(&self, registration: &Registration) {
         // The same gate the registration path holds, so a disconnect can never
-        // interleave with a re-registration's park → join → spawn → install.
-        let gate = self.codex_link_gate(&registration.session.uid).await;
+        // interleave with a re-registration's acceptance — the row and the card
+        // relabel as much as the park → join → spawn → install.
+        let gate = self.registration_gate(&registration.session.uid).await;
         let _sequence = gate.lock().await;
         let released = {
             let mut inner = self.inner.lock().await;
             let released = match inner.supervisors.get(&registration.session.uid) {
                 Some(handle) if handle.epoch == registration.epoch => {
                     inner.supervisors.remove(&registration.session.uid);
+                    // **THE CLAIM IS NOT REMOVED HERE — OR ANYWHERE** (round-9 F3).
+                    //
+                    // It used to be, guarded by an ownership test, and the guard was
+                    // right for the reason below while the removal itself was wrong.
+                    // Deleting the entry made `A → B → B disconnects` and
+                    // `A → A disconnects` spell the same empty map, so
+                    // [`Daemon::mark_exited`] — which reads exactly this map to ask
+                    // whether the evidence in its hands is about the run the row now
+                    // describes — could not tell a disconnect from a REPLACEMENT that
+                    // had since gone too, and let A's stale evidence commit. The entry
+                    // stays behind as a tombstone naming the last registration to stake
+                    // this uid; see [`Inner::registration_epochs`] for why both of its
+                    // readers want that reading.
+                    //
+                    // The ownership test the removal carried is what remains, and it is
+                    // still load-bearing in the other direction: the two slots are
+                    // published a window apart on purpose — a replacement stakes its
+                    // claim in the same breath as the row and publishes its handle
+                    // several awaits later — so at the instant an incumbent disconnects,
+                    // `supervisors` can still be the incumbent's while the claim already
+                    // names the replacement. Writing anything for "the entry for this
+                    // uid" here would overwrite a claim that was never ours, and the
+                    // replacement never stakes again.
+                    //
+                    // The other two maps torn down here ask that same question —
+                    // `supervisors` on the line above, `codex_links` in
+                    // [`Inner::release_codex_link`] — and they are the ones a disconnect
+                    // genuinely owns: a channel and a task, both of which end with the
+                    // connection. The claim is not a resource this connection holds; it
+                    // is a record of what happened to this session.
                     true
                 }
                 _ => false,
@@ -3766,7 +4939,13 @@ impl Daemon {
                     .parked_codex_links
                     .entry(registration.session.uid.clone())
                     .or_default()
-                    .push(OwnedLink::new(link.task));
+                    .push(OwnedLink::new(
+                        link.task,
+                        Some(ParkedCarry {
+                            generation: link.generation,
+                            carry: link.carry,
+                        }),
+                    ));
             }
             released
         };
@@ -3810,11 +4989,18 @@ impl Daemon {
             .insert(row.session_uid, protocol::time::now_unix_ms());
     }
 
+    /// A supervisor reporting that its own run has ended.
+    ///
+    /// `reported_by` is **the registration the reporting connection made**, and it
+    /// is the identity this evidence is established against (round-9 F3). See the
+    /// note at the snapshot below for why it is not the same as "whoever owns this
+    /// session at the moment the report is handled".
     pub async fn session_exited(
         &self,
         session_id: &str,
         session_uid: Option<&str>,
         exit_code: Option<i32>,
+        reported_by: Option<&Registration>,
     ) {
         // Reported over a *fresh* connection by a supervisor whose session is
         // already gone, so the run has to be found again rather than inferred
@@ -3827,6 +5013,46 @@ impl Daemon {
         // means either an older supervisor or a failed replay, and the two
         // outcomes below are kept apart because "we looked and it is not there"
         // and "we could not look" are different facts.
+        //
+        // **THE IDENTITY THIS REPORT IS ESTABLISHED AGAINST IS THE REPORTER'S, NOT
+        // THE CURRENT OWNER'S** (round-9 F3).
+        //
+        // A supervisor reports its exit over a *fresh* connection and replays its
+        // registration on it first (see `cc`'s `report_exit`), so the frame arrives
+        // with an epoch of its own — the one identity that says which run this
+        // evidence is about. Reading the *current* owner instead answers a different
+        // question, and answers it wrongly in the one case the guard exists for:
+        // connection A registers at EA, B replaces it at EB, A's queued exit frame is
+        // then handled, the snapshot reads EB, and `mark_exited` compares EB against
+        // EB and ends the run that REPLACED the one that died.
+        //
+        // The window is real on this path too — `lookup_run` is a database read on
+        // the blocking pool, and a registration completes inside it — but taking the
+        // reporter's epoch closes it from the other end: the evidence carries its own
+        // identity, so no snapshot has to stand in for one.
+        //
+        // **And the epoch it carries is only an identity because the registration that
+        // minted it was judged first** (round-10 F1). The replay is what mints it, so
+        // on its own it is a number the reporter drew a moment ago and compares to
+        // itself — which is how this guard was defeated end to end while reading
+        // exactly as it does here. `register_supervisor` is where that is settled: a
+        // replay from a supervisor that is not the one holding the session is refused
+        // the claim and handed an epoch it never staked, so the comparison below
+        // *does* separate the two runs. The two halves are one guard, and neither
+        // works alone.
+        //
+        // A report with no registration on its connection is an older supervisor, or
+        // one whose replay never landed. It carries no identity, so the best that can
+        // be said is who owned the session before the lookup began — the round-8
+        // reading, kept for exactly that path and narrowed to it. Taken as a snapshot
+        // of every owner rather than of one because which uid this report is about is
+        // what the lookup below is for: there is no single entry to read until it has
+        // answered, and reading one afterwards would be an observation made *after*
+        // the window it exists to see.
+        let fleet_before_the_lookup = match reported_by {
+            Some(_) => None,
+            None => Some(self.inner.lock().await.registration_epochs.clone()),
+        };
         let row = match self.lookup_run(session_id, session_uid).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -3845,7 +5071,31 @@ impl Daemon {
                 return;
             }
         };
-        self.mark_exited(&row.key(), exit_code, None).await;
+        let observed = EndEstablishedAgainst {
+            owner: match reported_by {
+                Some(registration) => Some(registration.epoch),
+                None => fleet_before_the_lookup
+                    .as_ref()
+                    .and_then(|owners| owners.get(&row.session_uid).copied()),
+            },
+            // **Not a claim about the row.** What a supervisor witnessed is its own
+            // process ending, which no later write to the row makes untrue — a hook
+            // from the dying run landing between the lookup and the commit is the
+            // corpse twitching, not a reason to leave the row `Live`. The sweep's
+            // evidence is the opposite kind and carries the opposite answer; see
+            // [`EndEstablishedAgainst`].
+            row_writes: None,
+        };
+        if !self
+            .mark_exited(&row.key(), exit_code, None, observed)
+            .await
+        {
+            crate::log_info!(
+                "dropping the exit reported for {session_id}: a registration completed \
+                 while the report was in flight, so the row now describes the run that \
+                 replaced the one this exit is about"
+            );
+        }
     }
 
     /// Record that a run has ended: the durable lifecycle change, then the fact.
@@ -3869,12 +5119,91 @@ impl Daemon {
     /// the same second its supervisor reconnects to say so. Without the id that
     /// race produces two `SessionEnd` events for one death; with it the second
     /// is deduplicated by the log's own rule and the first account stands.
+    ///
+    /// # This is the row's THIRD writer, and it commits under the same gate as the
+    /// other two (round-8 F3)
+    ///
+    /// Both callers establish an end at one moment and record it at a later one, and
+    /// the gap is not small: the sweep's is a whole confirmation loop — probes,
+    /// sleeps and a second pass over the suspects — and the reported path's is a
+    /// database lookup on the blocking pool. A registration for the same uid
+    /// completes inside that gap whenever a supervisor reconnects or a crashed run
+    /// is resumed under its own uid, and it writes the row `Live`, publishes a
+    /// supervisor and installs a link. Committing then is not recording an end: it
+    /// is killing the run that replaced it, with a `SessionEnd` no later fact can
+    /// withdraw.
+    ///
+    /// **The gate alone is not the fix.** Taking [`Daemon::registration_gate`] here
+    /// makes the commit exclusive against acceptances, but the stale observation was
+    /// made *before* the gate was ever asked for, so a commit that only waits its
+    /// turn still commits stale evidence. So the caller passes what it observed —
+    /// see [`EndEstablishedAgainst`] — and this compares it again under the gate,
+    /// where the answers cannot move between the compare and the write.
+    ///
+    /// **The owner rule is "somebody else has staked it since", not "the owner
+    /// changed".** A caller that observed no owner at all and finds one now has been
+    /// overtaken; a caller whose observation matches the standing claim has not,
+    /// *including* when the connection that made that claim has since disconnected —
+    /// [`Inner::registration_epochs`] is a tombstone (round-9 F3), so a disconnect
+    /// leaves the epoch behind and a real exit report is not refused for having
+    /// arrived after its own socket closed. An absent entry means nothing has ever
+    /// registered for this uid, which is the ordinary shape of a hook-adopted run.
+    ///
+    /// **The row rule is separate, and only one caller has evidence of that kind.**
+    /// A sweep proves a *row's* tmux location empty, so a row written since it
+    /// looked is a row it never examined; a supervisor proves its *own process*
+    /// ended, which no later write makes untrue. So the second comparison is made
+    /// only for the caller that passes a count — again under this gate, against
+    /// [`Inner::row_writes`], which every row writer bumps under the same gate.
+    ///
+    /// Returns whether the end was recorded, so a caller does not narrate an exit
+    /// that was refused: the sweep's `gone` counter and its per-row log line are
+    /// both claims about a write that may not have happened.
+    ///
+    /// Lock order is the type's existing one — `registration_gate` → `publish_gate`
+    /// (inside [`Daemon::ingest`]) → `inner` — which is exactly the order
+    /// `register_supervisor` takes them in across its own acceptance.
     async fn mark_exited(
         &self,
         session: &SessionKey,
         exit_code: Option<i32>,
         reason: Option<&str>,
-    ) {
+        observed: EndEstablishedAgainst,
+    ) -> bool {
+        let gate = self.registration_gate(&session.uid).await;
+        let _commit = gate.lock().await;
+        let (owner, row_writes) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.owner_of(&session.uid),
+                inner.row_writes_of(&session.uid),
+            )
+        };
+        if owner.is_some() && owner != observed.owner {
+            crate::log_info!(
+                "not recording an end for {} ({}): registration {:?} owns it now and the \
+                 end was established against {:?}, so a replacement completed while this \
+                 was in flight",
+                session.name,
+                session.uid,
+                owner,
+                observed.owner
+            );
+            return false;
+        }
+        if observed.row_writes.is_some_and(|seen| seen != row_writes) {
+            crate::log_info!(
+                "not recording an end for {} ({}): this row has been written {} time(s) \
+                 and the end was established against a row written {:?} time(s), so \
+                 something wrote it after the look this end rests on — the look was at a \
+                 row that no longer exists",
+                session.name,
+                session.uid,
+                row_writes,
+                observed.row_writes
+            );
+            return false;
+        }
         if let Err(err) = self
             .db
             .set_lifecycle(session.uid.clone(), Lifecycle::Exited)
@@ -3882,6 +5211,10 @@ impl Daemon {
         {
             crate::log_error!("failed to mark {} exited: {err:#}", session.name);
         }
+        // The row's third writer counts its write like the other two, under the same
+        // gate — so "every writer bumps this" is a property of the type rather than a
+        // habit two of them happen to share. See [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&session.uid);
         let payload = match reason {
             Some(reason) => serde_json::json!({"exit_code": exit_code, "reason": reason}),
             None => serde_json::json!({"exit_code": exit_code}),
@@ -3900,6 +5233,7 @@ impl Daemon {
         let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
             session_uid: session.uid.clone(),
         });
+        true
     }
 
     /// Ask the supervisor for something, and be precise about failure.
@@ -4008,11 +5342,239 @@ impl Daemon {
         }
     }
 
+    // ---------------------------------------------- the inbound resolver
+
+    /// **What a Codex session's control link is, right now.** Keyed by uid, which
+    /// is what the `codex_links` slot is keyed by.
+    ///
+    /// [`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink) for a
+    /// Claude run, a uid that names nothing, and a run whose supervisor has
+    /// disconnected alike — from here those are one answer, because none of them
+    /// has a connection to address. It is a fact about the *slot*, not about the
+    /// row's `lifecycle`: `mark_exited` does not retire a link handle, so a run the
+    /// liveness sweep has marked `Exited` while its supervisor is still connected
+    /// keeps reporting what its link is doing.
+    ///
+    /// Takes `Inner` rather than the lock, so [`Daemon::sessions`] can ask about
+    /// every row without taking and dropping a lock per session — and, more to the
+    /// point, so the whole list is projected against **one** snapshot of the
+    /// registry instead of a different one per row.
+    ///
+    /// **The link has to belong to the registration that owns the session now.**
+    /// A registration stakes its epoch, writes its row, publishes its supervisor
+    /// handle, and only then — under a separate gate, because the link's lifecycle
+    /// needs awaits that must not run under `inner` — retires the incumbent link.
+    /// Through all of that the slot still holds the previous registration's handle,
+    /// whose connection is on the previous registration's thread. Answering from it
+    /// would pair the row one registration just wrote with the connection another
+    /// one is holding, which is the single thing this resolver exists to make
+    /// impossible.
+    ///
+    /// **Compared against the registration's CLAIM, not against the installed
+    /// supervisor handle** — see [`Inner::registration_epochs`]. The handle is
+    /// published *after* the row, so a handle-based comparison agrees with itself
+    /// for the whole of the first hand-over window: row B, owner A, link A, epochs
+    /// equal, and the resolver hands back A's presence for B's row. The claim moves
+    /// with the row, so there is no such window.
+    ///
+    /// A mismatch is [`NoLink`](crate::codex_link::CodexAddressee::NoLink) — no link
+    /// *for this registration*, which is the truth. The consequence in
+    /// [`Daemon::sessions`] is that a hand-over reports the incoming registration's
+    /// own claim until its link comes up, rather than the outgoing connection's last
+    /// word. In the steady state the two epochs are equal and this costs a map
+    /// lookup.
+    fn codex_addressee_locked(
+        inner: &Inner,
+        session_uid: &str,
+    ) -> crate::codex_link::CodexAddressee {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.presence.get())
+            .unwrap_or(crate::codex_link::CodexAddressee::NoLink)
+    }
+
+    /// **The connection-scoped inbound resolver.**
+    ///
+    /// A phone's session-scoped request names a *session reference* — a uid, or a
+    /// tmux name that resolves to the newest run under it. What a request has to be
+    /// handed to is a *connection*. This is the one step between them: the reference
+    /// becomes a run, and the run becomes the state of the control link that is
+    /// holding it, so a caller decides what to do knowing both.
+    ///
+    /// `Ok(None)` means the reference named nothing — a distinct answer from a run
+    /// that exists and has no link ([`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink)),
+    /// because one is a client error and the other is a fact about the fleet.
+    ///
+    /// **It resolves; it does not send.** Nothing on the wire is a Codex actuation
+    /// yet — approval answering is Phase 3, steer and interrupt are Phase 4 — so
+    /// there is deliberately no `send` beside this. What consumes it today is
+    /// [`Daemon::sessions`], which reports the thread the link has actually adopted
+    /// in preference to the one the registration claimed; the verbs arrive against
+    /// an addressing layer that already exists and is already tested.
+    ///
+    /// **Test-visible only until then**, and on the same footing
+    /// [`crate::store::Store::set_device_features`] is: a thing the phase after this
+    /// one turns on, kept because the read beside it is already real and already
+    /// asserted. The alternative is to invent a phone-facing command that nothing on
+    /// the wire asks for, which is the speculative half of this that the plan puts
+    /// in Phase 3.
+    ///
+    /// # The row and the addressee are two reads, made coherent by the REGISTRATION GATE
+    ///
+    /// They cannot be taken under one lock. The row is a database read, and this
+    /// type's lock ordering forbids awaiting the blocking pool while `inner` is held —
+    /// stated where a restart's recovery counts its approval requests up front for
+    /// exactly that reason, and enforced by the store's `!Send` guards. Read separately
+    /// and unguarded, a registration completing between them returns registration A's
+    /// row beside registration B's addressee: a caller acting on that would address a
+    /// thread using another registration's cwd and agent.
+    ///
+    /// **Counting registrations does not close it, and the obvious counter is worse
+    /// than useless.** [`Inner::next_epoch`] is bumped by the *stake*, which is the
+    /// FIRST act of an acceptance — the row upsert, the card relabel, the supervisor
+    /// publish and the link install all happen after it. So a registration that staked
+    /// before the reads began and finished in the middle of them leaves the count
+    /// unchanged, and an equality check on it reports the torn pair as settled: the
+    /// window it fails to see is exactly the dangerous one.
+    ///
+    /// So the pair is made coherent by construction instead. This takes the session's
+    /// own [`Daemon::registration_gate`] — the same gate `register_supervisor` holds
+    /// across its whole acceptance — and reads BOTH halves inside it. While it is held
+    /// no registration for this uid can be between its stake and its last install, so
+    /// the row and the addressee are necessarily the same registration's. No counter,
+    /// no retry budget, and no new failure mode: a caller waits out an acceptance that
+    /// is genuinely in flight rather than being told the fleet is unreadable.
+    ///
+    /// **The gate is held by every writer of the row, not only by registrations**
+    /// (round-7 F4). There are three: `register_supervisor`, [`Daemon::ensure_session`],
+    /// the hook path, which reads the row and writes it back — and `agent` is the one
+    /// identity column the upsert takes from `excluded` rather than COALESCE-ing, so an
+    /// unguarded hook could restore a Claude agent over a Codex registration and leave
+    /// exactly the pair this function promises not to return. A gate that stopped at
+    /// registrations would be guarding one writer and claiming both, which is a claim
+    /// this function is not entitled to make.
+    ///
+    /// The third is [`Daemon::mark_exited`], reached from a supervisor's exit report
+    /// and from the liveness sweep (round-8 F3). It writes only `lifecycle`, so it can
+    /// never assemble the torn identity pair above — but it takes this gate too, and
+    /// for a reason of its own: it commits an end established at an earlier moment,
+    /// and a registration completing in between makes the row somebody else's. The
+    /// census is spelled out here because "every writer of the row" is the claim this
+    /// function's coherence rests on, and a census that misses one is a claim about a
+    /// set nobody has actually enumerated.
+    ///
+    /// The row is read twice, and the first read is not wasted: a reference may be a
+    /// tmux *name*, which resolves to whichever run is newest, so the uid whose gate to
+    /// take is not known until something has been read. The re-read under the gate is
+    /// the one that counts. If the reference resolves to a different uid the second
+    /// time, the run underneath it changed while we waited, and the resolution is
+    /// simply taken again.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn resolve_codex_inbound(
+        &self,
+        reference: &str,
+    ) -> Result<Option<(SessionRow, crate::codex_link::CodexAddressee)>> {
+        for _ in 0..PAIRING_ATTEMPTS {
+            // `Ok(None)` is a reference that named nothing; an `Err` is a store that
+            // would not answer. Two different things for a caller to do, so the two are
+            // kept apart at the source — see [`Daemon::resolve_optional`] — rather than
+            // by mapping every failure onto absence here, which would report a broken
+            // database as a client error and hide the fault behind a plausible answer.
+            //
+            // This read only learns WHICH session to settle against; every value the
+            // caller receives comes from the guarded read below.
+            let Some(naming) = self.resolve_optional(reference).await? else {
+                return Ok(None);
+            };
+            let gate = self.registration_gate(&naming.session_uid).await;
+            let _settled = gate.lock().await;
+            let Some(row) = self.resolve_optional(reference).await? else {
+                return Ok(None);
+            };
+            if row.session_uid != naming.session_uid {
+                // The reference named a different run than a moment ago — a tmux name
+                // whose newest run changed. The gate in hand is the wrong session's, so
+                // it guarantees nothing about this row; resolve again.
+                continue;
+            }
+            let addressee = {
+                let inner = self.inner.lock().await;
+                Self::codex_addressee_locked(&inner, &row.session_uid)
+            };
+            return Ok(Some((row, addressee)));
+        }
+        anyhow::bail!(
+            "could not resolve {reference} to a settled run: the run it names changed \
+             under it on each of {PAIRING_ATTEMPTS} attempts"
+        )
+    }
+
     // -------------------------------------------------------------- queries
 
+    /// The fleet, as a description to render.
+    ///
+    /// # Every database read happens BEFORE the lock
+    ///
+    /// Two of them: the session rows, and each row's `max_seq`. The second used to be
+    /// awaited *inside* the loop, with `inner` held — which is the thing the lock
+    /// ordering forbids (see the restart recovery, which counts approval requests up
+    /// front to avoid the same shape) and which serialised every other task behind one
+    /// listing's worth of blocking-pool round trips. Hoisted, so the locked section is
+    /// pure in-memory assembly and contains no awaits at all.
+    ///
+    /// # A row can still be one registration behind its liveness, and that is ACCEPTED
+    ///
+    /// The rows come from the store and `attached`/`last_seen`/`blocked_on`/the adopted
+    /// thread come from `inner`, so a registration finishing between the two reads
+    /// leaves this describing a run with the previous registration's cwd and agent
+    /// beside the new one's link. **Not closed here, and deliberately.**
+    ///
+    /// [`Daemon::resolve_codex_inbound`] closes it by taking the session's registration
+    /// gate around both reads, which works because it answers about ONE uid. A listing
+    /// cannot borrow that: making every row coherent means holding each session's gate
+    /// across that session's own row read, which turns one `list_sessions` into a query
+    /// and a gate acquisition per row — and makes a listing wait out any acceptance in
+    /// the fleet, including its bounded five-second join.
+    ///
+    /// That is the wrong trade for this caller. This is a *display*: it is re-read
+    /// continuously, the staleness is one registration deep, it resolves itself on the
+    /// next listing, and nothing is actuated from it — the addressing path, which is
+    /// where a torn pair would matter, is the one that pays for coherence. The honest
+    /// statement is that this is eventually consistent by a registration, not that it
+    /// is atomic.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
         let rows = self.db.list_sessions().await?;
+        // Read up front, before the lock is taken, one query per row.
+        let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            last_seqs.insert(
+                row.session_uid.clone(),
+                self.db.max_seq(row.session_uid.clone()).await?,
+            );
+        }
         let inner = self.inner.lock().await;
+        Ok(Self::assemble_sessions(
+            &inner,
+            rows,
+            &last_seqs,
+            &self.config,
+        ))
+    }
+
+    /// Build the fleet listing from rows already read and a state already locked.
+    ///
+    /// Split out so the read above is plainly *all* database work and this is plainly
+    /// *no* database work — the property the lock ordering cares about, made structural
+    /// rather than something the loop has to keep remembering.
+    fn assemble_sessions(
+        inner: &Inner,
+        rows: Vec<SessionRow>,
+        last_seqs: &HashMap<String, u64>,
+        config: &Config,
+    ) -> Vec<SessionSummary> {
         let now = protocol::time::now_unix_ms();
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -4021,7 +5583,7 @@ impl Daemon {
             // Positive liveness only: silence is `stale`, never `idle`.
             let link = match (attached, last_seen) {
                 (false, _) => Link::Detached,
-                (true, Some(ms)) if now - ms > self.config.stale_after_ms as i64 => Link::Stale,
+                (true, Some(ms)) if now - ms > config.stale_after_ms as i64 => Link::Stale,
                 (true, Some(_)) => Link::Attached,
                 (true, None) => Link::Degraded,
             };
@@ -4046,17 +5608,36 @@ impl Daemon {
                 link,
                 claude_session_id: row.claude_session_id,
                 transcript_path: row.transcript_path,
-                last_seq: self.db.max_seq(row.session_uid.clone()).await?,
+                last_seq: last_seqs.get(&row.session_uid).copied().unwrap_or_default(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 blocked_on,
                 // The per-session agent fact the client scopes its offerings to.
                 // Claude for every row today; the seam carries it either way.
                 agent: row.agent,
-                codex_thread_id: row.codex_thread_id,
+                // **The thread the link ADOPTED, and only then the one the
+                // registration claimed.**
+                //
+                // The row's `codex_thread_id` has a single writer — the registration
+                // frame — so it is what the launcher believed at spawn time and
+                // nothing since. A `/new` in the TUI moves the session to another
+                // thread (2e-4c) and the link follows it; the row does not, because
+                // nothing writes it back. Reporting the row alone therefore names a
+                // retired thread for the rest of the run.
+                //
+                // So the resolver answers first when it can. It is deliberately the
+                // *binding* rather than the subscription — a thread bound and not
+                // yet resumed is still the thread this session is on, and the fleet
+                // is a description of where things are, not of what may be sent.
+                // With no link the claim is all there is, and it is better than
+                // nothing.
+                codex_thread_id: Self::codex_addressee_locked(inner, &row.session_uid)
+                    .thread_id()
+                    .map(str::to_string)
+                    .or(row.codex_thread_id),
             });
         }
-        Ok(out)
+        out
     }
 
     // ---------------------------------------------------- liveness sweep
@@ -4141,6 +5722,35 @@ impl Daemon {
             return LivenessSweep::default();
         };
         let started = std::time::Instant::now();
+
+        // **What every session's row and owner were when this sweep's evidence
+        // began** (round-8 F3, round-9 F3).
+        //
+        // Read before the rows are, and therefore before any probe, because
+        // everything after this line is evidence about the world as it was at this
+        // instant: the target a row names is read below and probed later still, so a
+        // write landing at any point from here on has moved the row — possibly to a
+        // different tmux location — and every look taken afterwards is a look at the
+        // wrong thing. Compared again by [`Daemon::mark_exited`] under the per-uid
+        // gate, which is what turns "this looked gone" into "this is still the row
+        // that looked gone".
+        //
+        // **Two observations, because "whose session is this" and "is this still the
+        // row I read" are two questions and the epoch answers only the first.** A
+        // registration stakes its epoch one await BEFORE its row write, so a sweep
+        // can hold the new epoch and the old row at once and find them agreeing at
+        // the commit; and `ensure_session` writes `Lifecycle::Live` without staking
+        // an epoch at all, so a hook can revive a row invisibly to an owner check.
+        // The write count moves with the row in both cases. See
+        // [`Inner::row_writes`].
+        //
+        // One snapshot for the sweep rather than one read per commit: a read at the
+        // commit is the answer *after* the window, which is the one answer that
+        // cannot see into it.
+        let (observed_owners, observed_row_writes) = {
+            let inner = self.inner.lock().await;
+            (inner.registration_epochs.clone(), inner.row_writes.clone())
+        };
 
         let rows = match self.db.list_sessions().await {
             Ok(rows) => rows,
@@ -4267,6 +5877,45 @@ impl Daemon {
         {
             for (target, session, held) in &suspect {
                 let session = &session.clone();
+                // **Attempted before it is narrated** (round-8 F3). The commit can
+                // now decline — a registration completing since the snapshot above
+                // owns this row, and the sweep's evidence is about the run it
+                // replaced — and a log line written first would report an exit that
+                // never happened, which is the same unfounded claim in the log that
+                // the write would have been in the row.
+                let recorded = self
+                    .mark_exited(
+                        session,
+                        // Nobody watched this run end, so there is no exit status to
+                        // report. Saying `null` is the honest answer; inventing a 0
+                        // would claim it finished cleanly.
+                        None,
+                        Some(&format!(
+                            "no tmux session {:?} on server {:?}; the daemon never saw this run \
+                             end and established it had by asking tmux",
+                            target.name, target.socket
+                        )),
+                        EndEstablishedAgainst {
+                            owner: observed_owners.get(&session.uid).copied(),
+                            // The sweep's proof is about a ROW — the tmux location
+                            // this row recorded — so a row written since the look is
+                            // one this sweep never examined.
+                            row_writes: Some(
+                                observed_row_writes.get(&session.uid).copied().unwrap_or(0),
+                            ),
+                        },
+                    )
+                    .await;
+                if !recorded {
+                    crate::log_info!(
+                        "liveness: {} ({}) looked gone, but its row was written while the sweep \
+                         was proving that; the row describes a run this sweep never looked at \
+                         and is left alive",
+                        session.name,
+                        session.uid
+                    );
+                    continue;
+                }
                 // Two different facts, and the log must not report the second as
                 // the first. A name nobody holds and a name held by a *newer run*
                 // both mean this run is gone, but only one of them means there is
@@ -4290,19 +5939,6 @@ impl Daemon {
                         target.socket
                     ),
                 }
-                self.mark_exited(
-                    session,
-                    // Nobody watched this run end, so there is no exit status to
-                    // report. Saying `null` is the honest answer; inventing a 0
-                    // would claim it finished cleanly.
-                    None,
-                    Some(&format!(
-                        "no tmux session {:?} on server {:?}; the daemon never saw this run end \
-                         and established it had by asking tmux",
-                        target.name, target.socket
-                    )),
-                )
-                .await;
                 sweep.gone += 1;
             }
         }
@@ -4755,6 +6391,14 @@ impl Daemon {
     /// transaction: a rotation that landed the new token beside the old bearer
     /// would present the relay a pair it has no binding for, and every push
     /// would be refused as a credential failure that no repair could fix.
+    ///
+    /// **A registration carries no feature set.** `register_push` once wrote the
+    /// device's advertised agents in this same statement; nothing on the wire can
+    /// send that field, so the write was machinery for an input no client produces
+    /// and it is gone. `devices.features` stays `NULL` for every row, which is the
+    /// Claude floor, and the read
+    /// ([`crate::store::Store::push_targets`]) keeps every fail-closed branch it
+    /// had. Phase 5 lands the write with the phone that exercises it.
     pub async fn register_push(
         &self,
         device_id: &str,
@@ -5347,6 +6991,24 @@ mod tests {
         SessionKey::new(TEST_UID, "cc-1")
     }
 
+    /// The session as it stands right now — what a caller of
+    /// [`Daemon::mark_exited`] observes before it goes off and establishes an end
+    /// (round-8 F3, round-9 F3), read through the very maps the commit revalidates
+    /// against.
+    ///
+    /// A test that wanted an end recorded used to just call `mark_exited`. It now
+    /// has to say what its end is established against, and answering with the real
+    /// current state is what the sweep and the exit report both do — the difference
+    /// being that they answer *before* the work that establishes the end, which is
+    /// what makes the window the guard closes exist at all.
+    async fn observed_now(daemon: &Arc<Daemon>, session_uid: &str) -> EndEstablishedAgainst {
+        let inner = daemon.inner.lock().await;
+        EndEstablishedAgainst {
+            owner: inner.owner_of(session_uid),
+            row_writes: Some(inner.row_writes_of(session_uid)),
+        }
+    }
+
     async fn hello_with_code(daemon: &Arc<Daemon>, code: &str) -> AuthOutcome {
         daemon
             .authenticate(STATIC_TOKEN, None, Some(code), Some("iPhone"))
@@ -5805,6 +7467,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -5840,6 +7503,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -6269,6 +7933,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::clone(&inflight),
@@ -6374,7 +8039,7 @@ mod tests {
             tool_call(&daemon, "cc-1", &first.session.uid, &format!("toolu_a{i}")).await;
         }
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .session_exited("cc-1", Some(&first.session.uid), Some(0), Some(&first))
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -6595,7 +8260,7 @@ mod tests {
         // Once that run has exited, the same hook is a *new* run: `cc-1` having
         // ended and `cc-1` having restarted are indistinguishable from a name.
         daemon
-            .session_exited("cc-1", Some(&live.session.uid), Some(0))
+            .session_exited("cc-1", Some(&live.session.uid), Some(0), Some(&live))
             .await;
         daemon
             .handle_hook(HookPost {
@@ -6643,7 +8308,7 @@ mod tests {
             )
             .unwrap();
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .session_exited("cc-1", Some(&first.session.uid), Some(0), Some(&first))
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -7064,7 +8729,9 @@ mod tests {
                 wait: false,
             })
             .await;
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .await;
         let kinds: Vec<EventKind> = daemon
             .store
             .events_after(TEST_UID, 0, 10)
@@ -7084,7 +8751,9 @@ mod tests {
         // vanished entirely, and there was no evidence anywhere that an agent
         // had run at all.
         let daemon = test_daemon();
-        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-9", Some(TEST_UID), Some(0), None)
+            .await;
         assert!(
             daemon
                 .store
@@ -7105,7 +8774,9 @@ mod tests {
         let daemon = test_daemon();
         let registration = register(&daemon, "cc-9", Some(TEST_UID)).await;
         assert_eq!(registration.session.uid, TEST_UID);
-        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-9", Some(TEST_UID), Some(0), Some(&registration))
+            .await;
 
         let kinds: Vec<EventKind> = daemon
             .store
@@ -7569,6 +9240,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -7991,6 +9663,7 @@ mod tests {
             kind: crate::apns::PushKind::NeedsInput,
             blocked_sessions: 1,
             session_uid: uid.into(),
+            agent: protocol::agent::AgentKind::Claude,
         };
 
         // Nothing has ever filed a row under this uid, which is the state a
@@ -8353,6 +10026,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -8401,6 +10075,7 @@ mod tests {
                     codex_generation,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -8551,7 +10226,14 @@ mod tests {
             .inner
             .lock()
             .await
-            .install_codex_link(uid, first.epoch, link)
+            .install_codex_link(
+                uid,
+                first.epoch,
+                1,
+                crate::codex_link::LinkPresence::new(),
+                crate::codex_link::LinkCarry::new(),
+                link
+            )
             .is_none());
 
         // **A real re-registration retires it.** This is the whole transaction: the
@@ -8575,7 +10257,14 @@ mod tests {
             .inner
             .lock()
             .await
-            .install_codex_link(uid, second.epoch, park())
+            .install_codex_link(
+                uid,
+                second.epoch,
+                1,
+                crate::codex_link::LinkPresence::new(),
+                crate::codex_link::LinkCarry::new(),
+                park()
+            )
             .is_none());
         assert!(
             daemon
@@ -8593,7 +10282,7 @@ mod tests {
             .release_codex_link(uid, second.epoch)
             .expect("the owning registration releases its own link");
         {
-            let link = OwnedLink::new(released.task);
+            let link = OwnedLink::new(released.task, None);
             link.abort();
             for _ in 0..200 {
                 if link.is_finished() {
@@ -8628,7 +10317,7 @@ mod tests {
         });
         started_rx.await.expect("the task must be running");
         let watch = task.abort_handle();
-        drop(OwnedLink::new(task));
+        drop(OwnedLink::new(task, None));
         for _ in 0..200 {
             if watch.is_finished() {
                 break;
@@ -8673,7 +10362,10 @@ mod tests {
             uid.to_string(),
             CodexLinkHandle {
                 epoch: 1,
+                generation: 1,
                 task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry: crate::codex_link::LinkCarry::new(),
             },
         );
         daemon.park_current_codex_link(uid).await;
@@ -8745,7 +10437,14 @@ mod tests {
             .inner
             .lock()
             .await
-            .install_codex_link(uid, current - 1, stale)
+            .install_codex_link(
+                uid,
+                current - 1,
+                1,
+                crate::codex_link::LinkPresence::new(),
+                crate::codex_link::LinkCarry::new(),
+                stale,
+            )
             .expect(
                 "an install by a registration that no longer owns the session must be \
                  REFUSED — the empty slot cannot be what refuses it, so only the \
@@ -8756,7 +10455,7 @@ mod tests {
             "and nothing may be left in the slot"
         );
         // The handed-back task is the caller's to stop, never to drop.
-        let handed_back = OwnedLink::new(handed_back);
+        let handed_back = OwnedLink::new(handed_back, None);
         handed_back.abort();
         for _ in 0..200 {
             if handed_back.is_finished() {
@@ -8773,7 +10472,14 @@ mod tests {
             .inner
             .lock()
             .await
-            .install_codex_link(uid, current, live)
+            .install_codex_link(
+                uid,
+                current,
+                1,
+                crate::codex_link::LinkPresence::new(),
+                crate::codex_link::LinkCarry::new(),
+                live,
+            )
             .is_none());
         assert_eq!(daemon.inner.lock().await.codex_links[uid].epoch, current);
         let installed = daemon
@@ -8783,7 +10489,7 @@ mod tests {
             .release_codex_link(uid, current)
             .expect("installed");
         {
-            let link = OwnedLink::new(installed.task);
+            let link = OwnedLink::new(installed.task, None);
             link.abort();
             for _ in 0..200 {
                 if link.is_finished() {
@@ -8823,14 +10529,17 @@ mod tests {
         let built = Arc::new(AtomicBool::new(false));
         let refused = {
             let built = Arc::clone(&built);
-            daemon
-                .inner
-                .lock()
-                .await
-                .spawn_codex_link_if_owner(uid, current - 1, move || {
+            daemon.inner.lock().await.spawn_codex_link_if_owner(
+                uid,
+                current - 1,
+                1,
+                crate::codex_link::LinkPresence::new(),
+                crate::codex_link::LinkCarry::new(),
+                move || {
                     built.store(true, Ordering::SeqCst);
                     tokio::spawn(std::future::pending())
-                })
+                },
+            )
         };
         assert!(
             refused.is_err(),
@@ -8852,10 +10561,17 @@ mod tests {
                 .inner
                 .lock()
                 .await
-                .spawn_codex_link_if_owner(uid, current, move || {
-                    built_now.store(true, Ordering::SeqCst);
-                    tokio::spawn(std::future::pending())
-                })
+                .spawn_codex_link_if_owner(
+                    uid,
+                    current,
+                    1,
+                    crate::codex_link::LinkPresence::new(),
+                    crate::codex_link::LinkCarry::new(),
+                    move || {
+                        built_now.store(true, Ordering::SeqCst);
+                        tokio::spawn(std::future::pending())
+                    },
+                )
                 .expect("the owner may install")
         };
         assert!(orphan.is_none(), "and the install is accepted");
@@ -8866,7 +10582,7 @@ mod tests {
             .await
             .release_codex_link(uid, current)
             .expect("installed");
-        let link = OwnedLink::new(installed.task);
+        let link = OwnedLink::new(installed.task, None);
         link.abort();
         for _ in 0..200 {
             if link.is_finished() {
@@ -8904,7 +10620,7 @@ mod tests {
             .parked_codex_links
             .entry(uid.to_string())
             .or_default()
-            .push(OwnedLink::new(stubborn));
+            .push(OwnedLink::new(stubborn, None));
 
         assert!(
             !daemon.join_parked_codex_links(&session).await,
@@ -8945,7 +10661,7 @@ mod tests {
             .parked_codex_links
             .entry(uid.to_string())
             .or_default()
-            .push(OwnedLink::new(idle));
+            .push(OwnedLink::new(idle, None));
         assert_eq!(daemon.inner.lock().await.parked_codex_links[uid].len(), 1);
 
         let first = try_register(&daemon, uid, AgentKind::Claude, None, None)
@@ -8992,14 +10708,14 @@ mod tests {
     /// claimant cannot arrive mid-retirement — the shape a reservation protocol
     /// would have had to defend against with extra states.
     #[tokio::test]
-    async fn the_codex_link_gate_serializes_one_sessions_lifecycle() {
+    async fn the_registration_gate_serializes_one_sessions_lifecycle() {
         let daemon = test_daemon();
         let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
-        let gate = daemon.codex_link_gate(uid).await;
+        let gate = daemon.registration_gate(uid).await;
         let held = gate.lock().await;
 
         // A second sequence for the SAME session cannot start while one is running.
-        let other = daemon.codex_link_gate(uid).await;
+        let other = daemon.registration_gate(uid).await;
         assert!(
             tokio::time::timeout(Duration::from_millis(50), other.lock())
                 .await
@@ -9007,7 +10723,7 @@ mod tests {
             "one session's link lifecycle must be serialized end to end"
         );
         // A different session is unaffected — the gate is per-uid, not global.
-        let elsewhere = daemon.codex_link_gate("01K1B3XQ8ZC0DE5FGH7JKMNP99").await;
+        let elsewhere = daemon.registration_gate("01K1B3XQ8ZC0DE5FGH7JKMNP99").await;
         assert!(
             tokio::time::timeout(Duration::from_millis(50), elsewhere.lock())
                 .await
@@ -9041,42 +10757,2679 @@ mod tests {
         );
     }
 
-    /// The Codex push guard's fail-closed semantics: a distrusted device (a
-    /// failed write) is ineligible until it re-advertises; `distrust_all` (a
-    /// failed startup invalidation) makes every device ineligible for the run.
-    #[test]
-    fn the_codex_push_guard_fails_closed() {
-        let guard = CodexPushGuard::default();
-        assert!(guard.device_features_trusted("dev-1"), "trusted by default");
-        guard.distrust_device("dev-1");
-        assert!(!guard.device_features_trusted("dev-1"));
-        assert!(guard.device_features_trusted("dev-2"), "others unaffected");
-        guard.retrust_device("dev-1");
+    // ------------------------------- the inbound resolver (2e-5)
+
+    /// A Codex run in the session table, with a control link published into the
+    /// registry the way a registration installs one.
+    ///
+    /// **The supervisor handle is installed too, at the link's own epoch**, because
+    /// that is the only way a link ever exists: `register_supervisor` publishes the
+    /// handle and the gated transaction installs the link under the very epoch it
+    /// carries. A fixture that skipped it described a state production cannot
+    /// produce — and, worse, one the resolver is now required to refuse, since a
+    /// link belonging to no current registration is no link for this session.
+    /// Retire the live link the way a replacement registration retires it: park it,
+    /// then join it.
+    ///
+    /// **The join is not a tidy-up, it is where retention happens** — see
+    /// [`Inner::retain_codex_carry`] — so a fixture that parked and stopped short
+    /// would assert against a map the production sequence has not filled yet.
+    async fn retire_the_live_codex_link(daemon: &Arc<Daemon>, uid: &str) {
+        daemon.park_current_codex_link(uid).await;
         assert!(
-            guard.device_features_trusted("dev-1"),
-            "a good write re-trusts"
-        );
-        guard.distrust_all();
-        assert!(!guard.device_features_trusted("dev-1"));
-        assert!(
-            !guard.device_features_trusted("dev-2"),
-            "distrust_all is total"
+            daemon
+                .join_parked_codex_links(&SessionKey::new(uid.to_string(), "cc-9".to_string()))
+                .await,
+            "the premise: the retired task stops inside the budget, which is what makes \
+             what it knew retainable at all"
         );
     }
 
-    /// **Startup fails closed (Finding 2e).** If startup invalidation cannot run
-    /// (the device store is broken), recovery marks all devices Codex-ineligible
-    /// for the run rather than continuing on possibly-stale eligibility.
+    /// The other departure: the supervisor disconnects first, so the link is
+    /// released, parked and joined — the sequence `Daemon::unregister_supervisor`
+    /// runs, and for the same reason the one above is a sequence rather than a call.
+    async fn disconnect_the_codex_supervisor(daemon: &Arc<Daemon>, uid: &str, epoch: u64) {
+        {
+            let mut inner = daemon.inner.lock().await;
+            let link = inner.release_codex_link(uid, epoch).expect(
+                "the premise: this epoch's link is in the slot, and it leaves \
+                         through the real departure site",
+            );
+            inner
+                .parked_codex_links
+                .entry(uid.to_string())
+                .or_default()
+                .push(OwnedLink::new(
+                    link.task,
+                    Some(ParkedCarry {
+                        generation: link.generation,
+                        carry: link.carry,
+                    }),
+                ));
+        }
+        assert!(
+            daemon
+                .join_parked_codex_links(&SessionKey::new(uid.to_string(), "cc-9".to_string()))
+                .await,
+            "the premise: the released task stops inside the budget"
+        );
+    }
+
+    async fn codex_run_with_link(
+        daemon: &Arc<Daemon>,
+        claimed_thread: Option<&str>,
+        state: crate::codex_link::CodexAddressee,
+    ) -> (String, crate::codex_link::LinkPresence) {
+        codex_run_with_link_at(daemon, claimed_thread, state, 1, 1).await
+    }
+
+    /// The same, with the two epochs named separately, so a test can express the
+    /// hand-over window: a registration that owns the session and whose link has not
+    /// replaced the incumbent yet.
+    ///
+    /// `owning_epoch` is staked in **both** places a real registration stakes it —
+    /// the claim (`registration_epochs`, written beside the row) and the supervisor
+    /// handle (published one await later). Staging only one of them would build a
+    /// world no registration produces.
+    async fn codex_run_with_link_at(
+        daemon: &Arc<Daemon>,
+        claimed_thread: Option<&str>,
+        state: crate::codex_link::CodexAddressee,
+        owning_epoch: u64,
+        link_epoch: u64,
+    ) -> (String, crate::codex_link::LinkPresence) {
+        let uid = protocol::uid::new().unwrap();
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: uid.clone(),
+                session_id: "cc-9".into(),
+                tmux_session: "cc-9".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/work".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: claimed_thread.map(str::to_string),
+                codex_socket: Some("/tmp/ccd.sock".into()),
+            })
+            .unwrap()
+            .assert_present();
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests(state);
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        let mut inner = daemon.inner.lock().await;
+        inner.registration_epochs.insert(uid.clone(), owning_epoch);
+        // A real registration at this epoch left the allocator here, so the next
+        // one this daemon takes is a *later* epoch — without which a staged world
+        // hands the next registration an epoch it has already used.
+        inner.next_epoch = inner.next_epoch.max(owning_epoch.max(link_epoch));
+        inner.supervisors.insert(
+            uid.clone(),
+            SupervisorHandle {
+                tx,
+                inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                epoch: owning_epoch,
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                claude_bin: None,
+                codex_generation: Some(1),
+            },
+        );
+        inner.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: link_epoch,
+                generation: 1,
+                // Nothing drives it; the resolver reads the cell, never the task.
+                task: tokio::spawn(std::future::pending()),
+                presence: presence.clone(),
+                // Empty: what the link KNOWS is a separate cell from what it
+                // publishes, and a test that needs one reaches through the handle.
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        drop(inner);
+        (uid, presence)
+    }
+
+    /// A finished-turn fact, filed the way the live link files one.
+    async fn codex_turn_terminal(daemon: &Arc<Daemon>, session: &SessionKey, key: &str) -> Event {
+        daemon
+            .ingest(
+                PendingEvent::new(
+                    session,
+                    EventKind::TurnComplete,
+                    json!({"status": "completed"}),
+                    protocol::event::Source::Codex,
+                )
+                .with_source_event_id(key.to_string()),
+            )
+            .await
+            .expect("the append succeeds")
+            .expect("a fresh key files a fact")
+    }
+
+    /// **A reference resolves to a run, and a run resolves to a connection.**
+    ///
+    /// Three answers a caller has to be able to tell apart, and collapsing any two
+    /// of them is a way to send a request nowhere: a reference that names nothing,
+    /// a run with no Codex link at all, and a live link with a state of its own.
     #[tokio::test]
-    async fn a_failed_startup_invalidation_distrusts_all_device_features() {
+    async fn an_inbound_reference_resolves_to_the_links_own_state() {
         let daemon = test_daemon();
-        daemon.store.break_device_lookups_for_tests();
-        daemon.recover().await;
+
+        assert!(
+            daemon
+                .resolve_codex_inbound("cc-nonexistent")
+                .await
+                .unwrap()
+                .is_none(),
+            "a reference that names no run is absence, not a fact about the fleet"
+        );
+
+        // A Claude run: it exists, and it has no connection to address.
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        let claude = daemon.store.find_session("cc-1").unwrap().unwrap();
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&claude.session_uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert_eq!(row.agent, protocol::agent::AgentKind::Claude);
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "a Claude run has no control link, and the resolver says so rather than \
+             inventing an offline one"
+        );
+
+        // A Codex run whose link is subscribed: the addressee Phase 3/4 will send to.
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-live".into(),
+            },
+        )
+        .await;
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the codex run is there");
+        assert_eq!(row.session_uid, uid);
+        assert!(
+            addressee.is_subscribed(),
+            "a subscribed link is the one state a request can be handed to: {addressee:?}"
+        );
+
+        // The link reconnects: the resolver follows it, because it reads the cell
+        // rather than a snapshot taken when the session was registered.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        let (_, addressee) = daemon.resolve_codex_inbound(&uid).await.unwrap().unwrap();
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            "a link between connections has no addressee, and a resolver that still \
+             said Subscribed would hand a request to a socket that is gone"
+        );
+    }
+
+    /// **A store that will not answer is not a reference that named nothing.**
+    ///
+    /// One is a client error — the phone asked about a run that does not exist —
+    /// and the other is an operational fault on this Mac. A resolver that reported
+    /// both as absence would hand a caller a plausible answer built out of a
+    /// failure, and the fault would surface as "no such session" for as long as the
+    /// database stayed broken.
+    #[tokio::test]
+    async fn a_broken_store_is_an_error_and_not_an_absent_run() {
+        let daemon = test_daemon();
+        daemon.store.break_session_lookups_for_tests();
+        assert!(
+            daemon.resolve_codex_inbound("cc-1").await.is_err(),
+            "a lookup that could not be made is not a lookup that found nothing"
+        );
+    }
+
+    /// **The fleet names the thread the link ADOPTED, not the one launch guessed.**
+    ///
+    /// The row's `codex_thread_id` is written once, from the registration frame. A
+    /// `/new` in the TUI moves the session to another thread and the link follows
+    /// it; nothing writes that back. Before the resolver, the phone was shown the
+    /// retired thread for the rest of the run.
+    #[tokio::test]
+    async fn the_session_list_reports_the_thread_the_link_is_actually_on() {
+        let daemon = test_daemon();
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-after-a-switch".into(),
+            },
+        )
+        .await;
+        let thread_of = |sessions: &[SessionSummary]| {
+            sessions
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+        };
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "the wire's own evidence outranks the registration's claim"
+        );
+
+        // Bound and not yet subscribed is still where the session IS: the fleet
+        // describes what is happening, not what may be sent.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Bound {
+            thread_id: "th-being-chased".into(),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-being-chased")
+        );
+
+        // **The reconnect does not undo the switch.** A dropped connection ends an
+        // addressee, not a session's place: the link carries the thread it adopted
+        // into its backoff and says so. Publishing a threadless `Offline` here sent
+        // the fleet back to the launch-time claim for the whole of every outage —
+        // which after a `/new` is precisely the staleness this reports away.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline {
+            thread_id: Some("th-after-a-switch".into()),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "a link between connections still knows which thread it is coming back to"
+        );
+
+        // **Nor does the connection that comes back.** A fresh connection has bound
+        // nothing and had nothing accepted, but the link is resuming the thread it
+        // adopted — and a threadless answer here regressed the fleet to the launch
+        // claim for the length of every handshake-and-resume round trip.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Unbound {
+            adopted: Some("th-after-a-switch".into()),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "the link is dialling back to the thread it adopted, and says so"
+        );
+
+        // With nothing adopted the claim is all there is, and it beats nothing.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-at-launch"),
+            "a link that has adopted nothing has no better answer to offer, so the \
+             row's claim stands rather than the thread disappearing from the fleet"
+        );
+    }
+
+    /// **A replacement link is addressable at the thread its predecessor ADOPTED
+    /// from the instant it is installed** — not from the moment its first
+    /// connection returns.
+    ///
+    /// A freshly minted [`crate::codex_link::LinkPresence`] says
+    /// `Offline { thread_id: None }`, and a threadless answer sends the fleet to the
+    /// row. The row's `codex_thread_id` has exactly one writer, the registration
+    /// frame, so after a `/new` it names the thread the session LEFT — and the
+    /// replacement cannot correct it until it has dialled, upgraded, handshaken and
+    /// had a resume accepted. Every supervisor reconnect therefore reopened, at the
+    /// registration boundary, precisely the staleness the adoption exists to close.
+    ///
+    /// **The row names a different thread from the retained adoption on purpose.**
+    /// With the same thread in both, a working seed and a fallback to the row are
+    /// the same answer and this test could not tell them apart.
+    ///
+    /// **Driven through [`Inner::seed_codex_presence`]**, the whole rule in one named
+    /// step, for the same reason [`Inner::seed_codex_carry`] beside it is one: the
+    /// registration that calls it is reachable only through a gate that is currently
+    /// closed (`supported_agents()` refuses every Codex registration), and a rule left
+    /// inline there is a rule nothing can drive. The link it is asked about is read off
+    /// a real registration frame by `ControlLink::from_registration`, so the generation
+    /// the scoping turns on is the one a registration would actually carry.
+    ///
+    /// Asserted through what the fleet is actually told — `Daemon::sessions` and
+    /// `Daemon::resolve_codex_inbound` — and while the replacement's task has run
+    /// exactly nothing, which is the window the regression used to occupy. Four legs:
+    /// the seed, the counterfactual that says what it is worth, "published implies
+    /// adopted", and the launch scoping.
+    ///
+    /// **Mutations:** empty the body of `Inner::seed_codex_presence` and the first leg
+    /// fails — the fleet is sent back to the row. Seed it from
+    /// [`crate::codex_link::LinkCarry::first_target`] instead of the adopted slot and
+    /// the third leg fails, because a link mid-chase would publish a candidate nobody
+    /// has confirmed. Drop the generation guard it inherits from
+    /// [`Inner::retained_codex_adoption`] and the fourth fails.
+    #[tokio::test]
+    async fn the_replacement_link_is_addressable_at_the_adopted_thread_before_it_dials() {
+        let daemon = test_daemon();
+        // The launcher claimed `A`; the link then followed a `/new` to `B`, adopted
+        // it, and was subscribed to it when the registration boundary arrived.
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-a-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-b-adopted".into(),
+            },
+        )
+        .await;
+        daemon.inner.lock().await.codex_links[&uid]
+            .carry
+            .set_for_tests(Some("th-b-adopted"), None);
+
+        // A replacement registration arriving on top of the live link, which is what
+        // puts the departing link's memory where the next one can find it.
+        retire_the_live_codex_link(&daemon, &uid).await;
+
+        // The replacement's cells, minted and seeded exactly as the registration
+        // mints and seeds them, and installed in the same lock acquisition.
+        let link = codex_link_from(&uid, 1, "th-a-at-launch");
+        let presence = crate::codex_link::LinkPresence::new();
+        let carry = crate::codex_link::LinkCarry::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_carry(&uid, &link, &carry);
+            inner.seed_codex_presence(&uid, &link, &presence);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    // Nothing drives it: the whole claim is that the fleet has the
+                    // right answer BEFORE this task's first connection attempt.
+                    task: tokio::spawn(std::future::pending()),
+                    presence: presence.clone(),
+                    carry,
+                },
+            );
+        }
+        assert_eq!(
+            presence.get(),
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "the cell the link will inherit already names the adopted thread, and it \
+             is an OFFLINE addressee: a link that has not dialled yet is not a link \
+             that has adopted nothing"
+        );
+
+        let thread_of = |sessions: &[SessionSummary]| {
+            sessions
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+        };
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-b-adopted"),
+            "the fleet is told where the session IS from the moment the replacement \
+             is installed, rather than being sent back to the launch-time claim for \
+             the length of a dial, an upgrade and a handshake"
+        );
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(
+            row.codex_thread_id.as_deref(),
+            Some("th-a-at-launch"),
+            "the row still names the retired thread — nothing writes it back after a \
+             `/new` — which is what makes the assertion above a fact about the seed \
+             and not about the store"
+        );
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "and the inbound resolver answers with the same fact, which is the pair a \
+             caller acts on"
+        );
+
+        // **The counterfactual, in the same shape.** An unseeded cell is exactly the
+        // regression, so this is what the seed is worth rather than a claim about it.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-a-at-launch"),
+            "what a fresh cell says: the fleet falls back to the row and names the \
+             thread the session left"
+        );
+
+        // **Only an adopted thread may be seeded, never a pending candidate.** A link
+        // mid-chase knows both, and `Carried::first_target` deliberately ranks the
+        // candidate FIRST — which is right for deciding what to resume and wrong for
+        // deciding what to say, because the candidate is a thread nobody has confirmed
+        // and the presence is what the fleet is TOLD.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let chasing = crate::codex_link::LinkCarry::new();
+            chasing.set_for_tests(Some("th-b-adopted"), Some("th-c-being-chased"));
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: chasing,
+                },
+            );
+            assert!(
+                inner.release_codex_link(&uid, 1).is_some(),
+                "the premise: a link mid-chase departs, and both threads it holds are \
+                 retained"
+            );
+        }
+        let mid_chase = crate::codex_link::LinkPresence::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_presence(&uid, &link, &mid_chase);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: mid_chase.clone(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        assert_eq!(
+            mid_chase.get(),
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "publishing `th-c-being-chased` here would be the one thing \"published \
+             implies adopted\" forbids: no resume has been accepted for it, and the \
+             chase may yet come to nothing"
+        );
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-b-adopted"),
+            "and the fleet is told the confirmed thread rather than the one being \
+             chased — a caller sent at an unconfirmed thread is sent nowhere"
+        );
+
+        // **The seed is scoped to the LAUNCH, on the same terms as the carry**, since
+        // it answers out of the same retained entry. A relaunch's threads are its own.
+        let relaunched = codex_link_from(&uid, 2, "th-g2-at-launch");
+        let after_relaunch = crate::codex_link::LinkPresence::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_presence(&uid, &relaunched, &after_relaunch);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 2,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: after_relaunch.clone(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        assert_eq!(
+            after_relaunch.get(),
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            "a second Codex process adopted nothing yet, and generation 1's adopted \
+             thread belongs to one that has exited"
+        );
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-a-at-launch"),
+            "so the fleet falls back to the row, which is the only fact about this \
+             launch anybody has"
+        );
+    }
+
+    /// **What a link KNOWS survives the REGISTRATION boundary, not just the
+    /// connection one** (round-4 P9, round-5 F2).
+    ///
+    /// The test above proves a `/new` survives a dropped connection, because the link
+    /// outlives one and carries `Carried` through its backoff. A supervisor reconnect
+    /// is a different boundary and it lost the fact: the link is retired, its cells go
+    /// out of the map with it, the row is never written back after a `/new` by design,
+    /// and the `thread/started` announcement is broadcast once and never replayed. So
+    /// `A → /new → B → supervisor reconnect` rebuilt the link from the registration
+    /// hint alone and resumed retired `A`, for the rest of the run.
+    ///
+    /// **Retention reads the link's own carry and not its published presence**, and
+    /// the first leg is why. Mid-chase the presence is `Bound { B }` — a candidate
+    /// nobody has confirmed, which is deliberately not published as the session's
+    /// thread — so a retention that read the projection saved *nothing*: it lost the
+    /// adopted `A` the link was still holding, and it could never have carried the
+    /// pending `B` at all. Both are in the carry, and both come across.
+    ///
+    /// The old form of this test could not see that. It exercised `Bound` only after
+    /// an earlier leg had already put a thread in the retained map, so "unchanged"
+    /// passed whether the projection had saved the wrong thread or nothing at all.
+    /// The empty map is the production case, so this one starts there.
+    ///
+    /// Both departure sites are driven through their real functions, because they are
+    /// the two different reconnect shapes: `release_codex_link` is the supervisor
+    /// **disconnecting** first, `park_current_codex_link` is a replacement
+    /// registration arriving while the incumbent still holds the slot. Each is
+    /// followed by the join, because that is the departure — the sites above only
+    /// hand the cells to the park, and `join_parked_codex_links` is what reads them.
+    ///
+    /// **Mutations:** drop the `retain_codex_carry` call from the join and both legs
+    /// fail; retain `handle.presence.get()` instead of the carry and the chase leg
+    /// fails; seed only the adopted slot and the fallback assertion fails.
+    #[tokio::test]
+    async fn what_a_link_knows_outlives_the_registration_that_installed_it() {
+        let daemon = test_daemon();
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            // The projection a link mid-chase publishes: bound to the candidate,
+            // naming no adopted thread at all.
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-being-chased".into(),
+            },
+        )
+        .await;
+        async fn carry_of(daemon: &Arc<Daemon>, uid: &str) -> crate::codex_link::LinkCarry {
+            daemon.inner.lock().await.codex_links[uid].carry.clone()
+        }
+        async fn nothing_retained(daemon: &Arc<Daemon>, uid: &str) -> bool {
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(uid)
+        }
+        // What the link knows, which is strictly more than what it says.
+        carry_of(&daemon, &uid)
+            .await
+            .set_for_tests(Some("th-after-a-switch"), Some("th-being-chased"));
+        assert!(
+            nothing_retained(&daemon, &uid).await,
+            "the production case, and the one the old test could not reach: nothing \
+             has been retained for this session yet"
+        );
+
+        // A replacement registration arriving on top of a live link: the cells go into
+        // the park with the task, and are read once the task is proven stopped.
+        retire_the_live_codex_link(&daemon, &uid).await;
+        assert!(!nothing_retained(&daemon, &uid).await);
+
+        // The seed itself, proven against a real registration frame — the gated path
+        // (`supported_agents()` refuses every Codex registration) cannot drive it, so
+        // the rule is proven where the guard beside it is.
+        let frame = |thread: Option<&str>| protocol::ipc::RegisterSession {
+            session_id: "cc-9".into(),
+            session_uid: Some(uid.clone()),
+            tmux_session: "cc-9".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/work".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            codex_thread_id: thread.map(str::to_string),
+            codex_socket: Some("/tmp/ccd.sock".into()),
+            codex_generation: Some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        };
+        let link = crate::codex_link::ControlLink::from_registration(&frame(Some("th-at-launch")))
+            .unwrap()
+            .unwrap();
+        let carry = crate::codex_link::LinkCarry::new();
+        let resumed = daemon
+            .inner
+            .lock()
+            .await
+            .seed_codex_carry(&uid, &link, &carry);
+        assert_eq!(
+            resumed.as_deref(),
+            Some("th-being-chased"),
+            "the replacement picks the chase up where the previous link left it — \
+             `thread/started` is announced once, so nothing else can ever name it \
+             again — and it says so, because a link resuming somewhere other than \
+             where it was told to is worth one line in the log"
+        );
+        assert_eq!(
+            carry.slots_for_tests(),
+            (
+                Some("th-after-a-switch".to_string()),
+                Some("th-being-chased".to_string()),
+                Some("th-after-a-switch".to_string())
+            ),
+            "and the ADOPTED thread comes across with it, as the fallback: a \
+             candidate that never becomes a session thread must not strand the \
+             replacement on a thread it can never read"
+        );
+        assert_eq!(
+            link.thread_id.as_deref(),
+            Some("th-at-launch"),
+            "the frame's own claim is left alone — it is a fact about this \
+             registration, and `Carried::first_target` already ranks it last"
+        );
+
+        // **A link that learned nothing does not erase what is known.** The
+        // replacement above may fail to dial, or come up and never have a resume
+        // accepted; retiring it in turn must not send the next one back to the
+        // launch claim.
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: presence.clone(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        // The supervisor disconnecting, which is the other way a handle leaves.
+        disconnect_the_codex_supervisor(&daemon, &uid, 1).await;
+        let after = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &link, &after),
+            Some("th-being-chased".to_string()),
+            "a link that learned nothing has nothing to say about where the session \
+             is, and forgetting on its behalf is the same regression by a slower route"
+        );
+
+        // **The other departure site rescues too, and this is the leg that proves
+        // it.** The one above passes whether or not `release_codex_link` retains
+        // anything, because the link it retires learned nothing either way. So this
+        // one retires a link that has moved on — the chase settled, and a third
+        // thread was adopted — through the supervisor-disconnect path.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let carry = crate::codex_link::LinkCarry::new();
+            carry.set_for_tests(Some("th-settled-elsewhere"), None);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 2,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: presence.clone(),
+                    carry,
+                },
+            );
+        }
+        disconnect_the_codex_supervisor(&daemon, &uid, 2).await;
+        let moved_on = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &link, &moved_on),
+            Some("th-settled-elsewhere".to_string()),
+            "a supervisor disconnecting is the other moment a link's cells stop being \
+             reachable, and what it had learned by then must survive it too"
+        );
+
+        // And a session that never adopted anything is left exactly as the
+        // registration described it.
+        let untouched = crate::codex_link::LinkCarry::new();
+        let fresh = crate::codex_link::ControlLink::from_registration(&frame(Some("th-at-launch")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry("a-uid-with-no-history", &fresh, &untouched),
+            None
+        );
+        assert_eq!(untouched.slots_for_tests(), (None, None, None));
+        assert_eq!(fresh.thread_id.as_deref(), Some("th-at-launch"));
+    }
+
+    /// A Codex registration frame at a chosen launch and launch-time claim.
+    ///
+    /// Shared by the retention tests below because the thing they disagree about is
+    /// the `codex_generation`, and a frame built three times by hand invites the
+    /// three copies to drift on the field that is under test.
+    fn codex_frame(uid: &str, generation: u64, thread: &str) -> RegisterSession {
+        RegisterSession {
+            session_id: "cc-9".into(),
+            session_uid: Some(uid.to_string()),
+            tmux_session: "cc-9".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/work".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            codex_thread_id: Some(thread.to_string()),
+            codex_socket: Some("/tmp/ccd.sock".into()),
+            codex_generation: Some(generation),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        }
+    }
+
+    /// The control link that frame installs — read off the frame by the real
+    /// extractor, so the generation a test seeds against is the one a registration
+    /// would actually carry rather than a number written into a struct literal.
+    fn codex_link_from(uid: &str, generation: u64, thread: &str) -> crate::codex_link::ControlLink {
+        crate::codex_link::ControlLink::from_registration(&codex_frame(uid, generation, thread))
+            .expect("a complete Codex frame is accepted")
+            .expect("a Codex frame carries a control link")
+    }
+
+    /// A Codex link that has learned where the session went, taken out of the slot
+    /// the way a supervisor disconnect takes one out.
+    ///
+    /// Driven through the real departure — release, park, join — rather than by
+    /// writing the retained map, because retention is half of what the tests below
+    /// are about: a fixture that inserted the entry directly would prove the lookups
+    /// and nothing about how an entry comes to exist or what launch it is stamped
+    /// with.
+    async fn retire_a_codex_link_mid_chase(daemon: &Arc<Daemon>, uid: &str, generation: u64) {
+        {
+            let mut inner = daemon.inner.lock().await;
+            let carry = crate::codex_link::LinkCarry::new();
+            carry.set_for_tests(Some("th-g1-adopted"), Some("th-g1-chased"));
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation,
+                    task: tokio::spawn(async {}),
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry,
+                },
+            );
+        }
+        disconnect_the_codex_supervisor(daemon, uid, 1).await;
+    }
+
+    /// **What a link knew is retained for the LAUNCH that learned it, not for the
+    /// uid.**
+    ///
+    /// A uid outlives the process it names. The supervisor can relaunch Codex under
+    /// the same session — a later `codex_generation` — and the threads the previous
+    /// launch was on do not come with it: they belong to a process that has exited.
+    /// The retained carry is keyed by uid alone, so without the launch stamped onto
+    /// it the second launch's link is seeded from the first one's chase and spends
+    /// its whole life resuming a thread nothing can read, while the claim its own
+    /// registration carried — by construction the only fact anybody has about this
+    /// launch — is discarded as older than what was retained. The fallback makes it
+    /// permanent: a candidate that is never adopted strands the link on the dead
+    /// adopted thread behind it rather than on the new launch's own.
+    ///
+    /// The same-launch leg is the premise and is asserted first. Without it this
+    /// test would pass just as well against a retention that seeded nothing at all.
+    ///
+    /// **Mutation:** delete the `retained.generation != link.generation` guard from
+    /// `Inner::seed_codex_carry` and the relaunch leg fails — the second launch is
+    /// handed the first one's pending candidate and copies its slots wholesale.
+    #[tokio::test]
+    async fn a_carry_retained_by_one_codex_launch_never_seeds_a_link_from_a_later_one() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        retire_a_codex_link_mid_chase(&daemon, &uid, 1).await;
+
+        // The premise: the same launch reconnecting is seeded, which is the whole
+        // reason anything is retained.
+        let reconnect = codex_link_from(&uid, 1, "th-g1-at-launch");
+        let resumed = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &reconnect, &resumed)
+                .as_deref(),
+            Some("th-g1-chased"),
+            "a supervisor reconnecting under the SAME launch picks the chase up \
+             where the previous link left it"
+        );
+
+        // The relaunch. A second `codex_generation` under this uid is a second Codex
+        // process, and nothing generation 1 was holding exists inside it.
+        let relaunched = codex_link_from(&uid, 2, "th-g2-at-launch");
+        let fresh = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &fresh),
+            None,
+            "a relaunch resumes what its own registration named, not a thread \
+             belonging to a process that has exited"
+        );
+        assert_eq!(
+            fresh.slots_for_tests(),
+            (None, None, None),
+            "and nothing was copied into it on the way: a seeded fallback would \
+             strand the new launch on the previous one's dead thread the first time \
+             its own chase came to nothing"
+        );
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_adoption(&uid, &relaunched),
+            None,
+            "the presence seed answers out of the same entry and is scoped on the \
+             same terms — publishing generation 1's adopted thread would tell the \
+             fleet the new launch is somewhere it has never been"
+        );
+        assert_eq!(
+            relaunched.thread_id.as_deref(),
+            Some("th-g2-at-launch"),
+            "the frame's own claim is left alone: for a relaunch it is the newest \
+             fact about the session and the only one there is"
+        );
+    }
+
+    /// **A `Codex → Claude → Codex` sequence does not resurrect pre-Claude state.**
+    ///
+    /// The uid is stable across an agent change — the same tmux session, the same
+    /// row — and the retained carry is keyed by it. Retention happens when the
+    /// departed link's task is proven stopped, which is right when the next
+    /// registration is the same run reconnecting and wrong when it is a different
+    /// agent taking the session over. Nothing after it cleared the entry, so the
+    /// third registration was seeded from a chase belonging to neither of the two
+    /// runs in between. The generation stamp does not catch this on its own: the
+    /// relaunch can perfectly well arrive at the generation the first one used, and
+    /// this test uses that one deliberately.
+    ///
+    /// The Claude leg is a **real** registration, through the whole of
+    /// `register_supervisor` and into the control-link transaction, because that is
+    /// where the forgetting belongs: it is the one moment the daemon learns that
+    /// this uid is not Codex any more.
+    ///
+    /// **Mutation:** delete the `forget_codex_carry` call from the transaction and
+    /// the third leg is handed `th-g1-chased`.
+    #[tokio::test]
+    async fn a_claude_registration_between_two_codex_launches_forgets_the_codex_chase() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // Leg one: a Codex link learns where the session went, then departs.
+        retire_a_codex_link_mid_chase(&daemon, &uid, 1).await;
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "the premise: the departing link's chase is retained"
+        );
+
+        // Leg two: the uid comes back as Claude.
+        register(&daemon, "cc-9", Some(&uid)).await;
         assert!(
             !daemon
-                .codex_push_guard
-                .device_features_trusted("any-device"),
-            "a failed startup invalidation must fail closed for every device"
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "a registration that is not Codex is not this run reconnecting, and \
+             threads belong to the run"
+        );
+
+        // Leg three: Codex again, at the generation leg one used.
+        let relaunched = codex_link_from(&uid, 1, "th-g3-at-launch");
+        let carry = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &carry),
+            None,
+            "the third registration starts from its own claim; the chase it would \
+             otherwise resume belongs to a run two agents ago"
+        );
+        assert_eq!(
+            carry.slots_for_tests(),
+            (None, None, None),
+            "and no slot was carried across, so nothing can fall back to a thread \
+             the Claude run in between never even had"
+        );
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_adoption(&uid, &relaunched),
+            None,
+            "nor is the fleet told the new run is on the old one's adopted thread"
+        );
+    }
+
+    /// **A thread announced before the retirement and written after it is still
+    /// retained** (round-7 F1).
+    ///
+    /// `thread/started` is broadcast once and never replayed, so the instant a
+    /// worker reads it is the only instant `B` exists anywhere.
+    /// `Connection::bind_or_follow` writes it into the carry with no await in
+    /// between — which closes cancellation of *that task* and nothing else. A
+    /// registration retiring the link runs on another thread, and a retirement that
+    /// read the cells on the way out could land its snapshot inside that synchronous
+    /// stretch: the snapshot wins, the write lands a moment later in a cell no lookup
+    /// will ever reach again, and the replacement resumes `A`. The session's new
+    /// thread is then lost for the rest of the run, because nothing will announce it
+    /// a second time.
+    ///
+    /// So the cells travel into the park with the task and are read once
+    /// [`OwnedLink::is_finished`] says there is no writer left — see
+    /// [`Inner::retain_codex_carry`].
+    ///
+    /// **The window is reproduced exactly, and without a sleep.** The task says it
+    /// has consumed the frame and then blocks on a channel the test owns, which is
+    /// what "inside a synchronous stretch" means to an `abort`: cancellation lands at
+    /// an await point, and between the read and the write there is none. The
+    /// retirement runs while the task is parked there. Nothing here is timing —
+    /// the write is *ordered after* the retirement, every run.
+    ///
+    /// **Mutation:** snapshot at the departure site instead — `retain_codex_carry`
+    /// beside the removal in [`Daemon::park_current_codex_link`], `None` into the
+    /// park — and the replacement is seeded with nothing: `left: None`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_announced_before_the_park_and_written_after_it_is_still_retained() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        let carry = crate::codex_link::LinkCarry::new();
+        let (announced_tx, announced_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
+        let writing = carry.clone();
+        let task = tokio::spawn(async move {
+            // The frame has been read and the id is in hand; the write has not
+            // happened yet. A blocking receive rather than an await, because a task
+            // sitting at an await is a task an abort can end — and this one is
+            // running code, which is the case that loses the race.
+            announced_tx.send(()).expect("the test is listening");
+            write_rx.recv().expect("the test releases the write");
+            writing.set_for_tests(None, Some("th-announced-once"));
+        });
+        announced_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker must have consumed the announcement before the retirement");
+
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry,
+            },
+        );
+
+        // The replacement registration retires the incumbent — while the incumbent
+        // is between the announcement and the write.
+        daemon.park_current_codex_link(&uid).await;
+        write_tx.send(()).expect("the worker is waiting to write");
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the premise: the retired task stops, so its memory is readable at all"
+        );
+
+        let replacement = codex_link_from(&uid, 1, "th-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &replacement, &seeded)
+                .as_deref(),
+            Some("th-announced-once"),
+            "the replacement resumes the thread the wire announced, not the one the \
+             registration frame claims: the frame names where the session started and \
+             the announcement is the only fact about where it went"
+        );
+    }
+
+    /// **The same rule at the OTHER departure site: a supervisor disconnect**
+    /// (round-8 F4).
+    ///
+    /// A link leaves the slot in two places, not one. The sibling above drives
+    /// [`Daemon::park_current_codex_link`] — the retirement a replacement registration
+    /// performs — and pins the rule there. The release inside
+    /// [`Daemon::unregister_supervisor`] is a second, independently written departure:
+    /// its own [`Inner::release_codex_link`] call, its own construction of the
+    /// [`OwnedLink`], its own [`ParkedCarry`]. An early snapshot restored there alone
+    /// is a regression the sibling cannot see, and every other fixture that reaches
+    /// this path arrives with the carry already written and the task already finished
+    /// — which is precisely the shape in which taking the snapshot early and taking it
+    /// late give the same answer. Two departure sites, two proofs.
+    ///
+    /// **The window, at this site.** The task has consumed `thread/started` and is
+    /// inside the synchronous stretch before the write — a blocking receive, because a
+    /// task sitting at an await is a task an `abort` can end, and it is the one still
+    /// *running* that loses the race. The disconnect runs while it is there.
+    ///
+    /// **Ordered, not timed.** The write is released by a watcher that has first
+    /// observed the handle land in `parked_codex_links`, which is the departure having
+    /// happened. So "written after the departure" is an ordering this test establishes
+    /// rather than a race it hopes to win — and the disconnect's own bounded join then
+    /// finds a task that genuinely finishes, so nothing here costs
+    /// [`CODEX_LINK_STOP_BUDGET`].
+    ///
+    /// **Mutation:** restore the early snapshot at this site alone —
+    /// `inner.retain_codex_carry(uid, ParkedCarry { .. })` beside the
+    /// `release_codex_link` call, `None` into the park — and this fails with
+    /// `left: None, right: Some("th-announced-once")` while the park sibling above
+    /// stays green, which is what proves this leg reaches the release case and not the
+    /// one already covered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_written_after_a_disconnect_releases_the_link_is_still_retained() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        // A real registration, because the release path is keyed by its epoch: the
+        // slot is only this connection's to give up if the handle in it says so.
+        let registration = register(&daemon, "cc-9", Some(&uid)).await;
+
+        let carry = crate::codex_link::LinkCarry::new();
+        let (announced_tx, announced_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
+        let writing = carry.clone();
+        let task = tokio::spawn(async move {
+            announced_tx.send(()).expect("the test is listening");
+            write_rx.recv().expect("the watcher releases the write");
+            writing.set_for_tests(None, Some("th-announced-once"));
+        });
+        announced_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker must have consumed the announcement before the disconnect");
+
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: registration.epoch,
+                generation: 1,
+                task,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry,
+            },
+        );
+
+        // Releases the write the instant the link is in the park and not before, so
+        // the write is ordered strictly after the departure.
+        let watcher = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.clone();
+            tokio::spawn(async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if daemon
+                        .inner
+                        .lock()
+                        .await
+                        .parked_codex_links
+                        .contains_key(&uid)
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the disconnect must move the link into the park"
+                    );
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                write_tx.send(()).expect("the worker is waiting to write");
+            })
+        };
+        daemon.unregister_supervisor(&registration).await;
+        watcher.await.expect("the watcher must not panic");
+
+        assert!(
+            daemon.join_parked_codex_links(&registration.session).await,
+            "the premise: the released task stops, so its memory is readable at all"
+        );
+
+        let replacement = codex_link_from(&uid, 1, "th-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &replacement, &seeded)
+                .as_deref(),
+            Some("th-announced-once"),
+            "a disconnect that read the cells on its way out would hand the next \
+             registration the thread the session LEFT, and `thread/started` is \
+             broadcast once — so the new thread would be lost for the rest of the run"
+        );
+    }
+
+    /// **The agent boundary is a fact about the registration, not about when the
+    /// retired task happens to die** (round-7 F3).
+    ///
+    /// A link that will not stop inside [`CODEX_LINK_STOP_BUDGET`] leaves the park
+    /// unclear, and a registration that hung the forgetting on that report skipped it
+    /// — so the pre-Claude chase was still owed, was retained by whichever later
+    /// transaction finally joined the corpse, and seeded the next same-generation
+    /// Codex registration. The Claude registration in the middle had already
+    /// happened; agreeing with it a second time is not something a later join can be
+    /// asked to remember.
+    ///
+    /// The Claude leg is a **real** registration and its park is genuinely unclear,
+    /// which is the whole of the case: the sibling test above passes on the tidy path
+    /// whether or not the forgetting depends on the join.
+    ///
+    /// **Mutation:** move the `forget_codex_carry` call back inside the
+    /// `park_clear` arm and the last leg is handed `th-g1-chased`; drop the park
+    /// sweep from [`Inner::forget_codex_carry`] and it is handed the same thing by
+    /// the slower route.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claude_registration_forgets_a_chase_a_link_that_will_not_stop_still_holds() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking one
+        // has no await point to be cancelled at. It must be RUNNING before the abort
+        // — tokio cancels a blocking task that has not started, and the handle would
+        // then resolve instantly, which is a cancellation working rather than the
+        // case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        let carry = crate::codex_link::LinkCarry::new();
+        carry.set_for_tests(Some("th-g1-adopted"), Some("th-g1-chased"));
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry,
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+        assert!(
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "the premise: nothing is retained yet, because nothing has stopped yet"
+        );
+
+        // The uid comes back as Claude, over a park this registration's own join
+        // cannot clear — the path that used to skip the forgetting entirely.
+        register(&daemon, "cc-9", Some(&uid)).await;
+
+        // The corpse finally stops, and a later transaction joins it.
+        let _ = stop_tx.send(());
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "a parked corpse is joined on a later turn, and that join is what retains"
+        );
+        assert!(
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "and it retains NOTHING: this uid stopped being Codex while the corpse was \
+             still running, and a retention landing afterwards is the pre-Claude chase \
+             coming back by the slow route"
+        );
+
+        // Codex again, at the generation leg one used — the case the generation stamp
+        // cannot catch on its own.
+        let relaunched = codex_link_from(&uid, 1, "th-g3-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &seeded),
+            None,
+            "the relaunch starts from its own claim; the chase it would otherwise \
+             resume belongs to a run two agents ago"
+        );
+    }
+
+    // ------------------------------- codex push admission (2e-5)
+
+    /// **A Codex turn-complete rings the same doorbell Claude's does, and carries
+    /// the agent that decides who hears it.**
+    #[tokio::test]
+    async fn a_codex_turn_complete_rings_once_per_turn() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        {
+            let rings = capture.0.lock().unwrap();
+            assert_eq!(rings.len(), 1, "one finished turn, one ring: {rings:?}");
+            assert_eq!(rings[0].0.kind, crate::apns::PushKind::Completed);
+            assert_eq!(
+                rings[0].0.agent,
+                protocol::agent::AgentKind::Codex,
+                "the fan-out cannot narrow to Codex-capable phones without this"
+            );
+        }
+
+        // **The second turn is second news.** Claude's `agent_completed` re-fires on
+        // a timer and the ambient latch collapses the repeats; `turn/completed`
+        // fires exactly once per turn, so there is nothing to collapse and every
+        // terminal must ring on its own. Far enough apart to be two doorbells —
+        // what the dispatch grace does to two turns closer together than that is
+        // `two_turns_inside_one_dispatch_grace_ring_once_on_both_paths`.
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            2,
+            "a second turn finishing is a second fact, not a repeat of the first"
+        );
+    }
+
+    /// **Two turns inside one dispatch grace are one ring, on either agent's path.**
+    ///
+    /// The 400 ms grace exists so a doorbell describes the world at the moment it
+    /// rings rather than the moment it was admitted, and the price of that is
+    /// exactly this: a turn superseded before its push left the building does not
+    /// ring, and the reader is told the later, truer thing once. The alternative —
+    /// two "Finished a turn" banners 300 ms apart — is one fact said twice.
+    ///
+    /// Asserted for both agents in one test because the claim is *parity*: Claude
+    /// coalesces here by the same mechanism (its `Stop` hook records the progress
+    /// its `agent_completed` is admitted beside), and a Codex path that behaved
+    /// differently would be the defect. Measured, not assumed — this test is what
+    /// measured it.
+    #[tokio::test]
+    async fn two_turns_inside_one_dispatch_grace_ring_once_on_both_paths() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "the first turn's doorbell is superseded by the second, which rings"
+        );
+
+        // The Claude control, through the real hook path: `Stop` then the
+        // notification, twice, 100 ms apart — the shape the wire actually produces.
+        let (claude, claude_capture) = capture_daemon();
+        let stop = || HookPost {
+            session_id: "cc-1".into(),
+            session_uid: Some(TEST_UID.into()),
+            event: "Stop".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
+            wait: false,
+        };
+        claude.handle_hook(stop()).await;
+        claude
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        claude.handle_hook(stop()).await;
+        claude
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            claude_capture.0.lock().unwrap().len(),
+            1,
+            "Claude collapses the same pair the same way — the grace is agent-neutral"
+        );
+    }
+
+    /// **A turn that merely STARTS inside the grace cancels the doorbell too.**
+    ///
+    /// The parity test above covers the second turn *finishing*. This is the other
+    /// half, and it was the live hole: turn A completes, turn B starts 200 ms later,
+    /// and A's completion doorbell was still valid when its grace expired — so a
+    /// phone was told "finished a turn" about a run that was mid-turn. Codex, unlike
+    /// Claude, has a turn-start signal on the wire, and this is what reads it.
+    ///
+    /// Claude is the control again: its `Stop` hook records exactly this progress
+    /// beside the completion, and a `PreToolUse` arriving afterwards cancels a
+    /// waiting doorbell by the same epoch bump.
+    #[tokio::test]
+    async fn a_turn_starting_inside_the_grace_cancels_the_last_turns_doorbell() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The next turn begins. No terminal, no fact, no event — just the run
+        // going back to work.
+        daemon.note_codex_turn_running(&uid);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            0,
+            "a completion doorbell must not ring about a run that is mid-turn again"
+        );
+
+        // And the latch is open, not stuck: the turn that started then finishes,
+        // and *that* is news.
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "the turn that superseded the first one rings when it ends"
+        );
+    }
+
+    /// **A link belongs to the registration that installed it, and to no other.**
+    ///
+    /// `register_supervisor` publishes its epoch and writes its row before the gated
+    /// transaction retires the incumbent link — the two cannot be one step, because
+    /// the retirement needs awaits that must not run under `inner`. For that
+    /// interval the slot holds the *previous* registration's connection, sitting on
+    /// the previous registration's thread. Answering from it would pair the row one
+    /// registration just wrote with the connection another one is holding.
+    #[tokio::test]
+    async fn a_link_from_a_superseded_registration_is_no_link_at_all() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link_at(
+            &daemon,
+            Some("th-b-just-registered"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-a-the-incumbent".into(),
+            },
+            2, // the new registration's supervisor epoch, already published
+            1, // the incumbent link, not yet retired
+        )
+        .await;
+
+        let (_, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "the incumbent's connection is not this registration's addressee"
+        );
+        assert_eq!(
+            daemon
+                .sessions()
+                .await
+                .unwrap()
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+                .as_deref(),
+            Some("th-b-just-registered"),
+            "so the hand-over reports the incoming registration's own claim, never \
+             the outgoing connection's last word"
+        );
+    }
+
+    /// **The FIRST hand-over window, which the epoch filter used to miss.**
+    ///
+    /// The staged test above is the *later* window — supervisor B published, link A
+    /// still in the slot. This is the earlier one, and it is the one a
+    /// handle-based comparison cannot see: registration B writes the row and only
+    /// then publishes its handle, so for the length of that gap the row is B's while
+    /// `supervisors` and `codex_links` both still say A — agreeing with each other,
+    /// and handing back A's connection for B's row.
+    ///
+    /// It is staged through the failure that makes it observable rather than through
+    /// a race: a registration whose row is refused by the uid's tombstone has staked
+    /// its claim and gone no further, which is exactly a registration that has begun
+    /// and not finished. If the claim were staked *after* the row (the old order),
+    /// the refusal would leave nothing behind and the incumbent's connection would
+    /// still answer for the session.
+    ///
+    /// **Mutation:** move the claim below the `upsert_session` — or read
+    /// `supervisors` in `codex_addressee_locked` — and this fails.
+    #[tokio::test]
+    async fn a_registration_that_has_begun_owns_the_session_before_its_row_lands() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-a-the-incumbent".into(),
+            },
+        )
+        .await;
+        let (_, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert!(
+            addressee.is_subscribed(),
+            "the premise: the incumbent's connection answers for this session"
+        );
+
+        // The uid is deleted, which leaves a tombstone the next upsert refuses. A
+        // registration for it therefore gets as far as its row and no further —
+        // the shape of a registration caught part-way through, made deterministic.
+        daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
+        daemon.store.delete_exited_session(&uid).unwrap();
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-9".into(),
+                        session_uid: Some(uid.clone()),
+                        tmux_session: "cc-9".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/work".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: this registration got as far as its row and no further"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            crate::codex_link::CodexAddressee::NoLink,
+            "a registration has begun for this session, and the incumbent's \
+             connection is not its addressee"
+        );
+    }
+
+    /// **A disconnect does not touch a claim it never made.**
+    ///
+    /// The window the claim exists for cuts both ways. While a replacement has
+    /// staked its claim and not yet published its handle, the claim names B and
+    /// `supervisors` still names A — so anything A's disconnect writes "for this
+    /// uid" lands on a claim A never made. B then installs its supervisor and its
+    /// link, never stakes again (the stake happens once, beside the row), and every
+    /// later read finds a link no claim matches: `NoLink`, for the rest of that
+    /// session's life, for a registration that *succeeded*.
+    ///
+    /// Round 9 made that structural rather than conditional: a disconnect no longer
+    /// writes this map at all, because the entry is a tombstone that outlives the
+    /// connection (see [`Inner::registration_epochs`]). What the test asserts is
+    /// unchanged, and what can now break it is a disconnect that starts writing.
+    ///
+    /// Staged through the same refusal as the test above — a registration whose
+    /// row the uid's tombstone rejects has staked and gone no further, which is
+    /// exactly a registration caught inside the window.
+    ///
+    /// **Mutation:** have `unregister_supervisor` write its own epoch for this uid
+    /// (`registration_epochs.insert(uid, registration.epoch)` inside the released
+    /// arm) and both assertions fail.
+    #[tokio::test]
+    async fn an_incumbents_disconnect_never_erases_a_replacements_claim() {
+        let daemon = test_daemon();
+        let incumbent = register(&daemon, "cc-1", None).await;
+        let uid = incumbent.session.uid.clone();
+
+        daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
+        daemon.store.delete_exited_session(&uid).unwrap();
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(uid.clone()),
+                        tmux_session: "cc-1".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/tmp".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: the replacement staked its claim and got no further"
+        );
+        let staked = {
+            let inner = daemon.inner.lock().await;
+            inner.registration_epochs.get(&uid).copied()
+        };
+        assert!(
+            staked.is_some() && staked != Some(incumbent.epoch),
+            "the premise: the claim now names the replacement, not the incumbent"
+        );
+
+        // The incumbent's socket closes inside that window.
+        daemon.unregister_supervisor(&incumbent).await;
+
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .registration_epochs
+                .get(&uid)
+                .copied(),
+            staked,
+            "the incumbent released its own slot and left the replacement's claim"
+        );
+
+        // And the consequence the claim is compared for: the replacement's link,
+        // installed at the epoch it staked, answers for the session. (Installed
+        // directly, because the registration that would install it is the one the
+        // tombstone stopped — the stake is the only part of it this test needs.)
+        let addressee = crate::codex_link::CodexAddressee::Subscribed {
+            thread_id: "th-b-the-replacement".into(),
+        };
+        {
+            let presence = crate::codex_link::LinkPresence::new();
+            presence.publish_for_tests(addressee.clone());
+            daemon.inner.lock().await.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: staked.expect("the claim"),
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            addressee,
+            "a registration that staked, survived a disconnect it did not own, and \
+             installed its link is addressable"
+        );
+    }
+
+    /// Advance a future by exactly one poll, and never wait on it.
+    ///
+    /// The registration this stages has to be **stopped** between two of its own
+    /// await points, which a spawned task cannot be: a spawned task runs whenever
+    /// the executor pleases, so "B pauses while C runs" would be a race staged with
+    /// sleeps and would stage the *opposite* order half the time. Held as a future
+    /// this test polls by hand, B makes progress on the polls it is given and on no
+    /// others, and the interleaving is a fact rather than a hope.
+    ///
+    /// The waker is a no-op for the same reason: nothing may wake B behind the
+    /// test's back. That is safe only while B is parked on a `spawn_blocking` join
+    /// — a lock acquisition parked with a dead waker would hold its place in
+    /// tokio's fair queue and strand everyone behind it, which is why the loop below
+    /// stops at the stake, on the poll that carries B into its row write.
+    fn nudge<F: std::future::Future>(fut: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+        fut.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    /// **Two registrations for one session, both good, and only the winner may
+    /// publish.**
+    ///
+    /// The stake and the supervisor publish are separated by two awaits — the row
+    /// upsert and `relabel_open_cards` — and a whole second registration fits in
+    /// that gap. B stakes, pauses in its row write; C stakes a later epoch and runs
+    /// to the end, publishing its handle; B wakes and, published unconditionally,
+    /// overwrote it. Nothing about that is recoverable by anything downstream: the
+    /// live supervisor channel becomes B's, whose connection C is not on, while
+    /// `registration_epochs` still names C — so `codex_addressee_locked` compares
+    /// C's link against B's older epoch and answers `NoLink` for the rest of the
+    /// session's life, for a registration that *succeeded*.
+    ///
+    /// B goes through the real path. It is a future this test owns (see `nudge`)
+    /// rather than a spawned task, so nothing happens inside its pause except what
+    /// this test does there; polling stops on the poll that stakes B's claim, which
+    /// is the poll that carries B into `upsert_session` and leaves it there.
+    ///
+    /// **C is staked by hand, because it can no longer be a second registration.**
+    /// The acceptance gate (finding 6) is taken above B's stake and held to the end
+    /// of its link transaction, so a real C would queue outside B's window rather
+    /// than run inside it, and the two would simply happen in order. The check under
+    /// test is therefore no longer the first line of defence but a kept fail-closed
+    /// second one — and asking whether it still holds means staging the state it
+    /// exists to refuse, exactly as the tests around this one stage a link the gated
+    /// Codex path cannot install. C is staked in **both** places a real acceptance
+    /// stakes it: the claim, written beside the row, and the supervisor handle
+    /// published several awaits later.
+    ///
+    /// **Mutation:** make the publish unconditional again and the surviving handle
+    /// is B's — both the epoch assertion and the resolver assertion fail.
+    #[tokio::test]
+    async fn two_successful_concurrent_registrations_leave_only_the_winner_published() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        let mut overtaken = Box::pin(daemon.register_supervisor(
+            RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.clone()),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Claude,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: None,
+                codex_generation: None,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            },
+            tx,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+        ));
+
+        // Drive B as far as its stake and no further. `try_lock` so this test never
+        // joins the queue for `inner` itself and cannot be what B is waiting on.
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(overtaken.as_mut()).is_pending(),
+                "B must still be in flight: the window this test needs is the one \
+                 between its stake and its publish"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                if let Some(epoch) = inner.registration_epochs.get(&uid).copied() {
+                    staked = Some(epoch);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("B must reach its stake");
+
+        // C, inside B's pause: a later epoch, staked with a row and published as a
+        // handle, which is the whole of what B has to find when it wakes.
+        let winner = {
+            let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+            Box::leak(Box::new(rx));
+            let mut inner = daemon.inner.lock().await;
+            inner.next_epoch += 1;
+            let epoch = inner.next_epoch;
+            inner.registration_epochs.insert(uid.clone(), epoch);
+            inner.supervisors.insert(
+                uid.clone(),
+                SupervisorHandle {
+                    tx,
+                    inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                    next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                    epoch,
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    claude_bin: None,
+                    codex_generation: None,
+                },
+            );
+            epoch
+        };
+        assert!(
+            winner > staked,
+            "the premise: C staked after B ({winner} vs {staked})"
+        );
+
+        let refused = overtaken.await;
+        assert!(
+            refused.is_err(),
+            "a registration that lost the session while its row was being written \
+             must be abandoned, not completed: {refused:?}"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner.supervisors.get(&uid).map(|handle| handle.epoch),
+            Some(winner),
+            "the surviving supervisor is the winner's, not the one that woke up last"
+        );
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner),
+            "and the claim was never disturbed by the loser's abandonment"
+        );
+
+        // The consequence the two are compared for: the winner's link, installed at
+        // the epoch it staked, is what the session resolves to. (Installed directly,
+        // because a Claude registration installs no link — the disagreement between
+        // the claim and the published handle is the whole of what is under test.)
+        drop(inner);
+        let addressee = crate::codex_link::CodexAddressee::Subscribed {
+            thread_id: "th-the-winner".into(),
+        };
+        {
+            let presence = crate::codex_link::LinkPresence::new();
+            presence.publish_for_tests(addressee.clone());
+            daemon.inner.lock().await.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: winner,
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            addressee,
+            "the claim and the published handle agree, so the resolver answers the \
+             winner's connection rather than `NoLink` for the life of the session"
+        );
+    }
+
+    /// One registration for `uid` with every field this session is described by
+    /// carried differently, so which registration wrote what is legible afterwards.
+    ///
+    /// Returned as a future rather than awaited, because the tests below have to
+    /// stop it between two of its own await points; see `nudge`.
+    fn distinguishable_registration(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> impl std::future::Future<Output = Result<Registration>> {
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        let daemon = Arc::clone(daemon);
+        let info = RegisterSession {
+            session_id: format!("cc-{name}"),
+            session_uid: Some(uid.to_string()),
+            tmux_session: format!("cc-{name}"),
+            tmux_socket: format!("/tmp/{name}.sock"),
+            cwd: format!("/tmp/{name}-project"),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Claude,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: None,
+            codex_generation: None,
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        };
+        async move {
+            daemon
+                .register_supervisor(info, tx, Arc::new(std::sync::Mutex::new(HashMap::new())))
+                .await
+        }
+    }
+
+    /// Poll a future until it is ready, or give up. Bounded, and the sleep between
+    /// polls is what gives the rest of the runtime — the blocking pool a `nudge`d
+    /// future is parked on, most of all — a chance to make it ready.
+    async fn nudge_to_completion<F: std::future::Future>(
+        mut fut: std::pin::Pin<&mut F>,
+        turns: u32,
+    ) -> Option<F::Output> {
+        for _ in 0..turns {
+            if let std::task::Poll::Ready(out) = nudge(fut.as_mut()) {
+                return Some(out);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        None
+    }
+
+    /// **A registration that does not own the session cannot write its ROW or
+    /// relabel its CARDS** (finding 6).
+    ///
+    /// The stake check above the supervisor publish is a real guard and it protected
+    /// the wrong span. Two acceptance steps happen before it and both are durable:
+    /// `Db::upsert_session` writes this registration's cwd, session id, socket and
+    /// thread id over whatever the row said, and `relabel_open_cards` stamps this
+    /// registration's project onto every card the session is holding. Both are
+    /// awaits, and a whole second registration for the same uid fits inside either
+    /// one. The loser therefore left its working directory on the winner's row and
+    /// its project name on the winner's cards, and only afterwards reached the check
+    /// and refused — so "a refused registration mutated nothing" was true of the
+    /// in-memory tail and false of the half that survives a restart. Neither is
+    /// repaired by anything downstream: the registration frame is the row's only
+    /// writer, and the relabel is a fire-once edit.
+    ///
+    /// **The two registrations differ in every field under test** — cwd, session id,
+    /// tmux name and socket — because with the identical `/tmp` frames the test
+    /// above uses, neither consequence is observable at all: the loser's row write
+    /// and the winner's are byte-identical, and the two project labels are the same
+    /// word.
+    ///
+    /// **What is asserted is that the acceptance is ATOMIC**, not who won it. Under
+    /// the gate the first future through completes its whole acceptance and the
+    /// second's runs after it; with the gate around the link transaction alone the
+    /// second runs *inside* the first's row write. The two worlds disagree about
+    /// whether the first future succeeds or is refused, so that is deliberately not
+    /// asserted. What must hold either way is that the row, the cards, the claim and
+    /// the published handle all describe **one** registration — the last one to
+    /// stake — and under the mutation they do not.
+    ///
+    /// Both registrations are futures this test polls by hand (see `nudge`) rather
+    /// than spawned tasks, so the interleaving is a fact and not a hope, and so that
+    /// a second registration parked on the acceptance gate stays parked until this
+    /// test polls it again.
+    ///
+    /// **Mutation:** move the gate acquisition back down so it wraps only the
+    /// control-link transaction. The second registration then runs start to finish
+    /// inside the first's row write; the first wakes, relabels the card it no longer
+    /// owns with its own project, and only then refuses. The card assertion fails.
+    /// The row assertion is the same defect and is asserted for the same reason, but
+    /// it is not what makes this test go red: both registrations hand their write to
+    /// the blocking pool, and which of them reaches SQLite's single writer first is
+    /// not something a test can pin.
+    #[tokio::test]
+    async fn a_registration_that_loses_the_session_writes_neither_its_row_nor_its_cards() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // A card the session is already holding, filed under a project neither
+        // registration names, so a relabel by either one is visible.
+        daemon.inner.lock().await.pending.insert(
+            (uid.clone(), "r-1".to_string()),
+            pending_card(&uid, "before"),
+        );
+
+        let mut first = Box::pin(distinguishable_registration(&daemon, &uid, "first"));
+        // Stopped on the poll that stakes its claim, which is the poll that carries
+        // it into `upsert_session` and leaves it there. `try_lock`, so this test
+        // never joins the queue for `inner` and cannot be what a registration is
+        // waiting on.
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(first.as_mut()).is_pending(),
+                "the window this test needs is the one between the stake and the \
+                 publish, so the first registration must still be in flight"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                if let Some(epoch) = inner.registration_epochs.get(&uid).copied() {
+                    staked = Some(epoch);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("the first registration must reach its stake");
+
+        // The second, driven as far as it can get inside that pause. Under the
+        // acceptance gate that is nowhere at all — it parks on `register_supervisor`'s
+        // first act and stays there. With the gate moved down it runs to the end here,
+        // which is the world this test exists to refuse.
+        let mut second = Box::pin(distinguishable_registration(&daemon, &uid, "second"));
+        let inside = nudge_to_completion(second.as_mut(), 400).await;
+
+        // Both are walked out. Nothing is asserted until each has settled, so what
+        // follows is about the state the pair left behind rather than about who
+        // reached it first.
+        let first_out = nudge_to_completion(first.as_mut(), 5_000)
+            .await
+            .expect("the first registration must settle");
+        let second_out = match inside {
+            Some(out) => out,
+            None => nudge_to_completion(second.as_mut(), 5_000)
+                .await
+                .expect("the second registration must settle once the gate frees"),
+        };
+        let winner = second_out.expect("the later registration is accepted");
+        assert!(
+            winner.epoch > staked,
+            "the premise: the second staked after the first ({} vs {staked}); \
+             the first settled as {first_out:?}",
+            winner.epoch
+        );
+
+        let row = daemon
+            .store
+            .get_session(&uid)
+            .unwrap()
+            .expect("the session has a row");
+        assert_eq!(
+            row.cwd, "/tmp/second-project",
+            "the durable half of the acceptance belongs to the registration that \
+             owns the session: a run's working directory is where the fleet says it \
+             is and where every card it opens is named from"
+        );
+        assert_eq!(
+            row.session_id, "cc-second",
+            "and so does its identity — the registration frame is this column's only \
+             writer, so a loser's value stands for the life of the run"
+        );
+        assert_eq!(
+            row.tmux_socket, "/tmp/second.sock",
+            "and the socket the daemon would type into"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner
+                .pending
+                .values()
+                .map(|card| card.project_label.clone())
+                .collect::<Vec<_>>(),
+            vec!["second-project".to_string()],
+            "and the open card wears the owner's project: the relabel is a \
+             fire-once edit, so a card a losing registration renamed keeps that \
+             name — one project on a lock screen and another on the list behind it"
+        );
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner.epoch),
+            "the claim is the owner's"
+        );
+        assert_eq!(
+            inner.supervisors.get(&uid).map(|handle| handle.epoch),
+            Some(winner.epoch),
+            "and so is the live supervisor channel, which is the pairing the whole \
+             acceptance exists to keep consistent with the row above"
+        );
+    }
+
+    /// **The row and the addressee are two reads and they are validated as ONE
+    /// fact** (finding 7).
+    ///
+    /// They cannot be taken under one lock: the row is a database read, and this
+    /// type's lock ordering forbids awaiting the blocking pool with `inner` held.
+    /// So a registration that completed between them returned one registration's row
+    /// beside another's addressee — a caller told a thread, a cwd and an agent that
+    /// never described a single run at any instant.
+    ///
+    /// The tear is constructed rather than raced, and **the construction is the whole
+    /// difficulty**. An earlier form of this test paused the resolver on its own first
+    /// poll and ran the registration in that pause — which proved nothing, because that
+    /// pause is the read that only learns WHICH session to settle against, and it
+    /// happens before the gate is taken. The registration finished, the resolver then
+    /// walked through an uncontended gate, and both of its real reads landed after the
+    /// acceptance: a coherent pair, gate or no gate. Removing the gate entirely left it
+    /// green. A test that cannot see the guard it names is worse than no test.
+    ///
+    /// So the order is inverted. The REGISTRATION is the future parked mid-acceptance,
+    /// stopped on the poll that stakes its claim — which is the poll that carries it
+    /// into its row write while it holds the acceptance gate. Only then is the resolver
+    /// started, and what is asserted is that it **cannot finish**: it is polled far
+    /// past the point where both of its database reads would have completed, and it
+    /// must still be pending, because it is parked on a gate the registration is
+    /// holding. That is the assertion the guard is load-bearing for — without the gate
+    /// the resolver runs to completion right here, reading the pre-registration row and
+    /// pairing it with whatever the half-finished acceptance has published.
+    ///
+    /// Then the registration is released, the resolver is walked out, and the pair it
+    /// returns must be wholly post-registration. That second half is what proves the
+    /// pendency above was the gate rather than a wedged future.
+    ///
+    /// The two halves of the row that are asserted are its **agent** and its **cwd**,
+    /// which are the fields a registration actually moves. Not `codex_thread_id`: the
+    /// upsert coalesces that column, so a Claude registration cannot clear it and the
+    /// two rows would agree on it whichever one came back.
+    ///
+    /// **Mutation:** drop the gate acquisition in `resolve_codex_inbound` (keep the
+    /// `registration_gate` lookup, take no lock). The resolver then completes while the
+    /// registration is still parked, and the "must still be pending" assertion fails.
+    #[tokio::test]
+    async fn the_resolver_never_pairs_one_registrations_row_with_anothers_addressee() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-before"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-before".into(),
+            },
+        )
+        .await;
+        // The premise: settled, the pair describes the Codex run the fixture staged.
+        let (before, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(before.cwd, "/work");
+        assert_eq!(addressee.thread_id(), Some("th-before"));
+
+        // A real registration, parked mid-acceptance with the gate in its hand. It
+        // moves the session onto another agent and another directory, and its
+        // control-link transaction reclaims the slot and leaves it empty — so once it
+        // lands the session has no addressee at all.
+        //
+        // Stopped on the poll that stakes its claim, which is the poll that carries it
+        // into `upsert_session` and leaves it there. `try_lock`, so this test never
+        // joins the queue for `inner` and cannot be what the registration waits on.
+        // The fixture already staked a claim for this uid, so the stake to wait for is
+        // a CHANGE to it, not its presence.
+        let before_stake = daemon
+            .inner
+            .lock()
+            .await
+            .registration_epochs
+            .get(&uid)
+            .copied();
+        let mut moving = Box::pin(distinguishable_registration(&daemon, &uid, "moved"));
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(moving.as_mut()).is_pending(),
+                "the window this test needs is the one inside the acceptance, so the \
+                 registration must still be in flight"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                let now = inner.registration_epochs.get(&uid).copied();
+                if now != before_stake {
+                    staked = now;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("the registration must reach its stake");
+
+        // **The assertion the gate is load-bearing for.** Both of the resolver's reads
+        // are point queries on the blocking pool and would have settled many times over
+        // inside this budget — the same budget the registration above needed only a
+        // handful of turns of. It gets no further than the gate.
+        let mut resolving = Box::pin(daemon.resolve_codex_inbound(&uid));
+        assert!(
+            nudge_to_completion(resolving.as_mut(), 400).await.is_none(),
+            "a resolution may not be assembled across an acceptance that is still in \
+             flight: the row and the addressee would come from either side of it, and \
+             the caller would be handed a run that never existed at any instant"
+        );
+
+        // Released. Now it must settle, which is what makes the pendency above a gate
+        // and not a wedge.
+        let moved = nudge_to_completion(moving.as_mut(), 5_000)
+            .await
+            .expect("the registration must settle")
+            .expect("the registration is accepted");
+        assert!(moved.epoch >= staked, "the premise: the acceptance landed");
+
+        let (row, addressee) = nudge_to_completion(resolving.as_mut(), 5_000)
+            .await
+            .expect("the resolver settles once the gate frees")
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "the registration retired the Codex link and installed none in its \
+             place, so this is the addressee half of the pair"
+        );
+        assert_eq!(
+            row.cwd, "/tmp/moved-project",
+            "and the row it comes back with is the one that same registration \
+             wrote, not the one read before it started"
+        );
+        assert_eq!(
+            row.agent,
+            protocol::agent::AgentKind::Claude,
+            "a row still saying Codex beside a `NoLink` addressee is a description \
+             of no run that ever existed — the link was retired BY the registration \
+             that made this row say Claude"
+        );
+    }
+
+    /// **The hook path is the row's OTHER writer, and it is gated too** (round-7 F4).
+    ///
+    /// The resolver above holds the session's registration gate and says the pair it
+    /// returns is coherent. That is a claim about every writer of the row, and there
+    /// are three: `register_supervisor`, `Daemon::ensure_session` — which every hook
+    /// every run posts goes through, and which this test is about — and
+    /// `Daemon::mark_exited`, the lifecycle-only writer that takes the same gate for
+    /// its own reason (round-8 F3; see the sweep test that pins it).
+    /// `ensure_session` reads the row and writes it
+    /// back — `agent`, `cwd`, `tmux_session` and `created_at` are all carried forward
+    /// from what it read — and `agent` is the one identity column
+    /// `Store::upsert_session` takes from `excluded` rather than COALESCE-ing. So an
+    /// unguarded hook that read before an acceptance and wrote after it restored the
+    /// agent the acceptance had just changed, and the resolver then returned that row
+    /// beside the new registration's addressee: the exact pair it promises not to
+    /// return, assembled by a writer its gate was not holding.
+    ///
+    /// Two legs, because the guard has two halves and a mutation can remove either.
+    ///
+    /// **Leg one — the re-read.** The hook is stopped on its first poll, which
+    /// dispatches the read that only answers WHICH run this hook is for. A whole
+    /// registration then runs and lands, moving the agent and the cwd. Walked out, the
+    /// hook must write what the registration left, because the values it carries
+    /// forward come from the read it takes under the gate and not from that first one.
+    ///
+    /// **Leg two — the gate.** A second hook is polled until it holds this session's
+    /// gate, and a registration is then asserted unable to finish: it is polled far
+    /// past the point where its own reads and writes would have settled. Released, it
+    /// lands — which is what proves the pendency was the gate and not a wedge.
+    ///
+    /// The registration is a Claude one moving a Codex row, because that is the
+    /// direction the real path can drive: `supported_agents()` refuses every Codex
+    /// registration, so a fixture staging the reviewer's own direction would be
+    /// staging a registration nothing can make. The column and the mechanism are the
+    /// same either way. `cwd` is asserted beside `agent` because the hook carries no
+    /// `cwd` of its own here, which is what makes that field a read-modify-write too —
+    /// and unlike `agent` it is a corruption this phase can actually reach.
+    ///
+    /// **Mutations:** build the row from the unguarded read (delete the re-read under
+    /// the gate) and leg one hands back `Codex` and `/work`; drop the gate acquisition
+    /// in `ensure_session` and leg two's registration runs to completion inside the
+    /// hook's read-modify-write.
+    #[tokio::test]
+    async fn a_hook_may_not_write_the_row_across_a_registration_for_its_own_session() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-before"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-before".into(),
+            },
+        )
+        .await;
+        // No `cwd` and no `transcript_path`: the fields under test are then exactly
+        // the ones the hook carries forward from the row rather than asserting itself.
+        let input = input_from(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#);
+        let agent_of = |daemon: Arc<Daemon>, uid: String| async move {
+            let row = daemon
+                .db
+                .get_session(uid)
+                .await
+                .unwrap()
+                .expect("the run has a row");
+            (row.agent, row.cwd)
+        };
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await,
+            (protocol::agent::AgentKind::Codex, "/work".to_string()),
+            "the premise: the row describes the Codex run the fixture staged"
+        );
+
+        // ---- Leg one: the re-read is the one that counts.
+        //
+        // Stopped on the first poll, which is the one that dispatches the read that
+        // only learns which run this is — before any gate is taken, because the uid a
+        // gate is keyed by is not known until that read answers.
+        let mut hooking = Box::pin(daemon.ensure_session("cc-9", Some(&uid), &input));
+        assert!(
+            nudge(hooking.as_mut()).is_pending(),
+            "the window this test needs is the one inside the hook, so it must still \
+             be in flight"
+        );
+        nudge_to_completion(
+            Box::pin(distinguishable_registration(&daemon, &uid, "moved")).as_mut(),
+            5_000,
+        )
+        .await
+        .expect("the registration must settle")
+        .expect("the registration is accepted");
+        nudge_to_completion(hooking.as_mut(), 5_000)
+            .await
+            .expect("the hook must settle once the gate frees")
+            .unwrap()
+            .expect("the hook keeps its run");
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await,
+            (
+                protocol::agent::AgentKind::Claude,
+                "/tmp/moved-project".to_string()
+            ),
+            "a hook writes back what the row says NOW, not what it said when the hook \
+             worked out which run it belonged to: restoring either of these would hand \
+             the resolver a row describing the registration before last beside the \
+             addressee of the one that just landed"
+        );
+
+        // ---- Leg two: and nothing may register underneath it while it writes.
+        let gate = daemon.registration_gate(&uid).await;
+        let mut writing = Box::pin(daemon.ensure_session("cc-moved", Some(&uid), &input));
+        let mut held = false;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(writing.as_mut()).is_pending(),
+                "a hook that finishes before this session's gate is ever contended \
+                 took no gate at all, and its read-modify-write is unguarded"
+            );
+            if gate.try_lock().is_err() {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            held,
+            "the hook must reach its guarded section and hold this session's gate"
+        );
+        let mut arriving = Box::pin(distinguishable_registration(&daemon, &uid, "later"));
+        assert!(
+            nudge_to_completion(arriving.as_mut(), 400).await.is_none(),
+            "an acceptance may not land inside a hook's read-modify-write: the hook \
+             would write the row it read a moment before the acceptance over the one \
+             the acceptance just wrote"
+        );
+
+        // Released, and both settle — which is what makes the pendency above a gate
+        // rather than a wedged future.
+        nudge_to_completion(writing.as_mut(), 5_000)
+            .await
+            .expect("the hook settles")
+            .unwrap()
+            .expect("the hook keeps its run");
+        nudge_to_completion(arriving.as_mut(), 5_000)
+            .await
+            .expect("the registration settles once the hook releases the gate")
+            .expect("the registration is accepted");
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await.1,
+            "/tmp/later-project".to_string(),
+            "and the last writer is the registration, which ran wholly after the hook \
+             rather than inside it"
+        );
+    }
+
+    /// **A registration that has lost the session must not retire the winner's
+    /// link.**
+    ///
+    /// The retirement is the destructive half of the acceptance: the incumbent's
+    /// link goes out of the slot and is aborted, and the transaction that did it
+    /// installs a replacement. A transaction that ran that first act on behalf of a
+    /// registration the session no longer belongs to destroyed the OWNER's observer
+    /// and put nothing in its place — the session stayed registered and permanently
+    /// unobserved, which nothing downstream repairs, because `thread/started` is
+    /// broadcast once and the next transaction for this uid is the next
+    /// registration. So every step of the acceptance past the stake has to be
+    /// reachable only by whoever holds it.
+    ///
+    /// **The racing form of this is no longer constructible, and that is the fix,
+    /// not an omission.** The acceptance gate (finding 6) is taken above the stake
+    /// and held to the end of the link transaction, so no second registration can be
+    /// inside another's acceptance at any point: a loser cannot be overtaken between
+    /// its publish and its transaction, because nothing else can stake in that
+    /// window at all. What can still be staged is the state those guards exist to
+    /// refuse, and that is what this test stages — the same way the tests around it
+    /// stage a control link the gated Codex path cannot install.
+    ///
+    /// Three things are asked, in the order a registration meets them:
+    ///
+    ///   * the stake check refuses a registration whose claim has been taken, and it
+    ///     refuses it **before** the transaction, so the live link is untouched;
+    ///   * `Inner::owner_of` answers out of the CLAIM and not out of `supervisors`.
+    ///     The two disagree by design in the hand-over window — the claim is staked
+    ///     beside the row and the handle is published several awaits later — so an
+    ///     ownership check written against `supervisors` tells a transaction it still
+    ///     owns a session it has already lost;
+    ///   * the retirement is deferred and not skipped: the owner's own registration
+    ///     goes through the real path and does it.
+    ///
+    /// The link in the slot is installed by hand, for the same reason the test above
+    /// installs one: `supported_agents()` is `[Claude]`, so no registration this
+    /// daemon accepts carries a control link. The destructive phase is not
+    /// Codex-only, though — it runs for every agent, on every registration — which is
+    /// what makes a Claude loser able to abort a Codex link.
+    ///
+    /// **Mutation:** make `Inner::owner_of` read `supervisors` instead of the claim
+    /// and the middle leg fails. The "park before the ownership check" mutation the
+    /// earlier form of this test also killed is no longer observable from outside:
+    /// under the acceptance gate `owns` cannot be false when the transaction is
+    /// reached, so the two orders behave identically. The guard is kept fail-closed;
+    /// nothing here can prove it any more.
+    #[tokio::test]
+    async fn a_registration_that_lost_the_session_does_not_retire_the_live_link() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // The incumbent, and the link it is being observed through.
+        let incumbent = register(&daemon, "cc-1", Some(&uid)).await;
+        let live = tokio::spawn(std::future::pending());
+        let watch = live.abort_handle();
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: incumbent.epoch,
+                generation: 1,
+                task: live,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+
+        // The loser: a real registration, stopped on the poll that stakes its claim
+        // and carries it into its row write. `try_lock`, so this test never joins the
+        // queue for `inner` and cannot be what a registration is waiting on.
+        let mut loser = Box::pin(distinguishable_registration(&daemon, &uid, "loser"));
+        let mut lost = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(loser.as_mut()).is_pending(),
+                "the window this test needs is one inside the loser's own acceptance"
+            );
+            match daemon
+                .inner
+                .try_lock()
+                .ok()
+                .and_then(|inner| inner.registration_epochs.get(&uid).copied())
+            {
+                Some(epoch) if epoch > incumbent.epoch => {
+                    lost = Some(epoch);
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        }
+        let lost = lost.expect("the loser must reach its stake");
+
+        // The winner's claim, staked by hand. Its handle is deliberately NOT
+        // published: this is the hand-over window, and the whole question is which of
+        // the two maps a later step is entitled to believe.
+        let won = {
+            let mut inner = daemon.inner.lock().await;
+            inner.next_epoch += 1;
+            let won = inner.next_epoch;
+            inner.registration_epochs.insert(uid.clone(), won);
+            won
+        };
+        assert!(won > lost, "the premise: the winner staked after the loser");
+
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.supervisors.get(&uid).map(|handle| handle.epoch),
+                Some(incumbent.epoch),
+                "the premise: in this window the claim is the winner's and the \
+                 published handle is still somebody else's, so the two maps disagree \
+                 about who owns the session"
+            );
+            assert_eq!(
+                inner.owner_of(&uid),
+                Some(won),
+                "ownership is the claim, and only the claim: `supervisors` is a \
+                 window behind it by design, and a transaction that believed it \
+                 would retire the winner's link on a loser's behalf"
+            );
+        }
+
+        // The loser wakes into the rest of its acceptance and finds the session gone.
+        let outcome = nudge_to_completion(loser.as_mut(), 5_000)
+            .await
+            .expect("the loser must settle");
+        assert!(
+            outcome.is_err(),
+            "a registration that lost the session must be abandoned, not completed: \
+             {outcome:?}"
+        );
+
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.codex_links.get(&uid).map(|held| held.epoch),
+                Some(incumbent.epoch),
+                "a registration that has lost the session has nothing to retire: \
+                 destroying the link would leave the run unobserved with nothing to \
+                 install in its place"
+            );
+            assert!(
+                inner.parked_codex_links.get(&uid).is_none_or(Vec::is_empty),
+                "and nothing was moved into the park on the way"
+            );
+            assert!(
+                !watch.is_finished(),
+                "parking a link aborts it, and an aborted observer is not recoverable \
+                 by anything downstream"
+            );
+        }
+
+        // **Deferred, not skipped.** The retirement belongs to whoever owns the
+        // session, and the owner does it — through the real path, into the very
+        // transaction the loser was turned away from.
+        let winner = register(&daemon, "cc-1", Some(&uid)).await;
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner.epoch)
+        );
+        assert!(
+            inner.codex_links.is_empty(),
+            "the winner's own transaction retired the incumbent's link — a Claude \
+             registration reclaims the slot and leaves it empty"
+        );
+    }
+
+    /// **This run's epoch cannot be another run's by accident.**
+    ///
+    /// It is what `push_targets` compares a stored feature set against, so a repeat
+    /// silently re-authorizes an advertisement made to a different process. A pid
+    /// and a millisecond cannot promise that — pids are reused and clocks move — so
+    /// the identity is a uid's ten random bytes, and the legible pair is only a
+    /// prefix for whoever reads the column.
+    #[test]
+    fn the_feature_epoch_carries_an_identity_and_not_just_a_timestamp() {
+        let epoch = feature_epoch();
+        assert_eq!(epoch, feature_epoch(), "one value for the life of the run");
+        let nonce = epoch
+            .rsplit('-')
+            .next()
+            .expect("the epoch is a hyphenated triple");
+        assert!(
+            protocol::uid::is_well_formed(nonce),
+            "the epoch's last field must be a minted identity, not a derived number: \
+             {epoch}"
+        );
+        assert!(
+            epoch.starts_with(&format!("{}-", std::process::id())),
+            "and the pid stays in front of it, for a human reading the column: {epoch}"
+        );
+    }
+
+    /// **The nonce in the epoch is the nonce that was handed in** (round-8 F8).
+    ///
+    /// The sibling above, the refusal below and the startup-wiring test after it are
+    /// three assertions about the same value and none of them looks at where it came
+    /// from: the first checks a shape, the second what happens when entropy fails,
+    /// the third which function evaluates it. A fixed well-formed uid written into
+    /// [`epoch_from`] satisfies all three at once — the last field is still a
+    /// well-formed uid, `Err` still panics, `recover` still mints — while handing
+    /// every run of every daemon on every machine the same epoch. That is the exact
+    /// failure the whole design exists to prevent: `push_targets` compares a stored
+    /// feature set against this string, so two runs that share it re-authorize each
+    /// other's advertisements, and the tests would have said nothing.
+    ///
+    /// So the nonce is *controlled* here rather than observed. [`epoch_from`] taking
+    /// its entropy as an argument is what makes that possible, and is the same reason
+    /// the refusal below is assertable: nothing in a test can steer `getrandom`, but
+    /// everything can steer a parameter.
+    ///
+    /// **Mutation:** replace the parameter's value with a fixed well-formed uid
+    /// inside `epoch_from` and this fails on the tail comparison, with the constant
+    /// on the left and the nonce this test minted on the right; the three sibling
+    /// epoch tests stay green throughout, which is the masking being demonstrated
+    /// rather than asserted.
+    #[test]
+    fn the_epoch_is_built_from_the_entropy_it_was_handed() {
+        let nonce = protocol::uid::new().expect("a test machine has entropy");
+        let epoch = epoch_from(Ok(nonce.clone()));
+        let (_, tail) = epoch
+            .rsplit_once('-')
+            .expect("the epoch is a hyphenated triple");
+        assert_eq!(
+            tail, nonce,
+            "the epoch must carry the identity it was given; a constant here would \
+             pass every other assertion in this file and still give two runs one epoch"
+        );
+    }
+
+    /// **A daemon that cannot mint an identity does not invent one.**
+    ///
+    /// The epoch used to fall back to `pid-millis-no-entropy`, which is fail-open
+    /// at the exact comparison that authorizes a push: two runs sharing a pid and a
+    /// millisecond would share it, and the second would inherit the first's
+    /// confirmed advertisements. `Daemon::recover` mints the epoch before any
+    /// socket opens, so this refusal is a startup failure and not a push-time one.
+    ///
+    /// **Mutation:** put the `unwrap_or_else(|_| "no-entropy".into())` back and
+    /// this test fails.
+    #[test]
+    #[should_panic(expected = "kernel entropy")]
+    fn a_daemon_that_cannot_mint_an_identity_refuses_to_make_an_epoch() {
+        epoch_from(Err(std::io::Error::other("getrandom refused")));
+    }
+
+    /// **Startup is where the epoch is minted, and that is the wiring under test.**
+    ///
+    /// `epoch_from(Err(..))` above pins what the refusal *is*; it says nothing about
+    /// *where* it happens, and where is the whole of the fix. Minting it costs
+    /// kernel entropy, so the call can panic — and every other caller of
+    /// [`feature_epoch`] is on the push path, reached from a task
+    /// [`Daemon::dispatch_push`] spawned, where tokio absorbs the panic. A daemon
+    /// wired that way starts, serves for hours, and dies invisibly the first time a
+    /// doorbell tries to work out who may hear it. Asked in
+    /// [`Daemon::recover`] it is a process that refuses to come up.
+    ///
+    /// Read through [`FEATURE_EPOCH`] rather than through `feature_epoch()`,
+    /// because the question is whether the cell was *already* full: a check written
+    /// through the accessor fills it and then reports that it is full.
+    ///
+    /// **Why a child process.** The cell is process-wide and fills exactly once, so
+    /// in a full parallel suite any earlier test that reaches `feature_epoch()` has
+    /// already filled it — and this assertion then passes on that test's mint rather
+    /// than on `recover`'s. Removing the mint from `recover` altogether stayed green
+    /// that way, which is to say the test could not fail for the reason it exists.
+    /// A documented "run it alone" is not a fix: it is an instruction nothing
+    /// enforces, and CI runs plain `cargo test --workspace`.
+    ///
+    /// So the child is this same binary running this same test with the sentinel
+    /// set, in a process where nothing else has run. It asserts the emptiness FIRST
+    /// — that premise is what makes the mint observable — and the parent counts the
+    /// harness line, because the child is selected by a path spelled as a string and
+    /// a rename would leave it running no test and exiting zero.
+    ///
+    /// **Mutation:** drop the `feature_epoch()` call from `recover` and this fails.
+    #[tokio::test]
+    async fn recovery_is_where_the_feature_epoch_is_minted() {
+        const CHILD: &str = "CCD_FEATURE_EPOCH_MINT_CHILD";
+
+        if std::env::var_os(CHILD).is_some() {
+            // The level the parent set, applied — and the point of setting it.
+            crate::log::init_from_env();
+            assert!(
+                FEATURE_EPOCH.get().is_none(),
+                "the premise this test rests on: in a process where nothing else has \
+                 run, the cell is still empty when recovery begins — otherwise the \
+                 assertion below would pass on somebody else's mint"
+            );
+            let daemon = test_daemon();
+            daemon.recover().await;
+            let minted = FEATURE_EPOCH.get().expect(
+                "recovery must evaluate the feature epoch: it is the last moment a \
+                 daemon that cannot mint one can refuse to start, instead of failing \
+                 inside a spawned push task tokio will swallow",
+            );
+            assert_eq!(
+                minted.as_str(),
+                feature_epoch(),
+                "and the accessor hands back the value startup already settled on, \
+                 rather than minting a second one"
+            );
+            return;
+        }
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "state::tests::recovery_is_where_the_feature_epoch_is_minted",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            // **And at a level that does not print the line the mint used to hide
+            // in.** `log_info!` evaluates its arguments only when INFO is enabled,
+            // so a mint written inside one is a mint an operator can turn off:
+            // `CODECONNECT_LOG=warn` would put the first `feature_epoch()` call
+            // back inside a spawned push task, where tokio swallows the refusal —
+            // the exact wiring this test exists to pin. Measured: with the call
+            // inside the log line, this child fails.
+            .env("CODECONNECT_LOG", "warn")
+            .output()
+            .unwrap();
+        let told = String::from_utf8_lossy(&child.stderr).into_owned();
+        let harness = String::from_utf8_lossy(&child.stdout).into_owned();
+        assert!(
+            child.status.success(),
+            "startup is not where the feature epoch is minted: {told}"
+        );
+        assert!(
+            harness.contains("test result: ok. 1 passed"),
+            "the child ran no test: the path in `args` no longer names this one. {harness}"
         );
     }
 
@@ -9111,7 +13464,18 @@ mod tests {
         let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
         assert!(wait_bound(&daemon, uid, &request_id).await);
 
-        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        assert!(
+            daemon
+                .mark_exited(
+                    &test_key(),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, uid).await
+                )
+                .await,
+            "the premise: the end is recorded — this test is about what a recorded end \
+             does NOT make deletable"
+        );
         daemon.unregister_supervisor(&pane._registration).await;
         assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
         {
@@ -9146,7 +13510,18 @@ mod tests {
         let daemon = test_daemon();
         let uid = TEST_UID;
         let _pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        assert!(
+            daemon
+                .mark_exited(
+                    &test_key(),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, uid).await
+                )
+                .await,
+            "the premise: the end is recorded — this test is about what a recorded end \
+             does NOT make deletable"
+        );
         {
             let inner = daemon.inner.lock().await;
             assert!(inner.supervisors.contains_key(uid));
@@ -9439,7 +13814,9 @@ mod tests {
         seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
         let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
         daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .await;
 
         let ends = kinds_of(&daemon, TEST_UID)
             .iter()
@@ -9447,6 +13824,392 @@ mod tests {
             .count();
         assert_eq!(ends, 1, "one death, one `SessionEnd`");
         assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
+    }
+
+    /// A prober that lets a registration land in the one window round-8 F3 names:
+    /// **after the sweep's final look and before its commit.**
+    ///
+    /// The window cannot be staged from outside. `reconcile_liveness_with` probes
+    /// and commits inside one call with nothing in between a test can hold, so the
+    /// only seam is the probe itself — which is exactly where the real window opens,
+    /// because the sweep's evidence stops being current the instant the last answer
+    /// is given. Registering from inside the final `presence` call is therefore not
+    /// a contrivance: it is the same instant a real reconnect would occupy, and it
+    /// is *ordered*, so nothing here is timing.
+    struct ReregistersOnTheLastLook {
+        daemon: Arc<Daemon>,
+        uid: String,
+        looks: std::sync::Mutex<u32>,
+    }
+
+    impl crate::liveness::Presence for ReregistersOnTheLastLook {
+        async fn presence(&self, _target: &crate::liveness::Target) -> crate::liveness::Sighting {
+            let look = {
+                let mut looks = self.looks.lock().unwrap();
+                *looks += 1;
+                *looks
+            };
+            // Answered `Gone` on every look, so the sweep genuinely confirms the
+            // exit and genuinely reaches its commit. The replacement lands after the
+            // last of those answers is settled.
+            if look == protocol::tmux::EXIT_CONFIRMATIONS {
+                register(&self.daemon, "cc-1", Some(&self.uid)).await;
+            }
+            crate::liveness::Sighting {
+                presence: protocol::tmux::SessionPresence::Gone,
+                owner: None,
+            }
+        }
+    }
+
+    /// **A replacement registration that completes before the sweep commits keeps
+    /// the row** (round-8 F3).
+    ///
+    /// The sweep's proof is a tmux answer, and an answer is only ever a fact about
+    /// the moment it was given. Between the last look and
+    /// [`Daemon::mark_exited`] there is a whole confirmation loop's worth of
+    /// scheduling — and a supervisor reconnecting, or a crashed run resumed under
+    /// its own uid, completes a registration in it. The row then says `Live` because
+    /// the registration wrote it, the daemon holds that registration's supervisor
+    /// and link, and the sweep writes `Exited` over all of it and files a
+    /// `SessionEnd` for a session that is running. That is the same lie the sweep
+    /// exists to stop, told in the opposite direction.
+    ///
+    /// Gating alone does not fix it, which is why the fix is a gate **and** a
+    /// revalidation: the stale look happened before the gate was ever taken, so a
+    /// commit that merely waits its turn still commits stale evidence. What makes it
+    /// safe is comparing the owner the sweep observed against the owner at the
+    /// commit, under the gate that makes the answer unable to change.
+    ///
+    /// **Mutation:** drop the `observed_owner` comparison in `mark_exited` — keep
+    /// the gate — and this fails at the lifecycle assertion, `left: Exited, right:
+    /// Live`, with a `SessionEnd` filed against a live run.
+    #[tokio::test]
+    async fn a_replacement_registration_that_lands_before_the_commit_keeps_its_row_alive() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        let tmux = ReregistersOnTheLastLook {
+            daemon: Arc::clone(&daemon),
+            uid: TEST_UID.to_string(),
+            looks: std::sync::Mutex::new(0),
+        };
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            *tmux.looks.lock().unwrap(),
+            protocol::tmux::EXIT_CONFIRMATIONS,
+            "the premise: the sweep confirmed this row gone the full number of times \
+             and therefore reached its commit — a test whose sweep stopped early \
+             would pass for a reason that has nothing to do with the guard"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the row belongs to the registration that completed, not to the answer a \
+             probe gave before it"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "and no end is filed either: a `SessionEnd` is durable, so a phone told \
+             this run had finished would never be told otherwise"
+        );
+        assert_eq!(sweep.gone, 0, "nothing was proven gone");
+    }
+
+    /// The same seam, occupied by a **hook** rather than a registration.
+    ///
+    /// A hook is the writer the owner comparison cannot see: [`Daemon::ensure_session`]
+    /// writes the row `Live` and stakes no epoch at all, so the claim standing at the
+    /// commit is byte-identical to the one the sweep observed.
+    struct AHookLandsOnTheLastLook {
+        daemon: Arc<Daemon>,
+        uid: String,
+        looks: std::sync::Mutex<u32>,
+    }
+
+    impl crate::liveness::Presence for AHookLandsOnTheLastLook {
+        async fn presence(&self, _target: &crate::liveness::Target) -> crate::liveness::Sighting {
+            let look = {
+                let mut looks = self.looks.lock().unwrap();
+                *looks += 1;
+                *looks
+            };
+            if look == protocol::tmux::EXIT_CONFIRMATIONS {
+                self.daemon
+                    .handle_hook(HookPost {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(self.uid.clone()),
+                        event: "SessionStart".into(),
+                        payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                        wait: false,
+                    })
+                    .await;
+            }
+            crate::liveness::Sighting {
+                presence: protocol::tmux::SessionPresence::Gone,
+                owner: None,
+            }
+        }
+    }
+
+    /// **A ROW WRITTEN AFTER THE LOOK IS A ROW THE SWEEP NEVER EXAMINED** (round-9 F3).
+    ///
+    /// The owner comparison round 8 added answers "whose session is this", and that
+    /// is not the same question as "is this still the row I read". A hook is the
+    /// plainest demonstration: [`Daemon::ensure_session`] writes `Lifecycle::Live`
+    /// and stakes nothing, so the claim at the commit equals the claim the sweep
+    /// observed and an owner-only guard waves the stale evidence through — over the
+    /// liveness the hook just recorded, with a `SessionEnd` no later fact can
+    /// withdraw.
+    ///
+    /// The same guard covers the other trace in the same finding, which this cannot
+    /// stage without hand-polling a future parked on a lock: a registration stakes
+    /// its epoch two awaits BEFORE its row write, so a sweep can hold the *new*
+    /// epoch and the *old* row at once and find them agreeing. That the two move
+    /// independently, and that evidence carrying one of each is refused, is
+    /// [`an_end_established_between_a_registrations_stake_and_its_row_write_is_refused`].
+    ///
+    /// **Mutation:** drop the `row_writes` comparison in `mark_exited` — keep the
+    /// gate and the owner comparison — and this fails at the lifecycle assertion,
+    /// `left: Exited, right: Live`, with a `SessionEnd` filed against a run whose
+    /// hook had just said it was alive.
+    #[tokio::test]
+    async fn a_hook_that_lands_before_the_commit_keeps_its_row_alive() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        let tmux = AHookLandsOnTheLastLook {
+            daemon: Arc::clone(&daemon),
+            uid: TEST_UID.to_string(),
+            looks: std::sync::Mutex::new(0),
+        };
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            *tmux.looks.lock().unwrap(),
+            protocol::tmux::EXIT_CONFIRMATIONS,
+            "the premise: the sweep confirmed this row gone the full number of times \
+             and therefore reached its commit"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(TEST_UID),
+            None,
+            "the premise this test turns on: a hook stakes no registration, so the \
+             owner comparison sees the same answer before and after and cannot be \
+             what refuses this commit"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the row was written after the look this end rests on, so the look was at \
+             a row that no longer exists"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "and no end is filed either: a `SessionEnd` is durable"
+        );
+        assert_eq!(sweep.gone, 0, "nothing was proven gone");
+    }
+
+    /// **THE STAKE AND THE ROW WRITE ARE TWO MOMENTS, AND AN END BETWEEN THEM IS
+    /// STALE** (round-9 F3).
+    ///
+    /// The first half is the premise the second rests on, measured rather than
+    /// assumed: a registration that stakes its claim and is then refused by the
+    /// uid's tombstone has moved the owner and written no row, so the two
+    /// observations a commit compares genuinely move independently — which is
+    /// exactly the state a sweep can snapshot, since its snapshot is taken before
+    /// its row read and a registration holding the acceptance gate is running on the
+    /// other side of it.
+    ///
+    /// The second half is the refusal: evidence naming the *new* owner and the *old*
+    /// row count is evidence about a row that has since been overwritten, and the
+    /// owner comparison alone reads it as current.
+    ///
+    /// **Mutation:** drop the `row_writes` comparison in `mark_exited` and the final
+    /// assertion fails — the commit is accepted and the row the registration wrote
+    /// is marked `Exited`.
+    #[tokio::test]
+    async fn an_end_established_between_a_registrations_stake_and_its_row_write_is_refused() {
+        let daemon = test_daemon();
+
+        // Half one: a registration that stakes and gets no further. Its uid is
+        // deleted out from under it, so the upsert is refused and the row is never
+        // written — the same shape as a registration caught mid-window.
+        let doomed = register(&daemon, "cc-2", None).await;
+        let doomed_uid = doomed.session.uid.clone();
+        daemon
+            .store
+            .set_lifecycle(&doomed_uid, Lifecycle::Exited)
+            .unwrap();
+        daemon.store.delete_exited_session(&doomed_uid).unwrap();
+        let before = observed_now(&daemon, &doomed_uid).await;
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-2".into(),
+                        session_uid: Some(doomed_uid.clone()),
+                        tmux_session: "cc-2".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/tmp".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: this registration staked its claim and its row write was refused"
+        );
+        let after = observed_now(&daemon, &doomed_uid).await;
+        assert_ne!(
+            after.owner, before.owner,
+            "the claim is staked before the row is written, which is the whole window"
+        );
+        assert_eq!(
+            after.row_writes, before.row_writes,
+            "and nothing was written, so the two observations a commit compares are \
+             demonstrably not one observation"
+        );
+
+        // Half two: the commit. A sweep that snapshotted inside that window holds
+        // the incoming registration's epoch beside the outgoing row's count.
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let before = observed_now(&daemon, TEST_UID).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let mid_window = EndEstablishedAgainst {
+            owner: Some(replacement.epoch),
+            row_writes: before.row_writes,
+        };
+        assert!(
+            !daemon
+                .mark_exited(&test_key(), None, Some("test"), mid_window)
+                .await,
+            "the epochs agree because the stake had already happened; the row does \
+             not, because the write had not"
+        );
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+        assert!(!kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
+    }
+
+    /// **AN EXIT REPORT IS ABOUT THE RUN THAT REPORTED IT** (round-9 F3).
+    ///
+    /// A supervisor reports its exit over a fresh connection and replays its
+    /// registration on it first, so the frame arrives carrying an identity of its
+    /// own. Reading the *current* owner instead — round 8's shape — answers a
+    /// different question, and the answer is wrong in exactly the case the guard
+    /// exists for: A registers, B replaces it, A's queued frame is then handled, and
+    /// the snapshot reads B. `EB == EB`, so the commit ends the run that REPLACED
+    /// the one that died and files its `SessionEnd`.
+    ///
+    /// The round-8 test cannot see this: it snapshots *before* the replacement, so
+    /// its observation and the current owner differ for the ordinary reason.
+    ///
+    /// **Mutation:** ignore `reported_by` in `session_exited` and take the fleet
+    /// snapshot on every path — the first two assertions fail.
+    #[tokio::test]
+    async fn a_stale_reporters_exit_never_ends_the_registration_that_replaced_it() {
+        let daemon = test_daemon();
+        let stale = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        assert!(
+            replacement.epoch > stale.epoch,
+            "the premise: one uid, two registrations, the second owning it"
+        );
+
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&stale))
+            .await;
+
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the run that ended is the one the reporter registered, and something \
+             else holds this row now"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "a `SessionEnd` cannot be withdrawn, so it must not be filed for a run \
+             that is still running"
+        );
+
+        // And the owner's own report still lands, which is what keeps this a guard
+        // rather than a refusal to record exits.
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&replacement))
+            .await;
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
+        assert!(kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
+    }
+
+    /// **A DISCONNECT IS NOT AN ERASURE** (round-9 F3).
+    ///
+    /// [`Inner::registration_epochs`] used to lose its entry when the owning
+    /// supervisor disconnected, and that made two different histories spell the same
+    /// thing: `A → B → B disconnects` and `A → A disconnects` both left the map
+    /// empty. `mark_exited` reads exactly that map, so with the entry gone it could
+    /// not tell a session that had merely gone quiet from one that had been
+    /// REPLACED and then gone quiet — and A's stale evidence committed against B's
+    /// row.
+    ///
+    /// Both directions are asserted, because a tombstone that refused everything
+    /// would be worse than the erasure: an exit reported by the last registration
+    /// there was must still land after its own socket has closed, which is the
+    /// ordinary shape of every reported exit.
+    ///
+    /// **Mutation:** restore the removal in `unregister_supervisor` (delete the
+    /// entry when this registration owns it) and the first half fails — the stale
+    /// report is accepted and the replacement's row is marked `Exited`.
+    #[tokio::test]
+    async fn a_replaced_registrations_exit_is_refused_even_after_the_replacement_goes_quiet() {
+        let daemon = test_daemon();
+        let stale = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        daemon.unregister_supervisor(&replacement).await;
+        assert!(
+            !daemon.inner.lock().await.supervisors.contains_key(TEST_UID),
+            "the premise: nothing is connected any more, so only the record of what \
+             happened can tell these two histories apart"
+        );
+
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&stale))
+            .await;
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "a registration replaced this one; its disconnect does not hand the \
+             session back to the run it replaced"
+        );
+
+        // The other direction, on a session whose only registration has gone: the
+        // report lands, because a disconnect leaves the reporter's own epoch behind
+        // rather than somebody else's.
+        let other = "01K1B3XZZZC0DE5FGH7JKMNPQR";
+        let only = register(&daemon, "cc-2", Some(other)).await;
+        daemon.unregister_supervisor(&only).await;
+        daemon
+            .session_exited("cc-2", Some(other), Some(0), Some(&only))
+            .await;
+        assert_eq!(
+            lifecycle_of(&daemon, other),
+            Lifecycle::Exited,
+            "the supervisor that owned this run said it ended; its socket having \
+             closed first is what a reported exit always looks like"
+        );
     }
 
     #[tokio::test]
@@ -9499,7 +14262,9 @@ mod tests {
         // true by construction rather than by two people remembering.
         let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
         seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .await;
         assert_eq!(
             tails.try_recv().expect("the tailer must be told to stop"),
             crate::tailer::TailCommand::Stop {
@@ -10758,6 +15523,7 @@ mod tests {
                     codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),

@@ -362,6 +362,12 @@ impl CodexAdapter {
             // are alive, and a turn it reports `completed` describes their real
             // terminals. So there is still no "turn started" fact to mint here —
             // the turn's existence is carried by its terminal, from either source.
+            //
+            // **It is not inert, though — it is just not a fact.** The frame is the
+            // only thing on this wire that says the agent has gone back to work, and
+            // the push gate reads it as such: see `codex_link`'s
+            // `Connection::note_turn_start`, which takes it off the raw frame
+            // precisely because there is no event here to hang it on.
             "turn/started" => Vec::new(),
 
             // Known, deliberately not rendered: observation noise, ownership/
@@ -980,7 +986,7 @@ impl CodexAdapter {
         });
         out.push(
             self.event(EventKind::TurnComplete, payload)
-                .with_source_event_id(sid(tid, &format!("turn:{turn_id}")))
+                .with_source_event_id(turn_terminal_source_event_id(tid, turn_id))
                 .with_turn_id(Some(turn_id.to_string())),
         );
 
@@ -1114,6 +1120,19 @@ impl OpenItem {
 /// cannot alias after a switch.
 fn sid(thread_id: &str, suffix: &str) -> String {
     format!("{thread_id}:{suffix}")
+}
+
+/// **The identity of one turn's terminal fact**, thread-namespaced like every
+/// other source-event id here.
+///
+/// Named rather than inlined because it has a second caller that is not writing
+/// the fact but *asking whether it was ever written*
+/// ([`crate::store::Store::turn_terminal_filed`], through
+/// `Connection::attach_from_seed`). A turn id is unique per thread and not per
+/// session, so that question is unanswerable without the thread — and the two
+/// sites must build the same string or the ask is about a fact nothing files.
+pub fn turn_terminal_source_event_id(thread_id: &str, turn_id: &str) -> String {
+    sid(thread_id, &format!("turn:{turn_id}"))
 }
 
 /// Payload for a commandExecution/fileChange ToolCall from its started snapshot.

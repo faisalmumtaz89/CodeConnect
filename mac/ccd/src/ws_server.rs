@@ -615,21 +615,25 @@ where
                                 if tls_active { "wss" } else { "ws" },
                                 describe(&ack),
                             );
-                            // **Replace-on-hello, fail-closed — BEFORE the ack.**
-                            // An authenticated device's feature set is replaced
-                            // from this hello: present ⇒ recorded under this run's
-                            // epoch, absent ⇒ overwritten to Claude-only. Done
-                            // here, before the fallible ack build/send, so an ack
-                            // failure can never skip the replacement and leave a
-                            // stale Codex set eligible. The bootstrap token has no
-                            // device row, so it is skipped.
+                            // **The advertised feature set is read off the wire and
+                            // dropped.** `hello` still carries a wire-legal
+                            // `features`, and no shipping client puts anything in
+                            // it — the iOS encoder has no such key, and the only
+                            // other production client sends `None`. Persisting it
+                            // meant a write path, an epoch stamp and a fail-closed
+                            // record of failed writes, all acting on an input the
+                            // wire cannot produce; the whole of it is gone. Said at
+                            // debug rather than in silence so a phone that DOES
+                            // start advertising is visible in a log before anybody
+                            // wonders why it changed nothing.
                             if let Some(device_id) = device_id.as_deref() {
-                                persist_device_features_fail_closed(
-                                    &daemon,
-                                    device_id,
-                                    features.as_ref(),
-                                )
-                                .await;
+                                if features.is_some() {
+                                    crate::log_debug!(
+                                        "push: ignoring an advertised feature set from \
+                                         {device_id}; nothing writes device features in this \
+                                         phase"
+                                    );
+                                }
                             }
                             match hello_ack(&daemon, ack, tls_active, private_transport).await {
                                 Ok(ack) => send(&mut sink, &ack).await?,
@@ -1058,14 +1062,16 @@ where
     <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        // A second hello does not re-authenticate, but it **does** replace the
-        // device's feature set, fail-closed — the same replace-on-hello rule as
-        // the first one. A client that stopped advertising Codex on a re-hello
-        // must lose eligibility, not keep a stale set because the frame was
-        // treated as a no-op.
+        // A second hello does not re-authenticate, and there is nothing else for
+        // it to do: the `features` it may carry is ignored on exactly the same
+        // terms as the first hello's, because nothing in this phase writes a
+        // device feature set.
         ClientMessage::Hello { features, .. } => {
-            if let Some(device_id) = device_id {
-                persist_device_features_fail_closed(daemon, device_id, features.as_ref()).await;
+            if let (Some(device_id), Some(_)) = (device_id, features) {
+                crate::log_debug!(
+                    "push: ignoring an advertised feature set from {device_id}; nothing \
+                     writes device features in this phase"
+                );
             }
         }
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
@@ -1109,10 +1115,6 @@ where
                     Ok(accepted) => accepted,
                     Err(refusal) => {
                         crate::log_warn!("push: refusing registration from {device_id}: {refusal}");
-                        // Fail closed: a refused registration must not leave a
-                        // stale Codex feature set eligible. Clear to Claude-only
-                        // before returning.
-                        persist_device_features_fail_closed(daemon, device_id, None).await;
                         send(
                             sink,
                             &ServerMessage::Error {
@@ -1124,26 +1126,29 @@ where
                         return Ok(());
                     }
                 };
-            match daemon
+            // **The advertised feature set is ignored, exactly as on `hello`.** A
+            // registration used to write it in the token's own statement, under
+            // this run's epoch, with a fail-closed record of the writes that did
+            // not land. Nothing on the wire can fill this field — no shipping
+            // client encodes it — so all of that was a write path with no input,
+            // and it is gone rather than kept working. The registration itself is
+            // unaffected: the token, its environment and its credential are what a
+            // phone actually sends, and they still commit as one tuple.
+            if features.is_some() {
+                crate::log_debug!(
+                    "push: ignoring an advertised feature set from {device_id}; nothing \
+                     writes device features in this phase"
+                );
+            }
+            let registered = daemon
                 .register_push(device_id, &token, &environment, credential.as_ref())
-                .await
-            {
-                Ok(()) => {
-                    crate::log_info!(
-                        "push: device {device_id} registered for {environment} notifications"
-                    );
-                    // **Replace-on-registration, fail-closed.** Present ⇒ recorded
-                    // under this run's epoch; absent, an encode failure, or a
-                    // store failure ⇒ overwritten to Claude-only. A registration
-                    // that names no features can never leave stale Codex
-                    // eligibility standing.
-                    persist_device_features_fail_closed(daemon, device_id, features.as_ref()).await;
-                }
+                .await;
+            match registered {
+                Ok(()) => crate::log_info!(
+                    "push: device {device_id} registered for {environment} notifications"
+                ),
                 Err(err) => {
                     crate::log_error!("push: could not register {device_id}: {err:#}");
-                    // Fail closed: a failed token store must not leave a stale
-                    // Codex feature set eligible either.
-                    persist_device_features_fail_closed(daemon, device_id, None).await;
                     send(
                         sink,
                         &ServerMessage::Error {
@@ -2743,72 +2748,6 @@ fn validated_registration(
     }
 }
 
-/// Replace a device's persisted feature set from what a hello/registration
-/// advertised, **fail-closed**. `Some` records it under this run's epoch; `None`,
-/// an encoding failure, or a store failure clears it to Claude-only.
-///
-/// When the DB itself cannot be written the guard is the backstop: a set that
-/// failed is retried as a clear (so a broken write never leaves stale Codex
-/// eligibility standing), and if even the clear cannot be written the device is
-/// marked **untrusted** in [`Daemon::codex_push_guard`] — so the push projection
-/// treats it as Claude-only this run rather than trusting a possibly-stale
-/// same-epoch set until the next restart. A successful write re-trusts it.
-async fn persist_device_features_fail_closed(
-    daemon: &Arc<Daemon>,
-    device_id: &str,
-    features: Option<&protocol::ws::ClientFeatures>,
-) {
-    let epoch = crate::state::feature_epoch();
-    // An encode failure is treated as absence: clear, never keep a stale set.
-    let json = match features {
-        Some(features) => match serde_json::to_string(features) {
-            Ok(json) => Some(json),
-            Err(err) => {
-                crate::log_error!(
-                    "push: could not encode features for {device_id}; clearing to Claude-only: {err:#}"
-                );
-                None
-            }
-        },
-        None => None,
-    };
-    let clearing = json.is_none();
-    match daemon
-        .db
-        .set_device_features(device_id.to_string(), json, epoch.to_string())
-        .await
-    {
-        // The DB now holds the truth — either the advertised set, or Claude-only.
-        // Either way the device's persisted state is trustworthy again.
-        Ok(()) => daemon.codex_push_guard.retrust_device(device_id),
-        Err(err) => {
-            crate::log_error!("push: could not persist features for {device_id}: {err:#}");
-            if clearing {
-                // The clear itself failed: a prior same-epoch Codex set may
-                // survive, so this device is not Codex-eligible this run.
-                daemon.codex_push_guard.distrust_device(device_id);
-                return;
-            }
-            // The set failed; force a clear to Claude-only so no stale set is
-            // left standing. If that also fails, the device is untrusted.
-            match daemon
-                .db
-                .set_device_features(device_id.to_string(), None, epoch.to_string())
-                .await
-            {
-                Ok(()) => daemon.codex_push_guard.retrust_device(device_id),
-                Err(err) => {
-                    crate::log_error!(
-                        "push: could not clear features for {device_id} after a failed set; \
-                         marking it Codex-ineligible this run: {err:#}"
-                    );
-                    daemon.codex_push_guard.distrust_device(device_id);
-                }
-            }
-        }
-    }
-}
-
 fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) -> Capabilities {
     // **One transport, named once.** `push` and `push_relay` are one-hot and
     // both are read off the mode rather than off a predicate: a phone has to
@@ -3056,66 +2995,6 @@ mod tests {
         assert!(!revoked(&daemon, None).await);
     }
 
-    /// The replace-on-hello/registration helper: a present set is stored under
-    /// this run's epoch, and absence overwrites it to Claude-only. Probed via
-    /// `invalidate_device_features` (a set confirmed under the current epoch
-    /// survives a matching-epoch invalidation and is cleared by a mismatched one;
-    /// absence leaves nothing to clear).
-    #[tokio::test]
-    async fn the_feature_helper_replaces_a_set_and_absence_clears_it() {
-        let (daemon, device_id) = daemon_with_a_device();
-        let epoch = crate::state::feature_epoch();
-        let codex = protocol::ws::ClientFeatures {
-            agents: vec![protocol::agent::AgentKind::Codex],
-        };
-
-        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
-        assert!(daemon.codex_push_guard.device_features_trusted(&device_id));
-        // A set exists (a mismatched-epoch invalidation clears exactly one row).
-        assert_eq!(
-            daemon
-                .db
-                .invalidate_device_features("some-other-epoch".into())
-                .await
-                .unwrap(),
-            1
-        );
-
-        // Re-set, then absence clears it: nothing is left for a later invalidation.
-        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
-        persist_device_features_fail_closed(&daemon, &device_id, None).await;
-        assert_eq!(
-            daemon
-                .db
-                .invalidate_device_features(epoch.to_string())
-                .await
-                .unwrap(),
-            0,
-            "absence cleared the set to Claude-only"
-        );
-    }
-
-    /// **Fail-closed on a write failure (Finding 2d).** When the device store is
-    /// broken so a clear cannot be written, the device is marked Codex-ineligible
-    /// in the guard rather than left trusting a possibly-stale same-epoch set.
-    #[tokio::test]
-    async fn a_failed_feature_clear_marks_the_device_codex_ineligible() {
-        let (daemon, device_id) = daemon_with_a_device();
-        let codex = protocol::ws::ClientFeatures {
-            agents: vec![protocol::agent::AgentKind::Codex],
-        };
-        persist_device_features_fail_closed(&daemon, &device_id, Some(&codex)).await;
-        assert!(daemon.codex_push_guard.device_features_trusted(&device_id));
-
-        // Break the store so the clear write fails, then try to clear.
-        daemon.store.break_device_lookups_for_tests();
-        persist_device_features_fail_closed(&daemon, &device_id, None).await;
-        assert!(
-            !daemon.codex_push_guard.device_features_trusted(&device_id),
-            "a device whose feature write failed must not stay Codex-eligible"
-        );
-    }
-
     #[tokio::test]
     async fn revoking_publishes_a_cancellation_the_same_instant() {
         // Revocation used to reach an idle socket only at its next keepalive,
@@ -3233,6 +3112,9 @@ mod tests {
         /// The same database the daemon writes, so a test can read what a
         /// registration actually stored rather than what it hoped it did.
         store: Arc<crate::store::Store>,
+        /// The file that database lives in, so a test can reach it with a
+        /// connection of its own — see [`LiveServer::refuse_push_token_writes`].
+        path: std::path::PathBuf,
         /// The accept loop, ended when the test that started it is over.
         ///
         /// It used to be spawned and forgotten, which leaks the listener's
@@ -3262,7 +3144,7 @@ mod tests {
         config: protocol::config::Config,
         push: Arc<dyn crate::apns::PushSender>,
     ) -> (LiveServer, String) {
-        let (daemon, device_id, store, _path) = daemon_with_a_device_pushing(config, push);
+        let (daemon, device_id, store, path) = daemon_with_a_device_pushing(config, push);
         // Bound here rather than inside `serve` so the test learns the port.
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -3282,6 +3164,7 @@ mod tests {
                 daemon,
                 token,
                 store,
+                path,
                 accepting,
             },
             device_id,
@@ -3311,6 +3194,78 @@ mod tests {
             let reply = next_json(&mut socket).await.expect("a reply to hello");
             (socket, reply)
         }
+
+        /// The same handshake, carrying an advertised feature set.
+        ///
+        /// A separate method rather than a parameter on [`LiveServer::hello`]: every
+        /// other test here is about a phone that advertises nothing, which is every
+        /// phone in the field, and threading a `None` through all of them would make
+        /// the ordinary case read like the exception.
+        async fn hello_advertising(
+            &self,
+            device_token: &str,
+            features: serde_json::Value,
+        ) -> (
+            tokio_tungstenite::WebSocketStream<TcpStream>,
+            serde_json::Value,
+        ) {
+            let stream = TcpStream::connect(self.addr).await.unwrap();
+            let url = format!("ws://{}/", self.addr);
+            let (mut socket, _) = tokio_tungstenite::client_async(&url, stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    hello_frame(device_token, features).to_string(),
+                ))
+                .await
+                .unwrap();
+            let reply = next_json(&mut socket).await.expect("a reply to hello");
+            (socket, reply)
+        }
+
+        /// Make the next `register_push` fail **in the store**, leaving every
+        /// other query answering normally.
+        ///
+        /// The arm under test is the one after a registration has been accepted
+        /// as well-formed and the write itself did not land, and nothing the
+        /// daemon does can produce that on demand — so it is manufactured, for
+        /// the same reason and on the same terms as
+        /// [`crate::store::Store::break_device_lookups_for_tests`]. That one
+        /// drops the table, which is too big a hammer here: the assertion this
+        /// enables is a *read* of the same table afterwards, so the breakage has
+        /// to be narrow enough to leave the read working.
+        ///
+        /// `BEFORE UPDATE OF push_token` is exactly that narrow. It aborts the
+        /// one statement `Store::set_push_token` uses to claim the token — which
+        /// reaches the daemon as the same `Err` a corrupt page or a full disk
+        /// would — and touches nothing else: `devices.features` is written by a
+        /// different statement and read by a different one again, so a clearing
+        /// write on the failure path would still land, which is the whole point.
+        fn refuse_push_token_writes(&self) {
+            rusqlite::Connection::open(&self.path)
+                .expect("test fixture")
+                .execute_batch(
+                    "CREATE TRIGGER refuse_push_token_writes
+                       BEFORE UPDATE OF push_token ON devices
+                     BEGIN
+                       SELECT RAISE(ABORT, 'the devices table would not take this write');
+                     END;",
+                )
+                .expect("test fixture");
+        }
+    }
+
+    /// A `hello` at the current protocol, on the device token these tests pair with,
+    /// carrying an advertised feature set. Used for both the handshake hello and the
+    /// second one sent down an already-authenticated socket — the two are different
+    /// handlers, and the whole point of the test below is that they behave alike.
+    fn hello_frame(token: &str, features: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "hello",
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "token": token,
+            "client_name": "test",
+            "features": features,
+        })
     }
 
     /// How a read of the next text frame ended.
@@ -3531,7 +3486,11 @@ mod tests {
             "the message must name what is missing: {refusal}"
         );
         assert!(
-            server.store.push_targets().unwrap().is_empty(),
+            server
+                .store
+                .push_targets(crate::state::feature_epoch())
+                .unwrap()
+                .is_empty(),
             "nothing may be stored for a registration that was refused"
         );
     }
@@ -3549,7 +3508,10 @@ mod tests {
                 .is_none(),
             "an accepted registration is answered with silence, by design"
         );
-        let stored = server.store.push_targets().unwrap();
+        let stored = server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].device_id, device);
         assert_eq!(stored[0].token, A_TOKEN);
@@ -3557,6 +3519,268 @@ mod tests {
         assert_eq!(
             stored[0].credential.as_ref().map(|c| c.expose()),
             Some("a-relay-bearer")
+        );
+    }
+
+    /// **An advertised feature set is wire-legal, accepted, and ignored.**
+    ///
+    /// `features` is still a field on `register_push`, and the daemon used to store
+    /// it beside the token under this run's epoch. No shipping client can put
+    /// anything in it, so that write was machinery for an input the wire cannot
+    /// produce and it is gone — but the field itself stays legal, because refusing
+    /// a frame for carrying it would break the phone that eventually sends one.
+    ///
+    /// Both halves are the same rule stated twice: the registration succeeds, and
+    /// the row it wrote is at the Claude floor — the same row a phone that named
+    /// nothing leaves, because the column is never written at all.
+    ///
+    /// **Mutation:** make the handler refuse or persist an advertised set and one
+    /// of the two assertions fails.
+    #[tokio::test]
+    async fn an_advertised_feature_set_is_accepted_and_changes_nothing() {
+        let codex = protocol::agent::AgentKind::Codex;
+        let (server, _device) = server_in(crate::apns::PushMode::Direct).await;
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+
+        let mut advertising = registration(A_TOKEN, None);
+        advertising["features"] = serde_json::json!({"agents": ["claude", "codex"]});
+        assert!(
+            register(&mut socket, advertising).await.is_none(),
+            "a frame carrying a feature set is a good registration, not an error"
+        );
+        let stored = server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].token, A_TOKEN);
+        assert!(
+            !stored[0].features.supports(&codex),
+            "nothing wrote the advertisement down, so the row is the floor a device \
+             that said nothing would have"
+        );
+        assert!(
+            stored[0]
+                .features
+                .supports(&protocol::agent::AgentKind::Claude),
+            "and the floor is Claude, not silence: an empty column is the row every \
+             phone predating the field has"
+        );
+    }
+
+    /// The device's stored feature column, read twice: once under this run's epoch
+    /// and once under another's.
+    ///
+    /// Two reads because they pin different bytes. The first decodes the JSON, so it
+    /// pins what the device said; the second is `Unconfirmable` **only while a set is
+    /// stored at all**, so it pins that the column is non-`NULL` and that the epoch
+    /// stamp beside it is this run's. A write that cleared either would move one of
+    /// them, and `NULL` — the shape a clearing write leaves — moves both to the
+    /// Claude floor at once.
+    fn stored_features(
+        server: &LiveServer,
+    ) -> (crate::store::DeviceFeatures, crate::store::DeviceFeatures) {
+        let mine = server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap();
+        let foreign = server.store.push_targets("some-other-daemon-run").unwrap();
+        assert_eq!(mine.len(), 1, "one registered device");
+        assert_eq!(foreign.len(), 1);
+        (mine[0].features.clone(), foreign[0].features.clone())
+    }
+
+    /// **AN INERT FIELD LEAVES A PRE-EXISTING SET EXACTLY AS IT FOUND IT** (round-9 F7).
+    ///
+    /// The sibling test above starts from a fresh `NULL` row, and `NULL` is what a
+    /// clearing write produces — so "nothing was written" and "the column was wiped"
+    /// are the same observation there, and restoring `set_device_features(.., None,
+    /// ..)` to either handler passes it unchanged while erasing whatever the device
+    /// had said and handing a `[Codex]`-only phone the Claude doorbells its own claim
+    /// excluded. That is not a hypothetical shape: it is precisely the state
+    /// [`crate::store::DeviceFeatures::Unconfirmable`] exists for, and the read side
+    /// is already built to tell it from the floor.
+    ///
+    /// So this preseeds a real set and asserts it still reads back as the same set,
+    /// under the same epoch stamp, after every path that carries a `features` field.
+    /// Both reads decode rather than compare raw column bytes — that is what the
+    /// push projection itself does, so it is the granularity the behaviour lives at
+    /// — and between them they pin the column as populated, as this run's, and as
+    /// saying Codex, which is every property a clearing write would move:
+    ///
+    ///   * the **handshake** `hello`, which is a different handler from
+    ///   * a **second** `hello` down an already-authenticated socket;
+    ///   * an **accepted** `register_push`;
+    ///   * a **refused** one — a relay daemon's registration with no credential, so
+    ///     the frame is rejected after the feature field has been read;
+    ///   * and one whose **store write failed** — accepted as well-formed, then not
+    ///     written. That is a *different arm* from the refusal: the refusal returns
+    ///     during credential validation and never reaches `register_push` at all, so
+    ///     a leg that only exercises it leaves the failure arm below unwitnessed and
+    ///     a clearing write there survives every other assertion here.
+    ///
+    /// **Mutation:** call `set_device_features(device_id, None, feature_epoch())` from
+    /// any one of those five sites and its assertion fails: the confirmed `[Codex]`
+    /// set becomes the empty legacy set, which is the Claude floor under both reads.
+    #[tokio::test]
+    async fn an_advertised_feature_set_leaves_a_stored_one_untouched_on_every_path() {
+        let codex = protocol::agent::AgentKind::Codex;
+        let claude = protocol::agent::AgentKind::Claude;
+        let advertising = serde_json::json!({"agents": ["claude", "codex"]});
+        let (server, device) = server_in(crate::apns::PushMode::Relay).await;
+
+        // A registered phone whose column holds a confirmed `[Codex]` set. Written
+        // through the store rather than the wire because nothing on the wire can
+        // write it — that is the whole subject of this test — and `push_targets`
+        // only reports rows that carry a token, so the registration comes first.
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert!(
+            register(&mut socket, registration(A_TOKEN, Some("a-relay-bearer")))
+                .await
+                .is_none(),
+            "the premise: this device has a push token, or it is in no fan-out at all"
+        );
+        server
+            .store
+            .set_device_features(
+                &device,
+                Some(r#"{"agents":["codex"]}"#),
+                crate::state::feature_epoch(),
+            )
+            .unwrap();
+
+        let seeded = stored_features(&server);
+        assert_eq!(
+            seeded.0,
+            crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
+                agents: vec![codex.clone()]
+            }),
+            "the premise: this row says Codex and only Codex"
+        );
+        assert_eq!(
+            seeded.1,
+            crate::store::DeviceFeatures::Unconfirmable,
+            "the premise: a set really is stored — an empty column reads as the Claude \
+             floor under every epoch, and could not tell a clearing write apart"
+        );
+        assert!(
+            !seeded.0.supports(&claude),
+            "the premise that gives the mutation teeth: this phone has said it cannot \
+             render a Claude alert, so a write that broadened it back to the floor \
+             would start sending it ones"
+        );
+
+        // The handshake hello, advertising something else entirely.
+        let (mut socket, _) = server
+            .hello_advertising("device-token-for-tests", advertising.clone())
+            .await;
+        assert_eq!(
+            stored_features(&server),
+            seeded,
+            "the first hello reads the field and drops it; it does not get to rewrite \
+             what this device is already on record as saying"
+        );
+
+        // A second hello, down the socket that is already authenticated. Different
+        // handler, same rule — and the phone is answered rather than dropped, which
+        // is how the test knows the frame was processed at all.
+        socket
+            .send(Message::Text(
+                hello_frame("device-token-for-tests", advertising.clone()).to_string(),
+            ))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(r#"{"type":"ping"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut socket).await.expect("the ping is answered")["type"],
+            "pong",
+            "the re-hello was consumed before the ping, so what follows is a claim \
+             about a frame the daemon really handled"
+        );
+        assert_eq!(
+            stored_features(&server),
+            seeded,
+            "a second hello does not re-authenticate and does not re-advertise either"
+        );
+
+        // An ACCEPTED registration carrying a feature set.
+        let mut accepted = registration(A_TOKEN, Some("a-relay-bearer"));
+        accepted["features"] = advertising.clone();
+        assert!(
+            register(&mut socket, accepted).await.is_none(),
+            "the premise: this registration was accepted"
+        );
+        assert_eq!(
+            stored_features(&server),
+            seeded,
+            "the token, its environment and its credential commit as one tuple; the \
+             feature set is not part of it and does not travel with it"
+        );
+
+        // And a REFUSED one — a relay daemon with no credential to present. The
+        // field is read before the refusal, so this is the path where a write would
+        // be worst: a frame that mutated nothing else still erasing this column.
+        let mut refused = registration(A_TOKEN, None);
+        refused["features"] = advertising.clone();
+        let error = register(&mut socket, refused)
+            .await
+            .expect("a refusal the phone can act on");
+        assert_eq!(
+            error["code"], "push_registration_failed",
+            "the premise: this registration was refused, not accepted"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("relay credential"),
+            "and refused *during validation* — the code is shared with the storage \
+             failure below, so the message is what says which arm ran: {error}"
+        );
+        assert_eq!(
+            stored_features(&server),
+            seeded,
+            "a refused frame mutates nothing, and this column is nothing's most \
+             valuable case: it is the only record of what this phone can open"
+        );
+
+        // And one that was accepted and then FAILED TO STORE. The leg above
+        // returns while validating the credential and never calls
+        // `Daemon::register_push`; this one gets past validation with the bearer
+        // the accepted leg used, and dies in the write. It is its own arm, with
+        // its own handling, and nothing above reaches it.
+        server.refuse_push_token_writes();
+        let mut unstorable = registration(A_TOKEN, Some("a-relay-bearer"));
+        unstorable["features"] = advertising;
+        let error = register(&mut socket, unstorable)
+            .await
+            .expect("a failed store is reported, not swallowed");
+        assert_eq!(
+            error["code"], "push_registration_failed",
+            "the premise: this registration failed: {error}"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("could not store the push token"),
+            "the premise that makes this leg distinct: validation passed and the \
+             *write* is what failed, so this is the post-validation arm: {error}"
+        );
+        assert_eq!(
+            stored_features(&server),
+            seeded,
+            "a registration whose write failed has even less licence to rewrite this \
+             column than one that was refused outright: the daemon just demonstrated \
+             it could not write, and the only column it would still reach is the one \
+             holding what this phone said it can open"
         );
     }
 
@@ -3572,7 +3796,10 @@ mod tests {
         assert!(register(&mut socket, registration(A_TOKEN, None))
             .await
             .is_none());
-        let stored = server.store.push_targets().unwrap();
+        let stored = server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].credential, None);
 
@@ -3581,7 +3808,10 @@ mod tests {
                 .await
                 .is_none()
         );
-        let stored = server.store.push_targets().unwrap();
+        let stored = server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap();
         assert_eq!(
             stored[0].credential, None,
             "a bearer this Mac will never present is a secret kept for no reason"
@@ -3602,7 +3832,11 @@ mod tests {
                 .expect("a refusal, not silence");
             assert_eq!(refusal["code"], "push_registration_failed");
         }
-        assert!(server.store.push_targets().unwrap().is_empty());
+        assert!(server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap()
+            .is_empty());
     }
 
     /// **The bootstrap token has no device row, in any mode.** A push token
@@ -3626,7 +3860,11 @@ mod tests {
                 .await
                 .expect("a refusal, not silence");
             assert_eq!(refusal["code"], "no_device", "{mode:?}");
-            assert!(server.store.push_targets().unwrap().is_empty());
+            assert!(server
+                .store
+                .push_targets(crate::state::feature_epoch())
+                .unwrap()
+                .is_empty());
         }
     }
 
@@ -3650,7 +3888,11 @@ mod tests {
                 .expect("a refusal, not silence");
             assert_eq!(refusal["code"], "push_registration_failed", "{bad:?}");
         }
-        assert!(server.store.push_targets().unwrap().is_empty());
+        assert!(server
+            .store
+            .push_targets(crate::state::feature_epoch())
+            .unwrap()
+            .is_empty());
     }
 
     /// **The handshake reports the environment the daemon holds**, which is how

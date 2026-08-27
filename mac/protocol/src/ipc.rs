@@ -412,6 +412,28 @@ pub struct RegisterSession {
     /// performed against an unproven screen.
     #[serde(default)]
     pub protocol_minor: u32,
+    /// **This is a corpse's replay, not a supervisor introducing a run it hosts.**
+    ///
+    /// `report_exit` opens a *fresh* connection and replays this very frame
+    /// immediately before [`ClientFrame::SessionExited`], so that a session which
+    /// started *and* ended while `ccd` was down still has a row for its end to be
+    /// recorded against. The replay is byte-identical to the original
+    /// registration — it *is* the original registration, re-sent — and that is
+    /// precisely the problem this flag solves: nothing else in the frame tells
+    /// the daemon that the process behind it is already dead.
+    ///
+    /// Without it a replay is indistinguishable from a live supervisor arriving,
+    /// so it takes the session over. When another supervisor has meanwhile
+    /// resumed the same uid, that hand-over is a lie in both directions: the
+    /// replay overwrites the newer run's row, and the exit that follows is then
+    /// established against an identity the replay itself just minted — so the
+    /// daemon ends the run that *replaced* the one that died.
+    ///
+    /// Set only by `report_exit`. Absent — an older supervisor, or any other
+    /// client — decodes `false`, which is exactly the behaviour that shipped:
+    /// nothing negotiates on this, and no peer has to understand it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exit_replay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

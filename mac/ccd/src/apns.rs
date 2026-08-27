@@ -31,6 +31,24 @@ pub struct PushHint {
     /// ULID's leading bits are the run's start time, and a notification that
     /// carried one would let Apple group a device's pushes into sessions.
     pub session_uid: String,
+    /// **Whose run this doorbell is about — the authorization subject, not copy.**
+    ///
+    /// It reaches no payload and no sentence; it exists so the fan-out can drop
+    /// devices that never advertised they can render this agent (see
+    /// [`crate::push_queue::recipients`]). A phone that cannot open a Codex session
+    /// must not be told one is waiting: the notification would be unactionable, and
+    /// it would disclose a run the device has no way to see.
+    ///
+    /// On the hint as it is raised this is the run that *rang*; on the hint
+    /// [`describing`](PushHint::describing) hands the sender it is the subject the
+    /// alert ended up being about, which is not always the same thing. That is the
+    /// point: the two must never disagree, or a doorbell is delivered to devices
+    /// that cannot render what it says.
+    ///
+    /// Carried on the hint rather than passed beside it because the hint is what
+    /// crosses the [`PushSender`] seam, and a second parameter would be a second
+    /// thing for the two independent senders to keep in step.
+    pub agent: protocol::agent::AgentKind,
 }
 
 impl PushHint {
@@ -71,6 +89,36 @@ impl PushHint {
                 _ => String::new(),
             },
             session_uid: self.session_uid.clone(),
+            // **The subject follows the sentence, exactly as the title does.**
+            //
+            // This field is not copy — it is who may be *told* (see
+            // [`crate::push_queue::recipients`]) — so it is the one field where a
+            // disagreement with the re-description above is a delivery to a device
+            // that cannot render what the alert says. Keeping the ringing run's
+            // agent here did exactly that: a Codex turn finishing while a Claude
+            // card was open produced a Claude `Approval` alert, naming a Claude
+            // project, authorized to Codex-capable devices only — offering a run
+            // they have no way to open to phones that cannot see it, and skipping
+            // the phones that can answer it.
+            //
+            // So all four fields describe one subject. While any run is holding a
+            // decision the doorbell is about the decision deck, and the deck's agent
+            // is what governs; only when none is does the run that rang speak for
+            // itself.
+            //
+            // **The deck is Claude's in this build, and that is a fact rather than
+            // an assumption**: a Codex approval card cannot be raised — the Codex
+            // approval contracts are Phase 3 — so every card `blocked_sessions` can
+            // count belongs to a Claude run. This line is where Phase 3 must compute
+            // the deck's agent from the blocked set instead. Until it does, the
+            // failure direction is silence: a Codex-only device is left out of a
+            // doorbell about Codex cards that do not yet exist, never told about one
+            // it cannot open.
+            agent: if blocked > 0 {
+                protocol::agent::AgentKind::Claude
+            } else {
+                self.agent.clone()
+            },
         }
     }
 }
@@ -317,9 +365,18 @@ impl PushMode {
 }
 
 pub trait PushSender: Send + Sync {
-    /// `excluded` is the seen-filter's verdict: devices whose live socket
-    /// already delivered the fact this push announces. Computed by the caller
-    /// at dispatch time; the sender's only job is to honour it in the fan-out.
+    /// `excluded` is the list of devices this push must skip, and it carries one
+    /// refusal: the seen-filter's verdict — a device whose live socket already
+    /// delivered the fact this push announces. It is a list rather than a
+    /// predicate because it is one instruction to a sender — do not ring this
+    /// phone — computed by the caller at dispatch time; the sender's only job is
+    /// to honour it in the fan-out.
+    ///
+    /// **Eligibility is a separate question and is asked elsewhere.** Whether a
+    /// device could *use* what this announces is settled by its own advertised
+    /// feature set, in [`crate::push_queue::recipients`], against the row the
+    /// push read authorized. That is a property of the device, not of this
+    /// dispatch, so it does not travel in this list.
     fn send(&self, hint: &PushHint, excluded: &[String]);
     /// One real notification to **one named device**, with the outcome
     /// reported. `send` is deliberately fire-and-forget spray; a test whose
@@ -464,6 +521,7 @@ mod tests {
             kind: PushKind::Approval,
             blocked_sessions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+            agent: protocol::agent::AgentKind::Claude,
         }
     }
 
@@ -512,6 +570,90 @@ mod tests {
                 "Waiting on an approval"
             );
             assert_eq!(alert(&ambient.describing(3, None)).1, "3 agents need you");
+        }
+    }
+
+    /// **Whoever the doorbell speaks for is who it is delivered to.**
+    ///
+    /// `agent` is not copy — it is the authorization subject the fan-out narrows on
+    /// — so it has to move with the sentence. A Codex turn finishing while a Claude
+    /// card was open used to produce a Claude `Approval` alert naming a Claude
+    /// project, authorized to Codex-capable phones only: offered to devices with
+    /// nothing to open behind it, and withheld from the ones that could answer it.
+    #[test]
+    fn the_re_described_doorbell_is_authorized_as_what_it_says() {
+        let codex = protocol::agent::AgentKind::Codex;
+        let mut rang = hint(0);
+        rang.kind = PushKind::Completed;
+        rang.agent = codex.clone();
+
+        assert_eq!(
+            rang.describing(0, None).agent,
+            codex,
+            "with no decision waiting, the run that rang speaks for itself"
+        );
+        let deck = rang.describing(1, Some("Aion".into()));
+        assert_eq!(deck.kind, PushKind::Approval);
+        assert_eq!(
+            deck.agent,
+            protocol::agent::AgentKind::Claude,
+            "a doorbell re-described as the decision deck is authorized as that deck"
+        );
+
+        // **And the deck of SEVERAL, which is a different arm of the same
+        // expression** (round-9 F5). Every multi-card assertion above this one
+        // starts from a Claude hint, so `blocked == 1 ? Claude : self.agent`
+        // survived them all: the one-card leg was checked from a Codex hint and the
+        // many-card leg only from Claude hints, which the mutation returns
+        // unchanged. Two cards is reachable the moment a second Claude run blocks
+        // while a Codex turn finishes, and under that mutation the phone gets the
+        // Claude approval-deck sentence on a notification authorized to
+        // Codex-capable devices — a deck of Claude cards offered to phones that
+        // cannot open one, and withheld from every phone that can.
+        let deck = rang.describing(2, None);
+        assert_eq!(deck.kind, PushKind::Approval);
+        assert_eq!(
+            deck.agent,
+            protocol::agent::AgentKind::Claude,
+            "the deck speaks for the fleet whether it holds one card or several, and \
+             is authorized as what it says either way"
+        );
+    }
+
+    /// **And the ordinary doorbell keeps its own subject: a Claude run stays
+    /// Claude's.**
+    ///
+    /// The re-description only ever moves the subject *towards* Claude, so the test
+    /// above — which asks a Codex hint what it becomes — cannot see the unblocked
+    /// arm return a constant. Round-8 found that gap by mutation: hard-code
+    /// `AgentKind::Codex` in that arm and every test above stays green while every
+    /// ordinary Claude doorbell in the build is authorized to Codex-capable phones
+    /// only. Nothing writes the features column in this phase, so every row is the
+    /// `NULL` Claude floor — a Codex subject is refused for all of them in
+    /// [`crate::push_queue::recipients`] and the whole fleet goes quiet, which is
+    /// the failure no assertion about `kind` or `alert` can reach: those three
+    /// fields would still read exactly right on a notification nobody receives.
+    ///
+    /// Over every kind, because the passthrough is the arm the hook path takes for
+    /// all four of them — this is the majority route, not an edge.
+    ///
+    /// **Mutation:** replace `self.agent.clone()` in the `else` arm of
+    /// [`PushHint::describing`]'s `agent:` expression with
+    /// `protocol::agent::AgentKind::Codex`. This goes red;
+    /// `the_re_described_doorbell_is_authorized_as_what_it_says` and
+    /// `a_doorbell_speaks_for_the_fleet_while_any_decision_waits` stay green.
+    #[test]
+    fn an_unblocked_doorbell_is_authorized_as_the_run_that_rang_and_that_is_usually_claude() {
+        for &rang in PushKind::ALL {
+            let mut claude = hint(0);
+            claude.kind = rang;
+            assert_eq!(
+                claude.describing(0, None).agent,
+                protocol::agent::AgentKind::Claude,
+                "{rang:?}: with no decision waiting the run that rang is the subject, and \
+                 a Claude run's doorbell must stay authorized to the phones that can open \
+                 one — which, in this phase, is every phone there is"
+            );
         }
     }
 

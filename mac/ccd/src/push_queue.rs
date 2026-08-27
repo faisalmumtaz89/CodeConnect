@@ -69,6 +69,10 @@ pub(crate) struct PushTarget {
     /// `String` here made the redaction a promise about a hand-written `Debug`
     /// that the next carrier to hold this field could quietly break.
     pub(crate) credential: Option<Redacted>,
+    /// What this device advertised it can render, as
+    /// [`crate::store::Store::push_targets`] resolved it — already fail-closed for
+    /// anything this run has not confirmed. See [`crate::store::DeviceFeatures`].
+    pub(crate) features: crate::store::DeviceFeatures,
 }
 
 /// **Hand-written so the token is abbreviated.** The credential renders itself
@@ -88,21 +92,81 @@ impl std::fmt::Debug for PushTarget {
 
 /// Whether this push is for this device.
 ///
-/// **A function, so the seen-filter can be tested.** A device whose live socket
-/// already carried the fact must not also be rung, and that is the whole of the
-/// gate — worth asserting directly rather than inferring from a payload.
+/// **A function, so the filters can be tested.** Who a doorbell reaches is worth
+/// asserting directly rather than inferring from a payload.
 ///
 /// **The list, not a predicate.** `send` iterates exactly what this returns, so
 /// a test of this function is a test of who gets rung — which a per-target
 /// predicate could only be if every call site were also read.
-pub(crate) fn recipients(targets: Vec<PushTarget>, excluded: &[String]) -> Vec<PushTarget> {
+///
+/// # The two filters, and why they are one function
+///
+/// The `excluded` list asks whether this device should be skipped for a reason
+/// settled at dispatch: its live socket already carried the fact this push
+/// announces. The agent filter asks whether it could
+/// *use* the fact: a phone that never advertised it can render Codex has no
+/// screen to open behind a Codex doorbell, so ringing it produces a notification
+/// whose tap goes nowhere. Both are answers to "who gets rung", and there are two
+/// independent senders — a direct one and a relayed one — so a filter added beside
+/// only one of them is a filter that silently applies to half the fleet. They live
+/// here together because this is the list both senders iterate.
+///
+/// **Agent eligibility is the device's claim, met fail-closed.**
+/// [`crate::store::DeviceFeatures::supports`] treats Claude as the floor for a
+/// client that advertised nothing (the shape every pre-Codex phone sends),
+/// requires every other agent to be named explicitly, and grants nothing at all
+/// for a stored set this run cannot read — so a Codex push reaches exactly the
+/// devices that said the word.
+pub(crate) fn recipients(
+    targets: Vec<PushTarget>,
+    excluded: &[String],
+    agent: &protocol::agent::AgentKind,
+) -> Vec<PushTarget> {
     targets
         .into_iter()
         .filter(|target| {
             if excluded.contains(&target.device_id) {
-                // This device's live socket already carried the fact. Ringing
-                // it again is the noise the gate exists to stop.
-                crate::log_debug!("push: {} already saw this live; skipping", target.device_id);
+                // One refusal, and it is settled before the sender is called: the
+                // device's live socket already carried the fact this push
+                // announces. `PushGate::exclusions_if_valid` is what builds the
+                // list — the devices whose delivered watermark for this session
+                // has reached the triggering seq — and `Daemon::dispatch_push` is
+                // its only caller. Round-8: this line also claimed the list
+                // carried "could not confirm what the device said it can render",
+                // which it never has. That is `DeviceFeatures::Unconfirmable`, and
+                // it is refused at the second filter below, where the log line
+                // says so.
+                crate::log_debug!(
+                    "push: {} is excluded from this doorbell; skipping",
+                    target.device_id
+                );
+                return false;
+            }
+            if !target.features.supports(agent) {
+                // One predicate, two reasons — and an operator reading the log
+                // needs to know which, because they are fixed differently: the
+                // first is the phone's own claim, the second is a row this run
+                // cannot vouch for.
+                //
+                // In this phase only the first line can be reached. Nothing writes
+                // the column, so every row is `NULL` — the Claude floor — and a
+                // Codex doorbell is refused here for every device. The second line
+                // is what the phase that lands the writes will need; until then no
+                // advertisement exists to repair a row with.
+                match &target.features {
+                    crate::store::DeviceFeatures::Advertised(_) => crate::log_debug!(
+                        "push: {} has not advertised {}; it has nothing to open behind this \
+                         doorbell, so it is not rung",
+                        target.device_id,
+                        agent.as_str()
+                    ),
+                    crate::store::DeviceFeatures::Unconfirmable => crate::log_debug!(
+                        "push: {} has a stored feature set this run cannot confirm; it hears \
+                         nothing until a later phase records an advertisement under this \
+                         run's epoch",
+                        target.device_id
+                    ),
+                }
                 return false;
             }
             true
@@ -410,6 +474,7 @@ mod tests {
             environment: ApnsEnvironment::Sandbox,
             device_id: device.into(),
             credential: None,
+            features: Default::default(),
         }
     }
 

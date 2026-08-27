@@ -320,10 +320,24 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         server_request_id, generation)`, opaque to the phone's request-id
 ///         correlation.
 ///
-///     Device feature sets are persisted with a daemon-version epoch and
-///     replaced on every authenticated hello; a set not confirmed under the
-///     current epoch is invalidated to Claude-only at startup, so a rollback
-///     cannot resurrect stale Codex eligibility.
+///     [`ws::ClientFeatures`] stays wire-legal on `hello` and `register_push`
+///     and is **ignored**: no shipping client encodes it, so the daemon stores
+///     nothing and every device sits at the Claude-only floor. The read that
+///     authorizes a push is nonetheless already fail-closed — a stored set not
+///     confirmed under the running daemon's epoch authorizes nothing rather than
+///     falling back to the floor — which is what keeps a Codex doorbell from
+///     reaching a phone that cannot render one. The write arrives with the phone
+///     work that can advertise it.
+///
+///     [`ipc::RegisterSession::exit_replay`] rides here too, and it is the one
+///     addition that is not about agents at all: it marks the registration a
+///     supervisor replays on the way to reporting its own exit, so a daemon can
+///     tell a corpse's frame from a supervisor arriving. **The number is not
+///     bumped for it and must not be.** Nothing negotiates on it: absent decodes
+///     `false`, which is precisely the behaviour that shipped, and an older daemon
+///     ignores the field entirely. It only ever *withholds* an adoption — there is
+///     no peer that has to understand it in order to stay correct, which is the
+///     only thing the minor exists to say.
 pub const PROTOCOL_MINOR: u32 = 15;
 
 /// Private tmux server name. Never the user's default server.
