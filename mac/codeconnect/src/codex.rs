@@ -9,7 +9,8 @@
 //! wrapper (which could swap the real CLI out from under a pinned path), pins the
 //! resolved binary to a compiled-in tested-version set, and parses the user's
 //! argv against the reserved grammar that keeps CodeConnect the sole owner of the
-//! launch's transport, working directory, profile and approval policy. The `-c`
+//! launch's transport, working directory, profile, approval policy and — per
+//! A10 — sandbox policy. The `-c`
 //! ownership check parses values against the **same** TOML grammar the codex
 //! binary embeds (toml 0.9.11 / TOML 1.1), so a form codex applies cannot
 //! parse-fail here and be forwarded.
@@ -302,7 +303,7 @@ fn ensure_pinned_version(version: &str) -> Result<()> {
 pub enum CodexRefusal {
     /// A flag whose value CodeConnect owns for the launch: the transport
     /// (`--remote`, `--remote-auth-token-env`), the working directory
-    /// (`-C`/`--cd`).
+    /// (`-C`/`--cd`), and the sandbox policy (`-s`/`--sandbox`, `--add-dir`).
     OwnedFlag { flag: String, owner: &'static str },
     /// `--profile`/`-p`: a named profile can carry approval and hook settings, so
     /// the profile choice is CodeConnect's, not the caller's.
@@ -662,6 +663,26 @@ fn refuse_value_flag(canonical: &str, value: Option<&str>) -> Result<(), CodexRe
             flag: canonical.to_string(),
             owner: "the session working directory",
         }),
+        // A10: the sandbox dimension. CodeConnect names the launch's sandbox in
+        // the fingerprint it records and the broker enforces, so a passthrough
+        // that moves that dimension is an ownership escape — the TUI would run
+        // under a sandbox the fingerprint does not describe. `--add-dir` is the
+        // same dimension by another name: on 0.147 it is "additional directories
+        // that should be writable alongside the primary workspace", i.e. a
+        // widening of the sandbox's writable roots.
+        //
+        // One arm covers every spelling: `-s` is canonicalised to `--sandbox` by
+        // [`known_short`] before it reaches here, so the spaced, `=`-joined,
+        // attached (`-sread-only`) and clustered (`-hs read-only`) forms all
+        // arrive as this canonical name.
+        "--sandbox" => Err(CodexRefusal::OwnedFlag {
+            flag: canonical.to_string(),
+            owner: "the session sandbox policy",
+        }),
+        "--add-dir" => Err(CodexRefusal::OwnedFlag {
+            flag: canonical.to_string(),
+            owner: "the session sandbox policy's writable roots",
+        }),
         "--profile" => Err(CodexRefusal::Profile {
             flag: canonical.to_string(),
         }),
@@ -891,6 +912,42 @@ fn owned_in_subtree(path: &mut Vec<String>, value: Option<&toml::Value>) -> Opti
 ///   * the top-level approval controls, as tables/scalars — `approval_policy`
 ///     (including its `granular.*` table), `approvals_reviewer`, `hooks`, `notify`
 ///     — owned at and below their root;
+///   * the top-level **sandbox** controls (A10) — `sandbox`, `sandbox_mode`,
+///     `sandbox_policy`, `sandbox_workspace_write`, `sandbox_permissions` — owned
+///     at and below their root, for the same reason `-s`/`--sandbox` is refused:
+///     CodeConnect names the sandbox in the launch fingerprint, so a `-c` that
+///     moves it is the same ownership escape wearing a config key. Probed on
+///     0.147: `sandbox_workspace_write.writable_roots` and
+///     `.network_access` are real typed settings (feeding an integer names the
+///     key in codex's own validation error) and `sandbox_mode` is a real string
+///     enum; `sandbox`, `sandbox_policy` and `sandbox_permissions` are the
+///     spellings codex's own `-c` help example and the broker's sandbox
+///     fingerprint dimension use. `sandbox_permissions` is owned **deliberately**:
+///     an earlier revision forwarded `sandbox_permissions=["disk-full-read-access"]`
+///     as benign, but a read-scope widening is a mutation of the very dimension
+///     CodeConnect claims, so it belongs on this axis and is now refused.
+///     Refusal needs no knowledge of what a key expands to — that a token reaches
+///     an owned root is the whole finding — so an unenforced or renamed spelling
+///     costs an over-refusal (acceptable under A7), never an escape;
+///   * the top-level **permission-profile** controls (round-4 finding 1) —
+///     `permissions` and `default_permissions` — owned at and below their root.
+///     These are a SECOND, independent sandbox channel, not a spelling of the
+///     first, and the list above missed them. Probed on the installed 0.147 with
+///     the same invalid-value technique: `-c permissions=5` ⇒ "invalid type:
+///     integer `5`, expected struct PermissionsToml in `permissions`";
+///     `-c 'permissions={wide=5}'` ⇒ "expected struct PermissionProfileToml";
+///     `-c 'permissions={wide={filesystem=5}}'` ⇒ "expected struct
+///     FilesystemPermissionsToml"; `-c default_permissions=5` ⇒ "invalid type:
+///     integer `5`, expected a string in `default_permissions`". They are live and
+///     COUPLED, which is what makes them a profile system rather than two stray
+///     keys: `-c 'default_permissions="x"'` alone ⇒ "default_permissions requires a
+///     `[permissions]` table", and a `[permissions]` table alone ⇒ "config defines
+///     `[permissions]` profiles but does not set `default_permissions`". And the
+///     pair together is ACCEPTED and activated:
+///     `-c 'permissions={wide={filesystem={"/"="write"}}}' -c 'default_permissions="wide"'`
+///     runs. A forwarded `-c` carrying them therefore hands the pane a filesystem
+///     write scope CodeConnect never named in its launch fingerprint — the same
+///     ownership escape as `-s`/`--sandbox`, wearing a different config key;
 ///   * `features.hooks` (and below) and `features.codex_hooks` — hook enablement;
 ///   * `auto_review.policy` — selecting the automatic reviewer;
 ///   * per-app: `apps.<id>.default_tools_approval_mode`,
@@ -905,7 +962,17 @@ fn path_is_owned(path: &[String]) -> bool {
     // Top-level controls: owned at their root and anywhere beneath it.
     if matches!(
         seg(0),
-        Some("approval_policy") | Some("approvals_reviewer") | Some("hooks") | Some("notify")
+        Some("approval_policy")
+            | Some("approvals_reviewer")
+            | Some("hooks")
+            | Some("notify")
+            | Some("sandbox")
+            | Some("sandbox_mode")
+            | Some("sandbox_policy")
+            | Some("sandbox_workspace_write")
+            | Some("sandbox_permissions")
+            | Some("permissions")
+            | Some("default_permissions")
     ) {
         return true;
     }
@@ -1294,6 +1361,41 @@ mod tests {
         }
     }
 
+    /// A10: the sandbox dimension is CodeConnect's, so no spelling of the two
+    /// flags that move it may be forwarded. Every normalized form the grammar
+    /// admits is pinned here — spaced, `=`-joined, attached short, and a short
+    /// cluster whose value short is `s` (both with the value attached to the
+    /// cluster and spaced after it) — because a form that slipped past would
+    /// forward a sandbox mutation the launch fingerprint does not describe.
+    #[test]
+    fn sandbox_policy_flags_are_refused_every_form() {
+        for parts in [
+            &["--sandbox", "danger-full-access"][..],
+            &["--sandbox=workspace-write"][..],
+            &["-s", "read-only"][..],
+            &["-sread-only"][..],
+            &["-s=read-only"][..],
+            // Short clusters: a bool short in front of `-s` must not let the
+            // sandbox value ride through as a discarded suffix.
+            &["-hsread-only"][..],
+            &["-hs", "read-only"][..],
+            &["-Vsdanger-full-access"][..],
+            // A missing value is still the owned flag: codex would error, but the
+            // refusal must not depend on a value being present.
+            &["--sandbox"][..],
+            &["-s"][..],
+            // The writable-root widening on the same dimension.
+            &["--add-dir", "/repo"][..],
+            &["--add-dir=/repo"][..],
+            &["--add-dir"][..],
+        ] {
+            assert!(
+                matches!(refuse(parts), CodexRefusal::OwnedFlag { .. }),
+                "{parts:?} should be an owned-flag refusal"
+            );
+        }
+    }
+
     #[test]
     fn profile_is_refused_spaced_equals_and_attached() {
         for parts in [
@@ -1373,6 +1475,37 @@ mod tests {
             &["-c", "\"approval_policy\"=never"][..],
             &["-c", "apps.\"my.app\".default_tools_approval_mode=approve"][..],
             &["-c", "\"hooks\".command=x"][..],
+            // A10 — the sandbox dimension, one case per owned root, in the
+            // spellings a `-c` can wear: dotted, quoted, structural and
+            // `--config` long form.
+            &["-c", "sandbox=danger-full-access"][..],
+            &["-c", "sandbox_mode=danger-full-access"][..],
+            &["--config", "sandbox_mode=danger-full-access"][..],
+            &["-c", "sandbox_policy=danger-full-access"][..],
+            &["-c", "sandbox_workspace_write.writable_roots=[\"/\"]"][..],
+            &["-c", "sandbox_workspace_write.network_access=true"][..],
+            &["-c", "sandbox_workspace_write={network_access=true}"][..],
+            // The read-scope widening an earlier revision forwarded as benign.
+            &[
+                "--config",
+                "sandbox_permissions=[\"disk-full-read-access\"]",
+            ][..],
+            &["-csandbox_permissions=[\"disk-full-read-access\"]"][..],
+            // TOML-key-aware decoding on the sandbox axis: a quoted owned root,
+            // and a quoted (dot-bearing) leaf under one.
+            &["-c", "\"sandbox_mode\"=danger-full-access"][..],
+            &["-c", "sandbox_workspace_write.\"odd.key\"=1"][..],
+            // Round-4 finding 1 — the PERMISSION-PROFILE axis. The exact pair
+            // measured ACCEPTED and activated by the installed codex 0.147 (see
+            // `path_is_owned`), plus each half alone and the spellings a `-c`
+            // can wear: structural, dotted, quoted and `--config` long form.
+            &["-c", "permissions={wide={filesystem={\"/\"=\"write\"}}}"][..],
+            &["-c", "default_permissions=\"wide\""][..],
+            &["--config", "default_permissions=\"wide\""][..],
+            &["-cdefault_permissions=\"wide\""][..],
+            &["-c", "permissions.wide.filesystem.\"/\"=\"write\""][..],
+            &["-c", "\"permissions\"={wide={network=true}}"][..],
+            &["-c", "\"default_permissions\"=\"wide\""][..],
             // Feature toggles.
             &["--enable", "hooks"][..],
             &["--disable", "hooks"][..],
@@ -1439,10 +1572,6 @@ mod tests {
         accept(&["-c", "model=o3"]);
         accept(&["-cmodel=o3"]);
         accept(&["-c", "model_reasoning_effort=high"]);
-        accept(&[
-            "--config",
-            "sandbox_permissions=[\"disk-full-read-access\"]",
-        ]);
         accept(&["-c", "mcp_servers={s={command=\"x\"}}"]);
         accept(&["--enable", "some_other_feature"]);
         accept(&["--disable", "telemetry"]);
@@ -1458,8 +1587,21 @@ mod tests {
         // An MCP server (or app) literally named after an owned control.
         accept(&["-c", "mcp_servers.hooks.command=x"]);
         accept(&["-c", "apps.notify.command=x"]);
+        // The A10 sandbox roots are owned by exact **segment**, at the top level
+        // only: a server or app literally named `sandbox` is still just a name.
+        accept(&["-c", "mcp_servers.sandbox.command=x"]);
+        accept(&["-c", "apps.sandbox_mode.command=x"]);
+        // Same for the permission-profile roots (round-4 finding 1): owned by
+        // exact top-level segment, so an MCP server or app that happens to be
+        // NAMED `permissions`/`default_permissions` still forwards. This is the
+        // over-refusal direction — the new roots must not swallow the namespace.
+        accept(&["-c", "mcp_servers.permissions.command=x"]);
+        accept(&["-c", "apps.default_permissions.command=x"]);
+        accept(&["-c", "mcp_servers.s.env.permissions=literal"]);
+        accept(&["-c", "some_table={default_permissions=\"wide\"}"]);
         // `approval_policy` nested under an unowned container is not the real one.
         accept(&["-c", "some_table={approval_policy=\"never\"}"]);
+        accept(&["-c", "some_table={sandbox_mode=\"danger-full-access\"}"]);
         // A direct `approval_mode` under an app/server (not under tools) is not a
         // real owned setting.
         accept(&["-c", "apps.foo.approval_mode=whatever"]);
@@ -1669,9 +1811,6 @@ mod tests {
         accept(&["-m", "gpt-5"]);
         accept(&["--model", "gpt-5"]);
         accept(&["-i", "shot.png"]);
-        accept(&["-s", "read-only"]);
-        accept(&["--sandbox=workspace-write"]);
-        accept(&["--add-dir", "/repo"]);
         accept(&["--local-provider", "ollama"]);
         accept(&["--oss"]);
         accept(&["--search"]);
@@ -1731,6 +1870,17 @@ mod tests {
         assert!(refuse(&["-c", "approval_policy=never"])
             .to_string()
             .contains("approval_policy"));
+        assert!(refuse(&["-sread-only"])
+            .to_string()
+            .contains("the session sandbox policy"));
+        assert!(refuse(&["--add-dir", "/repo"])
+            .to_string()
+            .contains("writable roots"));
+        assert!(
+            refuse(&["-c", "sandbox_workspace_write.writable_roots=[\"/\"]"])
+                .to_string()
+                .contains("sandbox_workspace_write.writable_roots")
+        );
         assert!(refuse(&["-c", "features={hooks=false}"])
             .to_string()
             .contains("hooks"));

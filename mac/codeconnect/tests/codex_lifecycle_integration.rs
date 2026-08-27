@@ -1105,81 +1105,74 @@ fn the_last_session_on_a_server_still_reaches_terminal_cleanup() {
 }
 
 #[test]
-fn cleanup_terminalises_when_server_a_was_never_persisted() {
-    // The sibling of `the_last_session_on_a_server_still_reaches_terminal_cleanup`,
-    // and the window that test does NOT cover: it stages the kill *after* server A
-    // is recorded, so the escape it proves is the A-bound one.
+fn a_record_without_server_a_never_claims_the_remain_on_exit_premise() {
+    // **Round-3 finding 5: the shape the retired inference needed is unreachable.**
     //
-    // Here A is never persisted at all. `--test-newsession hang` holds the
-    // coordinator INSIDE `new_session`, after tmux created and resolved the session
-    // but before `record_server_a` runs — so the record carries `server_a: null`
-    // forever. Combined with this being the server's only session, cleanup has no
-    // server identity to bind to and no socket that will ever answer, which used to
-    // mean armed until the next reboot.
+    // This test used to assert the opposite. `server_gone_evidence` had a no-A
+    // fallback that read "the host is proven dead" as "the session is gone", gated on
+    // the recorded fact that `remain-on-exit off` had been asserted — and this test
+    // staged exactly that record and demanded terminal cleanup from it.
     //
-    // The escape is the HOST's recorded identity: the pane's command is the host,
-    // so a host proven dead means tmux has already reaped the pane and the session
-    // with it. Deliberately NO keepalive.
+    // The gate was not sound. `remain_on_exit_asserted` is a fact about ONE assertion,
+    // on one window and one pane, at one moment; a config hook can add a pane
+    // afterwards and the options stay mutable, so a historical assertion cannot
+    // license a present-tense claim that a session died with its host. The inference
+    // is therefore gone rather than better-gated.
+    //
+    // What makes that safe is an ORDERING, and this is now the test of it: the
+    // coordinator persists server A **immediately after resolving the session**,
+    // before it asserts anything. So a record can never carry the remain bit without
+    // also carrying A — the combination the fallback fed on cannot occur — and a
+    // record with no A is one where no session was ever resolved, leaving nothing to
+    // infer the death of.
+    //
+    // `--test-newsession hang` holds the coordinator in the genuine in-flight window:
+    // tmux created the session, and nothing has been pinned yet.
     let uid = "01JQXV9K7B8N4M2P6R3T5W9YQK";
     let sb = Sandbox::new("noserverA", uid);
-    let run = sb.expected_run_dir(uid);
     let mut coord = sb.spawn_coordinator_opts(uid, &["--test-newsession", "hang"]);
 
-    // The pane's host comes all the way up while the coordinator is still stuck
-    // inside new-session — which is exactly why A never gets written.
-    let up = wait_until(Duration::from_secs(30), || broker_legs_bound(&run));
+    let in_flight = wait_until(Duration::from_secs(30), || {
+        sb.record_text(uid)
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|v| {
+                v.get("new_session_indeterminate").and_then(|f| f.as_bool()) == Some(true)
+                    && v.get("server_a").is_some_and(|a| a.is_null())
+            })
+            .unwrap_or(false)
+            && sb.has_session("cc-1")
+    });
     assert!(
-        up,
-        "the pane's host should have bound both broker legs: {:?}",
+        in_flight,
+        "the coordinator should be hanging with the session created and nothing \
+         pinned yet: {:?}",
         sb.record_text(uid)
     );
-    let record = sb.record_text(uid).expect("record");
-    let parsed: serde_json::Value = serde_json::from_str(&record).unwrap();
-    assert!(
-        parsed.get("server_a").is_some_and(|v| v.is_null()),
-        "this test is only meaningful while server A is UNRECORDED: {record}"
-    );
-    assert_eq!(
-        parsed
-            .get("new_session_indeterminate")
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "the in-flight flag should still be set: {record}"
-    );
 
-    // Kill the host: its pane dies, and it was the only session, so the tmux server
-    // exits too. Nothing will answer that socket again.
-    let host_pids: Vec<i32> = processes_referencing(run.to_str().unwrap())
-        .into_iter()
-        .filter(|(_, cmd)| cmd.contains("internal-codex-host"))
-        .map(|(pid, _)| pid)
-        .collect();
-    assert!(
-        !host_pids.is_empty(),
-        "the host should be running in the pane"
-    );
-    for pid in &host_pids {
-        unsafe {
-            libc::kill(*pid, libc::SIGKILL);
-        }
+    // THE GATE. In this window — the only one that produces a record with no A —
+    // the remain-on-exit assertion has not run and must not be claimed. Held for a
+    // while, because the claim is that it NEVER becomes true here, not that it
+    // happens not to be true on the first poll.
+    for _ in 0..20 {
+        let record = sb.record_text(uid).expect("record");
+        let parsed: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert!(
+            parsed.get("server_a").is_some_and(|v| v.is_null()),
+            "the premise: A is still unrecorded in this window: {record}"
+        );
+        assert_eq!(
+            parsed
+                .get("remain_on_exit_asserted")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "a record with NO server A must never claim the remain-on-exit premise — \
+             that combination is what the retired no-A inference fed on: {record}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
+
     unsafe {
         libc::kill(coord.id() as i32, libc::SIGKILL);
     }
     let _ = coord.wait();
-
-    // THE GATE: terminal cleanup with no server A, no answering socket, and the
-    // indeterminate flag set — bound to the host identity the record does carry.
-    let resolved = wait_until(Duration::from_secs(30), || sb.failed_and_complete(uid));
-    assert!(
-        resolved,
-        "cleanup must terminalise with no recorded server A: {:?}{}",
-        sb.record_text(uid),
-        diagnose(&sb, uid)
-    );
-    assert!(
-        wait_until(Duration::from_secs(10), || !run.exists()),
-        "a wedged cleanup never sweeps; a terminal one must: {}",
-        run.display()
-    );
 }

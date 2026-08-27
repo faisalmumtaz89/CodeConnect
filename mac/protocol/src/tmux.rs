@@ -890,6 +890,253 @@ fn run_probe(bin: &Path, argv: &[String]) -> Result<(bool, String, String, bool)
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// One-shot: the next **post-command** epoch re-verification reports a changed
+    /// server. Only the kernel decides when a pid is recycled onto a replacement
+    /// tmux server inside a single command, so this is the only way to stage the
+    /// window the post-flight check exists for. Per test *thread*, so parallel tests
+    /// cannot arm each other's.
+    static EPOCH_CHANGE_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm the one-shot mid-assertion server replacement (see
+/// [`assert_remain_on_exit_off`]).
+#[cfg(test)]
+pub(crate) fn change_server_epoch_during_next_assertion() {
+    EPOCH_CHANGE_FAULT.with(|armed| armed.set(true));
+}
+
+#[cfg(test)]
+fn take_epoch_change_fault() -> bool {
+    EPOCH_CHANGE_FAULT.with(|armed| armed.replace(false))
+}
+
+#[cfg(not(test))]
+fn take_epoch_change_fault() -> bool {
+    false
+}
+
+/// What the epoch-conditional prints on the branch that actually asserted.
+const ROE_ASSERTED: &str = "CC-ROE-ASSERTED";
+
+/// …and on the branch that refused because the server answering the socket is not
+/// the one the session was created on.
+const ROE_REFUSED: &str = "CC-ROE-REFUSED";
+
+/// The argv that pins `remain-on-exit off` onto one session (A11.3), at **both**
+/// scopes that can decide it, and **only on the server that session was born on**.
+///
+/// Addressed by the session's internal `$N`, never by its `cc-N` name, for the same
+/// reason every destructive op here is: names are reused, ids are not. The caller
+/// resolves the id first and passes it in, so this cannot land on a session that
+/// took the name in the meantime.
+///
+/// **Two set-options, because the window scope does not win.** `remain-on-exit` is
+/// resolved pane → window → global, and a `-w` assertion is therefore silently
+/// beaten by a pane-local `set -p remain-on-exit on`. Measured on tmux 3.7b: with
+/// `-w off` in place and `-p on` set on the pane, the session outlived its command.
+/// With both asserted, it did not. So `-p` — the scope that actually decides — is
+/// asserted, and `-w` is kept alongside it so a pane split off later inherits `off`
+/// rather than the global a hostile config may have set. `-t <session id>` resolves
+/// to that session's current pane for `-p`, which is measured to reach it, so no
+/// pane id has to be resolved first.
+///
+/// **Wrapped in `if-shell -F` on the server's own pid AND its own start time, because
+/// `$N` is meaningless across server epochs** (round-3 finding 4; the start-time
+/// conjunct is round-4 finding 6). An internal id is unique only within one server's
+/// lifetime: if the server the session was created on exits and another binds the same
+/// socket, `$1` on the new server is a *different session*, and a bare `set-option`
+/// would mutate that stranger and report success — which the caller then records as a
+/// proven fact about a session that no longer exists. The pid test and the mutation are
+/// ONE tmux invocation, so nothing can rebind the socket between them; `-F` is a format
+/// test, not a shell, so no subprocess is involved.
+///
+/// **A pid alone is not an epoch, and that gap was real.** With only `#{==:#{pid},N}`,
+/// a server that died after the caller's preflight and was replaced by one that *reused
+/// its pid* on the same socket passed the conditional and **was mutated**. The postflight
+/// birth check still refused to record the fact, so attribution stayed fail-closed — but
+/// "a stranger is left untouched", which is the stronger claim this conditional exists to
+/// make, was false. So the conditional now tests the server's identity, not just its
+/// number: `#{&&:#{==:#{pid},N},#{==:#{start_time},T}}`.
+///
+/// `T` is the server's own `#{start_time}`, and it is deliberately the value **tmux
+/// reported at session resolution** ([`OwnedSession::server_start_time`]) rather than the
+/// kernel's `pbi_start_tvsec`. The two are different clocks sampled at different moments —
+/// tmux calls `gettimeofday` after its own fork/exec — and measured they agreed 20/20 here
+/// but need not: comparing tmux's format against the kernel's stamp could produce a
+/// spurious refusal (safe direction, but a failed launch for no reason). Comparing tmux's
+/// value against tmux's own value cannot.
+///
+/// Measured on tmux 3.7b: `#{start_time}` is SERVER-scoped (identical from every session
+/// in one server, unlike `#{session_created}` which differs per session), it changes across
+/// a restart on the same socket, and `#{&&:...}` evaluates correctly in an `if-shell -F`
+/// conditional in both directions — matching pid + matching start time runs the set-options
+/// and prints `CC-ROE-ASSERTED`; a wrong pid OR a wrong start time leaves **both options
+/// untouched** and prints `CC-ROE-REFUSED`. Both branches exit 0, which is why the caller
+/// reads the branch from stdout rather than from the status, and a silent third outcome is
+/// refused.
+///
+/// **The residual, stated exactly.** `#{start_time}` carries whole seconds only — tmux
+/// exposes no sub-second server start — so two distinct servers born inside the *same
+/// second* are indistinguishable to this conditional (measured: a fast restart on one
+/// socket produced two different servers with identical `start_time`). The bound is
+/// therefore: a same-socket rebind whose new server both recycles the old pid AND is born
+/// in the same wall-clock second. That is strictly narrower than the pid-only bound it
+/// replaces, and narrower than the caller's own kernel-birth checks, which compare
+/// `(start_sec, start_usec)` exactly.
+pub fn remain_on_exit_off_argv(
+    socket: &str,
+    session_id: &str,
+    server_pid: i64,
+    server_start_time: i64,
+) -> Option<Vec<String>> {
+    if !is_session_id(session_id) {
+        return None;
+    }
+    // A pid is interpolated into the format below; only a plain positive integer
+    // can be one, and anything else is a caller bug rather than something to encode.
+    if server_pid <= 0 {
+        return None;
+    }
+    // Same for the start time: tmux reports a unix second, so a non-positive value is
+    // not one this code resolved from a live server, and a conditional built from it
+    // would compare against a number no server can answer with.
+    if server_start_time <= 0 {
+        return None;
+    }
+    let mut argv: Vec<String> = server_args(socket)?.to_vec();
+    argv.push("if-shell".to_string());
+    argv.push("-F".to_string());
+    argv.push(format!(
+        "#{{&&:#{{==:#{{pid}},{server_pid}}},#{{==:#{{start_time}},{server_start_time}}}}}"
+    ));
+    argv.push(format!(
+        "set-option -t {session_id} -w remain-on-exit off ; \
+         set-option -t {session_id} -p remain-on-exit off ; \
+         display-message -p {ROE_ASSERTED}"
+    ));
+    argv.push(format!("display-message -p {ROE_REFUSED}"));
+    Some(argv)
+}
+
+/// Assert that a session's panes die with their commands (A11.3).
+///
+/// Cleanup leans on a premise that is not automatically true: *a pane dies when its
+/// command exits*. That premise is what lets a proven-dead host stand in for a
+/// proven-dead session when no server A was ever persisted. `remain-on-exit on`
+/// breaks it — and it is reachable **without any bug in this code**, because a
+/// user's own `~/.tmux.conf` is sourced when the tmux server starts. Measured: with
+/// `set -g remain-on-exit on` in a sourced config, a session whose command exits
+/// stays alive and `has-session` keeps answering yes.
+///
+/// So the option is asserted rather than assumed, which makes the premise TRUE
+/// instead of merely hoped for. Asserting beats censusing: it costs one bounded
+/// command at creation, and it removes the failure mode rather than detecting it.
+///
+/// Deliberately NOT `-f /dev/null` on the server args, which would also work by
+/// stopping the config being sourced at all: that only helps when this call is the
+/// one that starts the server (measured — an already-running server ignores `-f`),
+/// and it would silently discard the server config the Claude path writes for its
+/// own sessions on this same socket.
+///
+/// **Bound to the server epoch, and it takes the birth-pinned handle to say so**
+/// (round-3 finding 4). It used to take a bare `socket` and `$N`, which is not
+/// enough to name a session: internal ids are stable only *within one server's
+/// lifetime*, so if server B had rebound the socket, B's same-numbered session was
+/// mutated and the success recorded as a fact about A's. Three things now stand
+/// between the caller and that:
+///
+///   * A's `(pid, birth)` is re-verified **before** the command — a pid alone can be
+///     recycled, so the kernel birth stamp is what makes it an identity;
+///   * the epoch test and the mutation are ONE tmux invocation
+///     ([`remain_on_exit_off_argv`]), so the socket cannot be rebound between
+///     deciding and acting — a non-matching server is left **untouched**, which is
+///     the difference between refusing and mutating a stranger. The test is on
+///     `(pid, start_time)`, not on the pid alone (round-4 finding 6): a pid-only
+///     conditional let a same-socket rebind that recycled the pid pass and BE
+///     mutated, with only the postflight stopping the false record. The residual
+///     that survives — a rebind that recycles the pid *and* is born in the same
+///     wall-clock second — is stated on [`remain_on_exit_off_argv`];
+///   * and A's `(pid, birth)` is verified **again afterwards**, so a server that
+///     died and was replaced by a same-numbered one across the call is caught too.
+///
+/// A session resolved without a server birth is refused outright: an assertion that
+/// cannot be bound to an epoch is not one this codebase will record.
+pub fn assert_remain_on_exit_off(socket: &str, session: &OwnedSession) -> Result<(), String> {
+    let Some(bin) = tmux_bin() else {
+        return Err("tmux not found".into());
+    };
+    let session_id = &session.session_id;
+    let Some(birth) = session.server_birth else {
+        return Err(format!(
+            "session {session_id} carries no server birth identity, so a remain-on-exit \
+             assertion cannot be bound to the server it was created on"
+        ));
+    };
+    let pid = session.server_pid;
+    let still_server_a =
+        || proc_identity::read_birth_identity(pid as i32).is_some_and(|now| now == birth);
+    if !still_server_a() {
+        return Err(format!(
+            "the tmux server (pid {pid}) session {session_id} was created on is gone or \
+             replaced; refusing to assert remain-on-exit against whatever holds {socket} now"
+        ));
+    }
+    let Some(argv) = remain_on_exit_off_argv(socket, session_id, pid, session.server_start_time)
+    else {
+        return Err(format!(
+            "cannot address session {session_id} on socket {socket}"
+        ));
+    };
+    match run_probe(&bin, &argv) {
+        Ok((true, stdout, _, _)) => {
+            roe_branch(&stdout, socket, session_id, pid)?;
+            if still_server_a() && !take_epoch_change_fault() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the tmux server (pid {pid}) changed identity while remain-on-exit \
+                     was being asserted on {session_id}"
+                ))
+            }
+        }
+        Ok((false, _, stderr, _)) => Err(format!(
+            "tmux refused to clear remain-on-exit on {session_id}: {}",
+            stderr.trim()
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+/// Which branch of the epoch conditional actually ran, read from what it printed.
+///
+/// The pure half of [`assert_remain_on_exit_off`], split out for the same reason
+/// [`resolve_from_probe`] is: the classification is where the safety lives, and it
+/// should be assertable without a live tmux to produce each answer.
+///
+/// **The status is not the answer here**, which is why this reads stdout. Measured
+/// on tmux 3.7b: `if-shell -F` exits 0 on BOTH branches, so a caller reading only
+/// the exit status would record a refusal — a server that was deliberately left
+/// untouched — as a successful assertion.
+fn roe_branch(stdout: &str, socket: &str, session_id: &str, pid: i64) -> Result<(), String> {
+    match stdout.trim() {
+        ROE_ASSERTED => Ok(()),
+        // The conditional's own refusal: a DIFFERENT server holds the socket, and by
+        // construction nothing was changed on it.
+        ROE_REFUSED => Err(format!(
+            "the server answering {socket} is not the one session {session_id} was \
+             created on (pid {pid}); nothing was changed"
+        )),
+        // Neither branch spoke. Whatever happened, the assertion was not PROVEN to
+        // land, so it is not claimed — this codebase does not record unproven facts.
+        other => Err(format!(
+            "tmux did not confirm the remain-on-exit assertion on {session_id} \
+             (it said {other:?})"
+        )),
+    }
+}
+
 /// Resolve the one live session carrying `uid`, pinned to its server epoch.
 ///
 /// Bounded (this can run on a phone-driven request). Refuses `NotHosted` when
@@ -2694,6 +2941,299 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
 
         tmux(&["kill-server"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A11.3: the option is set on the pinned session ID, and by `-w`.
+    #[test]
+    fn the_remain_on_exit_argv_targets_the_session_id() {
+        // BOTH scopes, and `-p` is the one that decides: `remain-on-exit` resolves
+        // pane → window → global, so a `-w`-only assertion is beaten by a pane-local
+        // `set -p remain-on-exit on` (measured on tmux 3.7b — the session outlived
+        // its command). `-w` is kept so a pane split off later inherits `off`.
+        // …and the whole thing is CONDITIONAL on the server's own pid AND its own
+        // start time, because `$3` names a session only within one server epoch
+        // (round-3 finding 4) and a pid alone is not an epoch (round-4 finding 6).
+        assert_eq!(
+            remain_on_exit_off_argv("/private/tmp/cc.sock", "$3", 4242, 1787855360).unwrap(),
+            [
+                "-S",
+                "/private/tmp/cc.sock",
+                "if-shell",
+                "-F",
+                "#{&&:#{==:#{pid},4242},#{==:#{start_time},1787855360}}",
+                "set-option -t $3 -w remain-on-exit off ; \
+                 set-option -t $3 -p remain-on-exit off ; \
+                 display-message -p CC-ROE-ASSERTED",
+                "display-message -p CC-ROE-REFUSED",
+            ]
+        );
+        assert_eq!(
+            &remain_on_exit_off_argv("codeconnect", "$0", 7, 1).unwrap()[..2],
+            &["-L".to_string(), "codeconnect".to_string()]
+        );
+        // A NAME is not an id. Addressing `cc-1` would be exactly the reuse bug the
+        // rest of this module exists to avoid, so it is refused at the builder.
+        assert!(remain_on_exit_off_argv("codeconnect", "cc-1", 7, 1).is_none());
+        assert!(remain_on_exit_off_argv("", "$1", 7, 1).is_none());
+        // A pid is HALF the epoch binding; a non-pid cannot be one.
+        assert!(remain_on_exit_off_argv("codeconnect", "$1", 0, 1).is_none());
+        assert!(remain_on_exit_off_argv("codeconnect", "$1", -1, 1).is_none());
+        // …and the start time is the other half. A server whose birth this code
+        // never resolved cannot be named in the conditional either (round-4
+        // finding 6): a zero or negative `#{start_time}` is not a value any live
+        // tmux answers with, so building a conditional from it would compare
+        // against a number that can never match — an assertion that always refuses,
+        // dressed as one that binds.
+        assert!(remain_on_exit_off_argv("codeconnect", "$1", 7, 0).is_none());
+        assert!(remain_on_exit_off_argv("codeconnect", "$1", 7, -1).is_none());
+    }
+
+    /// Only the ASSERTED token is success, and the exit status is not consulted.
+    ///
+    /// `if-shell -F` exits 0 on both branches (measured, tmux 3.7b), so the whole
+    /// safety of the epoch binding rests on reading which one spoke. All three
+    /// answers are asserted here rather than left to whichever a live tmux happens
+    /// to produce — the "neither branch spoke" arm has no live producer at all.
+    #[test]
+    fn only_the_asserted_token_counts_as_a_proven_assertion() {
+        assert!(roe_branch("CC-ROE-ASSERTED\n", "sock", "$1", 42).is_ok());
+        let refused = roe_branch("CC-ROE-REFUSED\n", "sock", "$1", 42).unwrap_err();
+        assert!(
+            refused.contains("nothing was changed"),
+            "a refusal must say the stranger was left alone: {refused}"
+        );
+        // Silence is not consent: an empty answer, a diagnostic, or a token from
+        // some other command are all "not proven", never "asserted".
+        for said in ["", "\n", "some other output", "CC-ROE-ASSERTED-NOT"] {
+            let err = roe_branch(said, "sock", "$1", 42)
+                .expect_err("an unrecognised answer must not be read as a proven assertion");
+            assert!(err.contains("did not confirm"), "{said:?}: {err}");
+        }
+    }
+
+    /// A11.3, against real tmux: a user's own config can break the premise cleanup
+    /// depends on, and asserting the option restores it.
+    ///
+    /// Both halves are proven in one test, because the first is what makes the
+    /// second non-vacuous: without the control arm, a green here would be
+    /// indistinguishable from "this tmux ignores remain-on-exit entirely".
+    #[test]
+    fn a_hostile_remain_on_exit_is_overridden_at_creation() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-roe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("user.conf");
+        std::fs::write(&conf, "set -g remain-on-exit on\n").unwrap();
+        let sock = dir.join("s").to_string_lossy().into_owned();
+        let tmux = |args: &[&str]| {
+            std::process::Command::new(&bin)
+                .args(["-S", &sock])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        // The server is started with the hostile config sourced, exactly as it would
+        // be from `~/.tmux.conf`.
+        assert!(std::process::Command::new(&bin)
+            .args(["-S", &sock, "-f"])
+            .arg(&conf)
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "control",
+                "-e",
+                &format!("{}=UIDCONTROL", crate::ENV_SESSION_UID),
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 0",
+            ])
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // CONTROL: the premise is genuinely broken. Its command exited; it is alive.
+        assert!(
+            tmux(&["has-session", "-t", "=control"]).status.success(),
+            "control: with remain-on-exit on, a session must outlive its command — \
+             if this fails the test below proves nothing"
+        );
+
+        // Now the real thing: create, resolve, assert the option, let it exit.
+        assert!(tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "cc-1",
+            "-e",
+            &format!("{}={VICTIM_UID}", crate::ENV_SESSION_UID),
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 2; exit 0",
+        ])
+        .status
+        .success());
+        let resolved = resolve_owned_session(&sock, VICTIM_UID).expect("resolve");
+        // A SECOND control, and the one A11.3's `-w`-only assertion could not beat:
+        // `remain-on-exit` resolves pane → window → global, so a pane-local `on`
+        // shadows any window-scope `off`. Set here as a user with a second client
+        // could, so the assertion below is tested against the scope that decides
+        // rather than only against the global the config set.
+        assert!(
+            tmux(&[
+                "set-option",
+                "-t",
+                &resolved.session_id,
+                "-p",
+                "remain-on-exit",
+                "on",
+            ])
+            .status
+            .success(),
+            "the pane-local override must be settable, or this control proves nothing"
+        );
+        // **The epoch binding refuses rather than mutating a stranger** (round-3
+        // finding 4), proven here BEFORE the real assertion so a live server is on
+        // hand to be mutated if the binding does not hold. The handle is the real
+        // one with its server identity swapped for another epoch's — which is
+        // precisely the shape "server B rebound the socket" presents.
+        // A LIVE process that is not this tmux server: its pid and birth agree, so
+        // the birth pre-flight passes and the in-tmux pid conditional is the only
+        // thing left standing. That is what isolates the conditional.
+        let mut other = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("a live non-tmux process");
+        let other_pid = other.id() as i64;
+        let impostor = OwnedSession {
+            server_pid: other_pid,
+            server_birth: proc_identity::read_birth_identity(other_pid as i32),
+            ..resolved.clone()
+        };
+        let options = || {
+            tmux(&[
+                "show-options",
+                "-t",
+                &resolved.session_id,
+                "-p",
+                "remain-on-exit",
+            ])
+        };
+        let before = options();
+        let err = assert_remain_on_exit_off(&sock, &impostor)
+            .expect_err("an assertion against a foreign server epoch must refuse");
+        assert!(
+            err.contains("nothing was changed"),
+            "the in-tmux conditional is what must refuse a different server, so \
+             nothing can be mutated between deciding and acting: {err}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&before.stdout),
+            String::from_utf8_lossy(&options().stdout),
+            "a refused assertion must have mutated NOTHING — the pane-local `on` set \
+             above must still be exactly as it was"
+        );
+
+        // …and the OTHER half of the epoch, which a pid test alone cannot see: a
+        // RECYCLED pid. The handle names the real, live server's pid — so the
+        // in-tmux conditional matches and would happily mutate — but carries a
+        // different kernel birth stamp, which is the shape "this pid is now a
+        // different tmux server" presents. Only the birth check can refuse it.
+        let recycled = OwnedSession {
+            server_birth: Some(crate::proc_identity::BirthIdentity {
+                start_sec: 1,
+                start_usec: 1,
+            }),
+            ..resolved.clone()
+        };
+        let before = options();
+        let err = assert_remain_on_exit_off(&sock, &recycled)
+            .expect_err("a matching pid with a foreign birth stamp must refuse");
+        assert!(
+            err.contains("is gone or replaced"),
+            "and refuse on the BIRTH identity, which is the only thing that \
+             distinguishes a recycled pid from the server we resolved: {err}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&before.stdout),
+            String::from_utf8_lossy(&options().stdout),
+            "and it must have mutated nothing either"
+        );
+
+        // **The half a pid-only conditional could not see** (round-4 finding 6): a
+        // handle naming the REAL, LIVE server's pid and its real kernel birth — so
+        // both the pre-flight and the post-flight pass, and the `#{==:#{pid},N}`
+        // conjunct matches — but carrying a different server START TIME. That is the
+        // shape "A died and B rebound this socket with A's recycled pid" presents
+        // from inside tmux, and before the `#{start_time}` conjunct existed the
+        // conditional matched it and the set-options RAN. Attribution stayed
+        // fail-closed (the postflight refused to record it), but the stranger was
+        // mutated. Now the conditional itself refuses, and mutates nothing.
+        let recycled_pid = OwnedSession {
+            server_start_time: resolved.server_start_time + 1,
+            ..resolved.clone()
+        };
+        let before = options();
+        let err = assert_remain_on_exit_off(&sock, &recycled_pid)
+            .expect_err("a matching pid on a server born at another time must refuse");
+        assert!(
+            err.contains("nothing was changed"),
+            "the refusal must come from the IN-TMUX conditional — the pid and birth \
+             both match, so nothing else can refuse it: {err}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&before.stdout),
+            String::from_utf8_lossy(&options().stdout),
+            "THE GATE: a recycled pid must leave the stranger's options exactly as \
+             they were. A pid-only conditional mutates them here"
+        );
+
+        // A handle with no birth at all cannot be bound to an epoch, so it refuses
+        // rather than falling back to the pid.
+        let birthless = OwnedSession {
+            server_birth: None,
+            ..resolved.clone()
+        };
+        assert!(assert_remain_on_exit_off(&sock, &birthless)
+            .expect_err("a birthless handle must refuse")
+            .contains("no server birth identity"));
+        // The window the POST-command check exists for: the assertion lands, and the
+        // server it landed on is replaced before the call returns. Only the kernel
+        // decides when a pid is recycled onto a fresh tmux server that fast, so it is
+        // staged. The command really did run against the real server here — what the
+        // check refuses is CLAIMING it as a fact about a server that no longer exists.
+        change_server_epoch_during_next_assertion();
+        let err = assert_remain_on_exit_off(&sock, &resolved)
+            .expect_err("a server replaced mid-assertion must not be reported asserted");
+        assert!(
+            err.contains("changed identity while"),
+            "and say which window it is: {err}"
+        );
+        // One-shot: the very next call is unaffected, which is what makes the
+        // refusal above a fact about the fault rather than about the seam sticking.
+        assert!(assert_remain_on_exit_off(&sock, &resolved).is_ok());
+
+        let _ = other.kill();
+        let _ = other.wait();
+
+        assert_remain_on_exit_off(&sock, &resolved).expect("assert the option");
+        std::thread::sleep(std::time::Duration::from_millis(4000));
+        assert!(
+            !tmux(&["has-session", "-t", "=cc-1"]).status.success(),
+            "the asserted session must die with its command — at BOTH scopes, so a \
+             pane-local override cannot keep it alive"
+        );
+
+        let _ = tmux(&["kill-server"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The UID-atomic destructive contract against real tmux (D5/D7): a kill

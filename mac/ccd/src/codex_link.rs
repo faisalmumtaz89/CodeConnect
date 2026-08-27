@@ -8117,10 +8117,19 @@ mod tests {
         assert_only_the_announcement_recorded(&events);
     }
 
-    /// This link says only the three things it claims to. Not a check of the
-    /// broker's allowlist — `codex-broker` owns and tests that table — but of this
-    /// module's own contract, so a stray request added here has to be added to the
-    /// module doc too.
+    /// This link says only the three things it claims to, **and says them with the
+    /// params those three document and nothing else**. Not a check of the broker's
+    /// allowlist — `codex-broker` owns and tests that table — but of this module's
+    /// own contract, so a stray request added here, or a stray *field* on one, has
+    /// to be added to the module doc too.
+    ///
+    /// The params half is the ownership guard. The ccd leg is the one the broker's
+    /// allowlist trusts to be attach-only, so an `approvalPolicy`, `sandboxPolicy`
+    /// or `model` riding along on a request from here is an ownership escape and
+    /// not a style slip — and `send_resume`'s privilege-free exemption is exactly
+    /// the claim that the resume carries no such field. Asserted as a key SET
+    /// against what each method is permitted, never as a list of forbidden names:
+    /// the field somebody invents tomorrow is the one a denylist misses.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_link_sends_nothing_outside_its_documented_surface() {
         let (_, _, _, seen) =
@@ -8128,10 +8137,39 @@ mod tests {
         assert!(!seen.is_empty());
         for frame in &seen {
             let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
-            assert!(
-                matches!(method, "initialize" | "initialized" | "thread/resume"),
-                "the link sent {method}; its documented surface is initialize, \
-                 initialized and thread/resume"
+            // The documented surface, method and params together: being named here
+            // is what entitles a method to send params at all, and the slice beside
+            // it is the COMPLETE set of keys that method may carry. None of the
+            // three is unconstrained.
+            //
+            // `initialize` carries client identity; the interior of `clientInfo` is
+            // this daemon's own name and version, and an ownership field would be a
+            // params key of its own, which is the level asserted here.
+            let allowed: &[&str] = match method {
+                "initialize" => &["clientInfo"],
+                "initialized" => &[],
+                "thread/resume" => &["threadId"],
+                _ => panic!(
+                    "the link sent {method}; its documented surface is initialize, \
+                     initialized and thread/resume"
+                ),
+            };
+            let Some(params) = frame.get("params").and_then(Value::as_object) else {
+                panic!("{method} carries a params object on this wire; sent {frame}");
+            };
+            for key in params.keys() {
+                assert!(
+                    allowed.contains(&key.as_str()),
+                    "the link sent {method} carrying the params key {key:?}, which is \
+                     outside the {allowed:?} this method documents; a field added here \
+                     leaves the ccd leg on the wire the broker trusts to be attach-only"
+                );
+            }
+            assert_eq!(
+                params.len(),
+                allowed.len(),
+                "{method} sends its documented params exactly — {allowed:?} — and this \
+                 one sent {params:?}"
             );
         }
     }

@@ -57,6 +57,47 @@ use anyhow::{Context, Result};
 use protocol::proc_identity::{liveness, Liveness, ProcessIdentity};
 use protocol::tmux::OwnedSession;
 
+#[cfg(test)]
+thread_local! {
+    /// One-shot: the next `remain-on-exit` assertion fails with this reason instead
+    /// of running tmux. Per test *thread*, like `codex_launch`'s fault seams, so
+    /// parallel tests cannot arm each other's.
+    static ASSERT_FAULT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// One-shot: the next durable note of that assertion fails.
+    static NOTE_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm the one-shot assertion failure inside
+/// [`RealCoordinatorDeps::finish_new_session`].
+///
+/// The two post-create failure arms live in the REAL coordinator deps and are
+/// reachable on a live machine only with real tmux AND an assertion that refuses —
+/// a combination no test can stage. That is what let round-2's finding-4 fix be
+/// placed by inspection and let round-3's finding 6 (the persistence being undone
+/// one statement later) survive a passing suite: the helper was tested, the caller
+/// was not. These seams drive the actual caller.
+#[cfg(test)]
+pub(crate) fn fail_next_remain_assertion(why: &str) {
+    ASSERT_FAULT.with(|f| *f.borrow_mut() = Some(why.to_string()));
+}
+
+#[cfg(test)]
+fn take_assert_fault() -> Option<String> {
+    ASSERT_FAULT.with(|f| f.borrow_mut().take())
+}
+
+/// Arm the one-shot failure of the durable note (see [`fail_next_remain_assertion`]).
+#[cfg(test)]
+pub(crate) fn fail_next_remain_note() {
+    NOTE_FAULT.with(|armed| armed.set(true));
+}
+
+#[cfg(test)]
+fn take_note_fault() -> bool {
+    NOTE_FAULT.with(|armed| armed.replace(false))
+}
+
 /// The outcome of the coordinator's forward `tmux new-session`.
 pub enum NewSessionOutcome {
     /// The session was created and resolved to a pinned [`OwnedSession`].
@@ -64,6 +105,23 @@ pub enum NewSessionOutcome {
     /// tmux ran past its deadline: **indeterminate**. The coordinator records
     /// failure with the indeterminate flag and hands off to the custodian.
     Indeterminate,
+    /// **The session was created, resolved and PERSISTED — and then a later step of
+    /// the same call failed** (round-3 finding 6).
+    ///
+    /// Distinct from [`NewSessionOutcome::Indeterminate`], and the distinction is
+    /// the whole point. These paths used to return `Indeterminate` after having
+    /// written server A down, and `after_pending`'s indeterminate arm then called
+    /// `fail_new_session_indeterminate`, which sets `new_session_indeterminate` back
+    /// to **true** — undoing, one statement later, the very fact the persist had just
+    /// established. A record in that shape says "a late session may still appear",
+    /// which is false: the session appeared, it was resolved, and its identity is on
+    /// disk. The custodian then refuses to believe any absence it observes and stays
+    /// armed until the next reboot.
+    ///
+    /// Nothing about this outcome is indeterminate, so it terminalizes **determinate**
+    /// with `cleanup: Pending` — a session exists, it is pinned, and it is owed
+    /// cleanup that can now be bound to a proven server identity.
+    CreatedThenFailed(String),
     /// tmux answered with a definite failure.
     Failed(String),
 }
@@ -188,8 +246,8 @@ pub fn coordinate<D: CoordinatorDeps>(
     }
 }
 
-/// Drive the record to `failed{cleanup:pending}` **and durably disarm the
-/// indeterminate flag**, within a bounded deadline.
+/// Drive the record to `failed` **and durably disarm the indeterminate flag**,
+/// within a bounded deadline. The catch-all for any error out of `after_pending`.
 ///
 ///   * Uses a **non-blocking** `try_acquire` in a bounded retry loop, NOT the
 ///     blocking `acquire` (finding 3): a stopped lock holder must not hang the
@@ -203,15 +261,39 @@ pub fn coordinate<D: CoordinatorDeps>(
 ///     coordinator-loss failure keeps using flag-preserving `to_failed`.
 ///   * A persistent failure is a **hard error** (finding 7): a record that cannot
 ///     be driven terminal is never reported as a clean `Ok(Failed)`.
+///
+/// **The cleanup disposition is derived from the record, never assumed (A9.3).**
+/// It used to be hard-coded `Pending` for every error on this path, including the
+/// ones raised before tmux was ever touched (a failed custodian spawn, a record
+/// re-load, the pre-mutation lock/record_run_dir/mark_new_session_starting block).
+/// That wrote `Failed{Pending}` on a record with no session, no server A, and no
+/// host — and the sweep would then rearm a custodian for it forever: an unpinned
+/// `destroy()` returns `Unavailable`, and the retry path's escapes need either
+/// server-gone evidence (there is no server to be gone) or a boot change. Armed
+/// until reboot, for a session that never existed.
+///
+/// The rule is **total**, because since A9.1 the two fields it reads partition
+/// every durable record this path can observe: `server_a.is_some()` is exactly "a
+/// session was created" (A is persisted in the *same* write that records the
+/// creation, so there is no window where one holds without the other), and
+/// `new_session_indeterminate` is exactly "a mutation may be in flight". Neither
+/// set means no session can exist ⇒ `NotRequired`; either set means one may ⇒
+/// `Pending`. A record we cannot read falls to the conservative `Pending`.
 fn terminalize(uid: &str, reason: &str) -> Result<()> {
-    // Conservative default: a session MAY exist (used by the unexpected-error
-    // catch), so leave cleanup Pending.
-    terminalize_within(
-        uid,
-        reason,
-        CleanupState::Pending,
-        std::time::Duration::from_secs(5),
-    )
+    let uid_owned = uid.to_string();
+    let reason = reason.to_string();
+    bounded_lock_write(uid, std::time::Duration::from_secs(5), move |lock| {
+        // Read UNDER the lock the write takes, so the disposition is derived from
+        // the record the transition is about to act on, not a stale snapshot the
+        // custodian could have moved underneath us.
+        let cleanup = match codex_launch::load(&uid_owned) {
+            Ok(rec) if rec.server_a.is_none() && !rec.new_session_indeterminate => {
+                CleanupState::NotRequired
+            }
+            _ => CleanupState::Pending,
+        };
+        codex_launch::fail_new_session_determinate(lock, &uid_owned, &reason, cleanup).map(|_| ())
+    })
 }
 
 /// [`terminalize`] with an explicit cleanup disposition and budget. `cleanup` is
@@ -351,7 +433,7 @@ fn after_pending<D: CoordinatorDeps>(
     // mark the new-session as in-flight and fsync it BEFORE issuing it, so a
     // coordinator death mid-`new-session` leaves a record that already says
     // "indeterminate" and the custodian stays armed.
-    {
+    let prepared = (|| -> Result<()> {
         let lock = LaunchLock::acquire(&uid)?;
         // The run dir goes into the record under the SAME lock, and before the
         // mutation, for the same Principle-B reason: the host that will own the
@@ -361,7 +443,31 @@ fn after_pending<D: CoordinatorDeps>(
             let run_dir = run_dir.to_string();
             codex_launch::record_run_dir(&lock, &uid, &run_dir)?;
         }
-        codex_launch::mark_new_session_starting(&lock, &uid)?;
+        codex_launch::mark_new_session_starting(&lock, &uid)
+    })();
+    // **A9.3: this block's failures are pinned HERE, not left to the catch-all.**
+    //
+    // `terminalize` derives the disposition from the record, which is right for
+    // every error it cannot attribute — but this one it does not have to guess at.
+    // Nothing below has run: `deps.new_session()` is the next statement, so a
+    // failure here means tmux was never invoked and no session can exist.
+    //
+    // The case that makes the difference a wedge rather than a nicety is
+    // `mark_new_session_starting` failing *inside* `store_atomic`, after its rename
+    // has already published `new_session_indeterminate: true`. The flag is then
+    // visible to every reader while the write that set it returned `Err`. Handed to
+    // the catch-all, that flag is read as "a mutation may be in flight" and the
+    // record is terminalized `Failed{Pending}` — with no session, no server A and
+    // no host. The custodian's unpinned `destroy()` can only answer `Unavailable`
+    // or `Absent`, `server_gone_evidence` has no identity to bind to, and
+    // `late_session_still_possible` refuses to believe the absence: armed until the
+    // next reboot, for a session that was never created.
+    if let Err(err) = prepared {
+        return fail(
+            &uid,
+            &format!("the launch record could not be prepared for new-session: {err:#}"),
+            CleanupState::NotRequired,
+        );
     }
     match deps.new_session() {
         NewSessionOutcome::Created(session) => {
@@ -370,11 +476,16 @@ fn after_pending<D: CoordinatorDeps>(
             // custodian and supervisor bind cleanup/liveness to it instead of
             // re-establishing "A" from whatever server owns the socket later. A
             // session without a proven server birth is fail-closed (finding 3).
+            //
+            // ONE durable write for both (A9.1): clearing the flag and recording A
+            // used to be two `store_atomic`s, and a crash between them left a
+            // created-but-unpinned record — `new_session_indeterminate: false` with
+            // `server_a: null` — which is exactly the shape A9.3's disposition rule
+            // must be able to read as "a session exists".
             let a = codex_launch::ServerA::from_owned(&session)
                 .context("recording server A from the created session")?;
             let lock = LaunchLock::acquire(&uid)?;
-            codex_launch::clear_new_session_indeterminate(&lock, &uid)?;
-            codex_launch::record_server_a(&lock, &uid, a)?;
+            codex_launch::record_new_session_created(&lock, &uid, a, false)?;
         }
         NewSessionOutcome::Indeterminate => {
             // A genuinely-timed-out mutation must STAY indeterminate (round-4
@@ -387,6 +498,23 @@ fn after_pending<D: CoordinatorDeps>(
             let reason = "tmux new-session outcome was indeterminate; custodian retained";
             let _ = terminalize_indeterminate(&uid, reason);
             return Ok(CoordinateOutcome::Failed(reason.into()));
+        }
+        NewSessionOutcome::CreatedThenFailed(why) => {
+            // The session EXISTS, is resolved, and its server A is already on disk —
+            // `new_session` persisted it before returning this. So this is a
+            // determinate outcome about a known session, and it must terminalize as
+            // one: `fail` clears `new_session_indeterminate` in the same durable
+            // write that records the failure, which is exactly what the old
+            // `Indeterminate` return then un-did (round-3 finding 6).
+            //
+            // `Pending`, not `NotRequired`: something was created and is owed
+            // cleanup — and cleanup can now bind to the persisted A rather than
+            // probing by socket+uid.
+            return fail(
+                &uid,
+                &format!("the created tmux session could not be made safe: {why}"),
+                CleanupState::Pending,
+            );
         }
         NewSessionOutcome::Failed(why) => {
             // A definite failure is determinate: terminalize AND clear the flag
@@ -508,7 +636,22 @@ pub fn wait_on_record(
     loop {
         if let Ok(record) = codex_launch::load(uid) {
             match record.state {
-                LaunchState::Ready => return LaunchWait::Ready,
+                LaunchState::Ready => {
+                    // The reader's half of the durability handoff (A9.6a).
+                    // `store_atomic` makes the Ready visible at the rename and only
+                    // then fsyncs the directory, and `commit_ready` cannot
+                    // un-publish a rename whose dir-fsync afterwards failed — so a
+                    // bare sighting of Ready is not proof the entry survives power
+                    // loss. Re-fsync it here, on the consuming side, before telling
+                    // the caller the session exists. A failure is "not proven
+                    // durable *yet*", not a failure of the launch: keep polling
+                    // (the writer's own bounded retry may still prove it) until
+                    // `patience` runs out, which reports TimedOut rather than a
+                    // Ready the disk may not have.
+                    if codex_launch::prove_record_durable(uid).is_ok() {
+                        return LaunchWait::Ready;
+                    }
+                }
                 LaunchState::Failed { reason } => return LaunchWait::Failed(sanitize(&reason)),
                 LaunchState::Pending => {}
             }
@@ -770,6 +913,171 @@ impl RealCoordinatorDeps {
         } else {
             vec!["-L".into(), self.tmux_socket.clone()]
         }
+    }
+
+    /// Write down a session this launch is KNOWN to have created.
+    ///
+    /// The difference between a custodian that can bind cleanup to a proven server
+    /// identity and one that cannot bind it to anything — a record with no A is the
+    /// shape that stays armed until the next reboot.
+    fn persist_created_session(
+        &self,
+        resolved: &protocol::tmux::OwnedSession,
+        remain: bool,
+    ) -> Result<()> {
+        codex_launch::ServerA::from_owned(resolved).and_then(|a| {
+            codex_launch::LaunchLock::acquire_bounded(&self.uid, std::time::Duration::from_secs(5))
+                .and_then(|lock| {
+                    codex_launch::record_new_session_created(&lock, &self.uid, a, remain)
+                })
+        })
+    }
+
+    /// Whether the record on disk NOW names `resolved` as server A with the
+    /// indeterminate flag cleared — i.e. whether [`persist_created_session`]'s
+    /// `store_atomic` got as far as its rename (round-4 finding 2).
+    ///
+    /// [`persist_created_session`]: RealCoordinatorDeps::persist_created_session
+    ///
+    /// Deliberately compares the whole [`codex_launch::ServerA`], not merely
+    /// `is_some()`: a record can carry an A from some earlier write, and "an A is
+    /// present" would then read a stale pin as proof that *this* session was
+    /// published. Only the identity we just tried to write counts.
+    ///
+    /// Every way of not knowing answers `false`. The record cannot be read, cannot
+    /// be parsed, carries no A, carries a different A, or still carries the
+    /// indeterminate flag — none of those is evidence the rename landed, and the
+    /// caller's fail-closed direction is `Indeterminate`.
+    fn published_server_a(&self, resolved: &protocol::tmux::OwnedSession) -> bool {
+        let Ok(expected) = codex_launch::ServerA::from_owned(resolved) else {
+            return false;
+        };
+        match codex_launch::load(&self.uid) {
+            Ok(rec) => rec.server_a.as_ref() == Some(&expected) && !rec.new_session_indeterminate,
+            Err(_) => false,
+        }
+    }
+
+    /// Everything between "tmux created a session and we resolved it" and the
+    /// outcome the state machine acts on.
+    ///
+    /// Split out from [`RealCoordinatorDeps::new_session`] so the steps that can
+    /// fail here are reachable from a test **through this same code**, rather than
+    /// only from a live tmux that happens to refuse an assertion (round-3 finding 6,
+    /// and the coverage half of finding 4). `new_session` supplies the resolved
+    /// session and nothing else; every decision below is made here.
+    ///
+    /// **Server A is persisted FIRST, before anything else can fail** (round-3
+    /// finding 5). It used to be written only by the two failure arms below and by
+    /// the caller's `Created` arm, which left a window — resolved session, no A on
+    /// disk — whose only escape was an inference the custodian should never have had
+    /// to make: "no A recorded, but the host is proven dead, and a pane dies with its
+    /// command, so the session must be gone". That inference rests on
+    /// `remain_on_exit_asserted` being a LASTING property, which it is not: the
+    /// assertion covers the targeted window and pane at one moment, config hooks can
+    /// add panes afterwards, and the options stay mutable. Persisting A at the
+    /// earliest moment there is an A to persist deletes the window, and with it the
+    /// need for the inference at all.
+    fn finish_new_session(&mut self, resolved: OwnedSession) -> NewSessionOutcome {
+        if let Err(why) = self.persist_created_session(&resolved, false) {
+            eprintln!(
+                "codeconnect: created and resolved {} but could not persist server A \
+                 ({why:#}); the custodian owns the outcome",
+                resolved.session_id
+            );
+            // **An `Err` from the persist does not mean nothing was published**
+            // (round-4 finding 2). `store_atomic`'s contract splits the write in
+            // two: the RENAME makes the successor visible, and the directory
+            // `fsync` after it makes that entry durable. A failure of the second
+            // returns `Err` for a record every reader can nonetheless already see —
+            // `{server_a: Some(A), new_session_indeterminate: false}`, on disk, now.
+            //
+            // Mapping that to `Indeterminate` was the same re-arming defect
+            // `CreatedThenFailed` was introduced to close, one layer down:
+            // `after_pending`'s indeterminate arm calls
+            // `fail_new_session_indeterminate`, which durably sets the flag back to
+            // **true**, undoing the very fact the rename had just published. The
+            // record then says "a late session may still appear" about a session
+            // that has appeared, been resolved, and had its identity written down —
+            // and `late_session_still_possible` refuses every absence the custodian
+            // observes until the next reboot.
+            //
+            // So the mapping is made to respect what was PUBLISHED rather than what
+            // was RETURNED: re-read the record and ask whether the rename landed.
+            // The read needs no lock — it is exactly the atomic post-image the
+            // rename installed — and it fails closed in both directions it can fail:
+            // an unreadable or unparsable record, or one that does not name this
+            // session, is not proof of publication, so it stays `Indeterminate`.
+            return match self.published_server_a(&resolved) {
+                true => NewSessionOutcome::CreatedThenFailed(format!(
+                    "server A for {} was published but its write did not complete: {why:#}",
+                    resolved.session_id
+                )),
+                // Nothing reached the disk — the genuinely INDETERMINATE outcome.
+                // A session exists but its identity did not, so the flag
+                // `mark_new_session_starting` already set must STAY set: an
+                // unpinned created session is exactly what it is for.
+                false => NewSessionOutcome::Indeterminate,
+            };
+        }
+        // A11.3: make the premise cleanup rests on TRUE, rather than assuming it.
+        //
+        // A user's own `~/.tmux.conf` can set `remain-on-exit on` — no bug of ours
+        // required — and then a pane, and its session, outlive the command. Asserted
+        // here against the birth-pinned handle, which is what binds the mutation to
+        // the server this session was actually created on (finding 4).
+        //
+        // Not fatal-with-no-cleanup: the session exists either way, so the outcome is
+        // `CreatedThenFailed` — determinate, pinned, and owed cleanup.
+        if let Err(why) = self.assert_remain_on_exit(&resolved) {
+            eprintln!(
+                "codeconnect: could not clear remain-on-exit on {} ({why}); \
+                 handing the launch to the custodian",
+                resolved.session_id
+            );
+            return NewSessionOutcome::CreatedThenFailed(format!(
+                "remain-on-exit could not be cleared on {}: {why}",
+                resolved.session_id
+            ));
+        }
+        // …and write down that it held. **History about one assertion**, not a
+        // standing guarantee — see [`codex_launch::LaunchRecord::remain_on_exit_asserted`]
+        // for what it may and may not be read as. Nothing gates on it any more, so a
+        // failure to record it costs only that observation.
+        if let Err(why) = self.note_remain_asserted() {
+            eprintln!(
+                "codeconnect: cleared remain-on-exit on {} but could not record it \
+                 ({why:#}); handing the launch to the custodian",
+                resolved.session_id
+            );
+            return NewSessionOutcome::CreatedThenFailed(format!(
+                "the remain-on-exit assertion on {} could not be recorded: {why:#}",
+                resolved.session_id
+            ));
+        }
+        // Keep the pin: the bring-up census below binds to THIS server, not to
+        // whatever happens to answer the socket a few seconds from now.
+        self.session_a = Some(resolved.clone());
+        NewSessionOutcome::Created(Box::new(resolved))
+    }
+
+    /// The epoch-pinned `remain-on-exit off` assertion, behind a test seam.
+    fn assert_remain_on_exit(&self, resolved: &OwnedSession) -> std::result::Result<(), String> {
+        #[cfg(test)]
+        if let Some(why) = take_assert_fault() {
+            return Err(why);
+        }
+        protocol::tmux::assert_remain_on_exit_off(&self.tmux_socket, resolved)
+    }
+
+    /// The durable note that the assertion held, behind a test seam.
+    fn note_remain_asserted(&self) -> Result<()> {
+        #[cfg(test)]
+        if take_note_fault() {
+            anyhow::bail!("injected fault: the remain-on-exit note could not be written");
+        }
+        codex_launch::LaunchLock::acquire_bounded(&self.uid, std::time::Duration::from_secs(5))
+            .and_then(|lock| codex_launch::note_remain_on_exit_asserted(&lock, &self.uid))
     }
 
     /// The full `tmux new-session` argv, including the pane command.
@@ -1112,12 +1420,14 @@ fn host_lease_is_live(uid: &str) -> bool {
                 Some(lease) => liveness(&lease.identity) == Liveness::Alive,
                 None => false,
             };
-            // Both children recorded, too. The host aborts if it cannot record
-            // one, so this is normally true by the time the legs serve — checking
-            // it makes that a verified invariant instead of an assumption about
-            // the ordering of statements in another process, and it is cheap
-            // because it reads the record we already loaded for the lease.
-            leased && codex_launch::host_children_recorded(&record)
+            // Both children too, and as ONE question rather than two (round-3
+            // finding 1). "Recorded by this lease, past `execve`, and alive now" has
+            // to hold of a SINGLE entry per role: asked as two separate existential
+            // searches over the same list, a retained predecessor's still-breathing
+            // TUI could supply the liveness while the current host's confirmed TUI
+            // was already dead. [`codex_launch::host_children_ready`] carries the
+            // argument for each conjunct.
+            leased && codex_launch::host_children_ready(&record)
         }
         Err(_) => false,
     }
@@ -1167,6 +1477,20 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             }
             Err(err) => return NewSessionOutcome::Failed(format!("could not run tmux: {err}")),
         }
+        // Test-only Principle B window, and it has to be HERE (round-3 finding 5).
+        //
+        // "tmux in flight" means: the session exists and the record does not yet know
+        // which one it is — `new_session_indeterminate` still set, `server_a` still
+        // null. That used to be true all the way to the end of this function, so the
+        // hang could sit at the bottom. It no longer is: `finish_new_session` persists
+        // A as its first act, which both clears the flag and pins the session. A hang
+        // placed after that stages a record that is neither in flight nor unpinned —
+        // the opposite of what this seam exists to produce.
+        if self.hang_in_new_session {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
         // Resolve the created session by uid to pin it.
         let resolved = match protocol::tmux::resolve_owned_session(&self.tmux_socket, &self.uid) {
             Ok(session) => session,
@@ -1174,18 +1498,7 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             // it: treat as indeterminate so the custodian owns the outcome.
             Err(_) => return NewSessionOutcome::Indeterminate,
         };
-        // Test-only Principle B window: the session now exists and the record
-        // still says `new_session_indeterminate` (set before this call). Hang so
-        // the test can kill us here — "coordinator killed with tmux in flight".
-        if self.hang_in_new_session {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
-            }
-        }
-        // Keep the pin: the bring-up census below binds to THIS server, not to
-        // whatever happens to answer the socket a few seconds from now.
-        self.session_a = Some(resolved.clone());
-        NewSessionOutcome::Created(Box::new(resolved))
+        self.finish_new_session(resolved)
     }
 
     /// Wait for the pane's host to prove itself up, or fail with a precise reason.
@@ -1547,6 +1860,13 @@ mod tests {
         new_session: Option<NewSessionOutcome>,
         bring_up: Option<BringUp>,
         spawn_custodian_fails: bool,
+        /// A9.3: arm the one-shot post-rename fsync failure just before the
+        /// coordinator's pre-mutation block, so `mark_new_session_starting`
+        /// publishes the in-flight flag and then returns `Err`.
+        fail_the_pre_mutation_write: bool,
+        /// Captured at `spawn_custodian`, so the scripted bring-up can write the
+        /// record the way a real host does. The fake is handed the uid nowhere else.
+        uid: String,
     }
     impl Default for FakeDeps {
         fn default() -> Self {
@@ -1558,7 +1878,44 @@ mod tests {
                 new_session: Some(NewSessionOutcome::Created(Box::new(fake_owned()))),
                 bring_up: Some(BringUp::Ready),
                 spawn_custodian_fails: false,
+                fail_the_pre_mutation_write: false,
+                uid: String::new(),
             }
+        }
+    }
+
+    /// Write the record the way a real host does once its pane is up: take the
+    /// lease, then record and exec-confirm both roles (round-3 finding 2).
+    ///
+    /// `to_ready` re-asks the host census at commit time, so a fake that reports
+    /// `Ready` without having produced this shape is not simulating a launch that
+    /// came up — it is simulating one that did not. Every identity here is this
+    /// process's own, which is the only one a unit test can rely on being `Alive`
+    /// for as long as the commit takes.
+    fn fake_host_comes_up(uid: &str) {
+        let me = current_identity().unwrap();
+        let lock = LaunchLock::acquire(uid).unwrap();
+        assert_eq!(
+            codex_launch::admit_host(&lock, uid, "n0nce", &me, me.pid, "codex-host").unwrap(),
+            codex_launch::Admission::Admitted
+        );
+        for role in codex_launch::HOST_CHILD_ROLES {
+            codex_launch::record_host_child(
+                &lock,
+                uid,
+                &me,
+                codex_launch::ChildEntry {
+                    role: role.to_string(),
+                    identity: me,
+                    pgid: me.pid,
+                    nonce: "n0nce".into(),
+                    argv_hash: String::new(),
+                    recorded_by: None,
+                    exec_confirmed: false,
+                },
+            )
+            .unwrap();
+            codex_launch::confirm_host_child_exec(&lock, uid, &me, role, &me).unwrap();
         }
     }
     impl CoordinatorDeps for FakeDeps {
@@ -1566,6 +1923,7 @@ mod tests {
             if self.spawn_custodian_fails {
                 anyhow::bail!("gate refused the custodian");
             }
+            self.uid = uid.to_string();
             // Mimic the real path: arm the custodian into the record via the
             // single-owner CAS, so to_ready can re-verify a recorded live one.
             let lock = LaunchLock::acquire(uid)?;
@@ -1585,11 +1943,25 @@ mod tests {
                 .unwrap_or(NewSessionOutcome::Failed("no scripted outcome".into()))
         }
         fn bring_up_wrapper(&mut self) -> BringUp {
-            self.bring_up
+            let out = self
+                .bring_up
                 .take()
-                .unwrap_or(BringUp::Failed("no scripted bring-up".into()))
+                .unwrap_or(BringUp::Failed("no scripted bring-up".into()));
+            // A bring-up that reports `Ready` is reporting that a host came up, and
+            // the record has to say so — `to_ready` re-asks at commit time.
+            if matches!(out, BringUp::Ready) && !self.uid.is_empty() {
+                fake_host_comes_up(&self.uid);
+            }
+            out
         }
         fn custodian_liveness(&self, _id: &ProcessIdentity) -> Liveness {
+            // The last hook before the pre-mutation block, and the only durable
+            // write between here and it is `mark_new_session_starting` (this fake
+            // names no run dir), so a one-shot armed here lands on exactly that
+            // write.
+            if self.fail_the_pre_mutation_write {
+                codex_launch::fail_next_dir_fsync();
+            }
             if self.custodian_alive {
                 Liveness::Alive
             } else {
@@ -1617,6 +1989,370 @@ mod tests {
                 start_usec: 200,
             }),
         }
+    }
+
+    /// **A11.1, readiness half: confirmed-once is not alive-now** (round-2 finding 2).
+    ///
+    /// `exec_confirmed` records that the host proved a child got past `execve`. It is
+    /// never rewritten, so on its own it certifies `Ready` for a session whose TUI or
+    /// app-server has since exited — and nothing else the coordinator polls
+    /// contradicts that, because the broker's listeners belong to the HOST and go on
+    /// answering after either child dies.
+    #[test]
+    fn a_recorded_and_confirmed_child_that_is_dead_does_not_count_as_live() {
+        use protocol::proc_identity::{current_identity, BirthIdentity};
+
+        let entry = |role: &str, identity| codex_launch::ChildEntry {
+            role: role.to_string(),
+            identity,
+            pgid: 1,
+            nonce: "n".into(),
+            argv_hash: String::new(),
+            recorded_by: None,
+            exec_confirmed: true,
+        };
+        let alive = current_identity().expect("this process");
+        // A pid that cannot be alive as this identity: pid 1 with a birth stamp
+        // nothing has. Bound to the birth, so it is `Gone` rather than "some pid 1".
+        let gone = ProcessIdentity {
+            pid: 1,
+            birth: BirthIdentity {
+                start_sec: 1,
+                start_usec: 1,
+            },
+        };
+
+        let mut record = crate::codex_custodian::tests::base_record(
+            codex_launch::LaunchState::Pending,
+            codex_launch::CleanupState::Pending,
+            false,
+        );
+        record.host_lease = Some(codex_launch::HostLease {
+            identity: alive,
+            pgid: 1,
+            nonce: "n".into(),
+            role: "codex-host".into(),
+        });
+        let under_lease = |children: Vec<codex_launch::ChildEntry>| {
+            children
+                .into_iter()
+                .map(|mut c| {
+                    c.recorded_by = Some(alive);
+                    c
+                })
+                .collect::<Vec<_>>()
+        };
+
+        record.children = under_lease(vec![entry("app-server", alive), entry("tui", alive)]);
+        assert!(
+            codex_launch::host_children_ready(&record),
+            "two live, confirmed, lease-owned children are ready"
+        );
+
+        record.children = under_lease(vec![entry("app-server", alive), entry("tui", gone)]);
+        // The record half is untouched by the death — both roles are still recorded
+        // by the live lease and still flagged `exec_confirmed`, because nothing
+        // rewrites those when a child exits. That is precisely why the liveness
+        // conjunct has to be part of the same question.
+        assert!(
+            record
+                .children
+                .iter()
+                .all(|c| c.recorded_by == Some(alive) && c.exec_confirmed),
+            "the premise: the record still attests everything it ever attested"
+        );
+        assert!(
+            !codex_launch::host_children_ready(&record),
+            "THE GATE: a child that is gone must not be read as ready merely because \
+             its exec was confirmed once"
+        );
+
+        // …and the same shape, on disk, through the predicate readiness actually
+        // consults. Built with the real writers so the lease is one this process
+        // holds, which is what `record_host_child` and `confirm_host_child_exec`
+        // demand — and what makes the record indistinguishable, to every other
+        // check, from a healthy one.
+        let uid = "readyalive";
+        let lock = codex_launch::LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            codex_launch::NewLaunch {
+                launch_nonce: "cafef00d".into(),
+                uid: uid.into(),
+                session_name: "cc-ra".into(),
+                coordinator: alive,
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: protocol::proc_identity::monotonic_now_nanos().unwrap()
+                    + 60_000_000_000,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        codex_launch::cas_custodian_with_child(&lock, uid, alive, alive.pid, "n", "h").unwrap();
+        assert_eq!(
+            codex_launch::admit_host(&lock, uid, "cafef00d", &alive, alive.pid, "codex-host")
+                .unwrap(),
+            codex_launch::Admission::Admitted
+        );
+        for (role, identity) in [("app-server", alive), ("tui", gone)] {
+            codex_launch::record_host_child(&lock, uid, &alive, entry(role, identity)).unwrap();
+            codex_launch::confirm_host_child_exec(&lock, uid, &alive, role, &identity).unwrap();
+        }
+        drop(lock);
+        let on_disk = codex_launch::load(uid).unwrap();
+        assert!(
+            on_disk
+                .children
+                .iter()
+                .filter(|c| c.role != "custodian")
+                .all(|c| c.recorded_by == Some(alive) && c.exec_confirmed),
+            "everything the record can attest to is in place"
+        );
+        assert!(
+            !host_lease_is_live(uid),
+            "THE GATE, wired: readiness must refuse a launch whose TUI is gone, even \
+             though the lease is live and both roles are recorded and confirmed"
+        );
+    }
+
+    /// Bring a `pending` record into existence for `deps`, as `coordinate` would.
+    fn pending_for(deps: &RealCoordinatorDeps) {
+        let lock = codex_launch::LaunchLock::acquire(&deps.uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            codex_launch::NewLaunch {
+                launch_nonce: deps.launch_nonce.clone(),
+                uid: deps.uid.clone(),
+                session_name: "cc-1".into(),
+                coordinator: deps.coordinator,
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: protocol::proc_identity::monotonic_now_nanos().unwrap()
+                    + 60_000_000_000,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        // The forward path always marks the mutation in flight before issuing it,
+        // and that flag is what the outcome below has to end up disarming.
+        codex_launch::mark_new_session_starting(&lock, &deps.uid).unwrap();
+    }
+
+    /// **The post-create failure paths, driven THROUGH THE REAL CALLER** (round-3
+    /// findings 4-coverage, 5 and 6).
+    ///
+    /// These two arms live inside `RealCoordinatorDeps`, past a real `tmux
+    /// new-session` and a real resolve, so nothing used to reach them: round-2's fix
+    /// was placed by inspection and asserted against the persistence HELPER. That is
+    /// how finding 6 survived a green suite — the helper cleared
+    /// `new_session_indeterminate`, and the caller then returned `Indeterminate`,
+    /// which `after_pending` handed to `fail_new_session_indeterminate`, setting it
+    /// straight back to true. Every claim below is now made against
+    /// `finish_new_session` itself, with the failure injected at the seam the real
+    /// code calls.
+    #[test]
+    fn a_post_create_failure_persists_the_session_and_stays_determinate() {
+        // ── The assertion fails. A is known; the premise is not. ──────────────
+        let mut deps = real_deps("/tmp/cch.persist.0123456789abcdef");
+        let uid = deps.uid.clone();
+        pending_for(&deps);
+        assert!(
+            codex_launch::load(&uid).unwrap().server_a.is_none(),
+            "nothing is pinned before the session is created"
+        );
+
+        fail_next_remain_assertion("tmux refused");
+        let outcome = deps.finish_new_session(fake_owned());
+        assert!(
+            matches!(outcome, NewSessionOutcome::CreatedThenFailed(_)),
+            "a created, resolved, PERSISTED session that then fails is not indeterminate"
+        );
+
+        let record = codex_launch::load(&uid).unwrap();
+        assert!(
+            record.server_a.is_some(),
+            "THE GATE (finding 5): the session tmux created is written down BEFORE \
+             anything else can fail — cleanup has nothing to bind to otherwise"
+        );
+        assert!(
+            !record.remain_on_exit_asserted,
+            "and the premise must NOT be claimed: asserting it is what just failed"
+        );
+        assert!(
+            !record.new_session_indeterminate,
+            "a session that is pinned is not an in-flight mutation"
+        );
+
+        // ── …and the outcome survives the state machine ────────────────────────
+        //
+        // THE FINDING-6 GATE. The persistence above is only worth anything if the
+        // arm that consumes this outcome does not undo it. Driven through
+        // `after_pending`'s real dispatch.
+        let mut fake = FakeDeps {
+            new_session: Some(outcome),
+            ..FakeDeps::default()
+        };
+        let out = after_pending(&setup(&uid, far()), &mut fake).unwrap();
+        assert!(
+            matches!(out, CoordinateOutcome::Failed(_)),
+            "the launch fails: {out:?}"
+        );
+        let record = codex_launch::load(&uid).unwrap();
+        assert!(
+            !record.new_session_indeterminate,
+            "THE GATE: the recorded creation must NOT be re-armed as indeterminate — \
+             a known, pinned session cannot also be a mutation that might yet land, \
+             and a record in that shape keeps the custodian armed until reboot"
+        );
+        assert!(
+            record.server_a.is_some(),
+            "and A survives the terminalization, so cleanup can bind to it"
+        );
+        assert_eq!(
+            record.cleanup,
+            codex_launch::CleanupState::Pending,
+            "the session exists, so it is owed cleanup"
+        );
+        assert!(matches!(record.state, LaunchState::Failed { .. }));
+
+        // ── The note fails after a SUCCESSFUL assertion ────────────────────────
+        let mut deps = real_deps("/tmp/cch.persist2.0123456789abcde");
+        deps.uid = "01JQXV9K7B8N4M2P6R3T5W9YQE".into();
+        let uid2 = deps.uid.clone();
+        pending_for(&deps);
+        fail_next_remain_note();
+        let outcome = deps.finish_new_session(fake_owned());
+        assert!(matches!(outcome, NewSessionOutcome::CreatedThenFailed(_)));
+        let record = codex_launch::load(&uid2).unwrap();
+        assert!(
+            record.server_a.is_some(),
+            "A is persisted on this arm too, and before the assertion ran"
+        );
+        assert!(
+            !record.new_session_indeterminate,
+            "and this arm is determinate as well"
+        );
+    }
+
+    /// **A persist that RETURNS `Err` after its rename PUBLISHED is not
+    /// indeterminate** (round-4 finding 2).
+    ///
+    /// `store_atomic` publishes with the rename and makes it durable with the
+    /// directory fsync after it, and A9.3's injected fault is exactly the gap
+    /// between them: `{server_a: Some(A), new_session_indeterminate: false}` is on
+    /// disk and readable by everyone, and the call that put it there returns `Err`.
+    ///
+    /// The old mapping read the RETURN and answered `Indeterminate`, which
+    /// `after_pending` hands to `fail_new_session_indeterminate` — setting the flag
+    /// durably back to **true**, one statement after the rename cleared it. The
+    /// record then claims a late session may still appear about a session that has
+    /// already appeared and been pinned, and `late_session_still_possible` refuses
+    /// every absence the custodian observes until the next reboot. That is the same
+    /// re-arming defect `CreatedThenFailed` exists to close, reached one layer down.
+    ///
+    /// Two gates: the outcome is determinate, and the flag STAYS cleared through the
+    /// state machine that consumes it.
+    #[test]
+    fn a_persist_that_published_before_failing_terminalizes_rather_than_rearming() {
+        let mut deps = real_deps("/tmp/cch.persist4.0123456789abcde");
+        deps.uid = "01JQXV9K7B8N4M2P6R3T5W9YQG".into();
+        let uid = deps.uid.clone();
+        pending_for(&deps);
+        assert!(
+            codex_launch::load(&uid).unwrap().new_session_indeterminate,
+            "the premise: the forward path armed the flag before the mutation"
+        );
+
+        // The one fault this module cannot otherwise stage: the rename lands, the
+        // directory fsync then fails, and `store_atomic` returns `Err`.
+        codex_launch::fail_next_dir_fsync();
+        let outcome = deps.finish_new_session(fake_owned());
+        assert!(
+            matches!(outcome, NewSessionOutcome::CreatedThenFailed(_)),
+            "a published A is a determinate fact about a known session, whatever the \
+             write that published it returned: {}",
+            match &outcome {
+                NewSessionOutcome::Indeterminate => "got Indeterminate".to_string(),
+                NewSessionOutcome::Created(_) => "got Created".to_string(),
+                NewSessionOutcome::Failed(w) => format!("got Failed({w})"),
+                NewSessionOutcome::CreatedThenFailed(w) => format!("got CreatedThenFailed({w})"),
+            }
+        );
+        let record = codex_launch::load(&uid).unwrap();
+        assert!(
+            record.server_a.is_some(),
+            "the premise the whole finding rests on: the rename really did publish A"
+        );
+        assert!(
+            !record.new_session_indeterminate,
+            "and the rename really did clear the flag"
+        );
+
+        // THE GATE. The mapping is only worth anything if the arm consuming it does
+        // not re-arm the flag. Driven through `after_pending`'s real dispatch.
+        let mut fake = FakeDeps {
+            new_session: Some(outcome),
+            ..FakeDeps::default()
+        };
+        let out = after_pending(&setup(&uid, far()), &mut fake).unwrap();
+        assert!(
+            matches!(out, CoordinateOutcome::Failed(_)),
+            "the launch fails: {out:?}"
+        );
+        let record = codex_launch::load(&uid).unwrap();
+        assert!(
+            !record.new_session_indeterminate,
+            "THE GATE: the flag stays CLEARED. Re-arming it makes the custodian \
+             refuse every absence it observes until the next reboot"
+        );
+        assert_eq!(
+            record.cleanup,
+            CleanupState::Pending,
+            "and the session that exists is owed cleanup, bound to the A on disk"
+        );
+    }
+
+    /// The direction the fix must NOT over-reach: a persist that failed BEFORE its
+    /// rename published anything is still genuinely indeterminate, and the flag must
+    /// stay armed. `fake_owned()` carries a server birth, so `ServerA::from_owned`
+    /// succeeds; the failure is the record read, because no record exists for this
+    /// uid at all — nothing was ever published, so there is nothing to respect.
+    #[test]
+    fn a_persist_that_published_nothing_stays_indeterminate() {
+        let mut deps = real_deps("/tmp/cch.persist5.0123456789abcde");
+        deps.uid = "01JQXV9K7B8N4M2P6R3T5W9YQH".into();
+        // Deliberately NO `pending_for`: `record_new_session_created` loads before it
+        // stores, so it fails with nothing renamed and nothing on disk.
+        let outcome = deps.finish_new_session(fake_owned());
+        assert!(
+            matches!(outcome, NewSessionOutcome::Indeterminate),
+            "an unpinned created session is exactly what the fail-closed flag is for"
+        );
+    }
+
+    /// The seam is a SEAM, not the thing under test: with no fault armed,
+    /// `finish_new_session` runs its real steps and reports `Created`.
+    ///
+    /// Without this, every assertion in the test above would also hold of a
+    /// `finish_new_session` that failed unconditionally.
+    #[test]
+    fn the_post_create_path_reports_created_when_nothing_fails() {
+        let mut deps = real_deps("/tmp/cch.persist3.0123456789abcde");
+        deps.uid = "01JQXV9K7B8N4M2P6R3T5W9YQF".into();
+        let uid = deps.uid.clone();
+        pending_for(&deps);
+        // `fake_owned()` names no live tmux server, so the epoch-pinned assertion
+        // refuses on its own terms — which is the real code path, not a seam. The
+        // seam is exercised by arming nothing and letting the assertion be the only
+        // thing that decides.
+        let outcome = deps.finish_new_session(fake_owned());
+        assert!(
+            matches!(outcome, NewSessionOutcome::CreatedThenFailed(_)),
+            "an assertion that cannot bind to a live server epoch must refuse"
+        );
+        assert!(
+            codex_launch::load(&uid).unwrap().server_a.is_some(),
+            "and A is persisted regardless, because it was known before the refusal"
+        );
     }
 
     fn setup(uid: &str, deadline: u64) -> CoordinateSetup {
@@ -1722,9 +2458,7 @@ mod tests {
         };
         // The pending record was written, then the custodian spawn errored. A
         // coordinator error after the record exists must NOT leave a Pending with
-        // no guardian (the "Plus" finding): it is terminalized to
-        // Failed{cleanup:pending} so the recovery sweep can rearm a custodian and
-        // finish cleanup.
+        // no guardian (the "Plus" finding): it is terminalized to Failed.
         let out = coordinate(setup("c7", far()), &mut deps).unwrap();
         assert!(matches!(out, CoordinateOutcome::Failed(_)));
         let rec = codex_launch::load("c7").unwrap();
@@ -1732,7 +2466,90 @@ mod tests {
             matches!(rec.state, LaunchState::Failed { .. }),
             "the record must be terminalized, not left Pending"
         );
-        assert_eq!(rec.cleanup, CleanupState::Pending);
+        // A9.3: and the disposition is NotRequired, not the old hard-coded
+        // Pending. The spawn failed BEFORE any tmux mutation, so no session can
+        // exist — A is unrecorded and the in-flight flag was never set. A
+        // `Failed{Pending}` here is the wedge: the sweep rearms a custodian, whose
+        // unpinned `destroy()` returns Unavailable forever, with no server-gone
+        // evidence and no boot change to escape on. Armed until reboot for a
+        // session that never existed.
+        assert!(rec.server_a.is_none() && !rec.new_session_indeterminate);
+        assert_eq!(rec.cleanup, CleanupState::NotRequired);
+    }
+
+    #[test]
+    fn a_pre_mutation_failure_that_published_the_flag_still_pins_cleanup_not_required() {
+        // A9.3, the case the derived rule cannot see. `store_atomic` publishes by
+        // rename and fsyncs afterwards, so `mark_new_session_starting` can leave
+        // `new_session_indeterminate: true` VISIBLE and still return `Err`. The
+        // error stops the coordinator before `deps.new_session()` is called at all
+        // — no session, no server A, no host — but the catch-all's rule reads that
+        // published flag as "a mutation may be in flight" and writes
+        // `Failed{Pending}`. The custodian then has nothing to prove absence
+        // against: an unpinned `destroy()` answers `Unavailable`/`Absent`,
+        // `server_gone_evidence` has no identity, and the late-session rule refuses
+        // one absence as proof. Armed until reboot for a session that never
+        // existed. So the disposition is pinned by the caller that KNOWS tmux was
+        // never invoked.
+        let mut deps = FakeDeps {
+            fail_the_pre_mutation_write: true,
+            ..Default::default()
+        };
+        let out = coordinate(setup("c10", far()), &mut deps).unwrap();
+        assert!(matches!(out, CoordinateOutcome::Failed(_)));
+        let rec = codex_launch::load("c10").unwrap();
+        assert!(
+            matches!(rec.state, LaunchState::Failed { .. }),
+            "the record must be terminalized: {rec:?}"
+        );
+        assert!(
+            rec.server_a.is_none(),
+            "tmux was never invoked, so there is no server A: {rec:?}"
+        );
+        assert!(
+            !rec.new_session_indeterminate,
+            "a determinate coordinator failure disarms the published flag: {rec:?}"
+        );
+        assert_eq!(
+            rec.cleanup,
+            CleanupState::NotRequired,
+            "no session can exist, so nothing is owed — a `Pending` here is the \
+             until-reboot wedge: {rec:?}"
+        );
+        // The scripted new-session outcome is still sitting unconsumed, which is
+        // the direct proof that tmux was never reached.
+        assert!(
+            deps.new_session.is_some(),
+            "the launch must have failed BEFORE new_session was called"
+        );
+    }
+
+    #[test]
+    fn a_coordinator_error_after_the_session_was_created_still_terminalizes_to_pending() {
+        // The symmetric half of A9.3: the derived rule must not slide the other
+        // way. `ServerA::from_owned` fails closed on a session with no proven
+        // server birth — an error raised AFTER tmux created the session — and the
+        // record the disposition is derived from still carries
+        // `mark_new_session_starting`'s in-flight flag, so a mutation may well
+        // have landed. Cleanup is owed: Pending. (The write itself then disarms
+        // the flag, as every determinate coordinator failure does — the flag is
+        // the *input* to the rule, not its output.)
+        let mut unproven = fake_owned();
+        unproven.server_birth = None;
+        let mut deps = FakeDeps {
+            new_session: Some(NewSessionOutcome::Created(Box::new(unproven))),
+            ..Default::default()
+        };
+        let out = coordinate(setup("c9", far()), &mut deps).unwrap();
+        assert!(matches!(out, CoordinateOutcome::Failed(_)));
+        let rec = codex_launch::load("c9").unwrap();
+        assert!(matches!(rec.state, LaunchState::Failed { .. }));
+        assert!(rec.server_a.is_none(), "A was never recordable: {rec:?}");
+        assert_eq!(
+            rec.cleanup,
+            CleanupState::Pending,
+            "a session may exist, so cleanup is owed: {rec:?}"
+        );
     }
 
     #[test]
@@ -1913,6 +2730,46 @@ mod tests {
             wait_on_record("c8", ms(200), ms(5)),
             LaunchWait::Failed("line one line two".into())
         );
+    }
+
+    #[test]
+    fn a_ready_whose_entry_cannot_be_proven_durable_is_not_reported_ready() {
+        // A9.6(a): `store_atomic` renames (Ready becomes visible) and only THEN
+        // fsyncs the directory, and `commit_ready` cannot un-publish a rename
+        // whose dir-fsync afterwards failed. So the consumer re-proves the entry
+        // before acting on it. A session dir stripped of read permission (search
+        // still allowed, so `load` still parses the record and still sees Ready)
+        // makes that proof fail deterministically — and the wait must keep polling
+        // to TimedOut rather than report a Ready it cannot vouch for.
+        let mut deps = FakeDeps::default();
+        assert_eq!(
+            coordinate(setup("c10", far()), &mut deps).unwrap(),
+            CoordinateOutcome::Ready
+        );
+        assert_eq!(wait_on_record("c10", ms(200), ms(5)), LaunchWait::Ready);
+
+        let dir = codex_launch::session_dir("c10");
+        set_mode(&dir, 0o100);
+        if std::fs::File::open(&dir).is_ok() {
+            // Root, or a filesystem that ignores the mode: the environment refuses
+            // to create the condition, so there is nothing to assert.
+            set_mode(&dir, 0o700);
+            return;
+        }
+        assert_eq!(
+            codex_launch::load("c10").unwrap().state,
+            LaunchState::Ready,
+            "the record is still visibly Ready — this pins the durability proof"
+        );
+        assert_eq!(wait_on_record("c10", ms(60), ms(5)), LaunchWait::TimedOut);
+        set_mode(&dir, 0o700);
+        // Provable again ⇒ Ready again.
+        assert_eq!(wait_on_record("c10", ms(200), ms(5)), LaunchWait::Ready);
+    }
+
+    fn set_mode(dir: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
     #[test]
@@ -2578,6 +3435,16 @@ mod tests {
                 "/work",
             ]
         );
+        // A9.6(c): what the pane is told must be resolvable FROM THE PANE, and the
+        // pane's cwd is the `-c` above — not this process's. A relative root would
+        // make the two address different records; `protocol::root_dir()` is what
+        // guarantees it cannot be relative, so this asserts the property rather
+        // than the string.
+        assert!(
+            std::path::Path::new(home_env.trim_start_matches("CODECONNECT_HOME=")).is_absolute(),
+            "the pane must be handed an absolute launch-record root: {home_env}"
+        );
+
         // A label socket (no slash) still uses -L, unchanged by this chunk.
         let mut labelled = real_deps("/tmp/cch.a.b");
         labelled.tmux_socket = "codeconnect".into();

@@ -366,12 +366,79 @@ pub const LAUNCHD_LABEL: &str = "com.codeconnect.ccd";
 
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
 /// touch the real `~/.codeconnect`.
+///
+/// **Absolute whenever the cwd can be read** (A9.6(c)), and that is the whole point
+/// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is
+/// whatever the operator exported, and the `$HOME`-less fallback is literally
+/// `./.codeconnect` — and a relative root is not a root at all: it names a different
+/// directory in every process that resolves it. The launcher, the pane's host and
+/// the sweep run with **different working directories** by construction (the
+/// coordinator hands tmux an explicit `-c`), so a process-relative root has them
+/// addressing different records for the same session. Absolutising HERE, where the
+/// root is first read, is what makes every consumer — `session_dir`, the launch
+/// lock, the `CODECONNECT_HOME` the coordinator forwards into the pane — name one
+/// directory.
+///
+/// `std::path::absolute` is prefix-only (it prepends the cwd and drops `.`
+/// components; it resolves no symlinks and no `..`), so it is idempotent: an
+/// already-absolute root is returned unchanged, and forwarding this value to a
+/// child that calls `root_dir()` again yields the same path (measured).
+///
+/// **When it cannot be made absolute, this FAILS CLOSED** (round-4 finding 5). The
+/// absolutisation can fail, and the previous revision returned the configured value
+/// when it did — which is relative — on an argument that is now measured false.
+///
+/// That argument was: `std::path::absolute` fails only via `getcwd`; `getcwd` fails
+/// only on a cwd unlinked out from under the process; and in that state every
+/// relative path operation fails `ENOENT` too, so a relative root addresses nothing
+/// rather than something else. The first two clauses are wrong on Darwin. Measured
+/// here (Darwin 25.5.0, non-root): `getcwd` **also** fails `EACCES` when any ancestor
+/// of the cwd loses its **search** bit — `chmod 0000`, `0400`, `0444`, `0666` on a
+/// single ancestor all reproduce it, while `0111` and `0555` do not, so it is the
+/// `x` bit and not the `r` bit — and in *that* state `stat(".")`, `mkdir("x")`,
+/// `open("y", O_CREAT)`, `fs::write` and `fs::read` from the held cwd **all
+/// succeed**. So a relative root does not address nothing; it addresses whatever
+/// directory each process happens to be sitting in, which is precisely the
+/// divergent-tree hazard this wrapper exists to prevent, and it does so while the
+/// process remains perfectly able to create and read the wrong tree.
+///
+/// The failure arm therefore returns [`UNAVAILABLE_ROOT`] instead: an **absolute**
+/// path under `/dev/null`. Three properties, all measured, are why that is a
+/// fail-closed answer and not another wrong value:
+///
+///   * every filesystem operation under it fails `ENOTDIR` (20) — `create_dir_all`,
+///     `metadata`, `write`, `read`, `read_dir`, `remove_dir` — because `/dev/null` is
+///     a character device, so no process can create this tree even by accident;
+///   * it is **absolute**, so it is byte-identical in every process regardless of
+///     cwd, and cannot reintroduce the divergence;
+///   * `std::path::absolute` is a no-op on it, so a `CODECONNECT_HOME` forwarded to
+///     a child resolves to the same unusable root there.
+///
+/// The result is that `private_dir`, the launch lock, `store_atomic` and the record
+/// read all fail, and the launch fails closed — which is what the old doc *claimed*
+/// the relative fallback achieved and did not.
+///
+/// Note the failure arm is only reachable for a **relative** configured root:
+/// measured, `std::path::absolute` on an already-absolute input never calls `getcwd`
+/// and succeeds in every condition that breaks it. An operator with an absolute
+/// `CODECONNECT_HOME` — and the `$HOME`-derived default whenever `$HOME` is absolute
+/// — can never reach it.
 pub fn root_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("CODECONNECT_HOME") {
-        return PathBuf::from(dir);
-    }
-    home_dir().join(".codeconnect")
+    let configured = match std::env::var_os("CODECONNECT_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => home_dir().join(".codeconnect"),
+    };
+    std::path::absolute(&configured).unwrap_or_else(|_| PathBuf::from(UNAVAILABLE_ROOT))
 }
+
+/// The root returned when a **relative** configured root cannot be absolutised.
+///
+/// Not a placeholder to be special-cased: it is the fail-closed answer itself. Under
+/// `/dev/null` — a character device — every path operation fails `ENOTDIR`, so a
+/// process holding this root cannot create, read or delete any CodeConnect state.
+/// See [`root_dir`] for why an unusable absolute root is strictly safer than a usable
+/// relative one.
+pub const UNAVAILABLE_ROOT: &str = "/dev/null/codeconnect-root-unavailable";
 
 /// `$HOME`, falling back to the current directory so nothing panics in a
 /// launchd context with a stripped environment.
@@ -434,10 +501,74 @@ mod tests {
 
     #[test]
     fn root_honours_override() {
-        // Serialised implicitly: this is the only test touching the var.
+        // Serialised implicitly: this is the only test touching the var, and it
+        // stays the only one — everything about the override is asserted here.
         std::env::set_var("CODECONNECT_HOME", "/tmp/cc-test-home");
         assert_eq!(root_dir(), PathBuf::from("/tmp/cc-test-home"));
         assert_eq!(socket_path(), PathBuf::from("/tmp/cc-test-home/ccd.sock"));
+
+        // A9.6(c): a RELATIVE override is absolutised, because the launcher, the
+        // pane's host and the sweep do not share a working directory — a
+        // process-relative root has them addressing different records.
+        std::env::set_var("CODECONNECT_HOME", "rel-cc-home");
+        let root = root_dir();
+        assert!(
+            root.is_absolute(),
+            "a relative CODECONNECT_HOME must not stay relative: {}",
+            root.display()
+        );
+        assert_eq!(root, std::env::current_dir().unwrap().join("rel-cc-home"));
+        // Every consumer inherits it, so nothing downstream has to re-normalise.
+        assert!(sessions_dir().is_absolute());
+        assert!(socket_path().is_absolute());
+        // Idempotent: this value is forwarded to the pane as `CODECONNECT_HOME`,
+        // and the child resolves it again in a DIFFERENT working directory. Only
+        // a fixed point makes both processes name one record.
+        std::env::set_var("CODECONNECT_HOME", &root);
+        assert_eq!(root_dir(), root);
+
         std::env::remove_var("CODECONNECT_HOME");
+    }
+
+    /// Round-4 finding 5: the arm reached when a **relative** root cannot be
+    /// absolutised must be fail-CLOSED, not merely honest.
+    ///
+    /// The condition itself — `getcwd` failing `EACCES` because an ancestor of the
+    /// cwd lost its search bit — is measured (see [`root_dir`]) but cannot be staged
+    /// in-process: `set_current_dir` and the ancestor's mode are both process-global,
+    /// and this crate's tests run in parallel, so reproducing it here would corrupt
+    /// every other test's filesystem view. What IS asserted here is the property the
+    /// whole fix rests on, and it is the property that would silently rot: that the
+    /// value the arm returns cannot address anything.
+    #[test]
+    fn the_unavailable_root_addresses_nothing() {
+        let root = PathBuf::from(UNAVAILABLE_ROOT);
+        // Absolute — so it is byte-identical in every process and cannot
+        // reintroduce the divergence a relative root causes.
+        assert!(root.is_absolute(), "{}", root.display());
+        // …and a fixed point, so a child that resolves a forwarded
+        // `CODECONNECT_HOME` lands on the same unusable root.
+        assert_eq!(std::path::absolute(&root).unwrap(), root);
+
+        // Every operation CodeConnect performs on its root fails, and fails with
+        // `ENOTDIR` — the parent is a character device, so no process can create
+        // this tree even by accident. This is what makes `private_dir`, the launch
+        // lock and `store_atomic` fail the launch closed.
+        let enotdir = |err: std::io::Error| {
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::ENOTDIR),
+                "expected ENOTDIR, got {err}"
+            );
+        };
+        enotdir(std::fs::create_dir_all(&root).unwrap_err());
+        enotdir(std::fs::metadata(&root).unwrap_err());
+        enotdir(std::fs::read_dir(&root).unwrap_err());
+        enotdir(std::fs::remove_dir(&root).unwrap_err());
+        enotdir(std::fs::write(root.join("token"), b"x").unwrap_err());
+        enotdir(std::fs::read(root.join("token")).unwrap_err());
+        // And the private-dir boundary — the one the launch path actually calls —
+        // refuses too, which is the sentence "the launch fails closed" in code.
+        assert!(fsperm::private_dir(&root).is_err());
     }
 }

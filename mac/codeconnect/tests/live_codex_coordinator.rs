@@ -745,6 +745,29 @@ fn the_coordinator_commits_ready_on_the_hosts_evidence_and_teardown_leaves_nothi
     );
     println!("READY — bring_up_wrapper reported Ready and the record committed it");
 
+    // --- 3b. …and what Ready CLAIMS is actually written down -----------------
+    //
+    // Both of these are facts the record asserts about the world, and both were
+    // previously inferred rather than recorded. Asserted here, on a real launch
+    // against real codex, because they are exactly the kind of claim a unit test
+    // can only stage.
+    let text = sb.record_text().unwrap_or_default();
+    // A11.3: the premise the no-server-A cleanup escape rests on — a pane dies with
+    // its command — was established on THIS session, and the coordinator wrote it
+    // down between asserting it and recording server A.
+    assert!(
+        text.contains("\"remain_on_exit_asserted\": true"),
+        "a committed Ready must carry the proof that remain-on-exit was cleared: {text}"
+    );
+    // A11.1, readiness half: both host children are past `execve`. The fence records
+    // them BEFORE they can exec, so without this the record would name two processes
+    // that had not yet become the programs it claims they are.
+    assert_eq!(
+        text.matches("\"exec_confirmed\": true").count(),
+        2,
+        "both host children must be confirmed past execve before Ready: {text}"
+    );
+
     // --- 4. Teardown, by the custodian --------------------------------------
     // The coordinator exits once ready is committed; a `ready` record whose
     // coordinator is proven gone is session-fatal, so the custodian destroys the

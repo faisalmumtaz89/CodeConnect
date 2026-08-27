@@ -249,6 +249,59 @@ async fn main() -> Result<()> {
         })
     };
 
+    // **A12.2.** A registration whose parked link will not stop inside the link stop
+    // budget is accepted with no link installed: Live in the fleet, observed by
+    // nothing. No other part of the daemon ever builds that link — `codex_link::run`
+    // never returns on its own, so a link never vacates the slot, and the only other
+    // builder is the next registration for that uid. This is the retry.
+    //
+    // **A12.2 IS NOT CLOSED, and this is the mechanism half only.** What this ticker
+    // guarantees is that a link gets BUILT. Which thread that link then binds is a
+    // second question and it is open: a first thread or a `/new` emitting its
+    // one-shot `thread/started` during the accepted observer gap is seen by nobody,
+    // and recovery has only the predecessor's carry and the registration's hint to
+    // chase — neither of which can name a thread that appeared while nothing was
+    // watching. With no hint the link stays unbound; with a stale hint the broker
+    // accepts a resume of a RETIRED thread (`is_session_thread` widens resume to
+    // retired threads on purpose, for 2e-4c switching) while the active head goes
+    // undiscovered.
+    //
+    // The blocker is that ccd cannot ask. The head lives in the broker's own
+    // `Binding::creation`, `thread/started` is broadcast once and never replayed, and
+    // no ccd-allowlisted method reports the binding — the broker can synthesize an
+    // error and nothing else. Closing it needs new wire (the head replayed on
+    // subscribe, or a head query), which is a design chunk, not a patch. Dormant
+    // meanwhile: the registration hint has no production producer (the supervisor
+    // sends `codex_thread_id: None`) and the command stays gated.
+    //
+    // Its own ticker rather than a limb of the liveness sweep: that one shells out
+    // and can be turned off entirely (`liveness_sweep_secs: 0`), and this must keep
+    // running when it is.
+    //
+    // Ten seconds. Each attempt can pay the full stop budget for the session it is
+    // retrying, so a shorter period buys nothing but contention on that session's
+    // registration gate; and a pass is a single uncontended lock while nothing is
+    // owed, which in production today is always.
+    let codex_recovery = {
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+            // Delay rather than burst, exactly as the liveness sweep does — but for
+            // the reason it actually gives, which is not the one this comment used
+            // to claim. `Delay` does NOT withhold the overdue tick: measured, a pass
+            // that outran its period gets its next tick in ~1µs under all three
+            // behaviours. What it withholds is the CATCH-UP — the tick after the
+            // overdue one is a full period away (~103ms) instead of instant (~125ns
+            // under `Burst`). Every tick's work here is identical, so a burst of
+            // them buys nothing and only contends on the registration gates.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                daemon.recover_stalled_codex_links().await;
+            }
+        })
+    };
+
     // launchd holds the log files open, so nothing outside this process can
     // rotate them without leaving launchd appending to an unlinked inode.
     let rotate = {
@@ -276,6 +329,7 @@ async fn main() -> Result<()> {
         result = sweeper => Stop::Task(format!("sweeper exited: {result:?}")),
         result = local_watch => Stop::Task(format!("local resolver exited: {result:?}")),
         result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
+        result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
         // The one arm that is a deliberate exit rather than a failure: a
         // tailnet address turned up after this daemon had already fallen back

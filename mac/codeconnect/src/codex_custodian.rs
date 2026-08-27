@@ -99,7 +99,7 @@ use crate::codex_launch::{
     self, deadline_expiry, CleanupState, Expiry, LaunchLock, LaunchRecord, LaunchState,
 };
 use anyhow::Result;
-use protocol::proc_identity::{liveness, Liveness, ProcessIdentity};
+use protocol::proc_identity::{liveness, BootIdentity, Liveness, ProcessIdentity};
 use protocol::tmux::CleanupOutcome;
 
 /// One pass's verdict. Terminal variants stop the loop; the rest sleep + retry.
@@ -251,6 +251,16 @@ pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
                 }
             }
         }
+        // A9.6(b): the symmetric first arm to the `Failed` one below. A Ready
+        // record whose cleanup already reads `Complete` has been torn down, but
+        // the write that said so may have been rendered visible without its
+        // dir-fsync succeeding — exactly the round-5 finding 7 case the Failed
+        // path already re-proves. Re-fsync (idempotent) and exit, instead of
+        // exiting on the bare re-read, or — worse — destroying a second time.
+        LaunchState::Ready if record.cleanup == CleanupState::Complete => {
+            deps.mark_clean_complete()?;
+            Ok(Tick::Done)
+        }
         LaunchState::Ready => {
             // Only a PROVEN-gone coordinator is session-fatal (Principle D): an
             // `Unknown` coordinator must NOT trigger a teardown.
@@ -275,9 +285,33 @@ pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
                         }
                         Ok(Tick::ReadyFatalTeardown)
                     }
-                    CleanupOutcome::Unavailable(_) | CleanupOutcome::Ambiguous(_) => {
+                    CleanupOutcome::Unavailable(_) => {
+                        // A9.5: the Ready path needs the same escapes the retry
+                        // path has. A prior-boot Ready record is rearmed by
+                        // `recovery_sweep` (it flags any non-Complete cleanup whose
+                        // custodian is gone, with no boot check) and
+                        // `cas_custodian_with_child` admits Ready — so the fresh
+                        // custodian starts probing a socket nothing answers, reads
+                        // `Unavailable`, and without an escape retries until the
+                        // next reboot. A proven boot change means the session
+                        // cannot exist; proven-dead server A means the process that
+                        // hosted it is gone. Either is terminal here for the same
+                        // identity-bound reason `resolve_cleanup` uses. (Ready
+                        // implies the session was created and observed determinate,
+                        // so there is no late-session caveat to weigh.)
+                        if deps.boot_changed(&record) || deps.server_gone_evidence(&record) {
+                            if !complete_cleanup(deps)? {
+                                return Ok(Tick::RetryCleanup);
+                            }
+                            return Ok(Tick::ReadyFatalTeardown);
+                        }
                         Ok(Tick::RetryCleanup)
                     }
+                    // Ambiguity is never proof: tmux showed something this code
+                    // refuses to pick between, which is the opposite of evidence
+                    // that the session is gone. Retry whatever the boot or server
+                    // evidence says — the same stance `resolve_cleanup` takes.
+                    CleanupOutcome::Ambiguous(_) => Ok(Tick::RetryCleanup),
                 }
             } else {
                 Ok(Tick::Idle)
@@ -404,33 +438,188 @@ fn group_has_members(pgid: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+/// Whether a recorded pgid may still be signalled as a group (A11.2).
+#[derive(Debug, PartialEq, Eq)]
+enum GroupWarrant {
+    Warranted,
+    Refused(String),
+}
+
+/// Bind a process group to the identity that was recorded as leading it.
+///
+/// The reasoning, which rests on one kernel rule: a process group id can only come
+/// into existence in a process whose **pid equals that id** (`setpgid(0, 0)`). So
+/// the only way the recorded number can name a group that is not ours is if the
+/// recorded leader's pid was freed and handed to somebody else who then led a group
+/// with it. Deciding whether that happened is therefore a question about the PID,
+/// and it is answerable:
+///
+///   * the pid is **unoccupied** — nothing can currently be leading a fresh group
+///     with that id, so whatever is still in the group inherited it from our leader.
+///     This is the case that actually occurs: the app-server is reaped and the
+///     descendants it forked keep the group alive (measured);
+///   * the pid is still **our recorded process** — the identity matches outright;
+///   * anything else — a live pid with a different birth stamp, or one whose birth
+///     cannot be read — is the ABA case, or indistinguishable from it. Refused.
+///
+/// **Residual, stated exactly, and it is bigger than this used to claim.**
+///
+/// The first part is the gap between the answer and the signal that follows it:
+/// Darwin has no atomic check-and-signal for a process group, so that window is
+/// narrowed to an instant rather than closed.
+///
+/// The second part is the **unoccupied-leader arm itself, which is an unbounded
+/// ABA** — this doc used to say the opposite, and that was wrong. "Nothing can
+/// currently be leading a fresh group with that id" is true and does not imply what
+/// the arm concludes from it. Counterexample: our group empties; the pid is reused
+/// by a new process that leads a group with it; that process forks and exits; its
+/// unrelated descendants keep the group alive while the pid is unoccupied *again*.
+/// The arm then SIGKILLs a group that was never ours, and the age of the record
+/// does not bound it.
+///
+/// Measured (`KERN_PROC_PGRP` on the constructed state): the surviving members'
+/// only distinguishing fields are pid, ppid and start time. Every member has
+/// reparented to `launchd`, so ppid says nothing; and members of a recycled group
+/// start *after* the recycled leader's birth, which is after our leader's death,
+/// which is after our leader's birth — so start time does not separate them either.
+/// Nothing Darwin exposes today tells our own descendants from a stranger's.
+///
+/// The arm is nevertheless KEPT, deliberately, and the alternative is worse: the
+/// host reaps its children by pid (`Child::start_kill`), so the app-server's
+/// surviving descendants are exactly what this arm reaches on the ordinary teardown
+/// path. Refusing here would trade a narrow within-boot risk for a guaranteed leak of
+/// codex subprocesses on every session that ends normally — the leak this whole chunk
+/// exists to close.
+///
+/// **The worst arm of that residual is closed rather than recorded** (round-4 finding
+/// 10). The residual above is a within-boot one, and the sentences describing it used
+/// to say the unrelated-group risk "requires pid wraparound". Across a REBOOT it
+/// requires nothing at all: the recorded pgid is a number from a boot that no longer
+/// exists, the new boot allocates pids from the bottom and reaches that number in the
+/// ordinary course of starting up, and if the new occupant has exited while its
+/// children live, the unoccupied-leader arm authorizes `SIGKILL` on a process group
+/// belonging to a machine-lifetime this launch never touched. Nothing about the
+/// recorded identity distinguishes it, because every field in it — pid, birth,
+/// pgid — is scoped to the boot it was written under.
+///
+/// So the warrant now takes the record's [`BootIdentity`] and refuses outright when
+/// the current boot differs. This costs nothing real: no process recorded before a
+/// reboot can still be running after it, so there is never anything of ours on the
+/// other side of that comparison to reach. It is the one place in this residual where
+/// fail-closed is free. An UNREADABLE current boot also refuses — the same rule
+/// `boot_changed` uses in the other direction is inverted here on purpose, because
+/// this side is authorizing a `SIGKILL` rather than declining to conclude an absence.
+///
+/// **What would close it**, and why it is a chunk of its own rather than a line
+/// here: provenance the members carry themselves. The host would stamp the
+/// app-server's environment with this launch's nonce, every descendant would inherit
+/// it, and the warrant would enumerate `KERN_PROC_PGRP` and require every member to
+/// present it (via `KERN_PROCARGS2`, which is readable for same-uid processes). That
+/// is new kernel-introspection machinery with its own measurement and failure modes,
+/// and until it exists this arm signals on a warrant it cannot corroborate.
+///
+/// A second, smaller residual: a same-uid process in the same session may join an
+/// existing group deliberately with `setpgid(self, pgid)`. Such a process would be
+/// killed by the group signal. It is not reachable by accident — it requires
+/// guessing the pgid and choosing to join it — and no privilege boundary is crossed.
+fn group_warrant(identity: &ProcessIdentity, recorded_boot: BootIdentity) -> GroupWarrant {
+    // Round-4 finding 10. Asked FIRST, before the pid is even probed: across a boot
+    // change every field of `identity` names a machine-lifetime that is over, so no
+    // answer the kernel gives about that pid can be about our process.
+    match protocol::proc_identity::boot_identity() {
+        Some(now) if now == recorded_boot => {}
+        Some(_) => {
+            return GroupWarrant::Refused(
+                "the machine has rebooted since this launch was recorded, so the recorded \
+                 pgid names a process group from a boot that no longer exists"
+                    .to_string(),
+            )
+        }
+        None => {
+            return GroupWarrant::Refused(
+                "the current boot identity could not be read, so the recorded pgid cannot \
+                 be proven to belong to this boot at all"
+                    .to_string(),
+            )
+        }
+    }
+    let pid = identity.pid;
+    // SAFETY: signal 0 delivers nothing; it only asks whether the pid is occupied.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            // Unoccupied: no live leader. This is the UNCORROBORATED arm — see the
+            // residual above. It is warranted because the alternative leaks, not
+            // because the members are proven ours.
+            Some(libc::ESRCH) => GroupWarrant::Warranted,
+            // Occupied by a process we may not signal — fall through to the birth
+            // compare, which is what decides whether it is still ours.
+            Some(libc::EPERM) => birth_matches(identity),
+            _ => GroupWarrant::Refused(format!("pid {pid} could not be probed: {err}")),
+        };
+    }
+    birth_matches(identity)
+}
+
+fn birth_matches(identity: &ProcessIdentity) -> GroupWarrant {
+    let pid = identity.pid;
+    match protocol::proc_identity::read_birth_identity(pid) {
+        Some(birth) if birth == identity.birth => GroupWarrant::Warranted,
+        Some(_) => GroupWarrant::Refused(format!(
+            "pid {pid} is now a different process, so the group id may have been recycled"
+        )),
+        // A pid that exists but cannot be described is not evidence of anything.
+        None => GroupWarrant::Refused(format!(
+            "pid {pid} exists but its birth identity could not be read"
+        )),
+    }
+}
+
 /// Whether the server that hosted this launch's session is provably gone.
 ///
 /// Two bindings, both to a **recorded identity** and never to socket reachability:
 ///
 ///   * **Server A recorded** — the tmux server's own pid+birth. A session cannot
 ///     outlive the server process hosting it.
-///   * **No server A** — the coordinator died between starting the pane and
-///     persisting A, which leaves nothing to bind to and used to mean "armed until
-///     reboot". The fallback is the HOST's recorded identity: the pane's command
-///     *is* the host, so a host proven dead means tmux has already reaped the pane,
-///     and the session with it. Arrival evidence is required too, so this can never
-///     fire for a launch whose pane never ran.
+///   * **No server A** — nothing to bind to, so **nothing is concluded**.
 ///
-/// Neither branch can conclude "gone" against a live session: both demand a
-/// **proven** `Gone` (never `Unknown`), and the fallback's premise — a pane dies
-/// when its command exits — holds because nothing here sets `remain-on-exit`.
+/// The pinned branch demands a *proven* `Gone` (never `Unknown`), so it can never
+/// conclude "gone" against a live session. Server A's death is the death of the
+/// process hosting the session, which no pane option and no config hook survives.
+///
+/// **The no-A branch used to infer death from the HOST's death, and that inference
+/// is retired** (round-3 finding 5). It read "the pane's command *is* the host, so a
+/// host proven dead means tmux reaped the pane and the session with it" — which
+/// holds only because a pane dies when its command exits, which is only true because
+/// `remain-on-exit` is off. A11.3 made that premise something the coordinator
+/// asserts and records, and the branch then demanded the recorded bit
+/// ([`LaunchRecord::remain_on_exit_asserted`]) before firing.
+///
+/// That was still not sound, and the reason is what the bit actually covers. It is a
+/// fact about ONE assertion, against the session's window and its current pane, at
+/// one moment. It is not a property of the session for the rest of its life: a
+/// config hook can create another pane or window afterwards, and the options stay
+/// mutable by anything running as this uid. So a historical assertion cannot license
+/// a present-tense claim that the session died with its host.
+///
+/// It is not needed either, which is what makes retiring it a deletion rather than a
+/// regression. The branch existed for exactly one window — a coordinator that died
+/// after creating a session and before persisting A — and the coordinator now
+/// persists A **immediately after resolving it**, before the assertion and before
+/// anything else that can fail. A record with no A is therefore one where no session
+/// was ever resolved, and there is no session death to infer. Fail-closed is the
+/// honest answer: with nothing to bind to, this reports no evidence, and cleanup
+/// settles through the paths that rest on an observation rather than an inference —
+/// a positive `Absent`/`Killed` from tmux, or the boot-change escape.
 fn server_gone_evidence(record: &LaunchRecord) -> bool {
-    let proven_gone = |id: &ProcessIdentity| liveness(id) == Liveness::Gone;
     match &record.server_a {
-        Some(a) => proven_gone(&ProcessIdentity {
-            pid: a.server_pid as i32,
-            birth: a.server_birth,
-        }),
-        None => {
-            let arrived = record.host_reached_gate || record.host_identity.is_some();
-            arrived && record.host_identity.as_ref().is_some_and(proven_gone)
+        Some(a) => {
+            liveness(&ProcessIdentity {
+                pid: a.server_pid as i32,
+                birth: a.server_birth,
+            }) == Liveness::Gone
         }
+        None => false,
     }
 }
 
@@ -684,25 +873,62 @@ impl CustodianDeps for RealDeps {
                 // how a forked descendant of the app-server survives every kill
                 // (measured: it does).
                 //
-                // The group is only signalled if it still HAS members, which is
-                // also what makes the number safe to use: a process group id stays
-                // allocated while any member exists, so an occupied group cannot
-                // have been recycled out from under the recorded pgid. The residual
-                // is the same instant-wide check-then-signal window as for pids —
-                // narrowed to that instant, not closed, because this platform has
-                // no atomic check-and-signal.
+                // The group is only signalled if it still HAS members. That was once
+                // the whole warrant — "a process group id stays allocated while any
+                // member exists, so an occupied group cannot have been recycled" —
+                // but A11.2 is precisely that the premise holds only while the group
+                // stays occupied. A group that EMPTIES and has its id reused between
+                // the probe and the signal is exactly the case the sentence does not
+                // cover, and `kill(-pgid, 0)` cannot tell "our forked descendants"
+                // from "a stranger now occupying that number".
+                //
+                // So membership is bound to the recorded identity as well: a group id
+                // can only be created afresh by a process whose PID equals it, so
+                // proving the recorded leader's pid has not been taken over by
+                // somebody else is what rules the reuse out.
                 Liveness::Gone => {
                     if leads_own_group && group_has_members(child.pgid) {
-                        // SAFETY: signal to a group proven occupied a moment ago.
-                        let rc = unsafe { libc::kill(-child.pgid, libc::SIGKILL) };
-                        if rc != 0 {
-                            let err = std::io::Error::last_os_error();
-                            if err.raw_os_error() != Some(libc::ESRCH) {
-                                shortfalls.push(format!(
-                                    "signalling {role}'s surviving group ({}) failed: {err}",
-                                    child.pgid
-                                ));
+                        match group_warrant(&child.identity, record.boot) {
+                            GroupWarrant::Warranted => {
+                                // SAFETY: signal to a group proven occupied a moment
+                                // ago, whose id passed [`group_warrant`].
+                                //
+                                // NOT "proven not to have been recycled", which is
+                                // what this comment used to say and what A11.2's row
+                                // says is false: `Warranted` includes the
+                                // FREE-LEADER arm, which is deliberately
+                                // uncorroborated — nothing Darwin offers can tell
+                                // our leader's surviving descendants from a stranger
+                                // now occupying that number. Kept anyway, because it
+                                // is the only arm that reaches the app-server's
+                                // descendants on ordinary teardown, and refusing it
+                                // trades a within-boot pid-recycling risk for a
+                                // guaranteed leak on every normal session end. The
+                                // CROSS-boot half of that residual, which needed no
+                                // recycling at all, is refused outright by
+                                // `group_warrant`'s boot check (round-4 finding 10).
+                                // The
+                                // command stays gated until the nonce/KERN_PROCARGS2
+                                // provenance design lands; see [`group_warrant`].
+                                let rc = unsafe { libc::kill(-child.pgid, libc::SIGKILL) };
+                                if rc != 0 {
+                                    let err = std::io::Error::last_os_error();
+                                    if err.raw_os_error() != Some(libc::ESRCH) {
+                                        shortfalls.push(format!(
+                                            "signalling {role}'s surviving group ({}) failed: {err}",
+                                            child.pgid
+                                        ));
+                                    }
+                                }
                             }
+                            // Fail closed: not signalling leaks at worst OUR OWN
+                            // descendants, which the shortfall report names. Signalling
+                            // would SIGKILL a process that was never part of this
+                            // launch. Those are not symmetric mistakes.
+                            GroupWarrant::Refused(why) => shortfalls.push(format!(
+                                "{role}'s surviving group ({}) was NOT signalled: {why}",
+                                child.pgid
+                            )),
                         }
                     }
                     continue;
@@ -720,7 +946,27 @@ impl CustodianDeps for RealDeps {
             // GROUP, which reaches anything it forked. One that shares the host's
             // group is signalled as a pid — killing that group would mean killing
             // by a number whose members we never recorded.
-            let target = if leads_own_group { -child.pgid } else { pid };
+            //
+            // A11.2: "it is alive" is not "it is still in the group we recorded".
+            // The membership is re-proven here, against the kernel, immediately
+            // before the group signal — a child that has since called `setpgid` is
+            // no longer a warrant for killing that number, so it is signalled by pid
+            // alone rather than by a group it has left.
+            let target = if leads_own_group {
+                match protocol::proc_identity::read_pgid(pid) {
+                    Some(now) if now == child.pgid => -child.pgid,
+                    other => {
+                        shortfalls.push(format!(
+                            "{role} (pid {pid}) is no longer in its recorded group {} \
+                             (now {other:?}); signalled by pid alone",
+                            child.pgid
+                        ));
+                        pid
+                    }
+                }
+            } else {
+                pid
+            };
             // SAFETY: `target` derives from an identity verified alive an instant
             // ago, so the pid — and the pgid equal to it — is still allocated.
             let rc = unsafe { libc::kill(target, libc::SIGKILL) };
@@ -848,54 +1094,28 @@ impl CustodianDeps for RealDeps {
         // and the derivation is many-to-one — so the directory standing here now
         // may have been created by a different, LIVE launch that derived the same
         // name. Removing it would take that session's bound sockets and logs with
-        // it. Only the marker the owning host wrote can settle whose it is.
-        match crate::codex_launch::run_dir_marker(
+        // it. Only the marker the owning host wrote can settle whose it is, and
+        // only an fd can bind the reading of that marker to the thing deleted.
+        //
+        // A11.5 lives in [`codex_launch::sweep_owned_run_dir`] rather than here,
+        // because the HOST tears the same directory down on its own exit and had
+        // kept a path-addressed `remove_dir_all` — two callers, one discipline, so
+        // there is nothing for them to drift apart on.
+        match crate::codex_launch::sweep_owned_run_dir(
             std::path::Path::new(run_dir),
             &record.uid,
             &record.launch_nonce,
         ) {
-            // Ours: proceed to remove it.
-            crate::codex_launch::MarkerVerdict::Ours => {}
-            // Read, and it names someone else (or nobody). Not ours to delete — and
-            // nothing is owed on it either, so this reports DEALT WITH rather than
-            // retrying. Retrying would wedge the record forever on a directory this
-            // custodian must never touch, which is worse than leaving a stranger's
-            // directory alone.
-            crate::codex_launch::MarkerVerdict::Foreign => {
-                eprintln!(
-                    "codex-custodian: {run_dir} exists but its owner marker does not name {}; \
-                     leaving it alone",
-                    record.uid
-                );
-                return true;
+            crate::codex_launch::RunDirSweep::Settled(note) => {
+                if let Some(note) = note {
+                    eprintln!("codex-custodian: {note}");
+                }
+                true
             }
-            // Already gone: the normal success.
-            crate::codex_launch::MarkerVerdict::Absent => return true,
-            // The question could not be ANSWERED. This is the one verdict that must
-            // not become `Complete`: an unreadable marker is not proof the directory
-            // is a stranger's, and treating it as such would abandon a directory
-            // this custodian is responsible for, with the marker that says so
-            // written and then never re-read. Retry — a transient read error is
-            // exactly what a later pass fixes.
-            crate::codex_launch::MarkerVerdict::Unknown(why) => {
+            crate::codex_launch::RunDirSweep::Retry(why) => {
                 eprintln!(
-                    "codex-custodian: could not read {run_dir}'s owner marker ({why}); \
-                     leaving cleanup pending so a later pass retries"
-                );
-                return false;
-            }
-        }
-        // NotFound is the normal, successful case: a live host removed its own
-        // directory moments ago on the SIGHUP this cleanup just sent. Any OTHER
-        // error means the directory may still be there, which is not something to
-        // paper over with a `Complete` marker — report it and let the caller retry.
-        match std::fs::remove_dir_all(run_dir) {
-            Ok(()) => true,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-            Err(err) => {
-                eprintln!(
-                    "codex-custodian: could not remove the run dir {run_dir} for {}: {err}; \
-                     leaving cleanup pending so a later pass retries",
+                    "codex-custodian: {why} (for {}); leaving cleanup pending so a later pass \
+                     retries",
                     self.cfg.uid
                 );
                 false
@@ -1330,7 +1550,7 @@ pub fn late_host_admission(uid: &str, nonce: &str, socket: &str) -> Result<HostA
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
 
@@ -1354,7 +1574,14 @@ mod tests {
         sweep_succeeds: bool,
     }
 
-    fn base_record(state: LaunchState, cleanup: CleanupState, indeterminate: bool) -> LaunchRecord {
+    /// `pub(crate)` because the coordinator's readiness tests need the same record
+    /// shape, and a second copy of a fourteen-field literal is a second thing to
+    /// keep in step with the record.
+    pub(crate) fn base_record(
+        state: LaunchState,
+        cleanup: CleanupState,
+        indeterminate: bool,
+    ) -> LaunchRecord {
         LaunchRecord {
             schema: 1,
             launch_nonce: "n".into(),
@@ -1383,6 +1610,10 @@ mod tests {
             host_reached_gate: false,
             host_identity: None,
             session_observed: false,
+            // A11.3: the ordinary case — the coordinator got past `new-session` and
+            // asserted the option, so the premise the no-A escape rests on holds.
+            // The test that cares about its ABSENCE clears it explicitly.
+            remain_on_exit_asserted: true,
             children: vec![],
             created_ms: 0,
         }
@@ -1609,6 +1840,71 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_host_is_never_read_as_a_dead_session_without_server_a() {
+        // **Round-3 finding 5: the no-A inference is RETIRED, and this pins that.**
+        //
+        // The branch used to conclude "the session is gone" from "the host is proven
+        // dead", which is only sound because a pane dies when its command exits —
+        // and `remain-on-exit on` breaks that, reachable from a user's own
+        // `~/.tmux.conf` with no bug of ours. A11.3 gated the inference on the
+        // recorded fact that the coordinator had asserted the option away.
+        //
+        // That gate was not enough. `remain_on_exit_asserted` covers ONE assertion,
+        // on the session's window and its then-current pane, at one moment; a config
+        // hook can add a pane afterwards and the options stay mutable. A historical
+        // fact cannot license a present-tense claim about a session's death.
+        //
+        // So the inference is gone rather than better-gated, and it costs nothing:
+        // the coordinator persists A immediately after resolving the session, so a
+        // record with no A is one where no session was ever resolved. This asserts
+        // the strong form — no combination of host death and recorded premise
+        // produces "gone" without A.
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.server_a = None;
+        record.host_reached_gate = true;
+        // A pid that cannot be alive with this birth stamp: `liveness` proves Gone.
+        record.host_identity = Some(ProcessIdentity {
+            pid: 0x3FFF_FFFE,
+            birth: protocol::proc_identity::BirthIdentity {
+                start_sec: 7,
+                start_usec: 7,
+            },
+        });
+        // The premise is established, the host is provably dead, and arrival is
+        // recorded — every input the old inference wanted.
+        record.remain_on_exit_asserted = true;
+        assert!(
+            !server_gone_evidence(&record),
+            "THE GATE: a proven-dead host must NOT be read as a dead session. The pane \
+             may be sitting there under a remain-on-exit set after the assertion, and \
+             completing cleanup would abandon a LIVE session while writing down that \
+             nothing is owed"
+        );
+        record.remain_on_exit_asserted = false;
+        assert!(
+            !server_gone_evidence(&record),
+            "and without the premise, just as certainly not"
+        );
+
+        // The PINNED branch needs no such condition — server A's death is the death
+        // of the process hosting the session, which no pane option survives.
+        record.server_a = Some(codex_launch::ServerA {
+            session_id: "$1".into(),
+            server_pid: 0x3FFF_FFFD,
+            server_start_time: 9,
+            session_created: 9,
+            server_birth: protocol::proc_identity::BirthIdentity {
+                start_sec: 9,
+                start_usec: 9,
+            },
+        });
+        assert!(
+            server_gone_evidence(&record),
+            "a proven-dead server A is terminal whatever the pane option said"
+        );
+    }
+
+    #[test]
     fn failed_pending_server_gone_completes_even_when_indeterminate() {
         // Finding 1 interaction: a kill that drains the server yields ServerGone.
         // The server (and any chance of a late session on it) is gone, so the
@@ -1700,6 +1996,83 @@ mod tests {
         ));
         d.coordinator = Liveness::Gone;
         assert_eq!(tick(&d).unwrap(), Tick::ReadyFatalTeardown);
+    }
+
+    #[test]
+    fn ready_cleanup_retry_escapes_on_a_boot_change_or_a_dead_server_a() {
+        // A9.5: a prior-boot Ready record gets a fresh custodian from
+        // `recovery_sweep` (Ready + cleanup != Complete + guardian gone, with no
+        // boot check), and `cas_custodian_with_child` admits Ready. That custodian
+        // probes a socket nothing answers, reads `Unavailable`, and — before this
+        // — had no escape on the Ready arm at all, so it retried until reboot.
+        let ready = || {
+            let mut d = Scripted::new(base_record(
+                LaunchState::Ready,
+                CleanupState::NotRequired,
+                false,
+            ));
+            d.coordinator = Liveness::Gone;
+            d.destroy = CleanupOutcome::Unavailable("no server answers the socket".into());
+            d
+        };
+
+        // No evidence either way ⇒ stay armed, exactly as before.
+        let mut d = ready();
+        assert_eq!(tick(&d).unwrap(), Tick::RetryCleanup);
+        assert!(!*d.completed.borrow());
+
+        // A proven reboot ⇒ the session cannot exist. Terminal.
+        d.boot_changed = true;
+        assert_eq!(tick(&d).unwrap(), Tick::ReadyFatalTeardown);
+        assert!(*d.completed.borrow());
+
+        // And, independently, a proven-dead server A ⇒ the process hosting the
+        // session is gone. Also terminal.
+        let mut d = ready();
+        d.server_a_gone = true;
+        assert_eq!(tick(&d).unwrap(), Tick::ReadyFatalTeardown);
+        assert!(*d.completed.borrow());
+    }
+
+    #[test]
+    fn ready_cleanup_never_escapes_on_ambiguity() {
+        // A9.5's deliberate asymmetry, matching `resolve_cleanup`: `Ambiguous` is
+        // tmux showing something this code refuses to pick between, which is the
+        // opposite of proof that the session is gone. No amount of boot or
+        // server-gone evidence licenses a terminal cleanup on it.
+        let mut d = Scripted::new(base_record(
+            LaunchState::Ready,
+            CleanupState::NotRequired,
+            false,
+        ));
+        d.coordinator = Liveness::Gone;
+        d.destroy = CleanupOutcome::Ambiguous("two claimants for one uid".into());
+        d.boot_changed = true;
+        d.server_a_gone = true;
+        assert_eq!(tick(&d).unwrap(), Tick::RetryCleanup);
+        assert!(!*d.completed.borrow());
+    }
+
+    #[test]
+    fn ready_already_complete_is_done() {
+        // A9.6(b): the symmetry the Failed arm has had since round-5 finding 7. A
+        // visibly-Complete record may have been published by a write whose
+        // dir-fsync failed, so the exit re-proves it (idempotent) instead of
+        // trusting the re-read — and does NOT fall through to a second destroy.
+        let mut d = Scripted::new(base_record(
+            LaunchState::Ready,
+            CleanupState::Complete,
+            false,
+        ));
+        d.coordinator = Liveness::Gone;
+        // If this arm were missing, the Gone coordinator would drive a fresh
+        // teardown instead of exiting.
+        d.destroy = CleanupOutcome::Killed;
+        assert_eq!(tick(&d).unwrap(), Tick::Done);
+        assert!(
+            *d.completed.borrow(),
+            "the exit must re-prove the Complete marker durable"
+        );
     }
 
     #[test]
@@ -1967,6 +2340,731 @@ mod tests {
         deps.sweep_succeeds = true;
         assert_eq!(tick(&deps).unwrap(), Tick::CleanedAndDone);
         assert!(*deps.completed.borrow());
+    }
+
+    /// A real child in its own process group, plus its true recorded identity.
+    /// The caller is responsible for reaping it.
+    fn spawn_group_leader() -> (std::process::Child, codex_launch::ChildEntry) {
+        use std::os::unix::process::CommandExt;
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn a group leader");
+        let pid = child.id() as i32;
+        let birth = protocol::proc_identity::read_birth_identity(pid).expect("birth");
+        let pgid = protocol::proc_identity::read_pgid(pid).expect("pgid");
+        assert_eq!(pgid, pid, "the stand-in must lead its own group");
+        (
+            child,
+            codex_launch::ChildEntry {
+                role: "app-server".into(),
+                identity: ProcessIdentity { pid, birth },
+                pgid,
+                nonce: "n".into(),
+                argv_hash: String::new(),
+                recorded_by: None,
+                exec_confirmed: false,
+            },
+        )
+    }
+
+    fn real_deps(uid: &str) -> RealDeps {
+        RealDeps {
+            cfg: CustodianCfg {
+                uid: uid.into(),
+                socket: "/tmp/cc-no-such-server.sock".into(),
+                coordinator: protocol::proc_identity::current_identity().unwrap(),
+                poll: std::time::Duration::from_millis(1),
+            },
+            seen_present: std::cell::Cell::new(false),
+        }
+    }
+
+    /// A11.2: the group kill is warranted by an occupied group id, and that warrant
+    /// expires the moment the id could have been recycled.
+    ///
+    /// Here the recorded leader's pid is occupied by a process with a DIFFERENT
+    /// birth stamp — which is exactly what pid reuse looks like from the outside.
+    /// The old code read only "the leader's identity is `Gone`" plus "the group has
+    /// members" and killed the group, which in this state means SIGKILLing a process
+    /// that was never part of the launch.
+    #[test]
+    fn a_group_whose_leader_pid_was_recycled_is_never_signalled() {
+        let (mut child, mut entry) = spawn_group_leader();
+        let real_pid = entry.identity.pid;
+        // Corrupt ONLY the birth stamp: same pid, same pgid, different process.
+        // `liveness` reads this as `Gone` (reuse), which is the arm under test.
+        entry.identity.birth.start_usec ^= 0x5A5A;
+        assert_eq!(
+            liveness(&entry.identity),
+            Liveness::Gone,
+            "a wrong birth on a live pid must read as Gone, or this proves nothing"
+        );
+        assert_eq!(
+            group_warrant(&entry.identity, this_boot()),
+            GroupWarrant::Refused(format!(
+                "pid {real_pid} is now a different process, so the group id may have been recycled"
+            ))
+        );
+
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = "abaguard".into();
+        record.children = vec![entry];
+        real_deps("abaguard").teardown_children(&record);
+
+        // THE GATE: the innocent process is still alive, and STAYS alive.
+        //
+        // Polled rather than checked once: `teardown_children` returns as soon as
+        // the recorded identity reads `Gone`, which a corrupted birth stamp does
+        // immediately — so it returns before a signal it did send could land. A
+        // single `try_wait` here passes by luck even when the group was killed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            assert!(
+                matches!(child.try_wait(), Ok(None)),
+                "a group whose recorded leader pid was recycled must NOT be signalled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A11.2, the other side: the measured case must still work. When the recorded
+    /// leader's pid is genuinely FREE, nothing can be leading a fresh group with
+    /// that id, so the members still in it inherited it from our leader — and they
+    /// are exactly the forked descendants that used to survive every kill.
+    ///
+    /// Without this, the guard above could be "closed" by never signalling at all.
+    #[test]
+    fn a_group_whose_leader_pid_is_free_is_still_killed() {
+        let (mut leader, entry) = spawn_group_leader();
+        let pgid = entry.pgid;
+        // A second process that JOINS the leader's group and outlives it — the
+        // forked descendant the group kill exists for.
+        use std::os::unix::process::CommandExt;
+        let mut descendant = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn a group member");
+        // Kill and REAP the leader, so its pid is genuinely free.
+        let _ = leader.kill();
+        let _ = leader.wait();
+        assert_eq!(
+            group_warrant(&entry.identity, this_boot()),
+            GroupWarrant::Warranted,
+            "a freed leader pid must still warrant the group kill"
+        );
+        assert!(
+            group_has_members(pgid),
+            "the descendant must still hold the group open"
+        );
+
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = "abasurvivor".into();
+        record.children = vec![entry];
+        // The group-kill arm is warranted only WITHIN the boot that recorded the
+        // group (round-4 finding 10), and `base_record`'s fixture boot is a fake.
+        // These children are real processes of THIS boot, so the record has to say
+        // so or the test would prove the refusal rather than the kill.
+        record.boot = this_boot();
+        real_deps("abasurvivor").teardown_children(&record);
+
+        // THE GATE: the descendant was reached by the group signal.
+        let reaped = descendant.wait().expect("reap the descendant");
+        assert!(
+            !reaped.success(),
+            "the surviving group member must have been SIGKILLed"
+        );
+    }
+
+    /// **A11.2's worst arm: cross-BOOT pgid reuse** (round-4 finding 10).
+    ///
+    /// The unoccupied-leader arm is deliberately uncorroborated within one boot, and
+    /// the recorded bound used to say the unrelated-group risk needs pid wraparound.
+    /// Across a reboot it needs nothing: pids restart from the bottom, so the new
+    /// boot reaches the recorded pgid in the ordinary course of starting up, and a
+    /// new occupant that has exited while its children live puts the arm in exactly
+    /// the state that authorizes `SIGKILL` — on a process group from a machine
+    /// lifetime this launch never touched.
+    ///
+    /// Staged as the real thing rather than argued: the SAME live group that the
+    /// test above proves IS killed within its own boot must be refused when the
+    /// record names a different boot. Nothing but the boot field changes between the
+    /// two, which is what makes the boot field the cause.
+    #[test]
+    fn a_group_recorded_under_a_different_boot_is_never_signalled() {
+        let (mut leader, entry) = spawn_group_leader();
+        let pgid = entry.pgid;
+        use std::os::unix::process::CommandExt;
+        let mut descendant = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(pgid)
+            .spawn()
+            .expect("spawn a group member");
+        let _ = leader.kill();
+        let _ = leader.wait();
+
+        // The premise: within THIS boot the arm warrants the kill. Asserted first so
+        // a refusal below cannot be a vacuous pass on some other precondition.
+        assert_eq!(
+            group_warrant(&entry.identity, this_boot()),
+            GroupWarrant::Warranted,
+            "the within-boot warrant is the premise this test inverts"
+        );
+
+        let prior_boot = protocol::proc_identity::BootIdentity {
+            boot_sec: this_boot().boot_sec - 1,
+            boot_usec: this_boot().boot_usec,
+        };
+        match group_warrant(&entry.identity, prior_boot) {
+            GroupWarrant::Refused(why) => assert!(
+                why.contains("rebooted"),
+                "the refusal must name the reason it refused: {why}"
+            ),
+            other => panic!("a cross-boot pgid must never be signalled: {other:?}"),
+        }
+
+        // …and end to end, through the caller that does the signalling.
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = "abareboot".into();
+        record.children = vec![entry];
+        record.boot = prior_boot;
+        real_deps("abareboot").teardown_children(&record);
+
+        // THE GATE: the group is untouched. A stranger's group surviving is the
+        // whole point — this is the one place in A11.2's residual where failing
+        // closed costs nothing, because nothing of ours can outlive a reboot.
+        assert!(
+            group_has_members(pgid),
+            "a group recorded under another boot must be left alone"
+        );
+        let _ = descendant.kill();
+        let _ = descendant.wait();
+    }
+
+    /// A11.2, the live-child half: "the recorded identity is alive" is not "it is
+    /// still in the group we recorded", and the group signal needs the second fact.
+    ///
+    /// A record claiming `pgid == pid` for a process that is NOT a group leader used
+    /// to send `kill(-pid, ...)` at a group id that does not exist. That returns
+    /// `ESRCH`, which this code reads as "it went away anyway" — so the child was
+    /// silently never signalled at all. Re-proving membership against the kernel
+    /// turns that into a signal by pid, which actually reaches it.
+    #[test]
+    fn a_live_child_that_is_not_in_its_recorded_group_is_still_signalled() {
+        // NO `process_group`: this child sits in the test runner's group, so the
+        // recorded `pgid == pid` below is a claim the kernel does not back.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let birth = protocol::proc_identity::read_birth_identity(pid).expect("birth");
+        assert_ne!(
+            protocol::proc_identity::read_pgid(pid),
+            Some(pid),
+            "the stand-in must NOT lead its own group, or this proves nothing"
+        );
+        let entry = codex_launch::ChildEntry {
+            role: "app-server".into(),
+            identity: ProcessIdentity { pid, birth },
+            // The stale/false claim under test.
+            pgid: pid,
+            nonce: "n".into(),
+            argv_hash: String::new(),
+            recorded_by: None,
+            exec_confirmed: false,
+        };
+        assert_eq!(liveness(&entry.identity), Liveness::Alive);
+
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = "pgidmismatch".into();
+        record.children = vec![entry];
+        real_deps("pgidmismatch").teardown_children(&record);
+
+        // THE GATE: it was actually reached, not signalled at a group id that has
+        // no members and reported as "already gone".
+        let reaped = child.wait().expect("reap");
+        assert!(
+            !reaped.success(),
+            "a live child must be signalled by pid when it is not in its recorded group"
+        );
+    }
+
+    /// A11.5: the delete is bound to the INODE the marker was read from, not to the
+    /// path it was reached by.
+    ///
+    /// The window this closes: the custodian read the owner marker by path and then
+    /// called `remove_dir_all` on that same path, re-resolving it. In sticky,
+    /// world-writable `/tmp` a same-uid process — or a legitimate colliding launch,
+    /// since the run-dir derivation is many-to-one — could swap the directory
+    /// between those two steps, and the thing deleted would not be the thing
+    /// verified.
+    ///
+    /// The swap is performed here in the middle, deterministically, rather than
+    /// raced: the descriptor is taken, the name is then repointed at an impostor,
+    /// and the removal must still empty the directory the descriptor names.
+    #[test]
+    fn the_sweep_deletes_the_inode_it_verified_not_the_name() {
+        let base = std::env::temp_dir().join(format!("cc-a11-5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ours = base.join("run");
+        std::fs::create_dir_all(ours.join("nested")).unwrap();
+        std::fs::write(ours.join("as.sock.log"), b"ours").unwrap();
+        std::fs::write(ours.join("nested/deep"), b"ours").unwrap();
+
+        // The descriptor is taken while the name still points at OUR directory —
+        // this is the moment the real sweep reads the marker.
+        let fd = codex_launch::open_dir_nofollow(&ours).expect("open the run dir");
+
+        // Now the swap. `ours` is moved aside and an impostor takes the name.
+        let moved = base.join("moved");
+        std::fs::rename(&ours, &moved).unwrap();
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("sentinel"), b"impostor").unwrap();
+
+        codex_launch::remove_tree_beneath(&fd, 0, None).expect("empty the verified directory");
+        drop(fd);
+
+        // THE GATE: the verified inode was emptied — including its subdirectory...
+        assert!(
+            moved.exists(),
+            "the verified directory itself is not removed by this step"
+        );
+        assert_eq!(
+            std::fs::read_dir(&moved).unwrap().count(),
+            0,
+            "the verified inode must have been emptied, nested contents included"
+        );
+        // ...and the impostor that took the NAME was never touched.
+        assert_eq!(
+            std::fs::read(ours.join("sentinel")).unwrap(),
+            b"impostor",
+            "the directory that took the name must be untouched: the delete follows \
+             the descriptor, not the path"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A11.5, the other half of the same binding: the marker is read through the
+    /// descriptor too, so the verdict describes the directory that will actually be
+    /// emptied rather than whatever now answers to the name.
+    #[test]
+    fn the_owner_marker_is_read_through_the_descriptor() {
+        let base = std::env::temp_dir().join(format!("cc-a11-5m-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ours = base.join("run");
+        std::fs::create_dir_all(&ours).unwrap();
+        codex_launch::write_owner_marker(&ours, "uid-real", "nonce-real").unwrap();
+
+        let fd = codex_launch::open_dir_nofollow(&ours).expect("open");
+
+        // Swap the name to a directory claiming a DIFFERENT owner.
+        let moved = base.join("moved");
+        std::fs::rename(&ours, &moved).unwrap();
+        std::fs::create_dir_all(&ours).unwrap();
+        codex_launch::write_owner_marker(&ours, "uid-other", "nonce-other").unwrap();
+
+        // Through the fd: still ours. By path: the impostor's.
+        assert_eq!(
+            codex_launch::run_dir_marker_at(fd.0, "uid-real", "nonce-real"),
+            codex_launch::MarkerVerdict::Ours,
+            "the descriptor must still name the directory whose marker we wrote"
+        );
+        assert_eq!(
+            codex_launch::run_dir_marker(&ours, "uid-real", "nonce-real"),
+            codex_launch::MarkerVerdict::Foreign,
+            "and the path must now resolve to the impostor — which is the whole gap"
+        );
+        drop(fd);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A11.5, end to end through `sweep_run_dir`: a marked run dir with nested
+    /// contents is removed whole, and a tree deeper than the sweep will descend is
+    /// REFUSED rather than removed by some other route.
+    ///
+    /// The depth arm is what pins the wiring. `remove_dir_all` — the path-addressed
+    /// call this replaced — has no such bound, so a sweep that quietly went back to
+    /// it would remove the deep tree and report success here.
+    #[test]
+    fn the_sweep_removes_a_nested_run_dir_and_refuses_an_unreasonably_deep_one() {
+        let uid = "inodesweep";
+        let nonce = codex_launch::mint_nonce();
+        let ours = crate::codex_coordinator::choose_run_dir(uid, &nonce).unwrap();
+        let _ = std::fs::remove_dir_all(&ours);
+        std::fs::create_dir_all(ours.join("a/b/c")).unwrap();
+        std::fs::write(ours.join("a/b/c/deep"), b"x").unwrap();
+        std::fs::write(ours.join("as.stderr"), b"x").unwrap();
+        codex_launch::write_owner_marker(&ours, uid, &nonce).unwrap();
+
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = uid.into();
+        record.launch_nonce = nonce.clone();
+        record.run_dir = ours.to_str().map(|s| s.to_string());
+
+        assert!(
+            real_deps(uid).sweep_run_dir(&record),
+            "a marked run dir with nested contents must be swept"
+        );
+        assert!(!ours.exists(), "and removed whole: {}", ours.display());
+
+        // Now a tree deeper than the sweep is willing to descend.
+        let mut deep = ours.clone();
+        for _ in 0..(codex_launch::SWEEP_MAX_DEPTH + 4) {
+            deep = deep.join("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        codex_launch::write_owner_marker(&ours, uid, &nonce).unwrap();
+        assert!(
+            !real_deps(uid).sweep_run_dir(&record),
+            "a tree deeper than the sweep descends must leave cleanup pending, \
+             not be removed by an unbounded path-addressed delete"
+        );
+        assert!(
+            ours.exists(),
+            "and the directory must still be there to retry on"
+        );
+
+        // A11.5, the half a single pass cannot see: the failed pass must still hold
+        // its own RETRY WARRANT. The owner marker is the only thing that makes this
+        // directory provably ours, and the sweep used to unlink it with every other
+        // entry — so the second pass read the missing marker as `Foreign`, reported
+        // DEALT WITH, and the record went `Complete` over an unremoved tree with
+        // nobody left to notice.
+        assert!(
+            ours.join(codex_launch::RUN_DIR_OWNER_FILE).exists(),
+            "the owner marker must OUTLIVE a failed pass — it is the warrant the \
+             next pass needs to prove the directory is this launch's"
+        );
+        assert!(
+            !real_deps(uid).sweep_run_dir(&record),
+            "so a SECOND pass over the same unremoved tree must still report retry, \
+             never a success that abandons it"
+        );
+        assert!(ours.exists(), "and still leave it standing to retry on");
+
+        // Once the obstruction is gone, the retry the warrant preserved completes.
+        let mut top = ours.clone();
+        top.push("d");
+        std::fs::remove_dir_all(&top).unwrap();
+        assert!(
+            real_deps(uid).sweep_run_dir(&record),
+            "and the pass that finally can finish, does"
+        );
+        assert!(!ours.exists(), "removed whole: {}", ours.display());
+        let _ = std::fs::remove_dir_all(&ours);
+    }
+
+    /// **Round-2 finding 5: a straggler after the enumeration must not settle the
+    /// directory.**
+    ///
+    /// The one failure the marker's "unlinked last" discipline could not cover, and
+    /// the reason it could not: the marker lives INSIDE the directory `rmdir`
+    /// removes, so it has to go first. A process that creates an entry after the
+    /// sweep has listed the directory therefore makes `rmdir` return `ENOTEMPTY`
+    /// with the warrant already gone — and the next pass reads a missing marker as
+    /// `Foreign`, ignores its own `remove_dir` failure, and reports `Settled`.
+    /// Cleanup goes `Complete` over a tree that is still standing.
+    ///
+    /// The boot this test process is running under — the only boot under which a
+    /// group warrant can be granted (round-4 finding 10).
+    fn this_boot() -> BootIdentity {
+        protocol::proc_identity::boot_identity().expect("this boot's identity is readable")
+    }
+
+    /// Every warrant-restore staging file left in `dir`, by name.
+    ///
+    /// Scans for the PREFIX, not one fixed name: the staging name is unique per
+    /// attempt (round-4 finding 3), so `dir.join(".owner.restore")` would assert
+    /// about a file that is never created under that exact name — which is how the
+    /// litter assertion came to be unobservable in the first place.
+    fn staging_litter(dir: &std::path::Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .expect("the run dir is readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(codex_launch::MARKER_RESTORE_TEMP))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// So the failing arm restores the marker, and the second pass is the assertion
+    /// that matters: it must still say RETRY.
+    #[test]
+    fn a_straggler_after_the_enumeration_leaves_the_sweep_owed_not_settled() {
+        let uid = "straggler";
+        let nonce = codex_launch::mint_nonce();
+        let ours = crate::codex_coordinator::choose_run_dir(uid, &nonce).unwrap();
+        let _ = std::fs::remove_dir_all(&ours);
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("as.stderr"), b"x").unwrap();
+        codex_launch::write_owner_marker(&ours, uid, &nonce).unwrap();
+
+        codex_launch::straggle_next_sweep();
+        let first = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        assert!(
+            matches!(first, codex_launch::RunDirSweep::Retry(_)),
+            "a failed rmdir is unfinished work, not a settled directory: {first:?}"
+        );
+        assert!(ours.exists(), "and the tree is still standing");
+        assert!(
+            ours.join(codex_launch::STRAGGLER_FILE).exists(),
+            "the straggler is what made rmdir fail"
+        );
+        // THE GATE. Without the restore this file is gone, the marker reads
+        // `Foreign`, and the next line gets `Settled` over a live directory.
+        assert!(
+            ours.join(codex_launch::RUN_DIR_OWNER_FILE).exists(),
+            "the deletion warrant must be RESTORED when rmdir fails after it was \
+             unlinked — it is the only thing that makes this directory provably ours"
+        );
+        // **Existing is not the same as being a WARRANT** (round-3 finding 3). A
+        // half-written or empty file at the marker's name exists too, and the reader
+        // files it as `Foreign` — the verdict that settles and abandons. So the
+        // restored marker is put to the only test that matters: what the reader says
+        // about it.
+        assert_eq!(
+            codex_launch::run_dir_marker(&ours, uid, &nonce),
+            codex_launch::MarkerVerdict::Ours,
+            "a restored warrant must READ as ours, not merely occupy the name"
+        );
+        assert_eq!(
+            std::fs::read(ours.join(codex_launch::RUN_DIR_OWNER_FILE)).unwrap(),
+            format!("{uid}\n{nonce}\n").into_bytes(),
+            "and be byte-identical to the warrant the host originally wrote"
+        );
+        // No staging litter is left behind either.
+        assert_eq!(
+            staging_litter(&ours),
+            Vec::<String>::new(),
+            "the staging file must not survive a successful restore"
+        );
+        // Round-4 finding 4: the restored warrant is 0600 as a FACT, not as a
+        // creation-mode request the umask may have narrowed. A mode-000 marker reads
+        // `EACCES` ⇒ `Unknown` ⇒ Pending for ever, on a restore that reported success.
+        assert_eq!(
+            protocol::fsperm::mode_of(&ours.join(codex_launch::RUN_DIR_OWNER_FILE)).unwrap(),
+            0o600,
+            "a restored warrant must be readable by the passes that have to read it"
+        );
+
+        let second = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        assert!(
+            matches!(second, codex_launch::RunDirSweep::Settled(None)),
+            "and the retry the warrant preserved removes the straggler too: {second:?}"
+        );
+        assert!(!ours.exists(), "removed whole: {}", ours.display());
+        let _ = std::fs::remove_dir_all(&ours);
+    }
+
+    /// **A restore that FAILS is reported, and never as a settled directory**
+    /// (round-3 finding 3).
+    ///
+    /// The straggler test above proves the restore works. This one proves what
+    /// happens when it does not — the residual the arm's own comment claims is "not
+    /// pretended away", which nothing tested. Only the filesystem decides when a
+    /// write fails, so the failure is injected at the seam.
+    ///
+    /// **The seam fires AFTER the staging file is created** (round-4 finding 8). It
+    /// used to return at the top of `restore_marker_at`, before `.owner.restore`
+    /// existed — which made "a failed restore leaves no staging litter behind" an
+    /// assertion about a file nothing could have created. Deleting the staging
+    /// cleanup left it green. Now the fault reaches the arm a real write failure
+    /// reaches: a staging file exists, and the assertion is what proves it was
+    /// removed. Because the staging name is unique per attempt (round-4 finding 3),
+    /// the assertion scans for the PREFIX rather than one fixed name.
+    ///
+    /// Three things must hold, and the third is stated correctly here for the first
+    /// time. The pass must say the warrant was lost, in as many words, rather than
+    /// reporting the `rmdir` failure alone. It must leave no staging litter. And the
+    /// pass AFTER it must report `Settled(Some(_))` — this is the recorded residual,
+    /// not a contradiction of it: with its warrant gone the directory reads
+    /// `Foreign`, and a POPULATED foreign directory is one this code may never touch,
+    /// so settling is the only answer that does not wedge cleanup for ever on a
+    /// stranger's tree. What the earlier prose here claimed — "the pass after it must
+    /// NOT report the directory settled" — contradicted the assertion directly below
+    /// it and described a different, unimplemented policy.
+    #[test]
+    fn a_warrant_that_cannot_be_restored_is_reported_and_never_settles() {
+        let uid = "straggler-nofix";
+        let nonce = codex_launch::mint_nonce();
+        let ours = crate::codex_coordinator::choose_run_dir(uid, &nonce).unwrap();
+        let _ = std::fs::remove_dir_all(&ours);
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("as.stderr"), b"x").unwrap();
+        codex_launch::write_owner_marker(&ours, uid, &nonce).unwrap();
+
+        codex_launch::straggle_next_sweep();
+        codex_launch::fail_next_marker_restore();
+        let first = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        match &first {
+            codex_launch::RunDirSweep::Retry(why) => assert!(
+                why.contains("could not be restored"),
+                "the pass must name the residual it actually hit — a lost warrant is \
+                 worse than a failed rmdir and must not be reported as one: {why}"
+            ),
+            other => panic!("a lost warrant is owed work, not settled: {other:?}"),
+        }
+        assert!(ours.exists(), "the tree is still standing");
+        assert!(
+            !ours.join(codex_launch::RUN_DIR_OWNER_FILE).exists(),
+            "the premise: the warrant really is gone, or the pass below proves nothing"
+        );
+        assert_eq!(
+            staging_litter(&ours),
+            Vec::<String>::new(),
+            "and a failed restore leaves no staging litter behind — the fault fires \
+             AFTER the staging file exists, so this assertion has something to see \
+             and deleting the cleanup makes it RED"
+        );
+
+        // THE GATE. The next pass reads a missing marker as `Foreign`. A populated
+        // foreign directory settles — see the doc above for why that is the recorded
+        // residual and not the "cleanup complete, leftovers until reboot" defect.
+        assert_eq!(
+            codex_launch::run_dir_marker(&ours, uid, &nonce),
+            codex_launch::MarkerVerdict::Foreign,
+            "the premise: without its warrant the directory reads as a stranger's"
+        );
+        let second = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        assert!(
+            matches!(second, codex_launch::RunDirSweep::Settled(Some(_))),
+            "a POPULATED foreign directory settles — retrying would wedge for ever on \
+             a directory we may never touch: {second:?}"
+        );
+        assert!(
+            ours.exists(),
+            "and it is left standing, untouched, because it is not provably ours"
+        );
+        let _ = std::fs::remove_dir_all(&ours);
+    }
+
+    /// **The Foreign arm tells "not ours" from "could not tell"** (round-3 finding 3).
+    ///
+    /// A missing marker reads `Foreign`, and this arm then tries to collect what may
+    /// be its own empty residue. The `remove_dir` used to be `let _ = …`: every
+    /// outcome, including failures it never looked at, was reported `Settled` —
+    /// "nothing is owed here" — which is what turns an unfinished cleanup into a
+    /// completed one with leftovers until the next reboot.
+    ///
+    /// Staged against a real `EACCES`: an EMPTY unmarked directory whose PARENT is
+    /// not writable, so `rmdir` genuinely cannot remove it for a reason that says
+    /// nothing whatever about whose it is.
+    #[test]
+    fn a_foreign_directory_that_cannot_be_collected_is_owed_not_settled() {
+        let parent = std::env::temp_dir().join(format!("cc-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = parent.join("run");
+        std::fs::create_dir(&dir).unwrap();
+
+        // No marker at all, so the verdict is Foreign; and empty, so this is exactly
+        // the residue shape the arm exists to collect.
+        assert_eq!(
+            codex_launch::run_dir_marker(&dir, "someuid", "somenonce"),
+            codex_launch::MarkerVerdict::Foreign
+        );
+
+        // Control: with a writable parent it IS collected, and settles.
+        let control = parent.join("run2");
+        std::fs::create_dir(&control).unwrap();
+        assert!(
+            matches!(
+                codex_launch::sweep_owned_run_dir(&control, "someuid", "somenonce"),
+                codex_launch::RunDirSweep::Settled(None)
+            ),
+            "the premise: an empty foreign residue IS collectable when nothing stops it"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let verdict = codex_launch::sweep_owned_run_dir(&dir, "someuid", "somenonce");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        match &verdict {
+            codex_launch::RunDirSweep::Retry(why) => assert!(
+                why.contains("could not be completed"),
+                "and it must say the collection failed, not that nothing was owed: {why}"
+            ),
+            other => panic!(
+                "THE GATE: a removal that failed for an unexplained reason must not be \
+                 reported as a settled directory: {other:?}"
+            ),
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// **Round-2 finding 6: a `readdir` that FAILS is not a directory that ENDED.**
+    ///
+    /// `readdir` reports end-of-directory and a read error the same way — NULL — and
+    /// they are told apart only by `errno`. Read as EOF unconditionally, an I/O
+    /// error part way through made a partial listing look like a complete one: the
+    /// sweep unlinked the marker and reported success over entries it never saw.
+    #[test]
+    fn a_failed_enumeration_is_not_an_emptied_directory() {
+        let uid = "readdirfail";
+        let nonce = codex_launch::mint_nonce();
+        let ours = crate::codex_coordinator::choose_run_dir(uid, &nonce).unwrap();
+        let _ = std::fs::remove_dir_all(&ours);
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("as.stderr"), b"x").unwrap();
+        codex_launch::write_owner_marker(&ours, uid, &nonce).unwrap();
+
+        // Pinned, because "the marker is there" is not the claim — `sweep_owned_run_dir`
+        // RESTORES a marker it unlinked when the `rmdir` behind it fails, so a
+        // sweep that wrongly ran to completion on a partial listing would ALSO
+        // leave a marker at this path. The claim is that the marker was never
+        // touched, and only its inode says that.
+        use std::os::unix::fs::MetadataExt;
+        let marker = ours.join(codex_launch::RUN_DIR_OWNER_FILE);
+        let before = std::fs::metadata(&marker).unwrap().ino();
+
+        codex_launch::fail_next_readdir();
+        let first = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        assert!(
+            matches!(first, codex_launch::RunDirSweep::Retry(_)),
+            "an enumeration that errored must leave the directory owed: {first:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&marker).unwrap().ino(),
+            before,
+            "THE GATE: the failure must be propagated BEFORE any unlinking, so the \
+             warrant is the ORIGINAL file — not one the rmdir arm put back after \
+             a sweep that believed a partial listing was the whole directory"
+        );
+        assert!(
+            ours.join("as.stderr").exists(),
+            "and the tree is exactly as it was found"
+        );
+
+        let second = codex_launch::sweep_owned_run_dir(&ours, uid, &nonce);
+        assert!(
+            matches!(second, codex_launch::RunDirSweep::Settled(None)),
+            "and the pass whose enumeration works, finishes: {second:?}"
+        );
+        assert!(!ours.exists(), "removed whole: {}", ours.display());
+        let _ = std::fs::remove_dir_all(&ours);
     }
 
     #[test]

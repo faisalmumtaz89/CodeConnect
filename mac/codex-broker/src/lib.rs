@@ -54,5 +54,6 @@ pub use response_capability::{
     COMMAND_EXEC_APPROVAL, FILE_CHANGE_APPROVAL, GENERATION_UNSTAMPED,
 };
 pub use session::{
-    ConnId, IdAdmission, IdLedgerCounts, SessionThreads, ThreadBinding, VerifiedThread,
+    ConnId, IdAdmission, IdLedgerCounts, PrefixAdmission, SessionThreads, ThreadBinding,
+    VerifiedThread,
 };

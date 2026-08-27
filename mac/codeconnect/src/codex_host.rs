@@ -216,8 +216,14 @@ const EX_HOST_FATAL: i32 = 70;
 ///   4. the gate's readiness fence is blocking, and this is an async orchestrator.
 ///
 /// Making it fit means giving the gate stdio and process-group knobs and an async
-/// handle — a change to shared D6 machinery in service of one caller. So the
-/// window is minimised here and the residual is a documented pre-ungate gate.
+/// handle — a change to shared D6 machinery in service of one caller.
+///
+/// **A11.1: closed instead by [`spawn_fenced`]**, the host-local equivalent. It
+/// keeps all four facts above true — it adds only a `pre_exec` closure, so stdio and
+/// process-group inheritance are untouched, the handles stay `tokio::process::Child`,
+/// and the blocking part runs on a releaser thread rather than the runtime. What is
+/// left for this budget to bound is how long a launch sits inert, not how long a
+/// stray child can outlive its record.
 const RECORD_LOCK_BUDGET: Duration = Duration::from_secs(1);
 
 /// Exit code when the D7 gate refused this host admission to its launch:
@@ -677,6 +683,145 @@ pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<
 
 /// Bring the three parts up fail-closed, race them plus a host signal, tear
 /// everything down, and return the session's exit code.
+/// Build the run dir and its owner marker under a temp name, then publish the
+/// finished thing with one `rename` (A11.4).
+///
+/// The invariant this buys: **a directory at the final run-dir path always carries
+/// its owner marker.** Nothing else can be observed there, because the only thing
+/// ever placed at that name is a directory that already contains the marker.
+///
+/// `renamex_np(..., RENAME_EXCL)` rather than plain `rename(2)`, and that is not a
+/// stylistic choice — measured: a plain rename onto an existing *empty* directory
+/// SUCCEEDS and replaces it. That would silently convert the host's "refuses to
+/// adopt a directory it did not create" rule into "quietly takes over a squatted
+/// name", which is the opposite of what the `mkdir` it replaces was for.
+/// `RENAME_EXCL` fails `EEXIST` instead, so a squatted final name is still a
+/// refused launch.
+///
+/// The residual, stated plainly: a host SIGKILLed between the temp `mkdir` and the
+/// marker write leaks an unmarked `<run_dir>.tmp`. It is never RECORDED, so cleanup
+/// never reasons about it the way it had to about an unmarked dir at the final path.
+///
+/// It is not, however, never consulted: the next launch that derives the same run-dir
+/// name stages through this exact path, and its `create_dir` is `create_new`, so a
+/// leftover `.tmp` there makes that launch fail `EEXIST` — refused rather than
+/// adopted, which is the fail-closed direction, but a refusal all the same. The name
+/// carries the launch nonce, so recurrence needs a nonce collision; the residual is
+/// negligible, not absent, and it is stated that way here.
+fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> Result<()> {
+    let parent = run_dir
+        .parent()
+        .ok_or_else(|| anyhow!("the run dir {} has no parent", run_dir.display()))?;
+    let name = run_dir
+        .file_name()
+        .ok_or_else(|| anyhow!("the run dir {} has no final component", run_dir.display()))?;
+    let mut temp_name = name.to_os_string();
+    temp_name.push(".tmp");
+    let temp = parent.join(temp_name);
+
+    // Exclusive, private, and fresh — the same guarantee the final `mkdir` used to
+    // give, just moved to a name nobody else consults.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&temp)
+        .with_context(|| {
+            format!(
+                "creating the staging run dir {} exclusively — it must NOT already exist",
+                temp.display()
+            )
+        })?;
+
+    // Everything from here removes the staging dir on failure: a host that does not
+    // come up leaves nothing behind.
+    let staged = (|| -> Result<()> {
+        crate::codex_launch::write_owner_marker(&temp, uid, launch_nonce)?;
+        // The marker's dirent must be durable BEFORE the rename publishes the
+        // directory, or a crash could expose a dir at the final name whose marker
+        // has not landed — exactly the state this is built to make impossible.
+        std::fs::File::open(&temp)
+            .with_context(|| format!("opening {} to flush it", temp.display()))?
+            .sync_all()
+            .with_context(|| format!("fsync of {}", temp.display()))
+    })();
+    if let Err(err) = staged {
+        let _ = std::fs::remove_dir_all(&temp);
+        return Err(err);
+    }
+
+    let c_from = std::ffi::CString::new(temp.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("{} contains a NUL byte", temp.display()))?;
+    let c_to = std::ffi::CString::new(run_dir.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("{} contains a NUL byte", run_dir.display()))?;
+    // SAFETY: two NUL-terminated paths owned by the CStrings above, live for the call.
+    let rc = unsafe { libc::renamex_np(c_from.as_ptr(), c_to.as_ptr(), libc::RENAME_EXCL) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_dir_all(&temp);
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            bail!(
+                "creating the host run dir {} exclusively — it must NOT already exist \
+                 (the host owns it and refuses to adopt a directory it did not create)",
+                run_dir.display()
+            );
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "publishing the staged run dir {} as {}",
+                temp.display(),
+                run_dir.display()
+            )
+        });
+    }
+
+    // And make the published name itself durable, so a crash cannot lose the dirent
+    // the record already points at.
+    std::fs::File::open(parent)
+        .with_context(|| format!("opening {} to flush it", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync of {}", parent.display()))
+}
+
+/// Remove the run dir this host created, on the way out.
+///
+/// `run_session` has already run teardown, so each child has been given a bounded
+/// best-effort stop and the aborted broker task was given `BROKER_ABORT_BUDGET` to
+/// finish. None of that is a proof — `start_kill` can fail, a reap can time out, a
+/// task can ignore its cancellation point — so this runs either way. It is safe
+/// that it does: unlinking a bound socket or an open log file is harmless to the fd
+/// holding it, and a straggler that outlived the budget keeps working against an
+/// unlinked inode rather than corrupting anything.
+///
+/// Best-effort — a cleanup failure must not mask the session outcome — but NOT
+/// silent. The module doc says the host *attempts* to remove the run dir, and an
+/// attempt that failed with no record is how a leak becomes invisible.
+///
+/// **A11.5: fd-anchored, not path-addressed.** This used to be
+/// `remove_dir_all(&args.run_dir)`, which re-resolves the NAME at every step. The
+/// name is not an identity — [`crate::codex_coordinator::choose_run_dir`]
+/// truncates, so the derivation is many-to-one — and this host can still be inside
+/// its bounded teardown while a custodian removes the old inode and a colliding
+/// launch publishes the same name. A path-addressed delete would then land on the
+/// replacement's bound sockets and logs. The shared sweep opens the directory once,
+/// proves the owner marker **through that descriptor**, and unlinks everything
+/// relative to it, so the thing deleted is provably the thing verified — and a
+/// directory whose marker is not ours is refused, which is a bar this host, the
+/// process that wrote that marker, is the one thing that always clears.
+fn sweep_own_run_dir(run_dir: &Path, uid: &str, nonce: &str) {
+    match crate::codex_launch::sweep_owned_run_dir(run_dir, uid, nonce) {
+        crate::codex_launch::RunDirSweep::Settled(note) => {
+            if let Some(note) = note {
+                eprintln!("codex-host: {note}");
+            }
+        }
+        // The host has no later pass. Saying so is the point: the custodian is the
+        // actor that comes back for it, and this line is what tells whoever reads
+        // the pane why it had to.
+        crate::codex_launch::RunDirSweep::Retry(why) => {
+            eprintln!("codex-host: {why}; leaving it for the custodian");
+        }
+    }
+}
+
 async fn orchestrate(args: HostArgs) -> Result<i32> {
     let paths = Paths::under(&args.run_dir);
     for sock in [&paths.as_sock, &paths.tui_sock, &paths.ccd_sock] {
@@ -708,62 +853,23 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
     // `crate::codex_coordinator::RUN_DIR_PREFIX`). So this `mkdir` is not one
     // safeguard among several — it is the load-bearing one: it turns a squatted
     // name into a refused launch rather than an adopted directory. The marker
-    // written immediately below is what then makes the directory say whose it is,
-    // since its NAME cannot (the derivation is many-to-one).
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&args.run_dir)
-        .with_context(|| {
-            format!(
-                "creating the host run dir {} exclusively — it must NOT already exist \
-                 (the host owns it and refuses to adopt a directory it did not create)",
-                args.run_dir.display()
-            )
-        })?;
-
-    // Claim it, immediately and durably. The `mkdir` above proves the directory is
-    // fresh; this says WHOSE it is, and the two must be inseparable — the marker is
-    // written before anything else can exist inside, by the only process that could
-    // have created it.
+    // written inside it is what then makes the directory say whose it is, since its
+    // NAME cannot (the derivation is many-to-one).
     //
-    // It is what lets the other two actors stop trusting the NAME. The coordinator
-    // will not accept sockets under this directory as evidence for a launch the
-    // marker does not name, and the custodian will not delete a directory whose
-    // marker is not its own — both real hazards, because the run-dir derivation is
-    // many-to-one and the custodian deletes a path recorded before it existed.
-    //
-    // A failure here removes the directory and aborts: the invariant is that a host
-    // which does not come up leaves nothing behind, and a claimed-but-unmarked
-    // directory is worse than none — nobody could later prove whose it was.
-    if let Err(err) = crate::codex_launch::write_owner_marker(&args.run_dir, &args.uid, &args.nonce)
-    {
-        let _ = std::fs::remove_dir_all(&args.run_dir);
-        return Err(err);
-    }
+    // A11.4: the dir and its marker are built under a TEMP name and published by a
+    // single `rename`, so no unmarked directory can ever exist at the final path.
+    // The old order — `mkdir(final)` then write the marker — left a window in which
+    // a SIGKILLed host stranded an unmarked dir at exactly the path the custodian
+    // later consults, and the custodian correctly refuses to delete a directory it
+    // cannot prove is the launch's. Publishing atomically makes that state
+    // structurally impossible rather than merely unlikely, which is why this is
+    // preferred over an age-bounded sweep of unmarked dirs (no new clock, no
+    // heuristic).
+    create_run_dir_atomically(&args.run_dir, &args.uid, &args.nonce)?;
 
     let outcome = run_session(&args, &paths, &mut signals).await;
 
-    // `run_session` has already run teardown, so each child has been given a
-    // bounded best-effort stop and the aborted broker task was given
-    // BROKER_ABORT_BUDGET to finish. None of that is a proof — `start_kill` can
-    // fail, a reap can time out, a task can ignore its cancellation point — and
-    // teardown reports (log + stderr) whatever it could not show stopped. This
-    // sweep runs either way. It is safe that it does: `remove_dir_all` is
-    // openat-based, and unlinking a bound socket or an open log file is harmless to
-    // the fd holding it — a straggler that outlived the budget keeps working
-    // against an unlinked inode rather than corrupting anything.
-    //
-    // Best-effort — a cleanup failure must not mask the session outcome — but NOT
-    // silent. The module doc says the host *attempts* to remove the run dir, and an
-    // attempt that failed with no record is how a leak becomes invisible.
-    if let Err(err) = std::fs::remove_dir_all(&args.run_dir) {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            eprintln!(
-                "codex-host: could not remove the run dir {}: {err}",
-                args.run_dir.display()
-            );
-        }
-    }
+    sweep_own_run_dir(&args.run_dir, &args.uid, &args.nonce);
 
     Ok(match outcome {
         Outcome::TuiExited(status) => {
@@ -1059,7 +1165,12 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     };
 
     // --- The first spawn. Nothing fallible may run before the guard owns it --
-    let appserver = Command::new(&args.codex)
+    //
+    // A11.1: spawned through the fence, so its identity is durable before it is ever
+    // allowed to become codex. The recording that used to follow the spawn now
+    // happens *inside* it, while the child is still parked before `execve`.
+    let mut appserver_cmd = Command::new(&args.codex);
+    appserver_cmd
         .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", paths.as_sock.display()))
@@ -1072,31 +1183,25 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         // reaches it. Safe here precisely because this child has no tty: its
         // stdio is null/null/logfile, so being a background process group costs
         // it nothing. (The TUI is the opposite case; see its spawn below.)
+        //
+        // Measured, and the reason the fence can record a pgid at all: this is
+        // applied BEFORE the `pre_exec` closure runs, so the group the releaser
+        // reads while the child is fenced is already the final one.
         .process_group(0)
         // Safety net beneath the explicit teardown: even an unwind or an
         // early return that somehow skipped `teardown` cannot leak this child.
-        .kill_on_drop(true)
-        .spawn();
-    let appserver = match appserver {
-        Ok(child) => child,
-        Err(err) => {
-            return Outcome::Fatal(format!(
-                "spawning codex app-server ({}): {err}",
-                args.codex.display()
-            ))
-        }
-    };
-
-    // Record the app-server's identity BEFORE anything depends on the session
+        .kill_on_drop(true);
+    // The app-server's identity is durable BEFORE anything depends on the session
     // being up. The coordinator commits `ready` once the broker's legs are bound,
     // which is strictly after this point, so a session that is ever declared ready
     // has a recorded, signalable app-server behind it.
-    if let Err(err) = record_child(args, "app-server", &appserver) {
+    let appserver = match spawn_fenced(&mut appserver_cmd, args, "app-server") {
+        Ok(child) => child,
         // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
         // it, so returning here drops it through `kill_on_drop`. A session whose
         // processes cleanup cannot name is the leak this chunk exists to remove.
-        return Outcome::Fatal(format!("{err:#}"));
-    }
+        Err(err) => return Outcome::Fatal(format!("{err:#}")),
+    };
 
     let mut session = Session::new(appserver, sink);
     let outcome = drive(&mut session, args, paths, signals, &mut as_stderr_file).await;
@@ -1105,6 +1210,427 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         Ok(outcome) => outcome,
         Err(err) => Outcome::Fatal(format!("{err:#}")),
     }
+}
+
+/// The fixed-width frame a fenced child writes to report its own pid (A11.1).
+///
+/// Fixed width, never a delimiter scan, because the parent's copy of the write end
+/// is still open while it sits inside `spawn()` — so the read end can never see
+/// EOF, and a read-to-EOF here would deadlock the rendezvous rather than end it.
+const FENCE_ID_LEN: usize = 16;
+
+/// The single byte that releases a fenced child. Anything else — including EOF,
+/// which is what a SIGKILLed host produces — means "never exec".
+const FENCE_GO: u8 = b'G';
+
+/// A fenced child that is abandoned exits with this instead of `execve`-ing.
+/// Matches the exec gate's own inert exit, for one meaning per number.
+const FENCE_ABANDONED_EXIT: i32 = 70;
+
+/// Write a pid into a fixed-width ASCII frame without allocating.
+///
+/// `pre_exec` runs between `fork` and `execve` in a process that has copied a
+/// multi-threaded runtime's address space, so only async-signal-safe work is legal
+/// there. `format!` allocates and the allocator lock may have been held by another
+/// thread at the instant of the fork; this is the reason the frame is built by
+/// hand rather than with the obvious `format!("{pid:<16}")`.
+fn encode_fence_pid(pid: i32, out: &mut [u8; FENCE_ID_LEN]) {
+    *out = [b' '; FENCE_ID_LEN];
+    let mut digits = [0u8; FENCE_ID_LEN];
+    let mut n = pid.max(0) as u64;
+    let mut len = 0;
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        out[i] = digits[len - 1 - i];
+    }
+}
+
+fn decode_fence_pid(frame: &[u8; FENCE_ID_LEN]) -> Option<i32> {
+    let text = std::str::from_utf8(frame).ok()?.trim();
+    text.parse::<i32>().ok().filter(|pid| *pid > 0)
+}
+
+/// A pipe whose ends are **owned** by the caller, for the fence.
+///
+/// `OwnedFd` rather than a bare `RawFd` pair because these descriptors carry
+/// meaning by being closed: the write end of the release pipe closing is what tells
+/// an unrecorded child to die, and the parent's copies closing are what stop the
+/// releaser blocking forever on a spawn that failed. Every one of those closes used
+/// to be a hand-written `libc::close` on a normal path only — so a panic anywhere
+/// between them (a releaser panic is the reachable one) leaked the descriptor and
+/// left the child parked on a pipe that would never reach EOF. Ownership makes the
+/// close happen on every path, and the load-bearing ones are still written out
+/// explicitly as `drop`s so the ORDER stays visible.
+fn fence_pipe() -> Result<(std::os::unix::io::OwnedFd, std::os::unix::io::OwnedFd)> {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a live two-element array, which is what `pipe(2)` writes.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("creating a spawn-fence pipe");
+    }
+    // SAFETY: both descriptors were just created by `pipe(2)` and are owned by
+    // nothing else.
+    Ok(unsafe {
+        (
+            std::os::unix::io::OwnedFd::from_raw_fd(fds[0]),
+            std::os::unix::io::OwnedFd::from_raw_fd(fds[1]),
+        )
+    })
+}
+
+/// Read exactly `buf.len()` bytes, retrying short reads and `EINTR`.
+/// `false` on EOF or a hard error.
+///
+/// # Safety
+/// `fd` must be a readable descriptor owned by the caller.
+unsafe fn fence_read_exact(fd: std::os::unix::io::RawFd, buf: &mut [u8]) -> bool {
+    let mut got = 0;
+    while got < buf.len() {
+        let n = unsafe {
+            libc::read(
+                fd,
+                buf.as_mut_ptr().add(got) as *mut libc::c_void,
+                buf.len() - got,
+            )
+        };
+        if n > 0 {
+            got += n as usize;
+            continue;
+        }
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Write all of `buf`, retrying short writes and `EINTR`.
+///
+/// # Safety
+/// `fd` must be a writable descriptor owned by the caller.
+unsafe fn fence_write_all(fd: std::os::unix::io::RawFd, buf: &[u8]) -> bool {
+    let mut sent = 0;
+    while sent < buf.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                buf.as_ptr().add(sent) as *const libc::c_void,
+                buf.len() - sent,
+            )
+        };
+        if n > 0 {
+            sent += n as usize;
+            continue;
+        }
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Spawn `cmd` **inert** and release it only once its identity is durable (A11.1).
+///
+/// This closes the spawn→record window at the root. Before it, the child was
+/// already running the target program by the time its pid could be read, so a host
+/// SIGKILLed in that interval left a live codex process nobody had written down and
+/// nobody could later name. Now the child parks in `pre_exec` — after `fork`, before
+/// `execve` — until the host has written `(pid, birth, pgid)` into the launch record.
+/// If the host dies first, the release pipe's last writer goes with it, the child
+/// reads EOF and `_exit`s **without ever becoming codex**. Fail-closed: an
+/// unrecorded child is not a leak, it is a process that never existed.
+///
+/// **Why a second thread rather than releasing in line.** Measured: `spawn()` does
+/// not return until the child has exec'd — the parent blocks reading the CLOEXEC
+/// error pipe std uses to report `execve` failure. So a fence released after
+/// `spawn()` returns can never be released at all; the obvious in-line version
+/// deadlocks (measured, both ways). The child therefore reports its own pid through
+/// a pipe while still fenced, and a releaser thread does the recording and the
+/// release while the calling thread is still inside `spawn()`.
+///
+/// **Why the identity is trustworthy pre-`execve`.** Measured: a birth stamp read
+/// while the child is fenced is byte-identical to the one read after it execs, and
+/// its pgid is already final because `process_group(0)` is applied *before* the
+/// `pre_exec` closure runs. So this records exactly what the custodian will later
+/// verify — the module doc's `[UNVERIFIED]` note on `execve` no longer applies here.
+///
+/// **What this does NOT touch**, deliberately: stdio and process-group inheritance.
+/// The fence adds a `pre_exec` closure and nothing else, so the TUI still inherits
+/// the pane's tty and the host's process group — the measured dead-keyboard
+/// constraint at its spawn site is untouched — and the app-server still gets its own
+/// group. That is the whole reason this is a host-local fence rather than the D6
+/// exec gate, which hardcodes both.
+fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child> {
+    use std::os::unix::io::AsRawFd;
+    let (id_r, id_w) = fence_pipe()?;
+    let (go_r, go_w) = fence_pipe()?;
+    // The raw numbers the CHILD will use. They name the child's own inherited
+    // copies after the fork, and `pre_exec` may not allocate or run a destructor,
+    // so the closure captures plain integers — the owners below stay alive in the
+    // parent until after `spawn()` has forked, which is what keeps them valid.
+    let (child_id_r, child_id_w) = (id_r.as_raw_fd(), id_w.as_raw_fd());
+    let (child_go_r, child_go_w) = (go_r.as_raw_fd(), go_w.as_raw_fd());
+
+    // SAFETY: the closure runs between `fork` and `execve`. Everything it calls —
+    // `getpid`, `read`, `write`, `close`, `_exit` — is async-signal-safe, and the
+    // frame is built without allocating (see `encode_fence_pid`).
+    unsafe {
+        cmd.pre_exec(move || {
+            let (id_r, id_w) = (child_id_r, child_id_w);
+            let (go_r, go_w) = (child_go_r, child_go_w);
+            // Drop the ends this side must not hold. Closing the WRITE end of the
+            // release pipe is load-bearing, not tidiness: while the child holds a
+            // writer open it is itself a writer, so the read below could never see
+            // the EOF that a dead host is supposed to produce.
+            libc::close(id_r);
+            libc::close(go_w);
+
+            let mut frame = [0u8; FENCE_ID_LEN];
+            encode_fence_pid(libc::getpid(), &mut frame);
+            if !fence_write_all(id_w, &frame) {
+                libc::_exit(FENCE_ABANDONED_EXIT);
+            }
+            libc::close(id_w);
+
+            let mut go = [0u8; 1];
+            if !fence_read_exact(go_r, &mut go) || go[0] != FENCE_GO {
+                // The host died, or refused to record us. Never become codex.
+                libc::_exit(FENCE_ABANDONED_EXIT);
+            }
+            libc::close(go_r);
+            Ok(())
+        });
+    }
+
+    // Read HERE, on the calling thread, and carried into the releaser: both of
+    // these are per-thread test state, and the releaser is a thread of its own.
+    #[cfg(test)]
+    let kill_after_go = take_kill_after_go_fault();
+    #[cfg(test)]
+    let test_root = crate::codex_launch::this_thread_sessions_root();
+
+    let (spawned, recorded) = std::thread::scope(|scope| {
+        // Both ends this thread is responsible for are MOVED in, so they are closed
+        // when it ends — including when it ends by panicking. The child is parked in
+        // `read(go_r)`, and a releaser that panicked while still holding `go_w` open
+        // would leave it parked there for ever, with the caller still blocked inside
+        // `spawn()` and so never reaching the `join()` that reports the panic.
+        let releaser = scope.spawn(
+            move || -> Result<protocol::proc_identity::ProcessIdentity> {
+                #[cfg(test)]
+                crate::codex_launch::adopt_test_sessions_root(test_root);
+                let id_r = id_r;
+                let go_w = go_w;
+                let mut frame = [0u8; FENCE_ID_LEN];
+                // SAFETY: `id_r` is owned by this thread for the whole call.
+                if !unsafe { fence_read_exact(id_r.as_raw_fd(), &mut frame) } {
+                    bail!("the {role} child never reported its identity through the spawn fence");
+                }
+                let pid = decode_fence_pid(&frame)
+                    .ok_or_else(|| anyhow!("the {role} child reported an unreadable pid frame"))?;
+                let outcome = record_child_pid(args, role, pid);
+                if outcome.is_ok() {
+                    // SAFETY: `go_w` is owned by this thread and dropped just below.
+                    if !unsafe { fence_write_all(go_w.as_raw_fd(), &[FENCE_GO]) } {
+                        // The child is gone; it cannot have exec'd, since only this
+                        // write releases it.
+                        bail!("releasing the fenced {role} child failed");
+                    }
+                    // The window round-2 finding 2 measured, staged from inside it.
+                    // A released child that dies before `spawn()` gets back out is
+                    // indistinguishable, to `spawn()`, from one that exec'd — and no
+                    // test can schedule that death from outside this thread.
+                    //
+                    // The whole block is `cfg(test)`, not merely guarded by a flag
+                    // that is always false in production: a `kill` this process can
+                    // aim at its own child has no business existing in the shipped
+                    // binary at all, however unreachable it is.
+                    #[cfg(test)]
+                    if kill_after_go {
+                        // SAFETY: a signal to the pid this fence just released.
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                        // SIGKILL is delivered asynchronously, and the racing
+                        // question is whether the child gets to `execve` first —
+                        // which is the very race this stages, so it must not be left
+                        // to chance in a test. Wait for the death to have LANDED
+                        // before letting the caller out of `spawn()`. The seam is
+                        // establishing its own precondition, not asserting anything.
+                        let until = Instant::now() + Duration::from_secs(5);
+                        while child_image(pid).is_some() && Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                    }
+                }
+                // Closing without a GO is what tells an unrecorded child to die, so the
+                // close stays written out rather than left to the end of the scope.
+                drop(go_w);
+                outcome
+            },
+        );
+
+        let spawned = cmd.spawn();
+        // The child has forked and owns its own copies; the parent's are what would
+        // otherwise keep the releaser blocked forever if the spawn failed outright.
+        drop(id_w);
+        drop(go_r);
+        let recorded = releaser
+            .join()
+            .unwrap_or_else(|_| Err(anyhow!("the {role} spawn-fence releaser panicked")));
+        (spawned, recorded)
+    });
+
+    let child = spawned.with_context(|| format!("spawning the {role} child"))?;
+    // Checked AFTER the spawn is unwrapped so the `Child` exists to be dropped —
+    // `kill_on_drop` then reaps a child that was released but could not be used.
+    let identity = recorded?;
+    // A11.1, readiness half — and `spawn()` returning `Ok` is NOT the proof.
+    //
+    // It was taken to be: the parent blocks on std's CLOEXEC error pipe until the
+    // exec either succeeds or reports its errno, so `Ok` was read as "the exec
+    // succeeded". What actually reaches the parent is the pipe CLOSING, and a pipe
+    // closes for two reasons — the exec that set `O_CLOEXEC` on it, or the child
+    // dying with every descriptor it held. **Measured** (round-2 finding 2): a child
+    // SIGKILLed after the GO byte and before `execve` gives `spawn()` → `Ok(pid)`,
+    // `recorded` → `Ok`, and a process that never became codex. The interval is real
+    // — the fence releases the child and then the parent has to get back out of
+    // `spawn()` — and everything downstream of this point would have certified it.
+    //
+    // What IS distinguishable, measured on Darwin: the child's IMAGE. Before
+    // `execve` it is still this host's own binary (the fork's inherited image);
+    // after `execve` it is the program that was spawned. `proc_pidpath` reports the
+    // first as our own path, the second as the target's, and a child that died
+    // reports nothing at all (`ESRCH`). Asked together with liveness, which is what
+    // binds the pid to OUR child rather than to whoever the kernel handed the number
+    // to next — the birth stamp survives `execve` unchanged (measured), so the
+    // identity recorded pre-exec is still the right question post-exec.
+    //
+    // Written down rather than kept, because the process that needs it is the
+    // COORDINATOR: it is deciding whether to certify a session as `Ready`, and every
+    // other fact it can see — listeners serving, host alive, both roles recorded —
+    // is already true while the TUI is still parked in the fence.
+    prove_past_execve(&identity, role)?;
+    confirm_child_exec(args, role, &identity)?;
+    Ok(child)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot: the next [`spawn_fenced`] kills its child in the instant after the
+    /// GO byte — the measured window in which `spawn()` still returns `Ok` and the
+    /// child never became the target program. Thread-local like every other fault
+    /// seam here, and READ ON THE CALLER'S THREAD before the fence starts, because
+    /// the releaser that acts on it is a thread of its own.
+    static KILL_AFTER_GO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm the one-shot post-GO kill (see [`spawn_fenced`]).
+#[cfg(test)]
+fn kill_next_child_after_go() {
+    KILL_AFTER_GO.with(|armed| armed.set(true));
+}
+
+#[cfg(test)]
+fn take_kill_after_go_fault() -> bool {
+    KILL_AFTER_GO.with(|armed| armed.replace(false))
+}
+
+/// The child's own image, or `None` if it has no image to report (it is gone).
+fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is exactly the size this call documents and outlives it.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(std::path::PathBuf::from(std::ffi::OsString::from(
+        String::from_utf8(buf).ok()?,
+    )))
+}
+
+/// Whether two image paths name the **same file**, not merely the same spelling
+/// (round-3 finding 9).
+///
+/// The discriminator below asks "is the child still running MY image?", and it used
+/// to ask it by comparing [`std::env::current_exe`]'s bytes against `proc_pidpath`'s.
+/// Those two are not obliged to agree on spelling for one file. Darwin's firmlinks
+/// alias the data volume, so the very same inode is reachable as `/Users/…` and as
+/// `/System/Volumes/Data/Users/…` — measured on this platform: the two paths compare
+/// UNEQUAL as strings and identical as `(st_dev, st_ino)`. A byte compare that says
+/// "different image" for one file is the wrong answer in the unsafe direction: it
+/// reads a child still parked pre-`execve`, running our own binary under the other
+/// spelling, as PROOF that it exec'd.
+///
+/// So identity is compared, not spelling. The path equality stays as a fast path
+/// (it is sufficient, never necessary), and a `stat` that cannot be taken is an
+/// `Err` rather than a `false`: an image question that cannot be answered must
+/// refuse, exactly like the liveness question above it.
+fn same_image(ours: &std::path::Path, theirs: &std::path::Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    if ours == theirs {
+        return Ok(true);
+    }
+    let a = std::fs::metadata(ours)
+        .with_context(|| format!("stat of this host's own image {}", ours.display()))?;
+    let b = std::fs::metadata(theirs)
+        .with_context(|| format!("stat of the child's image {}", theirs.display()))?;
+    Ok(a.dev() == b.dev() && a.ino() == b.ino())
+}
+
+/// Refuse unless this child is **alive and past `execve`** (A11.1, readiness half).
+///
+/// Two questions, and both are needed:
+///
+///   * **Alive**, by the recorded birth identity rather than by the bare pid, so a
+///     recycled number cannot answer for a child that is gone. A child that died —
+///     before the exec or immediately after it — must not be certified either way:
+///     `Ready` is a claim about a session that is running.
+///   * **Past `execve`**, by the image differing from this host's own. A fenced
+///     child that has not exec'd is still running the host's binary, because that
+///     is what `fork` gave it; the target's image is the first thing about it that
+///     is not inherited. Compared by file identity rather than by path spelling —
+///     see [`same_image`] for the aliasing this closes.
+///
+/// Fail-closed on every unreadable answer, including our own path: an image
+/// question that cannot be asked is not an image question that was answered.
+fn prove_past_execve(
+    identity: &protocol::proc_identity::ProcessIdentity,
+    role: &str,
+) -> Result<()> {
+    use protocol::proc_identity::{liveness, Liveness};
+    if liveness(identity) != Liveness::Alive {
+        bail!(
+            "refusing to confirm {role}'s exec: the child (pid {}) is not proven live",
+            identity.pid
+        );
+    }
+    let ours = std::env::current_exe().context("reading this host's own image path")?;
+    let Some(theirs) = child_image(identity.pid) else {
+        bail!(
+            "refusing to confirm {role}'s exec: the child (pid {}) reports no image",
+            identity.pid
+        );
+    };
+    if same_image(&ours, &theirs)
+        .with_context(|| format!("comparing {role}'s image against this host's own"))?
+    {
+        bail!(
+            "refusing to confirm {role}'s exec: the child (pid {}) is still running this \
+             host's own image ({}), so it has not passed execve",
+            identity.pid,
+            ours.display()
+        );
+    }
+    Ok(())
 }
 
 /// Record a spawned child's `(pid, birth, pgid)` in the launch record.
@@ -1121,42 +1647,75 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
 /// A child whose birth or pgid cannot be read is an error rather than a partial
 /// entry: a `(pid, ?)` record is a bare number, and this codebase does not signal
 /// bare numbers.
-fn record_child(args: &HostArgs, role: &str, child: &Child) -> Result<()> {
-    let pid = child
-        .id()
-        .with_context(|| format!("the {role} child has already been reaped"))? as i32;
+///
+/// A11.1: called by [`spawn_fenced`] while the child is still parked before
+/// `execve`, so "recorded" now strictly precedes "running the target program".
+fn record_child_pid(
+    args: &HostArgs,
+    role: &str,
+    pid: i32,
+) -> Result<protocol::proc_identity::ProcessIdentity> {
     let (Some(birth), Some(pgid)) = (
         protocol::proc_identity::read_birth_identity(pid),
         protocol::proc_identity::read_pgid(pid),
     ) else {
         bail!("could not read {role}'s (pid {pid}) birth identity and process group");
     };
+    let identity = protocol::proc_identity::ProcessIdentity { pid, birth };
     let entry = crate::codex_launch::ChildEntry {
         role: role.to_string(),
-        identity: protocol::proc_identity::ProcessIdentity { pid, birth },
+        identity,
         pgid,
         nonce: args.nonce.clone(),
         argv_hash: String::new(),
         // Stamped by `record_host_child` from the verified lease holder.
         recorded_by: None,
+        // A11.1: NOT yet — the child is still parked before `execve`. Set by
+        // `confirm_child_exec` once `spawn()` proves it got past it.
+        exec_confirmed: false,
     };
     let me = crate::codex_launch::require_current_identity()?;
     // A SHORT lock wait, deliberately, because this call sits inside a window.
     //
-    // The child is already running by the time its identity can be read, so there
-    // is an interval between the spawn and the record in which a SIGKILLed host
-    // leaves a live child nobody has written down. The interval is bounded by how
-    // long this takes, and the lock is the only part that can stretch — so it gets
-    // a tight budget rather than the five seconds the non-urgent writers use. A
-    // launch that cannot get the lock in a second is failed, which is the same
-    // fail-closed answer as any other recording failure.
+    // The interval is bounded by how long this takes, and the lock is the only part
+    // that can stretch — so it gets a tight budget rather than the five seconds the
+    // non-urgent writers use. A launch that cannot get the lock in a second is
+    // failed, which is the same fail-closed answer as any other recording failure.
     //
-    // This narrows the window; it does not close it. Closing it needs the child
-    // spawned inert and released only after its identity is durable — see
-    // `RECORD_LOCK_BUDGET`.
+    // A11.1: for a child spawned through [`spawn_fenced`] that window is no longer a
+    // leak. The child is parked before `execve` until this write returns, so a host
+    // SIGKILLed here leaves a process that has not become codex and that dies on the
+    // release pipe's EOF. The budget still matters — it bounds how long the launch
+    // is held inert — but missing it now costs a slow launch, not a stray process.
     let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, RECORD_LOCK_BUDGET)?;
     crate::codex_launch::record_host_child(&lock, &args.uid, &me, entry)
-        .with_context(|| format!("recording {role} in the launch record"))
+        .with_context(|| format!("recording {role} in the launch record"))?;
+    Ok(identity)
+}
+
+/// Mark a recorded child **past `execve`** (A11.1, readiness half).
+///
+/// Called only once [`prove_past_execve`] has SUCCEEDED — never on the strength of
+/// `Command::spawn()` returning `Ok`, which is measurably not the same claim: the
+/// parent blocks on std's CLOEXEC error pipe until the exec has succeeded (EOF) or
+/// reported its errno, and the child's DEATH closes that pipe too, so a child
+/// SIGKILLed between the fence's GO and `execve` yields `Ok` having never become the
+/// program. See [`crate::codex_launch::ChildEntry::exec_confirmed`] for why the
+/// coordinator cannot commit `Ready` without this, and why nothing else it looks at
+/// can stand in.
+///
+/// Launch-fatal for the same reason the recording is: a child this host cannot
+/// confirm is one the coordinator will never be able to certify, so failing here
+/// costs a refused launch rather than a session that waits out its deadline.
+fn confirm_child_exec(
+    args: &HostArgs,
+    role: &str,
+    identity: &protocol::proc_identity::ProcessIdentity,
+) -> Result<()> {
+    let me = crate::codex_launch::require_current_identity()?;
+    let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, RECORD_LOCK_BUDGET)?;
+    crate::codex_launch::confirm_host_child_exec(&lock, &args.uid, &me, role, identity)
+        .with_context(|| format!("confirming {role}'s exec in the launch record"))
 }
 
 /// The session proper, run under the teardown guard so it may use `?` freely.
@@ -1206,7 +1765,8 @@ async fn drive(
     }
 
     // --- Step 3: the real interactive TUI, foreground, inheriting our tty ----
-    let tui = Command::new(&args.codex)
+    let mut tui_cmd = Command::new(&args.codex);
+    tui_cmd
         .arg("--remote")
         .arg(format!("unix://{}", paths.tui_sock.display()))
         .args(&args.tui_args)
@@ -1231,15 +1791,23 @@ async fn drive(
         // (pid, birth, pgid) like the app-server's, and the custodian signals it by
         // that verified identity. A group kill buys nothing here anyway, since the
         // TUI's group would be the host's own.
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))?;
-    // Recorded before the TUI is handed to the session guard, but the result is
-    // checked AFTER, so a failure aborts through the guard that already owns both
-    // children rather than leaking the one just spawned.
-    let recorded = record_child(args, "tui", &tui);
+        //
+        // A11.1: the fence below preserves every one of those measured facts. It
+        // installs a `pre_exec` closure and touches nothing else — no stdio
+        // redirection, no `setpgid` — so the TUI still comes up on the pane's tty in
+        // the host's foreground process group, and the keyboard still works.
+        .kill_on_drop(true);
+    // A11.1: fenced, so the TUI's identity is durable before it can become codex.
+    // The spawn and the record are now one step, which is what removes the interval
+    // in which a SIGKILLed host left a live, unrecorded TUI on the user's pane.
+    let tui = match spawn_fenced(&mut tui_cmd, args, "tui") {
+        Ok(child) => child,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))
+        }
+    };
     session.tui = Some(tui);
-    recorded?;
 
     // --- Step 4: race the two children, the broker, and a host signal -------
     // Destructured so all three can be polled in one `select!`.
@@ -2486,16 +3054,415 @@ mod tests {
 
     /// Readiness rests on owning the directory, so the host must refuse a run dir
     /// it did not create — that is what makes a planted `as.sock` impossible.
+    ///
+    /// A11.4: asserted against `create_run_dir_atomically`, the function that
+    /// actually creates it, rather than against a bare `DirBuilder` call that no
+    /// longer appears on the path.
+    ///
+    /// **The destination is EMPTY, and that is the whole point.** A non-empty
+    /// destination proves nothing about `RENAME_EXCL`: plain `rename(2)` already
+    /// refuses to replace a directory that has anything in it (`ENOTEMPTY`), so a
+    /// build that dropped the flag entirely would still pass. The load-bearing
+    /// Darwin behaviour is the other one — plain `rename(2)` onto an existing
+    /// **empty** directory SUCCEEDS, silently replacing it — and the only way to
+    /// see the difference is to test that shape and prove the inode standing there
+    /// afterwards is the same one, never a replacement.
     #[test]
     fn an_existing_run_dir_is_refused() {
+        use std::os::unix::fs::MetadataExt;
         let dir = std::env::temp_dir().join(format!("cc-host-owned-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(
+            dir.with_file_name(format!("cc-host-owned-{}.tmp", std::process::id())),
+        );
         std::fs::create_dir_all(&dir).unwrap();
-        let err = std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .expect_err("a non-recursive create must refuse an existing dir");
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        let squatted = std::fs::metadata(&dir).unwrap().ino();
+        let err = create_run_dir_atomically(&dir, "uid-a", "nonce-a")
+            .expect_err("publishing must refuse a run dir the host did not create");
+        assert!(
+            format!("{err:#}").contains("must NOT already exist"),
+            "the refusal must name the exclusivity rule: {err:#}"
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().ino(),
+            squatted,
+            "the squatted EMPTY directory must be the same inode afterwards — a plain \
+             rename(2) would have replaced it and left our staged dir standing at that name"
+        );
+        assert!(
+            !dir.join(crate::codex_launch::RUN_DIR_OWNER_FILE).exists(),
+            "and it must not have acquired our marker: it was never adopted"
+        );
+        // The staging dir is cleaned up on the refusal path, not leaked.
+        let staged = dir.with_file_name(format!("cc-host-owned-{}.tmp", std::process::id()));
+        assert!(
+            !staged.exists(),
+            "the staging dir must be removed when publishing is refused: {}",
+            staged.display()
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A11.5: the host's own teardown is bound to the directory it PROVED is its
+    /// own, not to the name it was handed.
+    ///
+    /// The collision this refuses is the one A11.7 names: the host is still inside
+    /// its bounded teardown when a custodian removes the old inode and a colliding
+    /// launch — the derivation is many-to-one, so two launches can land on one name
+    /// — publishes a fresh directory at exactly that path. A path-addressed
+    /// `remove_dir_all` re-resolves the name and takes the replacement's bound
+    /// sockets and logs with it. Staged here as the state that collision produces:
+    /// a directory at our path whose marker names somebody else.
+    ///
+    /// **Mutation:** put `remove_dir_all(run_dir)` back in `sweep_own_run_dir` and
+    /// this fails — the stranger's directory and its socket are gone.
+    #[test]
+    fn the_hosts_teardown_refuses_a_run_dir_whose_marker_is_not_its_own() {
+        let dir = std::env::temp_dir().join(format!("cc-host-teardown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // What a colliding launch publishes at our name: its own marker, and the
+        // sockets and logs a delete must never reach.
+        crate::codex_launch::write_owner_marker(&dir, "someone-elses-uid", "someone-elses-nonce")
+            .unwrap();
+        std::fs::write(dir.join("tui.sock"), b"a live session's socket").unwrap();
+
+        sweep_own_run_dir(&dir, "our-uid", "our-nonce");
+
+        assert!(
+            dir.exists(),
+            "a directory whose marker names another launch must survive our teardown"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("tui.sock")).unwrap(),
+            b"a live session's socket",
+            "and so must everything in it — this is a LIVE session's run dir"
+        );
+
+        // And the directory this host really does own is removed whole.
+        let _ = std::fs::remove_dir_all(&dir);
+        let staged = dir.with_file_name(format!("cc-host-teardown-{}.tmp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staged);
+        create_run_dir_atomically(&dir, "our-uid", "our-nonce").unwrap();
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        std::fs::write(dir.join("logs/as.stderr"), b"x").unwrap();
+        sweep_own_run_dir(&dir, "our-uid", "our-nonce");
+        assert!(
+            !dir.exists(),
+            "our own run dir is removed whole, nested contents and all: {}",
+            dir.display()
+        );
+    }
+
+    /// A11.4: the run dir is only ever observable WITH its owner marker.
+    ///
+    /// The window this closes: `mkdir(final)` followed by a separate marker write
+    /// let a SIGKILLed host strand an unmarked directory at exactly the path the
+    /// custodian later consults — and the custodian correctly refuses to delete a
+    /// directory it cannot prove is the launch's, so it stayed forever.
+    #[test]
+    fn a_published_run_dir_always_carries_its_owner_marker() {
+        let dir = std::env::temp_dir().join(format!("cc-host-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(
+            dir.with_file_name(format!("cc-host-atomic-{}.tmp", std::process::id())),
+        );
+
+        create_run_dir_atomically(&dir, "uid-b", "nonce-b").expect("publish");
+        let marker = dir.join(crate::codex_launch::RUN_DIR_OWNER_FILE);
+        assert!(
+            marker.exists(),
+            "a published run dir must already contain its marker"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "uid-b\nnonce-b\n",
+            "and the marker must name this launch"
+        );
+        // 0700, as the old `DirBuilder::new().mode(0o700)` guaranteed.
+        assert_eq!(
+            protocol::fsperm::mode_of(&dir).unwrap(),
+            0o700,
+            "the run dir must stay private through the rename"
+        );
+        // Nothing staged is left lying around on the success path.
+        let staged = dir.with_file_name(format!("cc-host-atomic-{}.tmp", std::process::id()));
+        assert!(
+            !staged.exists(),
+            "the staging dir must be gone once published: {}",
+            staged.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A11.1: the pid frame is built by hand because `pre_exec` may not allocate.
+    /// Hand-rolled integer formatting is exactly the kind of thing that is right
+    /// for four years and then wrong for pid 1000000, so it is pinned here.
+    #[test]
+    fn the_fence_pid_frame_round_trips() {
+        for pid in [1, 7, 42, 999, 1000, 99999, 1_000_000, i32::MAX] {
+            let mut frame = [0u8; FENCE_ID_LEN];
+            encode_fence_pid(pid, &mut frame);
+            assert_eq!(
+                decode_fence_pid(&frame),
+                Some(pid),
+                "frame {:?} did not round-trip",
+                String::from_utf8_lossy(&frame)
+            );
+        }
+        // A frame that never got written is not a pid 0 — it is unreadable.
+        assert_eq!(decode_fence_pid(&[b' '; FENCE_ID_LEN]), None);
+        assert_eq!(decode_fence_pid(&[0u8; FENCE_ID_LEN]), None);
+    }
+
+    /// A11.1, the gate itself: a child whose identity could NOT be recorded never
+    /// becomes the target program.
+    ///
+    /// The window this closes: the child used to be running codex by the time its
+    /// pid could be read, so a host SIGKILLed between the spawn and the record left
+    /// a live process nobody had written down and nobody could later name. Here the
+    /// recording fails (there is no launch record for this uid), which is the same
+    /// "the host did not get to write it down" outcome a SIGKILL produces — and the
+    /// proof is that the child's `execve` never ran at all.
+    #[tokio::test]
+    async fn an_unrecordable_child_never_execs() {
+        let args = parse_host_args(&complete(&[]))
+            .map(|mut a| {
+                // A uid with no launch record, so `record_child_pid` must fail.
+                a.uid = "01JQXV9K7B8N4M2P6R3T5WZZZZ".into();
+                a
+            })
+            .expect("charter");
+
+        let witness = std::env::temp_dir().join(format!("cc-fence-execd-{}", std::process::id()));
+        let _ = std::fs::remove_file(&witness);
+
+        // If this child is ever released, it exec's `/bin/sh` and the witness
+        // appears. That file is the whole assertion.
+        //
+        // Deliberately NOT `kill_on_drop`, and deliberately polled rather than
+        // checked once: a released child races the drop that would kill it, so an
+        // immediate `!exists()` can pass by luck while the child is mid-`execve`.
+        // Nothing may kill it and the window must be generous, or this test reports
+        // a fence that is not there. (It was written the racy way first, and a
+        // mutation that released every child still passed.)
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("printf execd > {}", witness.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let err = spawn_fenced(&mut cmd, &args, "witness")
+            .expect_err("an unrecordable child must fail the spawn");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            assert!(
+                !witness.exists(),
+                "the fenced child must never have exec'd, but it wrote {}: {err:#}",
+                witness.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&witness);
+    }
+
+    /// **A11.1, readiness half: what `exec_confirmed` is allowed to rest on.**
+    ///
+    /// `spawn()` returning `Ok` is not it. What the parent observes is the CLOEXEC
+    /// error pipe closing, and that happens both when `execve` closes it and when
+    /// the child dies holding it — measured (round-2 finding 2): a child SIGKILLed
+    /// after the fence's GO byte and before `execve` yields `spawn()` → `Ok(pid)`
+    /// with a recorded child that never became codex.
+    ///
+    /// The three answers the discriminator must give, each staged from a process
+    /// whose state is known rather than raced:
+    ///
+    ///   * a process still running THIS binary — the shape of a fenced child before
+    ///     `execve`, since `fork` gives it our image — is refused;
+    ///   * one that has genuinely exec'd a different program is accepted;
+    ///   * one that is dead is refused, however it died.
+    #[test]
+    fn only_a_live_child_running_a_different_image_proves_execve() {
+        use protocol::proc_identity::{current_identity, read_birth_identity, ProcessIdentity};
+
+        // 1. Our own process: alive, and running the image a pre-exec child runs.
+        let me = current_identity().expect("this process's identity");
+        let err = prove_past_execve(&me, "witness")
+            .expect_err("a process still running this binary has not passed execve");
+        assert!(
+            format!("{err:#}").contains("has not passed execve"),
+            "and it must be refused FOR that reason: {err:#}"
+        );
+
+        // 2. A child that really did exec a different program.
+        // `std`'s Command, not the module's tokio one: this test is synchronous,
+        // and `std::process::Command::spawn` is the very call whose return value
+        // this function exists to stop standing in for a proof.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let pid = child.id() as i32;
+        let birth = read_birth_identity(pid).expect("the child's birth stamp");
+        let exec_d = ProcessIdentity { pid, birth };
+        prove_past_execve(&exec_d, "witness")
+            .expect("a live child running /bin/sleep is past execve");
+
+        // 3. The same child, dead. `exec_confirmed` is a fact about a moment that
+        //    has passed; a child that is gone must not certify anything.
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        let err = prove_past_execve(&exec_d, "witness")
+            .expect_err("a dead child proves nothing about a live session");
+        assert!(
+            format!("{err:#}").contains("not proven live"),
+            "and liveness must be the reason, not the image: {err:#}"
+        );
+    }
+
+    /// **The image discriminator compares files, not spellings** (round-3 finding 9).
+    ///
+    /// Darwin reaches one inode by two paths — `/x` and `/System/Volumes/Data/x` —
+    /// and a byte compare calls that "a different image", which is the answer that
+    /// would certify a child still parked pre-`execve` as having exec'd. Staged
+    /// against a real alias of a real file rather than argued about: the two paths
+    /// are asserted UNEQUAL as strings first, so the test cannot pass by the alias
+    /// having quietly stopped existing, and `same_image` is then required to say
+    /// they are one file anyway.
+    #[test]
+    fn the_image_compare_sees_through_the_data_volume_alias() {
+        let ours = std::env::current_exe().expect("this test binary's own path");
+        let aliased = std::path::Path::new("/System/Volumes/Data").join(
+            ours.strip_prefix("/")
+                .expect("current_exe is absolute on this platform"),
+        );
+        if !aliased.exists() {
+            // The alias is a property of the volume layout, not of this code. If it
+            // is not present the premise does not hold and there is nothing to
+            // assert — but say so rather than passing silently.
+            eprintln!("no data-volume alias for {}; skipping", ours.display());
+            return;
+        }
+        assert_ne!(
+            ours, aliased,
+            "the premise: the alias must be a DIFFERENT spelling, or this proves nothing"
+        );
+        assert!(
+            same_image(&ours, &aliased).expect("both images are stat-able"),
+            "one file reached by two paths must compare as one image: {} vs {}",
+            ours.display(),
+            aliased.display()
+        );
+        // …and the discriminator still separates genuinely different files, so the
+        // fix above is not "say yes to everything".
+        assert!(
+            !same_image(&ours, std::path::Path::new("/bin/sleep"))
+                .expect("both images are stat-able"),
+            "two different files must still compare as different images"
+        );
+        // An image question that cannot be ASKED refuses rather than answering.
+        same_image(
+            &ours,
+            std::path::Path::new("/nonexistent/codeconnect/image"),
+        )
+        .expect_err("an unstat-able image is an unanswered question, not a difference");
+    }
+
+    /// **A11.1, the window itself: a child that dies in the confirmation interval
+    /// is not confirmed** (round-2 finding 2).
+    ///
+    /// `spawn_fenced`'s own wiring, not just the predicate. The fence releases the
+    /// child and the parent then has to get back out of `spawn()`; a child killed in
+    /// that interval closes the CLOEXEC error pipe by dying rather than by exec'ing,
+    /// which `spawn()` cannot tell apart — measured: `Ok(pid)`, a successful
+    /// recording, and a process that never ran the target program. So the kill is
+    /// staged from inside the releaser, at the one instant no test can reach from
+    /// outside, and the whole call must refuse.
+    #[tokio::test]
+    async fn a_child_that_dies_in_the_confirmation_window_is_not_confirmed() {
+        use crate::codex_launch as cl;
+        use protocol::proc_identity::{current_identity, monotonic_now_nanos};
+
+        let mut args = parse_host_args(&complete(&[])).expect("charter");
+        args.uid = "01JQXV9K7B8N4M2P6R3T5WEXEC".into();
+
+        // A launch this host holds the lease on, so the recording inside the fence
+        // succeeds and the ONLY thing left to refuse on is the exec proof.
+        let me = current_identity().unwrap();
+        let lock = cl::LaunchLock::acquire(&args.uid).unwrap();
+        cl::create_pending(
+            &lock,
+            cl::NewLaunch {
+                launch_nonce: args.nonce.clone(),
+                uid: args.uid.clone(),
+                session_name: "cc-exec".into(),
+                coordinator: me,
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: monotonic_now_nanos().unwrap() + 60_000_000_000,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        cl::cas_custodian_with_child(&lock, &args.uid, me, me.pid, "t-nonce", "t-hash").unwrap();
+        assert_eq!(
+            cl::admit_host(&lock, &args.uid, &args.nonce, &me, me.pid, "codex-host").unwrap(),
+            cl::Admission::Admitted
+        );
+        drop(lock);
+
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        kill_next_child_after_go();
+        let err = spawn_fenced(&mut cmd, &args, "app-server")
+            .expect_err("a child that died in the confirmation window must not be confirmed");
+
+        // THE GATE. Without the exec proof on this path, `spawn()` returned `Ok`,
+        // the recording returned `Ok`, and `exec_confirmed: true` went into the
+        // record for a process that is not running.
+        let record = cl::load(&args.uid).unwrap();
+        assert!(
+            !cl::host_children_ready(&record),
+            "no child may count as recorded-and-confirmed: {err:#}"
+        );
+        assert!(
+            record.children.iter().all(|c| !c.exec_confirmed),
+            "and exec_confirmed must not have been written for any of them"
+        );
+    }
+
+    /// A11.4: a marker that cannot be written publishes NOTHING — neither the final
+    /// name nor the staging dir survives. A host that does not come up leaves
+    /// nothing behind, and a claimed-but-unmarked directory is worse than none.
+    #[test]
+    fn a_marker_that_cannot_be_written_publishes_nothing() {
+        let dir = std::env::temp_dir().join(format!("cc-host-nomarker-{}", std::process::id()));
+        let staged = dir.with_file_name(format!("cc-host-nomarker-{}.tmp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&staged);
+
+        // A newline forges a second marker field, so `write_owner_marker` refuses it.
+        let err = create_run_dir_atomically(&dir, "uid-c", "nonce\nc")
+            .expect_err("a refused marker must fail the whole publish");
+        assert!(
+            format!("{err:#}").contains("newline"),
+            "the marker's own refusal must surface: {err:#}"
+        );
+        assert!(
+            !dir.exists(),
+            "nothing may appear at the final run-dir path"
+        );
+        assert!(
+            !staged.exists(),
+            "and the staging dir must be cleaned up: {}",
+            staged.display()
+        );
     }
 }

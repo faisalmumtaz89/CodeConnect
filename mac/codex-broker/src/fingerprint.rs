@@ -306,6 +306,11 @@ pub fn assert_fingerprint(
         ));
     }
 
+    // 1b) permissions / default_permissions: the SECOND sandbox channel (round-4
+    //     finding 1). Measured null everywhere it was ever captured; a populated one
+    //     is a permission profile this broker never observed and cannot prove.
+    check_permission_profiles(params)?;
+
     // 2) hooks: only a bare bool equal to the fingerprint is provable.
     check_hooks(fp, params)?;
 
@@ -1169,6 +1174,99 @@ fn first_dotted_key(node: &Value, depth: usize) -> Option<(usize, usize)> {
     }
 }
 
+/// Refuse a POPULATED `permissions`, and ANY `default_permissions`, anywhere in `params`
+/// — on EVERY method, not only `turn/start` (round-4 finding 1).
+///
+/// ## Why this is its own rule and not a line in the sandbox check
+///
+/// codex 0.147 has **two** sandbox channels, not one. Beside `sandbox`/`sandbox_mode`/
+/// `sandbox_policy` there is a named permission-PROFILE system, probed read-only against
+/// the installed 0.147: `permissions` is a real `PermissionsToml` map of profile name →
+/// `PermissionProfileToml`, each with a `FilesystemPermissionsToml`, and
+/// `default_permissions` is the string that SELECTS one. They are coupled — either alone
+/// is a config error — and together they are accepted and activated:
+/// `permissions={wide={filesystem={"/"="write"}}}` + `default_permissions="wide"` grants a
+/// filesystem write scope that no `sandbox*` key names. The host-side argv allowlist now
+/// owns both roots; this is the wire half of the same boundary.
+///
+/// ## What "measured" means here, and why the rule spans every method
+///
+/// `turn/start` already pins `permissions` to exactly JSON `null` through the captured
+/// boundary ([`TURN_START_CAPTURED_NULL_PARAMS`]), but `thread/start` — the method that
+/// SETS a thread's policy — had no such pin, and it is the one that matters: a profile
+/// installed at thread creation governs every turn that follows. The single captured
+/// `thread/start` request carries `"permissions": null`, and a census of the whole capture
+/// corpus finds the key at exactly one path, `params.permissions`, with exactly one value,
+/// `null`. `default_permissions` appears nowhere on the wire at all.
+///
+/// So: a `permissions` that is present-and-null is the measured shape and passes; anything
+/// else is refused, and a `default_permissions` at any nesting is refused outright. Unlike
+/// the `turn/start` boundary this rule does NOT require presence — `thread/resume` and the
+/// non-policy methods were never measured to carry the key, and demanding it would refuse
+/// traffic on no evidence.
+///
+/// ## Spelling- and depth-insensitive, and the over-refusal that buys
+///
+/// Key matching runs through [`normalize`], so the typed camelCase `defaultPermissions` and
+/// the config snake_case `default_permissions` are one key, and it is dotted-aware for the
+/// same reason [`owned_key_present_anywhere`] is: the wire `config` is a free-form map.
+///
+/// Depth-unbounded, which is the same treatment [`check_sandbox`] already gives its own
+/// leaves — a `config.decoy.sandbox_mode` refuses on its value even though a nested decoy
+/// cannot reach codex's top-level sandbox. The consequence is stated rather than
+/// discovered: a `config` carrying an MCP server or app literally NAMED `permissions`
+/// refuses, though it is only data in someone else's container. That is an over-refusal
+/// this module already accepts on the sandbox axis, it is loud (a refusal with an audit
+/// line, never a silent forward), and it is the direction that cannot become an escape.
+/// The host-side argv allowlist is path-aware and does NOT over-refuse there, because a
+/// `-c` key's effective path is decidable from the key alone; a free-form wire `config`
+/// merged by a codex this broker does not run is not.
+fn check_permission_profiles(params: &Value) -> Result<(), FingerprintRefusal> {
+    if let Some(bad) = first_permission_profile_violation(params) {
+        return Err(refusal(FpRefuseKind::Unprovable, bad));
+    }
+    Ok(())
+}
+
+/// The audit-safe detail for the first permission-profile violation in `node`, or `None`.
+///
+/// Carries FIXED VOCABULARY and a shape class only — never the client's key text or profile
+/// name (see the audit-log-safety note in the module header).
+fn first_permission_profile_violation(node: &Value) -> Option<String> {
+    match node {
+        Value::Object(map) => {
+            for (k, v) in map {
+                match normalize(first_segment(k)).as_str() {
+                    "defaultpermissions" => {
+                        return Some(
+                            "default_permissions present: it SELECTS a codex permission \
+                             profile, and no capture of this broker's wire ever carried the \
+                             key — an unmeasured sandbox channel cannot be proven"
+                                .to_string(),
+                        )
+                    }
+                    "permissions" if !v.is_null() => {
+                        return Some(format!(
+                            "permissions present as a {}: every measured frame sent this key \
+                             as JSON null; a populated permission profile grants a filesystem \
+                             and network scope no sandbox dimension names, and was never \
+                             observed — widening needs a new capture, not an argument",
+                            shape_class(v)
+                        ))
+                    }
+                    _ => {}
+                }
+                if let Some(found) = first_permission_profile_violation(v) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(first_permission_profile_violation),
+        _ => None,
+    }
+}
+
 /// Does any object anywhere in `node` have a key equal to — or whose first dotted segment
 /// equals — one of `names`? Used for the `notify` categorical reject; dotted-aware because
 /// the wire `config` is a free-form map codex may path-expand (see the dotted-key note).
@@ -1268,6 +1366,95 @@ mod tests {
         assert_eq!(
             assert_fingerprint(&fp(), "thread/start", &p).unwrap(),
             FpVerdict::Proven
+        );
+    }
+
+    /// Round-4 finding 1, the wire half. `thread/start` SETS the policy every later turn
+    /// inherits, and it had no pin on the permission-profile channel at all — the
+    /// captured-null boundary runs on `turn/start` only. The exact shape codex 0.147 was
+    /// measured to accept and activate must refuse here.
+    #[test]
+    fn populated_permission_profiles_refuse_on_thread_start() {
+        for extra in [
+            // The measured escalation: a profile granting `/` write, and the selector
+            // that activates it. Each half alone, and both together.
+            json!({"permissions": {"wide": {"filesystem": {"/": "write"}}}}),
+            json!({"defaultPermissions": "wide"}),
+            json!({"config": {"default_permissions": "wide"}}),
+            json!({
+                "config": {"permissions": {"wide": {"filesystem": {"/": "write"}}},
+                           "default_permissions": "wide"}
+            }),
+            // Depth and container do not launder it: nested under an unowned key, and
+            // inside an array element.
+            json!({"config": {"decoy": {"permissions": {"wide": {}}}}}),
+            json!({"config": {"list": [{"default_permissions": "wide"}]}}),
+            // A non-null value that is not even a profile map is equally unmeasured.
+            json!({"permissions": "wide"}),
+            json!({"permissions": []}),
+        ] {
+            let p = full_start(extra.clone());
+            assert_eq!(
+                assert_fingerprint(&fp(), "thread/start", &p)
+                    .unwrap_err()
+                    .kind,
+                FpRefuseKind::Unprovable,
+                "{extra} must refuse on thread/start"
+            );
+        }
+        // …and on the other policy-setting methods, and on a turn, for the same reason.
+        for method in ["thread/fork", "thread/resume"] {
+            let p = full_start(json!({"permissions": {"wide": {"filesystem": {"/": "write"}}}}));
+            assert!(assert_fingerprint(&fp(), method, &p).is_err(), "{method}");
+        }
+        let p = full_turn(json!({"permissions": {"wide": {}}}));
+        assert!(assert_fingerprint(&fp(), "turn/start", &p).is_err());
+    }
+
+    /// The over-refusal direction: the MEASURED shape still passes. `permissions: null` is
+    /// what every captured frame carried, and the key's absence is what every method
+    /// other than `turn/start` was measured to be free to do.
+    #[test]
+    fn the_measured_permission_shape_still_passes() {
+        assert_eq!(
+            assert_fingerprint(
+                &fp(),
+                "thread/start",
+                &full_start(json!({"permissions": null}))
+            )
+            .unwrap(),
+            FpVerdict::Proven
+        );
+        // Absent entirely (the `full_start` body) — not required, so not refused.
+        assert_eq!(
+            assert_fingerprint(&fp(), "thread/start", &full_start(json!({}))).unwrap(),
+            FpVerdict::Proven
+        );
+        // A key that merely CONTAINS the root as a substring is a different key.
+        assert_eq!(
+            assert_fingerprint(
+                &fp(),
+                "thread/start",
+                &full_start(json!({"config": {"permissions_note": "x", "tool_permissions": 1}}))
+            )
+            .unwrap(),
+            FpVerdict::Proven
+        );
+    }
+
+    /// The over-refusal this rule deliberately accepts, asserted so it is a recorded
+    /// property rather than a surprise: a `config` carrying an MCP server literally NAMED
+    /// `permissions` refuses, even though a nested decoy cannot reach codex's top-level
+    /// permission profiles. Depth-unbounded matching is what [`check_sandbox`] already
+    /// does with its own leaves, and the direction it errs in cannot become an escape.
+    #[test]
+    fn a_container_named_after_the_permission_roots_over_refuses_loudly() {
+        let p = full_start(json!({"config": {"mcp_servers": {"permissions": {"command": "x"}}}}));
+        assert_eq!(
+            assert_fingerprint(&fp(), "thread/start", &p)
+                .unwrap_err()
+                .kind,
+            FpRefuseKind::Unprovable
         );
     }
 

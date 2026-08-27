@@ -86,8 +86,8 @@ use crate::message::{classify_shape, RequestId, Shape, WsPayload};
 use crate::redact;
 use crate::response_capability::ResponseCapabilityRegistry;
 use crate::session::{
-    ConnId, IdAdmission, ThreadBinding, TurnAdmission, CREATION_METHOD, MAX_ACTIVE_TURNS,
-    TURN_METHOD,
+    ConnId, IdAdmission, PrefixAdmission, ThreadBinding, TurnAdmission, CREATION_METHOD,
+    MAX_ACTIVE_TURNS, TURN_METHOD, UNSUBSCRIBE_METHOD,
 };
 
 /// The runtime policy environment the classifier reads: the immutable launch
@@ -212,17 +212,58 @@ fn classify_request(
     if method == TURN_METHOD {
         return action;
     }
+    // **THE SWITCH PREFIX ADMITS ITSELF, IN ONE CRITICAL SECTION** (A16.1).
+    //
+    // Its head test, the admissibility of the switch behind it, the reservation-ownership
+    // rule and its own ledger admission were separate acquisitions of the session mutex —
+    // some of them here, some in the disposition, one of them taken twice — and the gaps were
+    // reachable. Between the check and the claim another connection's `thread/start` could be
+    // admitted (it saw no reservation yet), so the prefix forwarded, dropped a subscription,
+    // and then found the creation slot taken; and a second connection's prefix could clobber
+    // a live claim outright, with no thread interleaving at all. `try_admit_prefix` decides
+    // and claims together, so — like `turn/start` above — passing it through the generic
+    // ledger as well would register the same id twice and be refused as `ReusedInFlight`.
+    //
+    // **TUI leg only** (closing S3). A reservation fences turns and blocks other connections'
+    // creations, and it exists to make the TUI's `/new` prefix and the `thread/start` behind
+    // it one causal unit. ccd never starts a thread — the allowlist gives that leg no
+    // `thread/unsubscribe` cell at all, and refuses `thread/start` on it by role — so a ccd
+    // unsubscribe has no switch behind it and must never fence one.
+    if role == Role::Tui && method == UNSUBSCRIBE_METHOD {
+        // The disposition pinned the params to exactly `{"threadId": <string>}` and proved
+        // the thread is one of THIS session's, so the target is present by construction.
+        let target = params
+            .get("threadId")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        return match env.threads.try_admit_prefix(env.conn, &id, target) {
+            PrefixAdmission::Reserved => RelayAction::Forward {
+                note: "thread/unsubscribe: the active head; the switch behind it is \
+                       admissible and reserved",
+            },
+            PrefixAdmission::NoSwitch => RelayAction::Forward {
+                note: "thread/unsubscribe: a retired session thread; no switch begins",
+            },
+            // Unchanged wire shape, and deliberately so: a refused switch that is merely
+            // DROPPED wedges the real TUI (A4), so this stays a synthesized JSON-RPC error
+            // on the prefix's own id, with the same code and the same cause text it carried
+            // when the disposition took this decision.
+            PrefixAdmission::Inadmissible(why) => refuse_request(
+                Some(id),
+                E_POLICY_REFUSED,
+                "unsubscribe refused: this session cannot switch threads right now",
+                format!(
+                    "{}: the switch behind this unsubscribe could not be reserved — {why}; \
+                     refusing the prefix keeps the subscription rather than dropping it and \
+                     then failing",
+                    redact::method(method)
+                ),
+            ),
+            PrefixAdmission::Ledger(verdict) => ledger_refusal(env, method, Some(id), verdict),
+        };
+    }
     match env.threads.try_admit_request(env.conn, &id, method) {
         IdAdmission::Admitted => {
-            // **THE RESERVATION IS CLAIMED HERE, INSIDE THE TRANSACTION** (round-3 P4).
-            //
-            // The prefix has now cleared BOTH gates — the disposition proved it names the
-            // active head and that a switch behind it would be admissible, and the id
-            // ledger has admitted it — so its bytes really are about to go upstream. Only
-            // now may it claim the slot. Claiming inside the disposition, as the first
-            // form did, left a reservation behind for a prefix the ledger then refused:
-            // zero bytes on the wire, yet turns fenced and other connections' creations
-            // blocked until the TTL.
             // **A re-subscribe ATTEMPT is recorded only now** (closing S4): the fingerprint
             // has passed and the id ledger has admitted it, so these bytes really are going
             // upstream and an answer really will come back. Recording it in the disposition
@@ -233,18 +274,6 @@ fn classify_request(
             if method == "thread/resume" {
                 if let Some(target) = params.get("threadId").and_then(|t| t.as_str()) {
                     env.threads.note_resubscribe_attempt(env.conn, target, &id);
-                }
-            }
-            // **TUI leg only** (closing S3). A reservation fences turns and blocks other
-            // connections' creations, and it exists to make the TUI's `/new` prefix and the
-            // `thread/start` behind it one causal unit. ccd never starts a thread — the
-            // allowlist refuses `thread/start` on that leg by role — so a ccd unsubscribe
-            // has no switch behind it and must never fence one.
-            if role == Role::Tui && method == "thread/unsubscribe" {
-                if let Some(target) = params.get("threadId").and_then(|t| t.as_str()) {
-                    if env.threads.head_or_superseded().as_deref() == Some(target) {
-                        env.threads.reserve_switch(env.conn, target);
-                    }
                 }
             }
             action
@@ -629,60 +658,28 @@ fn classify_request_disposition(
                     format!("{}: {detail}", redact::method(method)),
                 );
             }
-            // **THE SWITCH BEHIND IT MUST BE ADMISSIBLE** (round-1 P4, as re-grounded).
+            // **THE SWITCH BEHIND IT MUST BE ADMISSIBLE** (round-1 P4, as re-grounded) —
+            // but that is no longer decided HERE (A16.1).
             //
             // `/new` is `unsubscribe, unsubscribe, thread/start`. If the prefix forwards
             // and the start is then refused, the TUI is left on the old thread and
             // UNSUBSCRIBED from it — silently blind. Holding the prefix was built and
             // MEASURED TO DEADLOCK the real TUI, which awaits each unsubscribe's response
-            // before sending the next frame (see `ThreadBinding::switch_admissibility`), so
+            // before sending the next frame (see `ThreadBinding::try_admit_prefix`), so
             // the failure is moved earlier instead: every cause the broker can know in
-            // advance refuses HERE, with zero wire effect and the subscription intact.
-            // The prefix is admitted ONLY against a valid RESERVATION (round-2 P3). The
-            // same call checks every precondition the `thread/start` behind it will face —
-            // from the one shared definition, including the per-connection creation-id
-            // arithmetic — and CLAIMS the slot, so a turn or a competing connection's
-            // creation cannot be admitted between the prefix and the start and turn a
-            // then-valid check into a then-invalid one.
-            // **Admissibility is checked here; the RESERVATION is claimed later**
-            // (round-3 P4). A prefix the id ledger goes on to refuse sends zero bytes, so
-            // it must leave no reservation behind — the claim happens in
-            // `classify_request`, after that ledger admission succeeds.
+            // advance refuses before the bytes go out, with the subscription intact.
             //
-            // Only an unsubscribe naming the ACTIVE HEAD is a switch prefix (round-3 P5);
-            // a retired thread's cleanup begins no switch and reserves nothing.
-            let names_head = params
-                .get("threadId")
-                .and_then(|t| t.as_str())
-                .is_some_and(|t| env.threads.head_or_superseded().as_deref() == Some(t));
-            if names_head {
-                if let Err(why) = env.threads.switch_prefix_admissible(
-                    env.conn,
-                    params
-                        .get("threadId")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default(),
-                ) {
-                    return refuse_request(
-                        id,
-                        E_POLICY_REFUSED,
-                        "unsubscribe refused: this session cannot switch threads right now",
-                        format!(
-                            "{}: the switch behind this unsubscribe could not be reserved \
-                             — {why}; refusing the prefix keeps the subscription rather \
-                             than dropping it and then failing",
-                            redact::method(method)
-                        ),
-                    );
-                }
-                RelayAction::Forward {
-                    note: "thread/unsubscribe: the active head; the switch behind it is \
-                           admissible",
-                }
-            } else {
-                RelayAction::Forward {
-                    note: "thread/unsubscribe: a retired session thread; no switch begins",
-                }
+            // This arm now does only the scoping it can decide from the PARAMS alone: the
+            // pinned shape, and that the named thread is one this session owns. Whether the
+            // frame is a switch PREFIX, whether the switch behind it is admissible, whether
+            // another connection already holds the claim, and the claim itself are ONE
+            // atomic decision — [`ThreadBinding::try_admit_prefix`], taken in
+            // `classify_request` inseparably from the id-ledger admission it must not be
+            // ordered against. Splitting those across separate lock acquisitions, with the
+            // head read once here and again there, was A16.1's race.
+            RelayAction::Forward {
+                note: "thread/unsubscribe: names a thread of this session; the prefix \
+                       admission decides whether it begins a switch",
             }
         }
         // Deferred dispositions fail closed until their machinery (and, for D2/D3, their
@@ -2196,14 +2193,10 @@ mod tests {
         // (b) The case that isolates WHERE the attempt is recorded. An attempt is only ever
         //     recorded for a WEDGED connection, so the connection must first be wedged: its
         //     unsubscribe prefix lands and the switch behind it fails.
-        assert!(threads
-            .switch_prefix_admissible(CONN_A, "01a0-head")
-            .is_ok());
         assert_eq!(
-            threads.try_admit_request(CONN_A, &RequestId::Int(50), "thread/unsubscribe"),
-            IdAdmission::Admitted
+            threads.try_admit_prefix(CONN_A, &RequestId::Int(50), "01a0-head"),
+            PrefixAdmission::Reserved
         );
-        threads.reserve_switch(CONN_A, "01a0-head");
         assert_eq!(
             threads.try_admit_request(CONN_A, &RequestId::Int(51), CREATION_METHOD),
             IdAdmission::Admitted
@@ -2242,6 +2235,131 @@ mod tests {
             threads.resubscribe_attempts(),
             1,
             "an admitted resume from a wedged connection IS recorded"
+        );
+    }
+
+    /// **A16.1, stated rather than raced — and stated THROUGH THE CLASSIFIER.**
+    ///
+    /// The session-level test races two threads two thousand times and asserts that
+    /// both never win. That is a detector, and it has two holes the reviewer named:
+    /// a split check→claim form only loses on an interleaving the scheduler is free
+    /// never to produce, and a classifier that stopped routing the prefix into
+    /// `try_admit_prefix` at all would bypass the tested method entirely and leave
+    /// it green.
+    ///
+    /// This closes both. Everything goes through [`classify`], the seam production
+    /// uses; and the prefix is STOPPED between the checks and the claim while still
+    /// holding the session guard, so the competing creation is shown to make no
+    /// progress until it is let go. Under a form that took the lock twice, the
+    /// parked thread holds nothing and the creation sails through — a deterministic
+    /// failure. Under a classifier that stopped routing, the latch never trips and
+    /// `await_arrival` says so.
+    #[test]
+    fn a_creation_cannot_enter_while_a_prefix_is_inside_the_admission_section() {
+        use crate::session::prefix_latch::Latch;
+
+        let threads = bound_session("01a0-head");
+        const PREFIX: &str =
+            r#"{"method":"thread/unsubscribe","id":60,"params":{"threadId":"01a0-head"}}"#;
+        const CREATION: &str = r#"{"method":"thread/start","id":61,"params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#;
+
+        let latch = Latch::arm(threads.latch_key(), CONN_A);
+        let (prefix, creation) = std::thread::scope(|scope| {
+            let t = &threads;
+            let prefix = scope.spawn(move || go_conn(Role::Tui, CONN_A, t, PREFIX));
+            // A is now provably parked between the checks and the claim — and it is
+            // parked HOLDING the guard, which `prefix_latch::park` enforces by taking
+            // a borrow of the guarded state rather than by asserting it.
+            latch.await_arrival();
+            // Everything the PARKED thread itself did to get here, so the wait below
+            // is about the competitor and nothing else.
+            let baseline = latch.attempts();
+
+            let creation = scope.spawn(move || go_conn(Role::Tui, CONN_B, t, CREATION));
+
+            // THE GATE, and it is three claims, not one (round-3 finding 7).
+            //
+            // First: the competitor really did REACH this binding's critical section.
+            // Without this, everything below is equally green when the thread was
+            // never scheduled, or when the classifier refused the creation long
+            // before it ever got near the section — a false green that hides the
+            // very race.
+            latch.await_entry_beyond(baseline);
+
+            // Second: having reached it, it makes no progress. A generous window,
+            // because the failure it must catch takes microseconds.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            assert!(
+                !creation.is_finished(),
+                "another connection's thread/start was admitted while a switch prefix \
+                 was mid-decision: the check and the claim are not one critical section"
+            );
+
+            latch.release();
+            // Third: and it COMPLETES once released — so "no progress" above was the
+            // critical section holding it, not a thread that had wedged or died.
+            (
+                prefix.join().expect("prefix thread"),
+                creation.join().expect("creation thread"),
+            )
+        });
+
+        // And the outcome is the one A16.1 promises: the prefix took the slot, so
+        // the creation behind it belongs to that connection and nobody else's.
+        assert!(
+            matches!(prefix, RelayAction::Forward { .. }),
+            "the prefix reserved and forwarded: {prefix:?}"
+        );
+        assert_eq!(
+            refused_code(&creation),
+            E_POLICY_REFUSED,
+            "and the competing creation is refused, not admitted: {creation:?}"
+        );
+    }
+
+    /// **The latch belongs to ONE binding** (round-3 finding 8).
+    ///
+    /// It is a process-global object keyed, until now, by `ConnId` alone — and
+    /// `ConnId(1)` is the first connection of every test in a suite that runs in
+    /// parallel. `TURN` serializes arming, not ordinary prefix admissions, so an
+    /// unrelated binding's prefix on the same numbered connection could park on a
+    /// latch armed by a different test and hang it, or trip its arrival signal and
+    /// let it proceed on a stranger's evidence.
+    ///
+    /// Staged directly: a latch is armed for one binding, and a DIFFERENT binding's
+    /// prefix — same `ConnId` — is driven through the same classifier seam. It must
+    /// pass straight through. If it parked, this test would hit the latch's own
+    /// ten-second budget and fail; if it tripped the arrival flag, the assertion
+    /// below catches it.
+    #[test]
+    fn an_unrelated_bindings_prefix_cannot_trip_or_park_on_the_latch() {
+        use crate::session::prefix_latch::Latch;
+
+        let armed = bound_session("01a0-head");
+        let other = bound_session("01b0-head");
+        let latch = Latch::arm(armed.latch_key(), CONN_A);
+
+        // The other binding's prefix, on the SAME connection id the latch is armed
+        // for. Returns rather than parking, because the latch is not its.
+        let a = go_conn(
+            Role::Tui,
+            CONN_A,
+            &other,
+            r#"{"method":"thread/unsubscribe","id":70,"params":{"threadId":"01b0-head"}}"#,
+        );
+        assert!(
+            matches!(a, RelayAction::Forward { .. }),
+            "an unrelated binding's prefix must run to completion, not park: {a:?}"
+        );
+        assert_eq!(
+            latch.attempts(),
+            0,
+            "and it must not be counted as the armed binding's admission attempt either"
+        );
+        // The armed binding is still armed and untouched — nothing was consumed.
+        assert!(
+            !armed.has_tracked_connection(CONN_B),
+            "the armed binding saw none of that traffic"
         );
     }
 

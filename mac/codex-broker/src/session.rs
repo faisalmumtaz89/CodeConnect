@@ -385,6 +385,243 @@ pub enum IdAdmission {
     CreationSlotClosed,
 }
 
+/// What ONE `thread/unsubscribe` prefix's single atomic admission decided (A16.1).
+///
+/// A park point inside [`ThreadBinding::try_admit_prefix`]'s critical section, so
+/// A16.1 can be asserted by construction instead of raced.
+///
+/// The probabilistic test next door races two threads two thousand times and asserts
+/// that both never win. It is a real test and it stays, but it is a *detector*: a
+/// split check→claim form only loses when the scheduler happens to interleave it,
+/// and a scheduler is free never to. This is the statement itself — one thread is
+/// stopped between the checks and the claim while still holding the guard, and the
+/// other is shown to have REACHED admission, to make no progress while it waits, and
+/// to complete once it is let go. A form that took the lock twice parks the first
+/// thread holding NOTHING, and the second sails through; that is a deterministic
+/// failure, not an unlucky one.
+///
+/// **What this does and does not catch, measured** (round-3 finding 7, corrected in
+/// round 4 finding 7).
+///
+/// [`park`] takes a borrow of the guarded [`Binding`], so it cannot be called without
+/// the guard — that much is enforced by the compiler and stands. **The stronger claim
+/// recorded here previously was false and is retracted**: it said the natural split
+/// form — checks under one acquisition, ledger and claim under a second, with the park
+/// where it textually belongs between them — "does not compile". It compiles.
+/// Non-lexical lifetimes end the borrow at the `park` call, so `park(…, g); drop(guard);
+/// let mut guard = self.enter();` builds cleanly. Measured by applying exactly that
+/// mutant: `cargo build -p codex-broker --lib --tests` succeeded with no diagnostic.
+///
+/// So the borrow is a guard against calling `park` unguarded, not against splitting the
+/// section. What actually catches the split was measured on the same mutant, three runs
+/// each:
+///
+///   * **the deterministic latch (this one) does NOT** — 3/3 GREEN. It cannot: the
+///     release window is a `drop` immediately followed by a re-`lock`, with no work in
+///     between, and the competitor is queued on the mutex while the releasing thread
+///     re-acquires before it can be scheduled. No in-process observer sees that window,
+///     so no test built on this latch can be deterministic against this split. Stated
+///     here so the latch is not credited with a guarantee it does not provide;
+///   * **the race detector at 2000 rounds DOES** — 3/3 RED
+///     (`a_prefix_and_a_competing_creation_never_both_win`). The split's window is
+///     narrow but it is a *real* window, and 2000 rounds cross it every time on this
+///     machine. It remains a detector rather than a proof, and it is the only
+///     instrument that covers this mutant.
+///
+/// The residual, stated exactly: a split whose release window is a bare `drop`/re-`lock`
+/// is invisible to the deterministic instrument and rests on the probabilistic one. The
+/// division of labour is deliberate — the latch proves the property that CAN be proven
+/// in-process (a thread stopped inside the section blocks the competitor), and the race
+/// detector covers the window the latch structurally cannot see.
+///
+/// **Keyed by the BINDING under test as well as by [`ConnId`]** (round-3 finding 8).
+/// The latch is one process-global object and the broker's tests run in parallel, so
+/// a key of `ConnId` alone is not a key at all: `ConnId(1)` is the first connection
+/// of *every* test, `TURN` serializes only arming, and an unrelated binding's
+/// ordinary prefix could therefore trip or park on a latch armed by a different test.
+/// Each [`SessionThreads`] carries its own `latch_key`, and only calls from the armed
+/// binding are seen.
+#[cfg(test)]
+pub(crate) mod prefix_latch {
+    use super::{Binding, ConnId};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    struct State {
+        /// The binding and connection this latch is armed for. Both halves.
+        armed: Option<(u64, ConnId)>,
+        arrived: bool,
+        released: bool,
+        /// How many times the armed binding's id-admission entry point has been
+        /// REACHED since arming — counted before the session mutex is taken, so it
+        /// distinguishes "the competitor is blocked" from "the competitor has not
+        /// run yet". See [`note_admission_attempt`].
+        attempts: u64,
+    }
+
+    static STATE: Mutex<State> = Mutex::new(State {
+        armed: None,
+        arrived: false,
+        released: false,
+        attempts: 0,
+    });
+    static WAKE: Condvar = Condvar::new();
+    static TURN: Mutex<()> = Mutex::new(());
+
+    /// How long either side waits before declaring the TEST broken. A latch that
+    /// never trips must fail loudly: a classifier that stopped routing the prefix
+    /// into the critical section would otherwise hang here for ever.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Arms the latch for one binding+connection and takes it down on drop, so a
+    /// panicking test releases whatever it parked instead of wedging the next one.
+    pub(crate) struct Latch {
+        _turn: MutexGuard<'static, ()>,
+    }
+
+    fn state() -> MutexGuard<'static, State> {
+        STATE.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut(&State) -> bool) {
+        let mut s = state();
+        let deadline = std::time::Instant::now() + BUDGET;
+        while !done(&s) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "{what}");
+            s = WAKE
+                .wait_timeout(s, left)
+                .unwrap_or_else(|poison| poison.into_inner())
+                .0;
+        }
+    }
+
+    impl Latch {
+        pub(crate) fn arm(key: u64, conn: ConnId) -> Latch {
+            let turn = TURN.lock().unwrap_or_else(|poison| poison.into_inner());
+            *state() = State {
+                armed: Some((key, conn)),
+                arrived: false,
+                released: false,
+                attempts: 0,
+            };
+            Latch { _turn: turn }
+        }
+
+        /// Block until the armed connection is provably parked inside the section.
+        pub(crate) fn await_arrival(&self) {
+            wait_until(
+                "the prefix never reached the admission critical section — the \
+                 classifier is not routing it through try_admit_prefix",
+                |s| s.arrived,
+            );
+        }
+
+        /// Block until this binding's critical section has been reached MORE than
+        /// `baseline` times — i.e. by somebody other than the thread already parked
+        /// inside it.
+        ///
+        /// This is what makes "it made no progress" a fact rather than a hope: a
+        /// sleep plus `is_finished` is equally green when the competing thread was
+        /// never scheduled at all, or when the classifier refused it long before it
+        /// ever reached the section. The baseline is taken after the parked thread
+        /// has arrived, so it already accounts for that thread's own entry.
+        pub(crate) fn await_entry_beyond(&self, baseline: u64) {
+            wait_until(
+                "the competing request never reached this binding's critical section \
+                 — it cannot have been BLOCKED by a section it never entered",
+                |s| s.attempts > baseline,
+            );
+        }
+
+        /// How many times this binding's critical section has been entered since
+        /// arming.
+        pub(crate) fn attempts(&self) -> u64 {
+            state().attempts
+        }
+
+        pub(crate) fn release(&self) {
+            state().released = true;
+            WAKE.notify_all();
+        }
+    }
+
+    impl Drop for Latch {
+        fn drop(&mut self) {
+            let mut s = state();
+            s.released = true;
+            s.armed = None;
+            WAKE.notify_all();
+        }
+    }
+
+    /// Called from inside the critical section, **while the session guard is held**.
+    ///
+    /// The `_held` parameter is that sentence, enforced by the compiler rather than
+    /// asserted in a comment (round-3 finding 7): it borrows the guarded [`Binding`],
+    /// so this cannot be called from anywhere the guard is not held. A form that
+    /// parked with no guard at all parks holding NOTHING — a deterministic failure,
+    /// not an unlucky one — or does not compile.
+    ///
+    /// **It does NOT prevent the section being split around this call** (round-4
+    /// finding 7). Non-lexical lifetimes end the borrow when `park` returns, so
+    /// `park(…, g); drop(guard); re-lock;` compiles — measured. See the module doc on
+    /// [`prefix_latch`] for which instrument covers that mutant and which cannot.
+    pub(super) fn park(key: u64, conn: ConnId, _held: &Binding) {
+        let mut s = state();
+        if s.armed != Some((key, conn)) {
+            return;
+        }
+        s.arrived = true;
+        WAKE.notify_all();
+        let deadline = std::time::Instant::now() + BUDGET;
+        while !s.released {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "the latch was never released");
+            s = WAKE
+                .wait_timeout(s, left)
+                .unwrap_or_else(|poison| poison.into_inner())
+                .0;
+        }
+    }
+
+    /// Record that the armed binding's critical section was reached. Any binding but
+    /// the armed one is ignored — which is what stops a parallel test's traffic from
+    /// being counted as this one's evidence (round-3 finding 8).
+    pub(super) fn note_section_entry(key: u64) {
+        let mut s = state();
+        if s.armed.map(|(k, _)| k) != Some(key) {
+            return;
+        }
+        s.attempts += 1;
+        WAKE.notify_all();
+    }
+}
+
+/// The three questions a prefix raises — *is this a switch prefix at all?*, *would the
+/// `thread/start` behind it be admitted?*, *may this connection claim the slot?* — used to be
+/// answered by three separate acquisitions of the session mutex, with the id ledger a fourth
+/// and the claim a fifth. Between the first and the last, another connection's `thread/start`
+/// could be admitted (it saw no reservation yet) and another connection's prefix could
+/// overwrite a live claim outright. They are now one decision with one answer, and this is
+/// its shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixAdmission {
+    /// It names the ACTIVE head: the switch behind it is admissible, its id is on the
+    /// ledger, and the creation slot is now CLAIMED for this connection. Forward.
+    Reserved,
+    /// It names a thread this session RETIRED. Its id is on the ledger and it forwards like
+    /// any other request, but it begins no switch and reserves nothing (round-3 P5).
+    NoSwitch,
+    /// The switch behind it could not be admitted, and the reason is rendered into the
+    /// refusal's audit note. **Zero upstream bytes** — which is the whole point: the
+    /// subscription survives a switch that was never going to happen.
+    Inadmissible(&'static str),
+    /// The id ledger refused it, with the same verdicts and the same wire shapes as any
+    /// other request's — a prefix is not exempt from the ledger, it merely runs it in the
+    /// same section as its claim.
+    Ledger(IdAdmission),
+}
+
 /// Counts of the protocol-hostile id events the ledger refuses, for the audit log.
 ///
 /// **Seam.** These are the input the *failure-containment / spam-close* sub-chunk reads:
@@ -482,11 +719,34 @@ pub trait ThreadBinding: Send + Sync {
     /// terminal was observed for its thread. Releases the busy mark.
     fn release_turn(&self, _conn: ConnId, _id: &RequestId) {}
 
-    /// **Would a switch be admitted RIGHT NOW?** (round-1 P4, as re-grounded.)
+    /// **Admit ONE `thread/unsubscribe` — check and claim in a SINGLE critical section**
+    /// (A16.1; round-1 P4, round-2 P3 and round-3 P4/P5, now inseparable).
     ///
-    /// Pure — it mutates nothing and claims nothing. It exists so the `thread/unsubscribe`
-    /// prefix of a `/new` can be refused BEFORE it reaches the server, in every case where
-    /// the `thread/start` behind it is already doomed.
+    /// It answers all three questions a prefix raises and takes the claim, under one held
+    /// `MutexGuard`, in this order:
+    ///
+    /// 1. **Is it a switch prefix?** Only an unsubscribe naming the ACTIVE head is
+    ///    (round-3 P5). Anything else is a retired thread's cleanup: ledger-admitted,
+    ///    forwarded, reserving nothing.
+    /// 2. **Would the `thread/start` behind it be admitted?** Every precondition, from the
+    ///    single [`creation_preconditions`] definition — session state, the retirement cap,
+    ///    active turns, and the per-connection creation-id arithmetic.
+    /// 3. **May this connection claim the slot?** A live reservation held by ANOTHER
+    ///    connection refuses: that connection's unsubscribe already went upstream, and a
+    ///    claim it paid for on the wire may not be taken from it.
+    /// 4. **The id ledger**, then the claim — in that order (round-3 P4): a prefix the
+    ///    ledger refuses sends zero bytes and must leave no reservation behind.
+    ///
+    /// # Why ONE section (A16.1)
+    ///
+    /// These were five separate acquisitions of the session mutex, and both gaps were
+    /// reachable. Between the check and the claim, another connection's `thread/start` was
+    /// admitted — it saw no reservation yet — so the prefix forwarded, dropped a
+    /// subscription, and then found the creation slot taken. And the check never consulted
+    /// the reservation at all while the claim overwrote it unconditionally, so a second
+    /// connection's prefix CLOBBERED a live claim with no thread interleaving whatsoever,
+    /// only frame ordering. Both end in round-2 P4's "unsubscribed, then refused" — the
+    /// sequence the pre-check exists to make impossible.
     ///
     /// # Why a pre-check rather than a hold
     ///
@@ -512,39 +772,22 @@ pub trait ThreadBinding: Send + Sync {
     /// one cause it cannot cover is the app-server ERRORING the `thread/start`, which no
     /// amount of local checking can predict; that path restores the old head (so turns keep
     /// working) and is documented as the residual.
-    /// **Reserve the next switch for `conn`, or say why it cannot be** (round-2 P3).
     ///
-    /// Called when a `thread/unsubscribe` prefix is about to forward. It does two things
-    /// under one lock, and both matter:
+    /// # The reservation
     ///
-    /// 1. **Checks every precondition the `thread/start` behind it will face**, from the
-    ///    single [`creation_preconditions`] definition — session state, the retirement cap,
-    ///    active turns, AND the per-connection creation-id arithmetic the first form
-    ///    omitted. A prefix must never forward in front of a creation that is already
-    ///    doomed, because that is precisely how a connection ends up unsubscribed and then
-    ///    refused.
-    /// 2. **Claims the slot.** Between the prefix and the start, a competing turn or a
-    ///    creation from another connection would otherwise be admitted and turn a
-    ///    then-valid check into a then-invalid one. The reservation makes the prefix and
-    ///    the switch one causal unit: while it is live, turns refuse
-    ///    ([`TurnAdmission::SwitchReserved`]) and another connection's creation refuses.
+    /// The claim this takes makes the prefix and the switch behind it ONE causal unit
+    /// (round-2 P3): while it is live, turns refuse ([`TurnAdmission::SwitchReserved`]) and
+    /// another connection's creation refuses. It is idempotent for the SAME connection — the
+    /// measured `/new` sends the prefix twice, and the second frame must refresh rather than
+    /// collide. It is consumed by that connection's next `thread/start`, released by its
+    /// disconnect, and ignored past [`SWITCH_RESERVATION_TTL`] so a client that goes quiet
+    /// cannot wedge turns for ever.
     ///
-    /// Idempotent for the same connection — the measured `/new` sends the prefix twice, and
-    /// the second frame refreshes rather than colliding. Consumed by that connection's next
-    /// `thread/start`, released by its disconnect, and ignored past
-    /// [`SWITCH_RESERVATION_TTL`] so a client that goes quiet cannot wedge turns for ever.
-    fn switch_prefix_admissible(&self, _conn: ConnId, _thread: &str) -> Result<(), &'static str> {
-        Err("this binding admits no switch")
+    /// The default implementation admits no prefix, so a binding that does not implement it
+    /// begins no switch.
+    fn try_admit_prefix(&self, _conn: ConnId, _id: &RequestId, _thread: &str) -> PrefixAdmission {
+        PrefixAdmission::Inadmissible("this binding admits no switch")
     }
-
-    /// Claim the next creation for `conn`, whose `thread/unsubscribe` of the ACTIVE head
-    /// has just been admitted to the ledger and is about to forward.
-    ///
-    /// **Called only AFTER that unsubscribe's own ledger admission succeeds** (round-3 P4).
-    /// A prefix the ledger refuses sends zero bytes, so it must leave no reservation behind
-    /// — a reservation with no wire effect fences turns and blocks other connections for
-    /// nothing.
-    fn reserve_switch(&self, _conn: ConnId, _thread: &str) {}
 
     /// A `thread/resume` naming `thread` is being FORWARDED on `conn` under request `id`.
     ///
@@ -576,19 +819,6 @@ pub trait ThreadBinding: Send + Sync {
     /// bound" from "wedged safe". `None` for every other state.
     fn creation_closed_reason(&self) -> Option<&'static str> {
         None
-    }
-
-    /// The thread that IS the head, or is about to stop being it.
-    ///
-    /// While a switch is `Pending` there is no `Bound` head at all, so
-    /// [`ThreadBinding::sole_session_thread`] answers `None` — and an unsubscribe naming the
-    /// thread being superseded would look indistinguishable from a retired thread's
-    /// cleanup, quietly forwarding a second prefix into a switch already in flight
-    /// (round-3 P5). This accessor closes that window: during a switch the superseded
-    /// thread still counts as the head for the purpose of "is this a switch prefix?", and
-    /// the prefix is then refused by the one-creation-in-flight rule with zero bytes.
-    fn head_or_superseded(&self) -> Option<String> {
-        self.sole_session_thread()
     }
 
     /// Does a thread id belong to this session?
@@ -1130,6 +1360,51 @@ pub struct SessionThreads {
     /// header). Compared by **exact string equality** against a creation response's `cwd`;
     /// this crate performs no path normalization of its own.
     launch_cwd: Arc<str>,
+    /// Identifies THIS store to the A16.1 test latch (round-3 finding 8). The latch
+    /// is process-global and the tests run in parallel, so it has to be able to tell
+    /// one binding's admissions from another's; `ConnId` cannot, because every test
+    /// starts at `ConnId(1)`.
+    #[cfg(test)]
+    latch_key: u64,
+}
+
+/// The next distinct [`SessionThreads::latch_key`].
+///
+/// **The previous note here was wrong, and is corrected rather than quietly deleted**
+/// (round-4 finding 9). It said this had to be a free function because a `static`
+/// inside the generic `SessionThreads::new` would be "monomorphized once per argument
+/// type", giving `new(&str)` and `new(String)` separate counters that both start at 1
+/// and hand two unrelated stores the same key. That is not how Rust behaves. A `static`
+/// declared inside a generic function is a single item whose type does not depend on
+/// the function's parameters, so there is exactly ONE of it across every
+/// monomorphization. Measured directly:
+///
+/// ```text
+/// fn gen_counter<T: Into<String>>(_x: T) -> u64 {
+///     static NEXT: AtomicU64 = AtomicU64::new(1);
+///     NEXT.fetch_add(1, Relaxed)
+/// }
+/// gen_counter("a")            -> 1
+/// gen_counter(String::from(…)) -> 2      // shared, not restarted
+/// gen_counter("c")            -> 3
+/// gen_counter(String::from(…)) -> 4
+/// ```
+///
+/// So the "4 where 0 was asserted" cross-talk that note credits to the placement was
+/// really the defect round-3 finding 8 named: a latch keyed by [`ConnId`] alone, where
+/// every test's first connection is `ConnId(1)`. That is fixed by the `latch_key`
+/// field, and the fix does not depend on where this counter lives — the isolation test
+/// next door constructs both bindings through the same `&str` instantiation, so it
+/// could not have distinguished the two placements either way.
+///
+/// The module-scope counter STAYS. It is correct, and one counter at module scope is
+/// the clearer statement of "one namespace" than a hidden static inside a constructor.
+/// But it is a legibility choice, not the load-bearing part of finding 8's fix, and it
+/// is recorded as one so a later reader does not defend it on a false premise.
+#[cfg(test)]
+fn next_latch_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl SessionThreads {
@@ -1149,7 +1424,34 @@ impl SessionThreads {
                 counts: IdLedgerCounts::default(),
             })),
             launch_cwd: launch_cwd.into().into(),
+            #[cfg(test)]
+            latch_key: next_latch_key(),
         }
+    }
+
+    /// This store's identity to the A16.1 latch, so a test can arm it for the
+    /// binding it is actually exercising.
+    #[cfg(test)]
+    pub(crate) fn latch_key(&self) -> u64 {
+        self.latch_key
+    }
+
+    /// Enter this store's **single critical section**.
+    ///
+    /// Every acquisition of `inner` goes through here, and that is the point: the
+    /// A16.1 latch has to be able to say that a competing request REACHED this
+    /// binding's section and was held there, as opposed to never having been
+    /// scheduled or having been refused somewhere upstream (round-3 finding 7).
+    /// Instrumenting one entry point — `try_admit_request` — was not enough and was
+    /// measured not to be: a competing `thread/start` blocks on whichever of these
+    /// sites its path touches first, which is not always that one, so the counter sat
+    /// at zero while the competitor was genuinely blocked.
+    ///
+    /// In production this is exactly `self.inner.lock().unwrap()`.
+    fn enter(&self) -> std::sync::MutexGuard<'_, Binding> {
+        #[cfg(test)]
+        prefix_latch::note_section_entry(self.latch_key);
+        self.inner.lock().unwrap()
     }
 
     /// Does the store hold a per-connection id ledger for `conn`?
@@ -1159,7 +1461,7 @@ impl SessionThreads {
     /// what proves an over-capacity or over-long-id refusal stores nothing.
     #[cfg(test)]
     pub(crate) fn has_tracked_connection(&self, conn: ConnId) -> bool {
-        self.inner.lock().unwrap().conns.contains_key(&conn)
+        self.enter().conns.contains_key(&conn)
     }
 
     /// Observe one server→client frame **on the connection with `conn`** and, if it is the
@@ -1238,7 +1540,7 @@ impl SessionThreads {
             return;
         };
 
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.enter();
         let g = &mut *guard;
 
         // Is this the correlated answer to the pending creation ON THIS CONNECTION? A
@@ -1487,6 +1789,64 @@ fn creation_preconditions(g: &Binding, conn: ConnId, for_prefix: bool) -> Result
     Ok(())
 }
 
+/// **The thread that IS the head, or is about to stop being it** — over a guard the caller
+/// already holds.
+///
+/// While a switch is `Pending` there is no `Bound` head at all, so
+/// [`ThreadBinding::sole_session_thread`] answers `None` — and an unsubscribe naming the
+/// thread being superseded would look indistinguishable from a retired thread's cleanup,
+/// quietly forwarding a second prefix into a switch already in flight (round-3 P5). This
+/// closes that window: during a switch the superseded thread still counts as the head for the
+/// purpose of "is this a switch prefix?", and the prefix is then refused by the
+/// one-creation-in-flight rule with zero bytes.
+///
+/// A free function over `&Binding` rather than an accessor, because A16.1 needs the answer
+/// INSIDE the section that goes on to claim the slot. Reading it through its own lock — as
+/// the classifier did, twice per prefix — is what let the head move between the read and the
+/// claim.
+fn head_or_superseded_of(g: &Binding) -> Option<&str> {
+    match &g.creation {
+        Creation::Bound(t) => Some(&t.id),
+        Creation::Pending {
+            superseding: Some(t),
+            ..
+        } => Some(&t.id),
+        _ => None,
+    }
+}
+
+/// **Would the switch behind this prefix be admitted?** — the pure half of A16.1's
+/// admission, over a guard the caller already holds.
+///
+/// Split out of the old `switch_prefix_admissible` for the same reason
+/// [`creation_preconditions`] and [`admit_id`] are free functions: so
+/// [`ThreadBinding::try_admit_prefix`] can run it in the SAME critical section that claims
+/// the slot. Two copies of this rule would be two chances for the check and the claim to
+/// disagree about what a prefix is.
+fn prefix_preconditions(g: &Binding, conn: ConnId, thread: &str) -> Result<(), &'static str> {
+    // **Only an unsubscribe naming the ACTIVE HEAD is a switch prefix** (round-3 P5).
+    // A retired thread's cleanup unsubscribes something this session is not on: it begins no
+    // switch, so reserving for it would fence turns and block other connections' creations
+    // for a frame that changes nothing.
+    match &g.creation {
+        Creation::Bound(active) if active.id == thread => {}
+        Creation::Bound(_) => {
+            return Err(
+                "this unsubscribe does not name the session's active head, so \
+                        it begins no switch",
+            )
+        }
+        // A switch is already in flight. The thread it is superseding still reads as the head
+        // (round-3 P5), so a SECOND prefix lands here and is refused with zero bytes rather
+        // than quietly forwarding into an in-flight switch.
+        Creation::Pending { .. } => return Err("a thread creation is already in flight"),
+        // No head bound yet: the next `thread/start` is a FIRST creation, not a switch, and
+        // it needs no unsubscribe prefix.
+        _ => return Err("this session has no bound thread to switch away from"),
+    }
+    creation_preconditions(g, conn, true)
+}
+
 /// Move a thread onto the retired list — id only, and never past the cap (round-1 P9).
 ///
 /// The cap cannot be exceeded here in practice: `try_admit_request` refuses a switch unless
@@ -1582,16 +1942,22 @@ impl SessionThreads {
             .pointer("/params/turn/id")
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty() && t.len() <= MAX_THREAD_ID_BYTES);
-        self.inner
-            .lock()
-            .unwrap()
-            .active_turns
-            .terminal(thread, turn);
+        // Through `enter()` like every other acquisition (round-4 finding 7): this
+        // was the last raw `inner.lock()` in the file, which made "all 17 sites are
+        // counted" false and left one path a competitor could block on invisibly.
+        self.enter().active_turns.terminal(thread, turn);
     }
 }
 
 /// The method whose admission marks a thread busy for the switch linearization.
 pub const TURN_METHOD: &str = "turn/start";
+
+/// The method whose admission may claim the switch reservation (A16.1).
+///
+/// Named here rather than spelled at the call site because the string now appears on BOTH
+/// sides of the seam — the classifier routes on it, and the ledger stores it as the
+/// outstanding request's method — and the two must not be able to drift apart.
+pub const UNSUBSCRIBE_METHOD: &str = "thread/unsubscribe";
 
 /// The P2 state machine over a correlated creation response. Pure, so the three arms are
 /// unit-testable without a store.
@@ -1714,7 +2080,7 @@ fn is_nonempty_path_array(v: &Value) -> bool {
 
 impl ThreadBinding for SessionThreads {
     fn bound_thread(&self) -> Option<VerifiedThread> {
-        match &self.inner.lock().unwrap().creation {
+        match &self.enter().creation {
             Creation::Bound(t) => Some(t.clone()),
             _ => None,
         }
@@ -1722,7 +2088,7 @@ impl ThreadBinding for SessionThreads {
 
     fn try_admit_request(&self, conn: ConnId, id: &RequestId, method: &str) -> IdAdmission {
         let is_creation = method == CREATION_METHOD;
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.enter();
         let g = &mut *guard;
 
         // SWITCH ADMISSION (2e-4c). Round-2 P3's rule was "one thread per session, and one
@@ -1823,7 +2189,7 @@ impl ThreadBinding for SessionThreads {
         cwd: Option<&Value>,
         roots: Option<&Value>,
     ) -> TurnAdmission {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.enter();
         let g = &mut *guard;
 
         // 1. The head-check, against the ACTIVE head only.
@@ -1947,53 +2313,93 @@ impl ThreadBinding for SessionThreads {
     }
 
     fn release_turn(&self, conn: ConnId, id: &RequestId) {
-        self.inner.lock().unwrap().active_turns.release(conn, id);
+        self.enter().active_turns.release(conn, id);
     }
 
-    fn head_or_superseded(&self) -> Option<String> {
-        self.head_or_superseded_impl()
-    }
-
-    fn switch_prefix_admissible(&self, conn: ConnId, thread: &str) -> Result<(), &'static str> {
-        let g = self.inner.lock().unwrap();
-        // **Only an unsubscribe naming the ACTIVE HEAD is a switch prefix** (round-3 P5).
-        // A retired thread's cleanup unsubscribes something this session is not on: it
-        // begins no switch, so reserving for it would fence turns and block other
-        // connections' creations for a frame that changes nothing.
-        match &g.creation {
-            Creation::Bound(active) if active.id == thread => {}
-            Creation::Bound(_) => {
-                return Err(
-                    "this unsubscribe does not name the session's active head, so \
-                            it begins no switch",
-                )
-            }
-            // A switch is already in flight. The thread it is superseding still reads as
-            // the head (round-3 P5), so a SECOND prefix lands here and is refused with zero
-            // bytes rather than quietly forwarding into an in-flight switch.
-            Creation::Pending { .. } => return Err("a thread creation is already in flight"),
-            // No head bound yet: the next `thread/start` is a FIRST creation, not a switch,
-            // and it needs no unsubscribe prefix.
-            _ => return Err("this session has no bound thread to switch away from"),
-        }
-        creation_preconditions(&g, conn, true)
-    }
-
-    fn reserve_switch(&self, conn: ConnId, thread: &str) {
-        let mut guard = self.inner.lock().unwrap();
+    /// **A16.1 — ONE critical section, five steps, no gaps.** See
+    /// [`ThreadBinding::try_admit_prefix`] for why each step is here rather than at its own
+    /// lock acquisition.
+    fn try_admit_prefix(&self, conn: ConnId, id: &RequestId, thread: &str) -> PrefixAdmission {
+        let mut guard = self.enter();
         let g = &mut *guard;
+
+        // 1. **Expire FIRST.** A reservation past `SWITCH_RESERVATION_TTL` is no longer a
+        //    claim and must not hold the slot against a legitimate prefix. Expiry is not
+        //    "nothing happened", though — it WEDGES the connection that made it (round-3 P5),
+        //    because that connection's unsubscribe really did go upstream.
         expire_reservation(g);
-        // Reserve, or refresh — `/new` sends the prefix TWICE, and the second frame must
-        // not collide with the reservation the first one made.
+
+        // 2. **Is this a switch prefix at all?** (round-3 P5.) Anything but the active head
+        //    is a retired thread's cleanup: it forwards, it takes a ledger slot like any
+        //    other request, and it reserves NOTHING. Reserving for it would fence turns and
+        //    block other connections' creations for a frame that changes nothing.
+        //
+        //    This test used to live in the classifier, at its own lock, and was read TWICE
+        //    per prefix — once to decide whether to pre-check and once to decide whether to
+        //    claim. Between those two reads the head could move.
+        if head_or_superseded_of(g) != Some(thread) {
+            return match admit_id(g, conn, id, UNSUBSCRIBE_METHOD) {
+                IdAdmission::Admitted => PrefixAdmission::NoSwitch,
+                other => PrefixAdmission::Ledger(other),
+            };
+        }
+
+        // 3. **Would the `thread/start` behind it be admitted?** Every precondition, from the
+        //    one shared definition — including the per-connection creation-id arithmetic.
+        if let Err(why) = prefix_preconditions(g, conn, thread) {
+            return PrefixAdmission::Inadmissible(why);
+        }
+
+        // 4. **A live claim belongs to the connection that paid for it** (A16.1's cheaper
+        //    half). `prefix_preconditions` reads the creation state, the retirement cap, the
+        //    active turns and the id ledger — but never the reservation, and the claim below
+        //    used to overwrite it unconditionally. So a SECOND connection's prefix was
+        //    admitted while the first held a live reservation and took it, and the first
+        //    connection's `thread/start` — its unsubscribe already on the wire — was then
+        //    refused `CreationSlotClosed`. That needed no thread interleaving at all, only
+        //    two TUI connections and an ordering.
+        //
+        //    The rule is DIFFERENT connection, not "any reservation": the measured `/new`
+        //    sends its prefix TWICE, and the second frame must refresh its own claim rather
+        //    than collide with it. `/new` is the one switch affordance A15 proved on the live
+        //    wire; refusing its second frame would break it.
+        if let Some(res) = &g.switch_reservation {
+            if res.conn != conn {
+                return PrefixAdmission::Inadmissible(
+                    "another connection is holding the switch reservation and its \
+                     thread/start is expected next",
+                );
+            }
+        }
+
+        // The one place a test may stop a thread INSIDE this section, so "nothing can
+        // be admitted between the check and the claim" is a statement a test can make
+        // rather than one it can only hope a scheduler will demonstrate. Between the
+        // checks and the claim, which is exactly the gap A16.1 closed — a form that
+        // released the guard anywhere after here parks the thread holding NOTHING, and
+        // the competing admission goes straight through.
+        #[cfg(test)]
+        prefix_latch::park(self.latch_key, conn, g);
+
+        // 5. **The ledger runs BEFORE the claim** (round-3 P4). A prefix the ledger refuses
+        //    sends zero bytes, so it must leave no reservation behind — a reservation with no
+        //    wire effect fences turns and blocks other connections for nothing.
+        match admit_id(g, conn, id, UNSUBSCRIBE_METHOD) {
+            IdAdmission::Admitted => {}
+            other => return PrefixAdmission::Ledger(other),
+        }
+        // Reserve, or refresh. Nothing can be admitted between the check above and this
+        // claim, which is the whole of A16.1.
         g.switch_reservation = Some(SwitchReservation {
             conn,
             thread: thread.to_string(),
             at: std::time::Instant::now(),
         });
+        PrefixAdmission::Reserved
     }
 
     fn note_resubscribe_attempt(&self, conn: ConnId, thread: &str, id: &RequestId) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.enter();
         // The attempt is stamped with the wedge it is trying to lift, so an answer that
         // arrives after a NEWER wedge replaced it clears nothing (closing S5).
         if let Some(w) = g.unsubscribed.get(&conn) {
@@ -2008,11 +2414,11 @@ impl ThreadBinding for SessionThreads {
     }
 
     fn id_ledger_counts(&self) -> IdLedgerCounts {
-        self.inner.lock().unwrap().counts
+        self.enter().counts
     }
 
     fn rollback_creation(&self, conn: ConnId, id: &RequestId) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.enter();
         let superseding = match &g.creation {
             Creation::Pending {
                 conn: c,
@@ -2040,7 +2446,7 @@ impl ThreadBinding for SessionThreads {
     }
 
     fn close_connection(&self, conn: ConnId) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.enter();
         if let Creation::Pending {
             conn: c,
             superseding,
@@ -2104,7 +2510,7 @@ impl ThreadBinding for SessionThreads {
     /// retired), so this is not a window of *optimism* — the thread is a session thread on
     /// every path out.
     fn is_session_thread(&self, thread_id: &str) -> bool {
-        let g = self.inner.lock().unwrap();
+        let g = self.enter();
         match &g.creation {
             Creation::Bound(active) if active.id == thread_id => return true,
             Creation::Pending {
@@ -2117,7 +2523,7 @@ impl ThreadBinding for SessionThreads {
     }
 
     fn creation_closed_reason(&self) -> Option<&'static str> {
-        match &self.inner.lock().unwrap().creation {
+        match &self.enter().creation {
             Creation::Closed(why) => Some(why),
             _ => None,
         }
@@ -2125,16 +2531,18 @@ impl ThreadBinding for SessionThreads {
 }
 
 impl SessionThreads {
-    /// See [`ThreadBinding::head_or_superseded`].
-    fn head_or_superseded_impl(&self) -> Option<String> {
-        match &self.inner.lock().unwrap().creation {
-            Creation::Bound(t) => Some(t.id.clone()),
-            Creation::Pending {
-                superseding: Some(t),
-                ..
-            } => Some(t.id.clone()),
-            _ => None,
-        }
+    /// **Would the switch behind a prefix be admitted RIGHT NOW?** — the pure predicate, on
+    /// its own lock.
+    ///
+    /// Test-only since A16.1, and deliberately so: production takes this decision INSIDE
+    /// [`ThreadBinding::try_admit_prefix`]'s critical section, and re-exposing it as
+    /// something a caller could consult and then act on is exactly the split the amendment
+    /// closed. It stays because the rule it states — which sessions may switch, and why —
+    /// is worth asserting directly, and it shares [`prefix_preconditions`] with the real
+    /// path, so the two cannot drift.
+    #[cfg(test)]
+    fn switch_prefix_admissible(&self, conn: ConnId, thread: &str) -> Result<(), &'static str> {
+        prefix_preconditions(&self.enter(), conn, thread)
     }
 
     /// Backdate the live switch reservation so its TTL has provably elapsed (round-2 P3).
@@ -2145,7 +2553,7 @@ impl SessionThreads {
     /// `is_live()` path with a real elapsed instant.
     #[cfg(test)]
     fn backdate_reservation(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.enter();
         if let Some(res) = g.switch_reservation.as_mut() {
             res.at = std::time::Instant::now() - SWITCH_RESERVATION_TTL - COMFORTABLY_PAST;
         }
@@ -2155,14 +2563,14 @@ impl SessionThreads {
     /// accessor: an attempt is invisible from outside until its answer lands, so a test
     /// that could not see the map would be asserting the rule only through its effect.
     pub fn resubscribe_attempts(&self) -> usize {
-        self.inner.lock().unwrap().resubscribing.len()
+        self.enter().resubscribing.len()
     }
 
     /// How many threads this session has retired (2e-4c). Test/observability accessor: the
     /// retirement cap is a fail-closed rule and a test that could not see the list would be
     /// asserting the cap only through its side effect.
     pub fn retired_len(&self) -> usize {
-        self.inner.lock().unwrap().retired.len()
+        self.enter().retired.len()
     }
 }
 
@@ -3405,17 +3813,15 @@ mod tests {
     // Round-2 P3 / round-3 P4+P5 — the switch RESERVATION.
     // ---------------------------------------------------------------------------
 
-    /// Admit a `thread/unsubscribe` of `thread` the way the classifier does: check
-    /// admissibility, then admit the id, then reserve (round-3 P4 ordering).
+    /// Admit a `thread/unsubscribe` of `thread` the way the classifier does: ONE atomic
+    /// check-and-claim (A16.1).
+    ///
+    /// This helper used to hand-serialise the check, the ledger admission and the claim into
+    /// three lock acquisitions, which is why no test through it could ever observe the gaps
+    /// between them — it *was* the serialisation. Every test that uses it now drives the
+    /// real path.
     fn prefix(s: &SessionThreads, conn: ConnId, id: &RequestId, thread: &str) -> bool {
-        if s.switch_prefix_admissible(conn, thread).is_err() {
-            return false;
-        }
-        if s.try_admit_request(conn, id, "thread/unsubscribe") != IdAdmission::Admitted {
-            return false;
-        }
-        s.reserve_switch(conn, thread);
-        true
+        s.try_admit_prefix(conn, id, thread) == PrefixAdmission::Reserved
     }
 
     /// **The prefix is admissible exactly when the switch behind it is**, and the predicate
@@ -3601,6 +4007,108 @@ mod tests {
             t.switch_prefix_admissible(B, "01a0").is_ok(),
             "an expired reservation must not hold the slot against another connection"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // A16.1 — prefix admission is ONE critical section that checks AND claims.
+    // ---------------------------------------------------------------------------
+
+    /// **A16.1, the cheap half — a second connection's prefix must not CLOBBER a live
+    /// reservation.**
+    ///
+    /// This needs no thread interleaving at all, only frame ordering between two TUI
+    /// connections (the `/resume` picker opens a second one). Before A16.1 the prefix's
+    /// admissibility check never consulted `switch_reservation` and the claim overwrote it
+    /// unconditionally, so B's prefix was admitted while A held a live reservation and took
+    /// it — and A's `thread/start`, already unsubscribed on the wire, was then refused
+    /// `CreationSlotClosed`. Exactly the "unsubscribed, then refused" sequence round-2 P4
+    /// exists to prevent, reached by a route P4 did not cover.
+    ///
+    /// B necessarily names the SAME thread: only an unsubscribe of the ACTIVE HEAD is a
+    /// switch prefix at all (round-3 P5), so a prefix for any other thread reserves nothing
+    /// and could never have clobbered anything.
+    #[test]
+    fn a_second_connections_prefix_cannot_clobber_a_live_reservation() {
+        let s = store();
+        assert!(open(&s, A, &req("start")));
+        s.observe_server_frame(A, &creation_response("start", "01a0"));
+
+        // A's prefix lands: admissible, ledger-admitted, and the slot is claimed.
+        assert!(prefix(&s, A, &req("u1"), "01a0"));
+        // B's prefix for the same head must be REFUSED with zero wire effect. Admitting it
+        // would drop B's subscription too, for a switch B is not going to win.
+        assert!(
+            !prefix(&s, B, &req("u2"), "01a0"),
+            "a prefix must not be admitted while ANOTHER connection holds the switch \
+             reservation — admitting it clobbers a claim whose unsubscribe already went \
+             upstream"
+        );
+        // ...and A's claim survives, so the switch it paid for on the wire still goes.
+        assert!(
+            open(&s, A, &req("sw")),
+            "the reservation A paid for with a real unsubscribe must still be A's"
+        );
+    }
+
+    /// **A16.1, the `/new` shape — the SAME connection refreshes rather than colliding.**
+    ///
+    /// The measured `/new` sends `thread/unsubscribe{active}` TWICE before its
+    /// `thread/start`, and A15 measured `/new` as the one switch affordance that works on
+    /// the live wire. So the ownership rule is "a live reservation held by a DIFFERENT
+    /// connection refuses" — never "any live reservation refuses", which would refuse the
+    /// second measured frame and break the affordance.
+    #[test]
+    fn the_same_connection_may_refresh_its_own_reservation() {
+        let s = store();
+        assert!(open(&s, A, &req("start")));
+        s.observe_server_frame(A, &creation_response("start", "01a0"));
+        assert!(prefix(&s, A, &req("u1"), "01a0"), "the first /new prefix");
+        assert!(
+            prefix(&s, A, &req("u2"), "01a0"),
+            "the measured /new sends the prefix TWICE; the second frame must refresh the \
+             reservation, not collide with it"
+        );
+        assert!(open(&s, A, &req("sw")), "and the switch behind them goes");
+    }
+
+    /// **A16.1, the raced half — a prefix and a competing creation never both win.**
+    ///
+    /// Modelled on [`a_turn_and_a_switch_never_both_win`], and asserting the same shape of
+    /// invariant one seam over. Before A16.1 the prefix's check, its ledger admission and
+    /// its claim were three separate acquisitions of the session mutex, so B's
+    /// `thread/start` could be admitted in the gap — it saw no reservation yet — and A's
+    /// prefix then forwarded, dropped a subscription, and found the creation slot taken.
+    ///
+    /// Exactly three outcome pairs are legal: the prefix won, the creation won, or both were
+    /// refused (the loser arrived after the winner had settled). "Both admitted" is the
+    /// defect.
+    #[test]
+    fn a_prefix_and_a_competing_creation_never_both_win() {
+        use std::sync::Arc;
+        // Ten times the rounds of `a_turn_and_a_switch_never_both_win`, and measured rather
+        // than guessed: at 200 the split-lock form this exists to catch survived ~3 runs in 8
+        // (still ~0.01s, so the rounds are nearly free). A detector that only sometimes
+        // detects is not one.
+        for round in 0..2000 {
+            let s = Arc::new(store());
+            assert!(open(&s, A, &req("start")));
+            s.observe_server_frame(A, &creation_response("start", "01a0"));
+
+            let s1 = Arc::clone(&s);
+            let pre = std::thread::spawn(move || prefix(&s1, A, &req("u1"), "01a0"));
+            let s2 = Arc::clone(&s);
+            let creation = std::thread::spawn(move || {
+                s2.try_admit_request(B, &req("sw"), CREATION_METHOD) == IdAdmission::Admitted
+            });
+            let prefix_won = pre.join().expect("prefix thread");
+            let creation_won = creation.join().expect("creation thread");
+            assert!(
+                !(prefix_won && creation_won),
+                "round {round}: a switch prefix forwarded — dropping a subscription — AND \
+                 another connection's creation took the slot behind it. That is the exact \
+                 window A16.1's single critical section exists to close."
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

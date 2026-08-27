@@ -554,6 +554,49 @@ struct Inner {
     /// in production today, where `supported_agents()` refuses every Codex
     /// registration.
     retained_codex_carry: HashMap<String, RetainedCarry>,
+    /// **What a registration could not install, kept so a later turn can** (A12.2).
+    ///
+    /// A registration whose park will not clear inside [`CODEX_LINK_STOP_BUDGET`]
+    /// installs no link — the slot is left honestly empty — and then publishes its
+    /// supervisor and returns `Ok` anyway. The session is Live in the fleet and
+    /// nothing is observing it, and nothing downstream repairs that: a link's only
+    /// other builder is the *next* registration for this uid, and a supervisor that
+    /// is already connected has no reason to send one. For a session nobody
+    /// restarts, "until a later transaction" meant for ever.
+    ///
+    /// So the install is written down rather than dropped, and
+    /// [`Daemon::recover_stalled_codex_links`] runs the tail of that transaction
+    /// again once the survivor stops.
+    ///
+    /// One entry per uid, holding the epoch it was owed to: a later registration
+    /// overwrites what an earlier one was owed, because the later one is the
+    /// registration the session belongs to, and the epoch is what makes an entry the
+    /// session has moved past harmless — see [`StalledCodexInstall`].
+    ///
+    /// Empty in production today for a second reason as well as the usual one: a
+    /// Claude registration carries no control link, so it can owe no install.
+    stalled_codex_installs: HashMap<String, StalledCodexInstall>,
+}
+
+/// An install a registration was forced to skip, with everything
+/// [`Daemon::recover_stalled_codex_links`] needs to finish it — see
+/// [`Inner::stalled_codex_installs`].
+///
+/// The epoch is the whole reason this is a struct rather than a bare
+/// [`crate::codex_link::ControlLink`]. It is handed straight to
+/// [`Inner::spawn_codex_link_if_owner`], which refuses to spawn anything for a
+/// registration the session has moved on from — so recovery answers the ownership
+/// question in the one place the registration answers it, and adds no reasoning of
+/// its own.
+#[derive(Clone)]
+struct StalledCodexInstall {
+    /// The uid **and the name**: recovery joins a park and logs, and both of those
+    /// take the pair rather than the id (see [`SessionKey`]).
+    session: SessionKey,
+    /// The registration this install is owed to.
+    epoch: u64,
+    /// Exactly what that registration would have installed.
+    link: crate::codex_link::ControlLink,
 }
 
 /// A departing link's [`crate::codex_link::Carried`], with the launch it belongs to.
@@ -853,6 +896,53 @@ impl Inner {
         }
     }
 
+    /// **Write down an install this registration could not perform** (A12.2) — see
+    /// [`Inner::stalled_codex_installs`].
+    ///
+    /// A named step rather than three lines inside the registration, for the same
+    /// reason [`Inner::seed_codex_carry`] is one: the arm that calls it is reached
+    /// only through a gate that is currently closed (`supported_agents()` refuses
+    /// every Codex registration), so a rule left inline there is a rule nothing can
+    /// drive and nothing can prove.
+    fn owe_codex_install(
+        &mut self,
+        session: &SessionKey,
+        epoch: u64,
+        link: &crate::codex_link::ControlLink,
+    ) {
+        self.stalled_codex_installs.insert(
+            session.uid.clone(),
+            StalledCodexInstall {
+                session: session.clone(),
+                epoch,
+                link: link.clone(),
+            },
+        );
+    }
+
+    /// **Cancel an install owed to _this_ registration** (A12.2).
+    ///
+    /// The same epoch test as [`Inner::release_codex_link`], and for the same reason:
+    /// a disconnect owns the resources its own connection holds and nothing a
+    /// replacement has since taken. An owed install is one of them — it is a task
+    /// this registration was still going to be given.
+    ///
+    /// Load-bearing rather than tidy. `unregister_supervisor` deliberately leaves the
+    /// claim behind as a tombstone, so [`Inner::owner_of`] — the only guard recovery
+    /// has — still answers with the disconnected registration's epoch for ever after.
+    /// Without this, the sweep would keep the promise to a supervisor that is gone:
+    /// a link spawned for a detached session, in a slot no disconnect will come back
+    /// to release.
+    fn release_owed_codex_install(&mut self, session_uid: &str, epoch: u64) {
+        if self
+            .stalled_codex_installs
+            .get(session_uid)
+            .is_some_and(|owed| owed.epoch == epoch)
+        {
+            self.stalled_codex_installs.remove(session_uid);
+        }
+    }
+
     /// **Take what a departing link knows and the daemon does not** — see
     /// [`Inner::retained_codex_carry`].
     ///
@@ -907,6 +997,12 @@ impl Inner {
     /// task happens to die is not this fact's business.
     fn forget_codex_carry(&mut self, session_uid: &str) {
         self.retained_codex_carry.remove(session_uid);
+        // **A12.2: and what is still OWED, for the same reason as what is still
+        // parked.** A Codex registration that stalled left an install to be retried;
+        // this uid has since registered as something that is not Codex, so
+        // performing it later would attach a link — and a resumed thread — to a run
+        // it was never built for. Which agent registered is settled now.
+        self.stalled_codex_installs.remove(session_uid);
         if let Some(parked) = self.parked_codex_links.get_mut(session_uid) {
             for link in parked.iter_mut() {
                 link.retain = None;
@@ -1898,6 +1994,177 @@ impl Daemon {
                 return false;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// **Install the links registrations could not** (A12.2).
+    ///
+    /// The recovery path for [`Inner::stalled_codex_installs`]. A registration whose
+    /// park would not clear inside [`CODEX_LINK_STOP_BUDGET`] is accepted with no
+    /// link installed — Live in the fleet, observed by nothing — and no other part
+    /// of the daemon would ever build one: `codex_link::run` never returns on its
+    /// own, so a link never vacates the slot, and the only other builder is the next
+    /// registration for that uid. This is the "later transaction" that arm's log
+    /// line promises.
+    ///
+    /// Driven from a ticker rather than from `unregister_supervisor`, which is the
+    /// other place a stalled park is joined: a disconnect is the one case that
+    /// already self-heals, because the supervisor that comes back registers again.
+    ///
+    /// A no-op — one uncontended lock — while nothing is owed, which in production
+    /// today is always.
+    ///
+    /// **Sequential, and one stubborn uid DOES delay the ones behind it.** The loop
+    /// below takes each session in turn and each can pay the full
+    /// [`CODEX_LINK_STOP_BUDGET`] joining a survivor that will not stop, so a second
+    /// owed uid waits that out before it is even looked at. That is bounded
+    /// operational latency — the next tick asks again, and nothing is lost — not a
+    /// missed install; but it is not the independence an earlier version of this
+    /// sentence claimed. Left sequential deliberately: concurrent passes would take
+    /// several registration gates at once, and the gate order is what serializes
+    /// this against the registrations and disconnects it must not race.
+    pub async fn recover_stalled_codex_links(self: &Arc<Self>) {
+        let owed: Vec<String> = self
+            .inner
+            .lock()
+            .await
+            .stalled_codex_installs
+            .keys()
+            .cloned()
+            .collect();
+        for session_uid in owed {
+            self.recover_stalled_codex_link(&session_uid).await;
+        }
+    }
+
+    /// One session's owed install: **the tail of the transaction that could not
+    /// finish it, run again** — the same gate, taken in the same order, joining the
+    /// same park before anything is built, seeding the same two cells and installing
+    /// through the same ownership check.
+    ///
+    /// Deliberately not re-derived. Every invariant here belongs to the
+    /// registration, and a second copy of them is a second thing to keep in step.
+    /// The ownership question in particular is asked exactly once, by
+    /// [`Inner::spawn_codex_link_if_owner`], under the lock that guards the map — so
+    /// an entry for a registration the session has moved past spawns nothing, and
+    /// recovery needs no rule of its own about when it is too late.
+    async fn recover_stalled_codex_link(self: &Arc<Self>, session_uid: &str) {
+        // Taken before `inner` on every path, as everything touching these maps is,
+        // and held across the join for the same reason the registration holds it:
+        // this is a park → seed → spawn → install transaction, and no registration
+        // for this uid may be inside it. It is also what serializes this against the
+        // disconnect that cancels what is owed.
+        let gate = self.registration_gate(session_uid).await;
+        let _sequence = gate.lock().await;
+        // Read under the gate, not before it: between the sweep listing the uids and
+        // reaching this one, a registration or a disconnect may have settled the
+        // question already.
+        let Some(owed) = self
+            .inner
+            .lock()
+            .await
+            .stalled_codex_installs
+            .get(session_uid)
+            .cloned()
+        else {
+            return;
+        };
+        // The reason there was nothing to install, asked again. Bounded exactly as
+        // it is in the registration, and destroying nothing that was not already
+        // aborted. A survivor still running leaves the entry where it is; the next
+        // tick asks again.
+        if !self.join_parked_codex_links(&owed.session).await {
+            return;
+        }
+
+        let StalledCodexInstall {
+            session,
+            epoch,
+            link,
+        } = owed;
+        let mut inner = self.inner.lock().await;
+        // Minted, seeded, spawned and installed under one lock with no await
+        // between them — see the registration's copy of this for why the spawn is a
+        // closure the install may decline to call.
+        let presence = crate::codex_link::LinkPresence::new();
+        let carry = crate::codex_link::LinkCarry::new();
+        if let Some(resumed) = inner.seed_codex_carry(&session.uid, &link, &carry) {
+            crate::log_info!(
+                "codex link for {} at epoch {epoch}: resuming {resumed}, where the \
+                 previous link left the session, rather than the registration's claim \
+                 ({})",
+                session.name,
+                link.thread_id.as_deref().unwrap_or("none")
+            );
+        }
+        inner.seed_codex_presence(&session.uid, &link, &presence);
+        let generation = link.generation;
+        let outcome = inner.spawn_codex_link_if_owner(
+            &session.uid,
+            epoch,
+            generation,
+            presence.clone(),
+            carry.clone(),
+            || {
+                tokio::spawn(crate::codex_link::run(
+                    Arc::clone(self),
+                    session.clone(),
+                    link,
+                    presence,
+                    carry,
+                ))
+            },
+        );
+        let orphan = match outcome {
+            Err(owner) => {
+                let now = owner
+                    .map(|e| format!("now epoch {e}"))
+                    .unwrap_or_else(|| "now unowned".to_string());
+                crate::log_debug!(
+                    "dropping the codex link owed to {} at epoch {epoch}: the session \
+                     changed hands ({now}) while the previous link was refusing to stop, \
+                     and the registration that owns it now has run this same transaction",
+                    session.name
+                );
+                None
+            }
+            Ok(orphan) => {
+                if orphan.is_none() {
+                    // **Says what it knows, which is less than it used to claim.**
+                    // The condition here is that a handle landed in the slot. The
+                    // task it names has not dialled the socket, let alone
+                    // handshaked, resumed, or had a resume ACCEPTED — so "the
+                    // session is observed again", which this line said, was a claim
+                    // about a thread binding made from the presence of a map entry.
+                    // Whether the link goes on to bind the session's ACTIVE thread
+                    // is the open half of A12.2 (see the ledger): the head it will
+                    // chase comes from predecessor carry and the registration's
+                    // stale hint, and neither is the broker's head.
+                    crate::log_info!(
+                        "codex link for {} installed at epoch {epoch}: the link that \
+                         blocked its registration has stopped, so this session has an \
+                         observer again — which thread it binds is the link's own \
+                         business and is not settled here",
+                        session.name
+                    );
+                }
+                orphan
+            }
+        };
+        // **Owed no longer, on both arms.** It was either installed or it is an
+        // answer to a question the session has moved past — and an entry kept for a
+        // dead epoch is a sweep that never stops asking.
+        inner.stalled_codex_installs.remove(&session.uid);
+        if let Some(orphan) = orphan {
+            // Parked rather than retired in hand, and with nothing to retain, for
+            // the reasons the registration gives at its own copy of this.
+            inner
+                .parked_codex_links
+                .entry(session.uid.clone())
+                .or_default()
+                .push(OwnedLink::new(orphan, None));
+            drop(inner);
+            let _ = self.join_parked_codex_links(&session).await;
         }
     }
 
@@ -4751,6 +5018,22 @@ impl Daemon {
                      later transaction can join it.",
                     session.name
                 );
+                // **A12.2: and that later transaction is written down here rather
+                // than left to chance.** Nothing else in the daemon would ever build
+                // this link — a link never vacates the slot on its own, so the only
+                // other builder is the *next* registration for this uid, which for a
+                // session nobody restarts never comes. Retried by
+                // [`Daemon::recover_stalled_codex_links`] once the survivor stops.
+                //
+                // Nothing is owed for a Claude registration: it has no link to
+                // install, and the forgetting above has already cancelled anything a
+                // Codex one left behind.
+                if let Some(link) = &control_link {
+                    self.inner
+                        .lock()
+                        .await
+                        .owe_codex_install(&session, epoch, link);
+                }
             } else {
                 // A Claude registration reclaims the slot and leaves it empty: a link
                 // left running under an epoch no later release can match would never
@@ -4856,7 +5139,25 @@ impl Daemon {
             serde_json::json!({"link": "attached", "reason": "supervisor registered"}),
             Source::Daemon,
         );
-        self.ingest(pending).await?;
+        // **A12.2: the debt above outlives a registration that never completed,
+        // unless it is cancelled here.** This ingest is the last fallible step, and
+        // it is fallible *after* `owe_codex_install` has already written the
+        // promise down. Its `?` returns before the `Registration` token exists, and
+        // that token is the only thing `ipc_server` stores — so no disconnect ever
+        // calls `unregister_supervisor`, and `release_owed_codex_install` (the one
+        // site that clears a debt on the way out) never runs. The claim, meanwhile,
+        // stays: `unregister_supervisor` deliberately leaves it as a tombstone, so
+        // `owner_of` — recovery's only guard — keeps naming this epoch for ever.
+        // The sweep would then install a link for a registration the daemon
+        // rejected, into a slot nothing releases. Cancelled at the failure, where
+        // the epoch that owes it is still in hand.
+        if let Err(err) = self.ingest(pending).await {
+            self.inner
+                .lock()
+                .await
+                .release_owed_codex_install(&session.uid, epoch);
+            return Err(err);
+        }
         crate::log_info!(
             "supervisor registered for {} ({}) speaking minor {}",
             session.name,
@@ -4947,6 +5248,11 @@ impl Daemon {
                         }),
                     ));
             }
+            // **A12.2: and the install this registration was still owed.** The third
+            // resource this connection holds, torn down beside the other two and on
+            // the same epoch test — see [`Inner::release_owed_codex_install`] for why
+            // leaving it would spawn a link for a session that has detached.
+            inner.release_owed_codex_install(&registration.session.uid, registration.epoch);
             released
         };
         // Stopped and JOINED on the same bounded budget as a supersession. Sound to
@@ -10399,6 +10705,464 @@ mod tests {
             .parked_codex_links
             .get(uid)
             .is_none_or(Vec::is_empty));
+    }
+
+    /// **A12.3(b): a join cancelled mid-flight leaves the park exactly as it was.**
+    ///
+    /// [`Daemon::join_parked_codex_links`] is an await loop, and the transaction
+    /// holding it can be dropped at any turn — a supervisor connection going away
+    /// mid-retirement. The rule that makes that safe is that the handles never leave
+    /// the map: nothing is removed except on proof of completion, so a cancelled turn
+    /// changes nothing and the next one tries again. The obvious shape — take the vec
+    /// out, join, put the survivors back — loses the handles the cancelled turn was
+    /// holding, and the next transaction then reads an empty park and installs a
+    /// second observer beside a task that is still running.
+    ///
+    /// Two handles, because the two halves of "changes nothing" are observable on
+    /// different tasks. The blocking one cannot be cancelled at all, so it is what
+    /// keeps the join Pending on the poll this test cancels it at; the ordinary one
+    /// is what shows the cancelled turn still did its abort. Both must still be
+    /// **recorded** afterwards — the ordinary one is finished by then, but nothing
+    /// has yet proven it, and unproven completion is the whole of what the park is
+    /// for.
+    ///
+    /// **Mutation:** rewrite the join to take the vec out, join, and put the survivors
+    /// back — and note that it has to hold the handles **across the sleep between
+    /// turns**, because that await is where a dropped transaction is dropped. (A
+    /// version that puts them back before the sleep leaves this test green, which is
+    /// a mutation that does not reach the defect rather than a test that misses it.)
+    /// Written faithfully, the drop loses both handles and the assertion immediately
+    /// after `drop(joining)` reads `None` against `Some(2)` — the next turn would
+    /// report an empty park, retain nothing, and clear the way for a second observer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_join_cancelled_mid_flight_leaves_the_park_holding_what_it_was_given() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking one
+        // has no await point to be cancelled at. It must be RUNNING before the abort
+        // — tokio cancels a blocking task that has not started, and the handle would
+        // then resolve instantly, which is a cancellation working rather than the
+        // case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        let carry = crate::codex_link::LinkCarry::new();
+        carry.set_for_tests(Some("th-g1-adopted"), None);
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry,
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+
+        // The second, parked beside it: an ordinary task, so an abort actually lands
+        // on it. Started for real for the same reason as above — a task the runtime
+        // has never polled can report finished for the wrong reason.
+        let (running_tx, running_rx) = tokio::sync::oneshot::channel();
+        let ordinary = tokio::spawn(async move {
+            let _ = running_tx.send(());
+            std::future::pending::<()>().await
+        });
+        running_rx.await.expect("the task must be running");
+        let abortable = ordinary.abort_handle();
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 2,
+                generation: 1,
+                task: ordinary,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[&uid].len(),
+            2,
+            "the premise: two unproven completions are recorded"
+        );
+
+        // One poll carries the join through its abort of both handles and onto the
+        // 20ms sleep between turns — and that sleep is the await a dropped
+        // transaction is dropped at. Held as a future this test owns rather than a
+        // spawned task, so the cancellation is a fact rather than a hope (see
+        // `nudge`).
+        let mut joining = Box::pin(daemon.join_parked_codex_links(&session));
+        assert!(
+            nudge(joining.as_mut()).is_pending(),
+            "a park holding a task that cannot be cancelled must keep the join in \
+             flight — that is the turn this test cancels it at"
+        );
+        drop(joining);
+
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .parked_codex_links
+                .get(&uid)
+                .map(Vec::len),
+            Some(2),
+            "a cancelled join must leave the park EXACTLY as it was: both completions \
+             are still unproven, and a handle the cancellation dropped is a task \
+             nothing can stop and nothing will ever join"
+        );
+        for _ in 0..200 {
+            if abortable.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            abortable.is_finished(),
+            "and the turn it was cancelled on still did its work: everything parked \
+             is aborted on every turn, whether or not that turn completes"
+        );
+
+        // And the next turn behaves: the stubborn one stops, both are proven, and
+        // what the newest of them knew is retained on the way out.
+        let _ = stop_tx.send(());
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the park a cancelled turn left untouched is joined by the next one"
+        );
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .get(&uid)
+            .is_none_or(Vec::is_empty));
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .get(&uid)
+                .and_then(|retained| retained.carried.adopted()),
+            Some("th-g1-adopted".to_string()),
+            "and the cells rode through the cancellation with their handle, so the \
+             join that finally proved the task stopped is the one that read them"
+        );
+    }
+
+    /// **A12.2: a registration a survivor blocks is accepted with NO link — and the
+    /// recovery sweep installs the one it was owed.**
+    ///
+    /// The first half is the defect, driven through the **real** transaction: a park
+    /// this registration's own join cannot clear inside [`CODEX_LINK_STOP_BUDGET`]
+    /// leaves the slot honestly empty, and the registration then publishes its
+    /// supervisor and returns `Ok` anyway. Live in the fleet, observed by nothing —
+    /// and nothing used to build that link afterwards, because a link never vacates
+    /// the slot on its own and the only other builder is the next registration for
+    /// the uid.
+    ///
+    /// The debt itself is staged by hand at the epoch the real registration
+    /// published, because the arm that records it cannot be reached: a Claude
+    /// registration carries no control link and `supported_agents()` is `[Claude]`,
+    /// so no registration carrying one gets past the agent gate. Same reason
+    /// `install_codex_link` and the two seeding steps are proven against [`Inner`]
+    /// directly — the rule is worth proving against the fact rather than through a
+    /// path nothing can drive.
+    ///
+    /// Costs the stop budget twice, which is why there is one test of this shape and
+    /// not four: once for the registration that gives up, and once for the sweep that
+    /// tries while the survivor is still running.
+    ///
+    /// **Mutation:** drop the `join_parked_codex_links` guard from
+    /// [`Daemon::recover_stalled_codex_link`] and the middle assertion fails — a
+    /// second observer is installed beside a task that is still running.
+    ///
+    /// **And one mutation this does NOT kill, said plainly rather than left to be
+    /// discovered:** deleting the `owe_codex_install` call from the `!park_clear` arm
+    /// changes nothing here, because the debt is staged by hand. That call site is
+    /// unreachable — no registration carrying a control link gets past
+    /// `supported_agents()` — so it is not separately observable, exactly as the
+    /// redundant `owns` check in the same transaction is not. What is observable is
+    /// the arm's other half, and it is asserted: a **Claude** registration over an
+    /// unclearable park owes nothing at all.
+    ///
+    /// **THE CLAIM, NARROWED — this test proves a HANDLE, not a BINDING.** The
+    /// socket below names nothing, deliberately, so the installed task dials, fails
+    /// and backs off: it never handshakes, never sends a `thread/resume`, and never
+    /// adopts a thread. Every assertion here is about the shape of [`Inner`]'s maps.
+    /// That is the whole of what the mechanism guarantees and the whole of what is
+    /// asserted — but it must not be read as "the session is observed again" in the
+    /// semantic sense, because WHICH thread the recovered link binds is the open
+    /// half of A12.2 and is not settled anywhere in this file. Recovery seeds from
+    /// predecessor carry and the registration's hint; a `/new` that landed inside
+    /// the accepted observer gap is in neither, and the broker's active head is not
+    /// readable from this process (`thread/started` is broadcast once and never
+    /// replayed, and no ccd-allowlisted method reports the binding). The ledger row
+    /// carries that blocker; this doc carries the limit of the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registration_a_survivor_blocked_gets_its_link_from_the_recovery_sweep() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 7,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+
+        // The real transaction, over a park it cannot clear.
+        let registration = register(&daemon, "cc-9", Some(&uid)).await;
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.supervisors.get(&uid).map(|handle| handle.epoch),
+                Some(registration.epoch),
+                "the registration is ACCEPTED: the supervisor is published and the \
+                 session is Live in the fleet"
+            );
+            assert!(
+                inner.codex_links.is_empty(),
+                "and nothing is observing it — the whole of A12.2"
+            );
+            assert_eq!(
+                inner.parked_codex_links[&uid].len(),
+                1,
+                "because the survivor that blocked the install is still running"
+            );
+            assert!(
+                inner.stalled_codex_installs.is_empty(),
+                "and a CLAUDE registration owes nothing for it: it has no link to \
+                 install, so there is nothing for a later sweep to owe it"
+            );
+        }
+
+        // What a Codex registration would have left behind, at the epoch this one
+        // published. The socket names nothing: the link task dials, fails and backs
+        // off, which is what a link does whenever its wrapper is not up yet.
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 7,
+            thread_id: Some("th-owed".to_string()),
+        };
+        daemon
+            .inner
+            .lock()
+            .await
+            .owe_codex_install(&session, registration.epoch, &owed);
+
+        // A sweep while the survivor is still running must install NOTHING — two
+        // observers on one timeline is the state the park exists to prevent — and
+        // must not forget what it could not do.
+        daemon.recover_stalled_codex_links().await;
+        {
+            let inner = daemon.inner.lock().await;
+            assert!(
+                inner.codex_links.is_empty(),
+                "the sweep must not install a link beside a task that is still running"
+            );
+            assert!(
+                inner.stalled_codex_installs.contains_key(&uid),
+                "and an attempt that could not be made must leave the debt standing"
+            );
+        }
+
+        // The survivor finally stops, and the sweep is the "later transaction" the
+        // registration's own log line promised.
+        let _ = stop_tx.send(());
+        daemon.recover_stalled_codex_links().await;
+        let inner = daemon.inner.lock().await;
+        let installed = inner
+            .codex_links
+            .get(&uid)
+            .expect("the sweep installs the link the registration could not");
+        assert_eq!(
+            installed.epoch, registration.epoch,
+            "at the epoch it was owed to, which is the claim the resolver compares \
+             against — a link installed at any other is one it answers `NoLink` for"
+        );
+        assert_eq!(
+            installed.generation, 7,
+            "speaking for the launch the registration named"
+        );
+        assert!(
+            inner.stalled_codex_installs.is_empty(),
+            "and the debt is discharged rather than retried for ever"
+        );
+        assert!(inner.parked_codex_links.get(&uid).is_none_or(Vec::is_empty));
+    }
+
+    /// **A12.2: an install owed to a registration the session has moved past spawns
+    /// nothing, and is dropped.**
+    ///
+    /// Recovery adds no ownership reasoning of its own — it hands the epoch it wrote
+    /// down to [`Inner::spawn_codex_link_if_owner`], the same check the registration
+    /// installs through. A debt whose epoch no longer owns the session is therefore a
+    /// no-op, and forgetting it is what stops the sweep asking a question the session
+    /// has already answered.
+    ///
+    /// The stale epoch is staged rather than produced by a second registration,
+    /// because a second *Claude* registration would cancel the debt through
+    /// [`Inner::forget_codex_carry`] before recovery ever saw it, and a second Codex
+    /// one cannot be driven at all.
+    ///
+    /// **Mutation:** delete the `stalled_codex_installs.remove` after the match in
+    /// [`Daemon::recover_stalled_codex_link`] and the debt outlives its own answer.
+    /// For the ownership refusal it takes **both** copies: deleting the one in
+    /// `spawn_codex_link_if_owner` alone leaves this green, because the second in
+    /// `install_codex_link` catches the task and hands it straight back as an orphan,
+    /// which is parked and joined — the slot ends up empty by the slower route. Delete
+    /// both and a link is installed for a registration that lost the session. That
+    /// redundancy is deliberate (see `install_codex_link`, the linearization point);
+    /// what it costs is that the outer refusal is not separately observable here.
+    #[tokio::test]
+    async fn an_install_owed_to_a_superseded_registration_spawns_nothing() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+        let registration = register(&daemon, "cc-1", Some(&uid)).await;
+
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 1,
+            thread_id: None,
+        };
+        daemon
+            .inner
+            .lock()
+            .await
+            .owe_codex_install(&session, registration.epoch + 1, &owed);
+
+        daemon.recover_stalled_codex_links().await;
+        let inner = daemon.inner.lock().await;
+        assert!(
+            inner.codex_links.is_empty(),
+            "a debt owed to an epoch that does not own the session must spawn nothing"
+        );
+        assert!(
+            inner.stalled_codex_installs.is_empty(),
+            "and must be forgotten rather than retried on every tick for ever"
+        );
+    }
+
+    /// **A12.2: the two things that make an owed install wrong to keep, cancel it.**
+    ///
+    /// A change of agent, because threads belong to a run and the run has changed —
+    /// the same fact [`Inner::forget_codex_carry`] settles for what has already been
+    /// retained, settled here for what is still owed. And a disconnect, because the
+    /// claim is deliberately left behind as a tombstone: [`Inner::owner_of`] goes on
+    /// naming the departed registration for ever, so nothing else would stop the
+    /// sweep spawning a link for a session that has detached — into a slot no
+    /// disconnect will come back to release.
+    ///
+    /// On the same epoch test as the link slot, and that half is what the third leg
+    /// pins: a stale disconnect must not cancel what a newer registration is owed.
+    ///
+    /// **Mutation:** delete the `stalled_codex_installs.remove` from
+    /// `forget_codex_carry` and the first leg fails; delete the
+    /// `release_owed_codex_install` call from `unregister_supervisor` and the second
+    /// fails; make it unconditional (drop the epoch compare) and the third fails.
+    #[tokio::test]
+    async fn an_owed_codex_install_is_cancelled_by_a_change_of_agent_and_by_a_disconnect() {
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 1,
+            thread_id: None,
+        };
+
+        // The uid comes back as Claude. The registration is real, and it is the real
+        // forgetting inside it that clears the debt.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let first = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, first.epoch, &owed);
+            register(&daemon, "cc-1", Some(&uid)).await;
+            assert!(
+                daemon.inner.lock().await.stalled_codex_installs.is_empty(),
+                "a uid that has stopped being Codex owes no Codex link: performing it \
+                 later would attach a link, and a resumed thread, to a run it was \
+                 never built for"
+            );
+        }
+
+        // The registration that was owed it disconnects.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let registration = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, registration.epoch, &owed);
+            daemon.unregister_supervisor(&registration).await;
+            assert!(
+                daemon.inner.lock().await.stalled_codex_installs.is_empty(),
+                "a detached session is owed nothing: the claim it would be installed \
+                 against outlives the disconnect, so nothing else would refuse it"
+            );
+        }
+
+        // And a stale disconnect must not cancel what a newer registration is owed —
+        // the same epoch test the link slot is released on.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let stale = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, stale.epoch + 1, &owed);
+            daemon.unregister_supervisor(&stale).await;
+            assert_eq!(
+                daemon
+                    .inner
+                    .lock()
+                    .await
+                    .stalled_codex_installs
+                    .get(&uid)
+                    .map(|entry| entry.epoch),
+                Some(stale.epoch + 1),
+                "a losing connection's teardown must leave the replacement's debt \
+                 alone, exactly as it leaves the replacement's link alone"
+            );
+        }
     }
 
     /// **M7: ownership is re-checked where the map is locked, not only where the

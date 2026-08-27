@@ -654,10 +654,10 @@ async fn a_switch_prefix_is_refused_when_the_switch_behind_it_cannot_be_admitted
 
 /// **ROUND-3 P4a, end to end: the prefix RESERVES, and a turn cannot slip in behind it.**
 ///
-/// The reservation is claimed by the classifier after the prefix's own ledger admission
-/// succeeds. This is the only test that exercises that wiring: the session-level tests call
-/// `reserve_switch` directly, so a classifier that stopped reserving would leave them green
-/// while the window between the prefix and the start stood wide open.
+/// The reservation is claimed inside the prefix's own atomic admission (A16.1). This is the
+/// only test that exercises the CLASSIFIER's half of that wiring: the session-level tests
+/// call `try_admit_prefix` directly, so a classifier that stopped routing the prefix into it
+/// would leave them green while the window between the prefix and the start stood wide open.
 #[tokio::test]
 async fn the_prefix_reserves_the_switch_and_fences_turns_behind_it() {
     let h = start_broker();
