@@ -893,8 +893,20 @@ fn supervise(args: &[String]) -> Result<()> {
             // would mint a second identity for a session that has one.
             session_uid: session_uid.filter(|uid| protocol::uid::is_well_formed(uid)),
             tmux_session,
+            // No flag, on purpose. `supervise` is spawned by `codeconnect
+            // claude` and by nothing else — the Codex launch supervises itself,
+            // in the coordinator process, so the seat and the socket travel as
+            // values rather than as argv. Adding `--agent` here would be a
+            // user-facing surface with no caller, on a parser that silently
+            // ignores what it does not recognise.
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd,
             claude_bin,
+            codex: None,
+            // A Claude run shares the fleet-wide tmux server with every other one,
+            // so there is no server whose death is this session's death, and no pin
+            // to hand over. `None` keeps the probe exactly as it was.
+            server_a: None,
         },
         &Config::load(),
     )

@@ -82,6 +82,11 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // was refused and why, before the gate.
     validate_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
 
+    // Daemon preflight, before anything is created.
+    refuse_unless_hostable(crate::daemon::agent_support(
+        &protocol::agent::AgentKind::Codex,
+    ))?;
+
     // The gate. Resolution and parsing above are wired and exercised; the launch
     // itself is withheld until the wrapper and the Phase-2 pre-exposure gates
     // land. A later chunk removes this line.
@@ -91,6 +96,36 @@ pub fn start(passthrough: &[String]) -> Result<()> {
         resolved.path.display(),
         version
     );
+}
+
+/// Refuse the launch when the daemon that is running cannot host Codex.
+///
+/// **The one case this exists for is a rollback.** A machine whose `ccd` has
+/// been rolled back to a build that predates the agent seam still has this
+/// launcher on it, and a Codex session started against that daemon is a session
+/// it can never be told about: the supervisor asks the same question this asks,
+/// reads the same answer, and withholds its registration for the life of the run
+/// (`crate::supervisor::withhold_unless_hosted`). The run works — the TUI is
+/// real, tmux is real — but nothing on the phone or in `codeconnect sessions`
+/// will ever show it. Refusing here says that before a session exists, rather
+/// than leaving somebody to discover it from an empty fleet.
+///
+/// **Only a decoded "no" refuses.** A daemon that is absent, or that we could not
+/// establish anything about, is not an obstacle: a session launched while `ccd`
+/// is down is a supported state, and it registers when the daemon comes back. The
+/// safety property lives with the supervisor, which fails closed on doubt; this
+/// only spends the operator's time well.
+fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
+    match support {
+        crate::daemon::AgentSupport::Hosted
+        | crate::daemon::AgentSupport::Absent
+        | crate::daemon::AgentSupport::Indeterminate(_) => Ok(()),
+        crate::daemon::AgentSupport::Refused(why) => bail!(
+            "refusing to launch: {why}. The session would run, but this daemon could \
+             never be told about it — nothing would list it and the phone would not \
+             see it. Update or restart ccd, then try again."
+        ),
+    }
 }
 
 // ----------------------------------------------------------- binary resolution
@@ -1107,6 +1142,42 @@ mod tests {
                 PathBuf::from("/from/path/codex"),
             ]
         );
+    }
+
+    /// **The preflight refuses only a decoded "no".**
+    ///
+    /// The launch is stopped when the daemon that is running says it cannot host
+    /// Codex — including the way a build predating the agent seam says it, by
+    /// failing to decode the question at all. It is NOT stopped when no daemon is
+    /// running, or when nothing could be established: a session started while
+    /// `ccd` is down is a supported state, and it registers when `ccd` returns.
+    /// Refusing on doubt would trade a real capability for a hiccup, and the
+    /// property that actually protects a rolled-back daemon's history is the
+    /// supervisor's withhold, which fails closed on this same answer.
+    #[test]
+    fn the_preflight_stops_a_launch_only_when_the_running_daemon_says_no() {
+        use crate::daemon::AgentSupport;
+
+        let refused = refuse_unless_hostable(AgentSupport::Refused(
+            "the running ccd does not host codex; it hosts claude".into(),
+        ))
+        .expect_err("a daemon that says no must stop the launch");
+        let refused = format!("{refused:#}");
+        // The operator is told what is wrong and what it costs, not just "no".
+        assert!(
+            refused.contains("does not host codex"),
+            "the refusal must carry the daemon's own reason: {refused}"
+        );
+        assert!(
+            refused.contains("phone") || refused.contains("list"),
+            "the refusal must say what the operator would lose: {refused}"
+        );
+
+        refuse_unless_hostable(AgentSupport::Absent)
+            .expect("no daemon must never stop a launch: the session registers later");
+        refuse_unless_hostable(AgentSupport::Indeterminate("timed out".into()))
+            .expect("doubt must never stop a launch");
+        refuse_unless_hostable(AgentSupport::Hosted).expect("a hosting daemon is the happy path");
     }
 
     #[test]

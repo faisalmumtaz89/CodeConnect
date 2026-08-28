@@ -1853,3 +1853,537 @@ async fn fragmented_message_reassembled_into_one_forward() {
         "reassembled message is byte-exact and forwarded"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The head replayed to a late `ccd` subscriber
+// ---------------------------------------------------------------------------
+
+/// The announcement the app-server broadcasts when a thread starts, in the shape
+/// measured off a real codex 0.147 server — and written **deliberately
+/// noncanonically** (round-2 F6).
+///
+/// Every byte here is chosen to differ from what `serde_json` would emit for the
+/// same value: space before a colon and a newline inside the object (whitespace),
+/// `params` before `method` and `path` before `id` (key order), and `7e0` for the
+/// unknown field (numeric spelling — a reserialization writes `7.0`). A replay
+/// that parsed and re-emitted the frame would therefore be visible as a byte
+/// difference even though it is semantically identical, which is what
+/// [`text_within`] compares. The unknown field is still here for the second, weaker
+/// claim it always made: a frame this broker *composed* could not carry it at all.
+fn started_announcement_text(thread: &str) -> String {
+    format!(
+        "{{ \"params\" :{{\"someFutureField\": 7e0 ,\n  \"thread\":{{\"path\":\"/x\", \
+         \"id\":\"{thread}\"}}}}, \"method\":\"thread/started\" }}"
+    )
+}
+
+fn started_announcement(thread: &str) -> Message {
+    Message::Text(started_announcement_text(thread))
+}
+
+/// The `ccd` link's own handshake opener.
+const CCD_INITIALIZE: &str = r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codeconnect-ccd","title":"CodeConnect daemon","version":"t"}}}"#;
+
+/// Await one frame **as the bytes it arrived in**, or prove none came. `None` ⇒ the
+/// broker sent nothing.
+///
+/// Raw text and not `serde_json::Value` (round-2 F6): the claim under test is that
+/// the replay is the app-server's own frame repeated, and a parsed comparison is
+/// satisfied by any reserialization of it — different whitespace, different key
+/// order, `7.0` where the server wrote `7e0`. Only the bytes can say "repeated".
+async fn text_within(ws: &mut WebSocketStream<UnixStream>, budget: Duration) -> Option<String> {
+    let msg = tokio::time::timeout(budget, ws.next()).await.ok()?;
+    let msg = msg.expect("stream closed").expect("ws error");
+    Some(msg.to_text().unwrap().to_string())
+}
+
+/// [`text_within`], parsed — for the assertions that are about the frame's meaning
+/// rather than its bytes.
+async fn frame_within(
+    ws: &mut WebSocketStream<UnixStream>,
+    budget: Duration,
+) -> Option<serde_json::Value> {
+    let text = text_within(ws, budget).await?;
+    Some(serde_json::from_str(&text).unwrap())
+}
+
+/// **A `ccd` leg that arrives after `thread/started` is still told which thread.**
+///
+/// This is the ordering the launch actually produces: the daemon's control link is
+/// built by a registration, the registration is sent once the launch is `ready`,
+/// and `ready` already requires the TUI to be running — so the observer is
+/// structurally late and the one-shot announcement is broadcast to nobody. The
+/// replay is what makes the late subscriber's outcome the same as an early one's.
+#[tokio::test]
+async fn a_late_ccd_subscriber_is_replayed_the_announcement_it_missed() {
+    let h = start_broker();
+    // The TUI leg's upstream: the announcement, then the correlated creation
+    // response that verifies it.
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+
+    let mut tui = connect(&h.tui_sock).await;
+    let announced = next_frame(&mut tui).await;
+    assert_eq!(
+        announced["method"], "thread/started",
+        "the fixture's premise: the announcement went out on the leg that was there"
+    );
+    create_thread(&mut tui, "01a0-a").await;
+
+    // The observer, connecting only now — after the announcement it needed.
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+
+    let replayed = text_within(&mut ccd, Duration::from_secs(5))
+        .await
+        .expect("a late ccd subscriber must be told the session's head");
+    // **Byte-for-byte, against a deliberately noncanonical original** (round-2 F6).
+    // A parsed comparison passes for any reserialization; this one fails for a
+    // changed space, a reordered key or `7.0` in place of `7e0`.
+    assert_eq!(
+        replayed,
+        started_announcement_text("01a0-a"),
+        "the replay must be the app-server's own bytes repeated, not a frame this \
+         broker parsed and wrote out again"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&replayed).unwrap();
+    assert_eq!(parsed["method"], "thread/started");
+    assert_eq!(
+        parsed["params"]["thread"]["id"], "01a0-a",
+        "and it must be the thread this launch is actually on"
+    );
+}
+
+/// **Nothing to replay is nothing sent.** The ordinary launch: the observer is up
+/// before the thread exists, and the real broadcast is still to come. A replay
+/// here would be a `thread/started` for a thread that does not exist.
+#[tokio::test]
+async fn a_ccd_subscriber_with_no_bound_head_is_replayed_nothing() {
+    let h = start_broker();
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert!(
+        frame_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "with no verified binding the broker must announce nothing"
+    );
+}
+
+/// **The head comparison is load-bearing, not decoration.** An announcement this
+/// broker forwarded but never verified — a thread that is not the session's head —
+/// is not evidence about where the session is, and replaying it would hand the
+/// observer a thread to chase that the broker itself refused to bind.
+#[tokio::test]
+async fn an_announcement_that_is_not_the_head_is_not_replayed() {
+    let h = start_broker();
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    // Announced on the TUI leg AFTER the binding, so `announced` names a stranger
+    // while `bound_thread` still names the head.
+    h.push_script(vec![]);
+
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+
+    // A second leg whose upstream announces a thread nothing bound.
+    h.push_script(vec![started_announcement("01a0-ghost")]);
+    let mut other = connect(&h.tui_sock).await;
+    let ghost = next_frame(&mut other).await;
+    assert_eq!(ghost["params"]["thread"]["id"], "01a0-ghost");
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert!(
+        frame_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the last announcement does not name the head, so there is nothing this \
+         broker can honestly say"
+    );
+}
+
+/// **A leg that initializes DURING a creation is served when the head binds**
+/// (round-2 F1).
+///
+/// Replaying once, at subscribe time, left this hole open. The measured `/new`
+/// interleave puts the `thread/started` broadcast BEFORE the `thread/start`
+/// response (`fixtures/codex/thread-switch.jsonl:31`), and the app-server only
+/// broadcasts to connections it has already answered `initialize` for. So a `ccd`
+/// leg reconnecting into that window is doubly missed: there is no bound head to
+/// replay to it, and it is not yet in the broadcast set for the live frame. Under
+/// replay-on-subscribe it stayed unbound for the life of the session.
+///
+/// Driven exactly in that order — announcement forwarded, leg initializes with
+/// nothing bound and is proven to get nothing, and only then does the creation
+/// response land.
+#[tokio::test]
+async fn a_ccd_leg_that_initializes_mid_creation_is_served_when_the_head_binds() {
+    let h = start_broker();
+    // Leg 1: the announcement goes out with no creation correlated yet — the
+    // fixture's interleave.
+    h.push_script(vec![started_announcement("01a0-b")]);
+    let mut tui = connect(&h.tui_sock).await;
+    let announced = next_frame(&mut tui).await;
+    assert_eq!(
+        announced["params"]["thread"]["id"], "01a0-b",
+        "the premise: the broadcast is out and the creation is still in flight"
+    );
+
+    // The reconnecting observer, arriving inside that window.
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "with the creation still pending there is no verified head, so the leg is \
+         told nothing — this is the state replay-on-subscribe left it in for ever"
+    );
+
+    // The creation response lands, on the leg that asked. The head binds NOW, with
+    // the observer already initialized and waiting.
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-b"))]);
+    let mut creator = connect(&h.tui_sock).await;
+    create_thread(&mut creator, "01a0-b").await;
+
+    let delivered = text_within(&mut ccd, Duration::from_secs(5))
+        .await
+        .expect("the head must reach a leg that was already there when it bound");
+    assert_eq!(
+        delivered,
+        started_announcement_text("01a0-b"),
+        "and it is the original announcement's bytes, delivered late"
+    );
+}
+
+/// **A leg already on the broadcast stream is not sent a second copy** — which is
+/// also what keeps the repair from ever walking the reader backwards (round-2 F1,
+/// the D4 interaction).
+///
+/// Once a leg has forwarded a `thread/started` of its own, the app-server has it in
+/// the broadcast set and every later announcement arrives live; it is not late any
+/// more and there is nothing to repair. That matters beyond tidiness: `ccd`'s visit
+/// filter reads an announcement naming neither the bound thread nor the held
+/// candidate as a person pressing `/new`, so a leg that has seen a successor
+/// announced must never afterwards be handed the head it is leaving.
+/// (`ccd::codex_link`'s `a_re_announcement_of_the_bound_thread_is_not_a_switch`
+/// pins the other half: the head arriving late while a candidate is held is
+/// `Passed`, and the candidate stands.)
+///
+/// Driven on the ordinary launch's own ordering: the observer is up first, the
+/// announcement reaches it live, and the head binds afterwards.
+#[tokio::test]
+async fn a_leg_already_on_the_broadcast_stream_is_not_replayed_the_head_it_saw_live() {
+    let h = start_broker();
+    // The observer's own upstream answers its `initialize` with the broadcast —
+    // which is the only order the server produces, since it broadcasts to a
+    // connection only once it has answered that request.
+    h.push_replies(vec![("initialize".into(), started_announcement("01a0-c"))]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    let live = text_within(&mut ccd, Duration::from_secs(5))
+        .await
+        .expect("the leg receives the announcement live, on its own passthrough");
+    assert_eq!(live, started_announcement_text("01a0-c"));
+
+    // The creation response now binds exactly that thread, so the (head,
+    // announcement) pair is complete and the ONLY thing standing between this leg
+    // and a second copy is that it has already been on the stream.
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-c"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-c").await;
+
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a leg that is on the broadcast stream is owed nothing, and a duplicate here \
+         would be the broker re-announcing a thread the reader already has"
+    );
+}
+
+/// **The `ccd` role is the authorization, and it is load-bearing** (round-2 F7).
+///
+/// The head fan-out delivers the app-server's own frame to a connection that was
+/// not there to receive it. Who may be that connection is a security question, not
+/// an ergonomic one: the TUI is the client that *creates* threads and was there for
+/// the announcement by construction, so a copy sent to it is a frame it never asked
+/// for on a leg the broker has no reason to write to unsolicited.
+///
+/// The rule was already right; nothing pinned it. This is the negative case: a
+/// fresh TUI leg initializing when a head is established and its announcement is
+/// held — every precondition the `ccd` path needs — must neither receive a delivery
+/// nor cause one.
+#[tokio::test]
+async fn a_tui_leg_is_neither_replayed_a_head_nor_able_to_trigger_one() {
+    let h = start_broker();
+    h.push_script(vec![started_announcement("01a0-d")]);
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-d"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-d").await;
+
+    // The head is established AND deliverable — proven by delivering it, so this
+    // test cannot pass merely because there was nothing to send.
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5))
+            .await
+            .as_deref(),
+        Some(started_announcement_text("01a0-d").as_str()),
+        "the premise: with a bound head and its announcement held, a ccd leg IS served"
+    );
+
+    // The same `initialize`, on the TUI socket. The role is the only difference.
+    let mut late_tui = connect(&h.tui_sock).await;
+    late_tui
+        .send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert!(
+        text_within(&mut late_tui, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "a TUI leg is not a subscriber: it receives no head, and its arrival is not a \
+         delivery point"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "and it triggers nothing for anybody else either"
+    );
+}
+
+/// A frame big enough that writing it to a socket **nobody is reading** blocks the
+/// leg's task inside `ws.send`.
+///
+/// Two megabytes against a unix-socket buffer measured in kilobytes: the park is a
+/// hard block on the kernel, not a scheduling hope. It is what lets the tests below
+/// hold a `ccd` leg still while the head moves underneath it.
+///
+/// Deliberately NOT a `thread/started`: this must not mark the leg `live_seen`, which
+/// would retire it from the repair and make the tests pass for the wrong reason.
+fn parking_frame() -> Message {
+    Message::Text(
+        serde_json::json!({"method": "x/noise", "params": {"blob": "z".repeat(2 * 1024 * 1024)}})
+            .to_string(),
+    )
+}
+
+/// One `/new` on `ws`: the measured prefix (`thread/unsubscribe` ×2, each awaited) and
+/// then the second `thread/start`. The caller's reply table must answer all three.
+async fn switch_thread(ws: &mut WebSocketStream<UnixStream>, from: &str, to: &str) {
+    for id in [7, 8] {
+        ws.send(Message::Text(
+            serde_json::json!({"method":"thread/unsubscribe","id":id,
+                               "params":{"threadId":from}})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let v = next_frame(ws).await;
+        assert_eq!(v["result"]["status"], "unsubscribed", "prefix #{id}");
+    }
+    ws.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(ws).await;
+    assert_eq!(
+        v["result"]["thread"]["id"], to,
+        "the switch must be admitted and its response relayed"
+    );
+}
+
+/// The switch's creation response, correlated to `switch_thread`'s `start-2`.
+fn switch_response(thread: &str) -> Message {
+    Message::Text(
+        serde_json::json!({
+            "id": "start-2",
+            "result": {
+                "thread": {"id": thread, "path": "/x"},
+                "cwd": LAUNCH_CWD,
+                "runtimeWorkspaceRoots": ["/work"]
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn unsubscribed(id: u32) -> (String, Message) {
+    (
+        "thread/unsubscribe".into(),
+        Message::Text(
+            serde_json::json!({"id": id, "result": {"status": "unsubscribed"}}).to_string(),
+        ),
+    )
+}
+
+/// **A replay queued for the old head is dropped rather than sent once the head has
+/// moved** (round-3 F1).
+///
+/// Enqueueing is not sending. The replay arm is the last of three in the leg's
+/// `select!`, so between "A is owed to this leg" and "A leaves this socket" the leg can
+/// pass a whole `/new`. Sending A then is not a harmless duplicate: `ccd`'s reader takes
+/// an announcement naming neither its visit nor its candidate as a person pressing
+/// `/new`, so the repair would walk the link BACK to a thread the session has left.
+/// `live_seen` does not cover it — it stops future enqueues, not one already written.
+///
+/// **Staged, not raced.** The leg is parked inside `ws.send` on a 2 MB frame that
+/// nothing is reading, which is a kernel-level block: while it is held, the TUI legs
+/// bind A (queueing A to this leg), announce B and switch to B (queueing B behind it),
+/// all deterministically. Only then does the client start reading.
+///
+/// **Mutation:** drop the `head_is` guard from the replay arm and the first frame after
+/// the parking frame is `01a0-a` — the switch back the reader must never see.
+#[tokio::test]
+async fn a_queued_replay_is_dropped_when_the_head_moves_before_it_is_sent() {
+    let h = start_broker_with_events();
+
+    // The observer subscribes with NOTHING bound, so it is owed nothing yet — and its
+    // own `initialize` is what triggers the frame that parks it.
+    h.push_replies(vec![("initialize".into(), parking_frame())]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await; // the leg is now blocked writing 2 MB into a socket nobody reads
+
+    // A is announced and bound while the observer cannot move: A is queued to it.
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        unsubscribed(7),
+        unsubscribed(8),
+        ("thread/start".into(), switch_response("01a0-b")),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut tui).await["params"]["thread"]["id"],
+        "01a0-a"
+    );
+    create_thread(&mut tui, "01a0-a").await;
+
+    // The successor is broadcast (the measured order: announcement before response)…
+    h.push_script(vec![started_announcement("01a0-b")]);
+    let mut other = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut other).await["params"]["thread"]["id"],
+        "01a0-b"
+    );
+    // …and then adopted. B is queued behind the A the observer still has not sent.
+    switch_thread(&mut tui, "01a0-a", "01a0-b").await;
+
+    // Now the observer is released. The parking frame first, and then the head — the
+    // CURRENT one.
+    let parked = text_within(&mut ccd, Duration::from_secs(10))
+        .await
+        .expect("the parking frame is the leg's own passthrough and must arrive");
+    assert!(
+        parked.contains("x/noise"),
+        "the premise: the leg was held inside its passthrough, not idling"
+    );
+    let next = text_within(&mut ccd, Duration::from_secs(10))
+        .await
+        .expect("the head owed to this leg must still be delivered");
+    assert_eq!(
+        next,
+        started_announcement_text("01a0-b"),
+        "the queued predecessor must be dropped at the send, not sent: this reader \
+         would take a late 01a0-a for a `/new` back onto a thread the session left"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "and nothing follows it — the stale entry is dropped, not merely reordered"
+    );
+    let events = h.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.contains("dropped a stale head replay for 01a0-a")),
+        "the drop is stated in the log, so an operator can tell it from a delivery \
+         that never happened: {events:?}"
+    );
+}
+
+/// **A leg descheduled across a `/new` cannot deny the new head to later subscribers**
+/// (round-3 F2).
+///
+/// The app-server broadcasts once, to every connection; each broker leg reads its copy
+/// off its own upstream socket, so cross-leg the order is scheduling. A single
+/// last-one-wins announcement slot therefore followed arrival rather than the head: leg
+/// 2 records B, leg 3 wakes up and records A over it, and from then on the slot names a
+/// thread the session has left. That is not a stale read that repairs itself — no
+/// further announcement of B is coming, so `deliver_head` refuses to say anything at
+/// all and B is denied to every later `ccd` subscriber for the rest of the session.
+///
+/// **Mutation:** collapse `announced` back to a single last-one-wins slot and the
+/// observer below is told nothing.
+#[tokio::test]
+async fn a_delayed_leg_replaying_an_old_announcement_cannot_strand_the_head() {
+    let h = start_broker();
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        unsubscribed(7),
+        unsubscribed(8),
+        ("thread/start".into(), switch_response("01a0-b")),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut tui).await["params"]["thread"]["id"],
+        "01a0-a"
+    );
+    create_thread(&mut tui, "01a0-a").await;
+
+    // A leg that is on time with the successor's broadcast.
+    h.push_script(vec![started_announcement("01a0-b")]);
+    let mut fast = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut fast).await["params"]["thread"]["id"],
+        "01a0-b"
+    );
+
+    // And the delayed one, arriving with the PREDECESSOR's copy afterwards. This is the
+    // write that used to overwrite the slot.
+    h.push_script(vec![started_announcement("01a0-a")]);
+    let mut delayed = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut delayed).await["params"]["thread"]["id"],
+        "01a0-a",
+        "the premise: an old announcement really is processed after the new one"
+    );
+
+    // The switch response lands: B is the head.
+    switch_thread(&mut tui, "01a0-a", "01a0-b").await;
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5))
+            .await
+            .as_deref(),
+        Some(started_announcement_text("01a0-b").as_str()),
+        "the head's own announcement must survive a delayed leg re-presenting its \
+         predecessor's"
+    );
+}

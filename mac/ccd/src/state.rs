@@ -550,9 +550,12 @@ struct Inner {
     /// so a generation-2 link claiming `C` cannot resume generation 1's `B`, and a
     /// `Codex → Claude → Codex` sequence cannot resurrect pre-Claude state.
     ///
-    /// One entry per session whose link has learned anything in this process — empty
-    /// in production today, where `supported_agents()` refuses every Codex
-    /// registration.
+    /// One entry per session whose link has learned anything in this process. This
+    /// used to say "empty in production today, where `supported_agents()` refuses
+    /// every Codex registration"; it is not empty any more. Codex is a supported
+    /// agent, a complete registration installs a link, and a link that learns a
+    /// thread and is then retired leaves its carry here for the next one to resume
+    /// from. The scoping rules above are what that traffic runs through.
     retained_codex_carry: HashMap<String, RetainedCarry>,
     /// **What a registration could not install, kept so a later turn can** (A12.2).
     ///
@@ -900,10 +903,15 @@ impl Inner {
     /// [`Inner::stalled_codex_installs`].
     ///
     /// A named step rather than three lines inside the registration, for the same
-    /// reason [`Inner::seed_codex_carry`] is one: the arm that calls it is reached
-    /// only through a gate that is currently closed (`supported_agents()` refuses
-    /// every Codex registration), so a rule left inline there is a rule nothing can
-    /// drive and nothing can prove.
+    /// reason [`Inner::seed_codex_carry`] is one. **The reason it was extracted has
+    /// expired and the extraction has not.** It was extracted because the arm that
+    /// calls it sat behind a closed gate — `supported_agents()` refused every Codex
+    /// registration — so a rule left inline there was a rule nothing could drive.
+    /// Codex is supported now and the arm is genuinely reachable: a complete Codex
+    /// registration over a park that will not clear inside the stop budget calls
+    /// this. Reaching it still takes a survivor that outlives
+    /// [`CODEX_LINK_STOP_BUDGET`], which is why the test that covers this debt
+    /// stages it here directly rather than paying that budget a third time.
     fn owe_codex_install(
         &mut self,
         session: &SessionKey,
@@ -1022,12 +1030,17 @@ impl Inner {
     /// `thread_id` is left alone: the claim is a fact about the registration, and
     /// overwriting it would leave nothing able to say what was displaced.
     ///
-    /// A named step rather than three lines inside the registration, because the
-    /// registration reaches it only through a gate that is currently closed
-    /// (`supported_agents()` refuses every Codex registration), and the rule is
-    /// worth proving against the frame directly rather than through a path nothing
-    /// can drive — the same way [`crate::codex_link::ControlLink::from_registration`]
-    /// and the generation guard beside it are proven.
+    /// A named step rather than three lines inside the registration. It was
+    /// extracted because the registration reached it only through a gate that was
+    /// closed — `supported_agents()` refused every Codex registration — and a rule
+    /// nothing can drive is a rule nothing can prove. **That gate is open now**:
+    /// Codex is supported, and a complete registration runs this on its way to
+    /// installing a link. The extraction is kept because the rule is still worth
+    /// proving against the frame directly, which is how
+    /// [`crate::codex_link::ControlLink::from_registration`] and the generation
+    /// guard beside it are proven, and because a resume decision asserted through a
+    /// whole registration transaction is asserted through a great deal of unrelated
+    /// machinery.
     ///
     /// **Only from the SAME launch.** The retained carry names threads, and a thread
     /// belongs to the Codex process that created it. A registration arriving at a
@@ -1067,10 +1080,12 @@ impl Inner {
     /// forbids — see [`crate::codex_link::CodexAddressee`].
     ///
     /// A named step rather than four lines inside the registration, for the same reason
-    /// [`Inner::seed_codex_carry`] is one: the registration reaches it only through a
-    /// gate that is currently closed (`supported_agents()` refuses every Codex
-    /// registration), so a rule left inline there is a rule nothing can drive and
-    /// nothing can prove. Asked of the frame directly instead.
+    /// [`Inner::seed_codex_carry`] is one — and with the same expiry on that reason.
+    /// It was extracted because the registration reached it only through a gate that
+    /// was closed (`supported_agents()` refused every Codex registration); Codex is
+    /// supported now and a complete registration runs this. The step keeps its name
+    /// because what the fleet is told is worth asking of the frame directly, rather
+    /// than reading it back out of `Daemon::sessions` after a whole transaction.
     fn seed_codex_presence(
         &self,
         session_uid: &str,
@@ -1620,11 +1635,28 @@ impl Daemon {
     }
 
     /// The agents this daemon can actually host, in one place so the WS
-    /// capabilities and the IPC support negotiation can never disagree. It stays
-    /// exactly `[Claude]` until Codex actuation ships — the daemon must not
-    /// advertise an agent it cannot yet drive — and Claude is always the floor.
+    /// capabilities and the IPC support negotiation can never disagree. Claude is
+    /// always the floor.
+    ///
+    /// **Codex joined this list when a Codex registration became possible to
+    /// send.** The rule has not changed — a daemon must never advertise an agent
+    /// it cannot drive — what changed is that there is now a producer: the Codex
+    /// coordinator supervises its own launch and registers the session with the
+    /// broker's control-link socket and its thread generation, so this daemon can
+    /// observe the run it is being told about. Admitting the agent here is what
+    /// lets that registration past the fail-closed gate in
+    /// [`Daemon::register_supervisor`], and what makes the IPC support
+    /// negotiation answer `supported: true` so the supervisor sends it at all.
+    ///
+    /// What this does **not** open is the shared approval/text ledgers: see
+    /// [`Daemon::shared_ledgers_admit`], which used to be defined in terms of
+    /// this list and no longer is, precisely so that admitting the agent and
+    /// splitting those four tables stay separate decisions.
     pub fn supported_agents(&self) -> Vec<protocol::agent::AgentKind> {
-        vec![protocol::agent::AgentKind::Claude]
+        vec![
+            protocol::agent::AgentKind::Claude,
+            protocol::agent::AgentKind::Codex,
+        ]
     }
 
     /// Whether a run hosted by `agent` may put a row in the four tables that are
@@ -1648,15 +1680,43 @@ impl Daemon {
     /// Phase 3 splits these tables per agent, and this method and its three call
     /// sites are what it deletes.
     ///
-    /// Asked of [`Daemon::supported_agents`] rather than `AgentKind::is_claude`
-    /// for the reason `AgentKind` gives for having no `is_supported`: what a
-    /// build can drive is the daemon's list, not a property of the value. The
-    /// coupling cuts both ways and that is intended — adding Codex to that list
-    /// opens this gate, so the three `..._is_refused_before_...` tests below name
-    /// `AgentKind::Codex` outright and go red on the day it is added, which is
-    /// the day the tables have to be split or this gate rewritten.
+    /// **This was `supported_agents().contains(agent)`, and the day that stopped
+    /// being right has arrived.** The coupling was deliberate and it was a
+    /// tripwire: the three `..._is_refused_before_...` tests name
+    /// `AgentKind::Codex` outright so that admitting the agent would turn them
+    /// red rather than quietly opening these four tables to a Codex run. It did.
+    /// The decision it forced is recorded here: **the refusal stays, and the
+    /// coupling goes.** Hosting a Codex session — listing it, observing its
+    /// turns, reporting its exit — is what this build gained; writing Codex
+    /// approvals and Codex text mutations into tables a rolled-back v0.6.0
+    /// daemon rewrites and deletes globally is not, and Phase 3 is where the
+    /// split that makes it safe lives.
+    ///
+    /// So the question is now asked of the value, not of the list — the one place
+    /// in this daemon where that is the right question, because what is being
+    /// asked is not "can this build drive the agent" but "is this run's state
+    /// safe in a table the previous build sweeps". Only the agent that predates
+    /// the split is, and it is the *only* agent a v0.6.0 daemon can even name.
+    /// The three tests continue to drive the real producers against a real Codex
+    /// row — a *registered* one now, rather than one staged into the store
+    /// because registration was impossible — so the refusal stays proven at the
+    /// place a Phase-3 change would have to remove it.
+    ///
+    /// **Asking this of a row is only sound because the answer cannot change
+    /// under the asker.** Each of the three producers reads the row's agent and
+    /// then does its durable write later — `send_text` in the same breath, the
+    /// hook seven awaits later, `answer` five — and none of them holds the
+    /// registration gate across the pair. A Claude → Codex re-registration landing
+    /// in that window would have the read admit a row the write then lands on as
+    /// Codex, which is exactly the isolation this method claims. It cannot: a uid
+    /// does not leave Claude ([`Daemon::register_supervisor`]'s transition
+    /// refusal), `ensure_session` preserves an existing row's agent, and those two
+    /// are the only production writers of the column. The other direction —
+    /// Codex → Claude — is admitted and harmless here: it can only turn a refusal
+    /// into an admission of a row that is genuinely Claude by the time it is
+    /// written.
     fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
-        self.supported_agents().contains(agent)
+        agent.is_claude()
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -4718,6 +4778,11 @@ impl Daemon {
         let existing = self
             .lookup_run(&info.session_id, info.session_uid.as_deref())
             .await?;
+        // The snapshot is taken. Everything below decides from the re-read under the
+        // acceptance gate, and this is what lets a test hold a registration here on
+        // purpose rather than guess at it with a sleep. See [`snapshot_latch`].
+        #[cfg(test)]
+        snapshot_latch::passed(info.session_uid.as_deref());
         let uid = match (&existing, &info.session_uid) {
             (Some(row), _) => row.session_uid.clone(),
             (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.clone(),
@@ -4734,12 +4799,20 @@ impl Daemon {
         // **Fail closed on the agent, before any write or install.** A daemon
         // only hosts what it can actually drive; the authoritative list is
         // `supported_agents()`, never a property of the value. Any registration
-        // for an agent not on that list — Codex before its launch path ships, or
-        // any unrecognised name — is refused here, persisting nothing and
-        // installing nothing. In this phase the list is `[Claude]`, so this
-        // rejects **all** Codex/unknown registration, which is what keeps the
-        // shared-`sessions`-table and the generation-adoption paths dormant until
-        // a real Codex producer and its agent-scoped isolation land in Phase 2.
+        // for an agent not on that list — any unrecognised name, or a present
+        // empty string — is refused here, persisting nothing and installing
+        // nothing.
+        //
+        // **The list is `[Claude, Codex]` now.** It was `[Claude]`, and that is
+        // what kept the generation-adoption path and everything below it dormant;
+        // Codex joined the day its coordinator became able to send a registration
+        // at all. What follows this gate is therefore live for Codex rather than
+        // dead code: the control-link fact is read off the frame, the generation
+        // is compared against the standing high-water, the row is routed to
+        // `codex_sessions` by `upsert_session`, and a link is spawned. What did
+        // NOT open with it is the four shared ledgers — see
+        // [`Daemon::shared_ledgers_admit`], which is deliberately no longer
+        // defined in terms of this list.
         if !self.supported_agents().contains(&info.agent) {
             anyhow::bail!(
                 "refusing to register {}: agent {:?} is not supported by this daemon",
@@ -4748,6 +4821,54 @@ impl Daemon {
             );
         }
 
+        // **A uid does not leave Claude**, and this is the gate that makes
+        // [`Daemon::shared_ledgers_admit`]'s premise an invariant rather than a
+        // hope.
+        //
+        // The store deliberately *moves* a row between `sessions` and
+        // `codex_sessions` when a re-registration disagrees with where the row
+        // lives ([`crate::store::Store::upsert_session`]), and says in as many
+        // words that whether a run may change agents at all is registration
+        // adoption's question, not storage's. This is that question, answered in
+        // the one direction where the answer is forced.
+        //
+        // A run introduced as Claude may already own rows in the four ledgers a
+        // rolled-back v0.6.0 daemon reads *globally* — `pending_approvals`,
+        // `answer_claims`, `answers`, `text_mutations`. Nothing moves those rows,
+        // and nothing has to: they are keyed by uid alone. So relabelling that uid
+        // Codex leaves Codex-owned rows sitting in exactly the tables the isolation
+        // argument depends on being Claude-only, which is the rollback hazard the
+        // refusal is *for*, arriving by the one route the refusal did not cover.
+        //
+        // **The narrow direction, deliberately.** Codex → Claude is left alone: it
+        // ends with the row where the shared ledgers legitimately admit it, and the
+        // registration retires the Codex link on its way through, so nothing is
+        // stranded. Claude → Codex is the direction that strands, and it is refused
+        // whether or not any ledger row exists today — a count would make the
+        // refusal depend on a race with the producers below rather than on the
+        // agent, and the counting query would be the only reader of four tables
+        // nothing else asks about by uid.
+        //
+        // **This is also what closes the three producers' check/write windows.**
+        // `send_text`, the `PermissionRequest` hook and `answer` each read the row's
+        // agent and write their ledger row later — 0, 7 and 5 awaits later
+        // respectively — without holding the registration gate. The write they are
+        // protecting is only wrong if the row can become Codex in between, and after
+        // this it cannot: `ensure_session` preserves an existing row's agent, and
+        // `register_supervisor` is the only other production writer of the column.
+        // Revalidating under the gate would defend a premise that can no longer
+        // change; making the premise immutable is the smaller statement and the
+        // stronger one. `a_claude_uid_never_becomes_codex` is what keeps it true.
+        //
+        // **Where the check actually stands, and why it is not here.** The refusal
+        // is applied under the acceptance gate below, against a row re-read there —
+        // see the site itself. The snapshot at the top of this function is taken
+        // before any synchronization, so a Codex registration can read *no row*,
+        // queue behind a Claude registration that commits one, and then find the
+        // check it was supposed to fail already behind it. A premise-immutability
+        // argument made from a stale read is not an argument; the read has to be
+        // the one the writer cannot get in front of.
+        //
         // **Identity guard, keyed off the validated agent — never field
         // presence.** A Claude registration that carries Codex-only identity
         // (a generation, thread id or socket) is internally inconsistent, so it
@@ -4765,6 +4886,25 @@ impl Daemon {
             );
         }
 
+        // **The other half of that guard, which the documentation claimed and the
+        // code did not have.** A non-Claude registration carrying `claude_bin` is
+        // the mirror-image inconsistency: the frame names one agent and hands over
+        // the other's binary, and `claude_bin` is what
+        // [`Daemon::command_catalog`] would later run to enumerate a session's
+        // slash commands — against a session that is not running it. The typed
+        // producer cannot build it — `registration_frame` derives every one of
+        // these fields from a single `Option<CodexSeat>` — so this is not
+        // production-reachable today; it is here because the receiver is where the
+        // claim was made, and a guard that exists only in a comment is one a later
+        // producer will discover the hard way.
+        if !info.agent.is_claude() && info.claude_bin.is_some() {
+            anyhow::bail!(
+                "refusing to register {}: a {} registration carried a Claude binary",
+                info.session_id,
+                info.agent.as_str()
+            );
+        }
+
         // **The control-link fact, and the Codex mirror of the guard above.** A
         // Codex registration must name the broker's ccd leg and the generation its
         // frames are attributed to, or this daemon would install a session it can
@@ -4772,10 +4912,16 @@ impl Daemon {
         // before any write, so a registration that cannot be observed leaves no
         // trace (`crate::codex_link::ControlLink::from_registration`).
         //
-        // Unreachable while `supported_agents()` is `[Claude]`, which refuses every
-        // Codex registration above: this is the guard the ungate turns on, and it
-        // is proven directly against the frame rather than through a path the gate
-        // currently closes.
+        // **Reached now.** This used to be unreachable — `supported_agents()` was
+        // `[Claude]` and refused every Codex registration above — and it was
+        // described here as the guard the ungate would turn on. The ungate has
+        // happened, so this is the guard that decides a real Codex frame's fate:
+        // it is what refuses the incomplete ones, and what hands the complete ones
+        // the link the transaction below installs. Still proven directly against
+        // the frame in `codex_link::tests`, because a truth table is worth
+        // asserting where it lives; the two registration-level outcomes are
+        // `the_claude_path_installs_no_control_link_and_an_unobservable_codex_one_installs_nothing`
+        // and `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
         let control_link = crate::codex_link::ControlLink::from_registration(&info)?;
 
         // **ONE REGISTRATION FOR THIS SESSION AT A TIME, from here to the end of the
@@ -4799,18 +4945,54 @@ impl Daemon {
         // `Db::upsert_session` hands the write to the blocking pool: two registrations
         // that call it in order can still reach SQLite's one writer in the other order.
         //
-        // **Taken above the generation refusal, not below it.** Every refusal above
-        // reads only the frame, so serializing them would buy nothing; that one reads
-        // `supervisors`, which is exactly the shared state this gate protects. Left
-        // outside, two Codex registrations at generations 5 and 6 could both read an
-        // empty high-water, both pass, and the session could settle on the OLDER
-        // launch. It is the one refusal the gate closes for free.
+        // **Taken above the generation refusal AND above the agent transition, not
+        // below them.** The refusals left outside read only the frame, so serializing
+        // them would buy nothing. These two read state a concurrent registration
+        // writes — `supervisors` and the row itself — which is exactly what this gate
+        // protects. Left outside, two Codex registrations at generations 5 and 6 could
+        // both read an empty high-water, both pass, and the session could settle on
+        // the OLDER launch. They are the refusals the gate closes for free.
         //
         // Serializing is what makes "a loser mutated nothing" true of the whole
         // acceptance rather than of its in-memory tail. Taken BEFORE `inner` on every
         // path, which is the lock ordering this type already uses.
         let gate = self.registration_gate(&uid).await;
         let _acceptance = gate.lock().await;
+
+        // **The row, re-read under the gate — and every decision about it made from
+        // THIS read, not the one at the top of the function** (round-2 F2).
+        //
+        // The snapshot above is taken before any synchronization: a registration can
+        // read no row for this uid, block here behind one that commits a row, and
+        // wake up holding a picture of the session that a durable write has already
+        // contradicted. The Claude→Codex refusal was decided from that picture, so a
+        // Codex frame could pass a check against a row it never saw and then
+        // overwrite it — the shared-ledger hazard documented above, arriving by the
+        // exact route the refusal exists to close.
+        //
+        // Re-reading is what makes the refusal a statement about the row this
+        // registration is actually about to overwrite. It costs one `get_session` by
+        // uid on a path that already does a durable write, and it is the same shape
+        // the 2e-5 and 2e-6 rounds took twice: a check whose subject can be written
+        // by a concurrent registration belongs under the gate that orders them.
+        //
+        // **`created_at` below reads the same snapshot and does NOT need this** —
+        // measured, not assumed. `Store::upsert_session`'s `ON CONFLICT DO UPDATE`
+        // deliberately omits `created_at`, so the column is written on insert only
+        // and a stale fallback there reaches no row that already has one. The
+        // shadowed read makes it moot rather than fixing it.
+        let existing = self.lookup_run(&info.session_id, Some(&uid)).await?;
+        if let Some(row) = &existing {
+            if row.agent.is_claude() && !info.agent.is_claude() {
+                anyhow::bail!(
+                    "refusing to register {}: {uid} is a Claude run and a run does not change \
+                     agents — its rows in the shared ledgers would become {}-owned in tables a \
+                     rolled-back daemon rewrites",
+                    info.session_id,
+                    info.agent.as_str()
+                );
+            }
+        }
 
         // **Stale generation is rejected BEFORE any persistent mutation (D4).**
         // The upsert and the card relabel below are persistent writes, so the
@@ -4821,8 +5003,13 @@ impl Daemon {
         // byte-identical. This reads the in-memory high-water only; **the
         // structural generation-completeness and the durable high-water that
         // makes this atomic across a restart are the binding Phase-2
-        // pre-exposure gate (plan amendment A5)** — not built here, because
-        // fail-closed registration makes the whole branch unreachable in Phase 1.
+        // pre-exposure gate (plan amendment A5)** — still not built here. The
+        // reason has changed: it used to be that fail-closed registration made
+        // this whole branch unreachable, and now the branch is reached on every
+        // Codex registration. What is still missing is the durable half, so this
+        // reads the in-memory high-water alone and a daemon restart forgets it —
+        // which is exactly what A5 exists to close, and why it is a gate rather
+        // than an omission.
         if matches!(info.agent, protocol::agent::AgentKind::Codex) {
             if let Some(incoming) = info.codex_generation {
                 let current = {
@@ -7218,6 +7405,61 @@ pub(crate) fn hook_event(
         pending = pending.with_source_event_id(format!("{prefix}:{tool_use_id}"));
     }
     pending
+}
+
+/// **The ordered seam that makes "past its snapshot" a fact** (round-3 F7).
+///
+/// [`Daemon::register_supervisor`] reads the row for its uid once before any
+/// synchronization and again under the acceptance gate, and the Claude→Codex refusal
+/// is decided from the SECOND read. Proving that requires a test to hold a
+/// registration provably past the FIRST read before it commits the row the second one
+/// must see.
+///
+/// `sleep(80ms)` plus `!is_finished()` does not prove it. An unscheduled task and one
+/// still inside the pre-gate `get_session` are both unfinished, so with the check
+/// regressed above the gate a task that had not yet read would read the
+/// already-committed Claude row and refuse *normally* — the test green, and asserting
+/// nothing about where the check lives.
+///
+/// So the snapshot says so itself. Armed per uid because these tests run in parallel
+/// and a process-global signal cannot tell one registration's read from another's;
+/// `notify_one` and not `notify_waiters` because the registration may pass the seam
+/// before the test reaches its await, and a stored permit is the difference between an
+/// ordering and a race.
+#[cfg(test)]
+pub(crate) mod snapshot_latch {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use tokio::sync::Notify;
+
+    fn table() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+        static T: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Watch for the next pre-gate snapshot taken for `uid`.
+    pub(crate) fn arm(uid: &str) -> Arc<Notify> {
+        let signal = Arc::new(Notify::new());
+        table()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(uid.to_string(), Arc::clone(&signal));
+        signal
+    }
+
+    /// Called by `register_supervisor` the moment its pre-gate row read returns.
+    pub(crate) fn passed(uid: Option<&str>) {
+        let Some(uid) = uid else { return };
+        let armed = table()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(uid)
+            .cloned();
+        if let Some(signal) = armed {
+            signal.notify_one();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -10484,6 +10726,15 @@ mod tests {
 
     /// Build and submit a registration with a chosen agent and Codex identity,
     /// returning the raw result so a test can assert it was refused.
+    ///
+    /// **It carries no `codex_socket`, and that is now load-bearing rather than
+    /// incidental.** While Codex was outside `supported_agents()` the field could
+    /// not matter — the agent gate refused the frame before anything read it. Now
+    /// that Codex is admitted, a frame built here is a Codex registration the
+    /// daemon could list but never observe, so it is refused one guard further
+    /// down by [`crate::codex_link::ControlLink::from_registration`]. Callers that
+    /// want an *acceptable* Codex frame build one in full; see
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
     async fn try_register(
         daemon: &Arc<Daemon>,
         uid: &str,
@@ -10518,29 +10769,55 @@ mod tests {
             .await
     }
 
-    /// **Fail closed on an unsupported agent (Finding 1).** A registration for
-    /// any agent the daemon does not support — Codex before its launch path
-    /// ships, an unrecognised name, or a present empty string — is refused, and
-    /// nothing is persisted or installed. Absence still means Claude and works.
+    /// **A registration this daemon cannot host is refused, and WHICH fact
+    /// refused it is asserted (Finding 1).** Nothing is persisted and nothing is
+    /// installed on any of the three arms. Absence still means Claude and works.
+    ///
+    /// The three arms no longer fail for one reason, and separating them is the
+    /// whole of what changed here. `gemini` and the present empty string are
+    /// refused by `supported_agents()`: this daemon does not host them. **Codex
+    /// is not one of those any more** — it joined that list when its coordinator
+    /// became able to send a registration — so its arm passes the agent gate and
+    /// is refused one guard further down, because the frame `try_register` builds
+    /// names no control-link socket and a session this daemon cannot observe is
+    /// one it will not list ([`crate::codex_link::ControlLink::from_registration`]).
+    ///
+    /// **The reason is asserted per arm because `is_err()` was not enough.** This
+    /// test was written to go red the day Codex was admitted, and it did not: the
+    /// Codex arm kept passing on a refusal about something else entirely, and a
+    /// gate opened underneath a green suite. An assertion that only says "refused"
+    /// cannot tell a closed door from a different closed door.
     #[tokio::test]
     async fn a_registration_for_an_unsupported_agent_is_refused_with_no_trace() {
         use protocol::agent::AgentKind;
         let daemon = test_daemon();
 
-        for (uid, agent) in [
-            ("01K1B3XQ8ZC0DE5FGH7JKMNP01", AgentKind::Codex),
+        for (uid, agent, refusal) in [
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP01",
+                AgentKind::Codex,
+                // The agent is supported; the frame is not observable.
+                "carries no control-link socket",
+            ),
             (
                 "01K1B3XQ8ZC0DE5FGH7JKMNP02",
                 AgentKind::Unsupported("gemini".into()),
+                "is not supported by this daemon",
             ),
             (
                 "01K1B3XQ8ZC0DE5FGH7JKMNP03",
                 AgentKind::Unsupported(String::new()),
+                "is not supported by this daemon",
             ),
         ] {
             assert!(protocol::uid::is_well_formed(uid), "{uid}");
-            let refused = try_register(&daemon, uid, agent.clone(), None, None).await;
-            assert!(refused.is_err(), "{agent:?} must be refused");
+            let refused = try_register(&daemon, uid, agent.clone(), None, None)
+                .await
+                .expect_err(&format!("{agent:?} must be refused"));
+            assert!(
+                refused.to_string().contains(refusal),
+                "{agent:?} must be refused for {refusal:?}, and was refused for: {refused}"
+            );
             let inner = daemon.inner.lock().await;
             assert!(
                 !inner.supervisors.contains_key(uid),
@@ -10590,18 +10867,31 @@ mod tests {
         );
     }
 
-    /// **A Claude registration installs no control link, and a Codex one cannot
-    /// yet be reached to install one.**
+    /// **A Claude registration installs no control link, and an unobservable
+    /// Codex one installs nothing either.**
     ///
-    /// Both halves are asserted here because the second is the more surprising:
-    /// `supported_agents()` is `[Claude]`, so every Codex registration is refused
-    /// before the control-link guard is consulted, and the spawn below it is
-    /// unreachable by construction. That is the gate, not an omission — the guard
-    /// itself is proven directly against the frame in
-    /// `codex_link::tests::a_codex_registration_missing_the_fact_is_refused`, and
-    /// what this test pins is that nothing on the **Claude** path grew a link.
+    /// The old name for this test — "and codex never gets that far" — described a
+    /// build in which `supported_agents()` was `[Claude]` and the control-link
+    /// guard sat behind a door no Codex frame could open. That door is open now,
+    /// and the second half of this test walks through it: the Codex registration
+    /// below reaches `ControlLink::from_registration`, is refused there because it
+    /// names no socket, and is refused *before any install* — which is the
+    /// property worth pinning, because the link is the one thing a registration
+    /// installs that outlives the call as a running task.
+    ///
+    /// The first half is unchanged and is the one that never depended on the gate:
+    /// a Claude session has no control link and never grows one, whatever else
+    /// moves around it.
+    ///
+    /// The guard's own truth table is proven against the frame directly in
+    /// `codex_link::tests::a_codex_registration_missing_the_fact_is_refused`; what
+    /// this test adds is that the registration transaction honours it on both
+    /// sides, leaving the slot empty either way. The accepting direction — a
+    /// complete Codex frame, which *does* install a link — is
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
     #[tokio::test]
-    async fn the_claude_path_installs_no_control_link_and_codex_never_gets_that_far() {
+    async fn the_claude_path_installs_no_control_link_and_an_unobservable_codex_one_installs_nothing(
+    ) {
         use protocol::agent::AgentKind;
         let daemon = test_daemon();
         let claude = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
@@ -10614,30 +10904,186 @@ mod tests {
         );
 
         let codex = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
-        let refused = try_register(&daemon, codex, AgentKind::Codex, Some(1), None).await;
-        assert!(refused.is_err(), "Codex is not a supported agent yet");
+        let refused = try_register(&daemon, codex, AgentKind::Codex, Some(1), None)
+            .await
+            .expect_err("a Codex registration naming no socket must be refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("carries no control-link socket"),
+            "the refusal must name the missing control-link fact, not agent support: {refused}"
+        );
         assert!(
             daemon.inner.lock().await.codex_links.is_empty(),
             "a refused registration must leave no link task behind"
         );
     }
 
+    /// **A complete Codex registration is ACCEPTED — the daemon half of the
+    /// producer-side gate A9.2.**
+    ///
+    /// Every other Codex assertion in this file is a refusal, and refusals are a
+    /// set of claims a daemon that hosted no Codex run at all would satisfy
+    /// perfectly. This is the one that says the door opens, and without it the
+    /// suite could not tell "Codex is admitted and correctly filed" from "Codex
+    /// is still refused, now for a different reason" — which is precisely the
+    /// mistake the two tests above were repointed to stop making.
+    ///
+    /// Driven with the frame the **real** producer sends. The Codex coordinator
+    /// supervises its own launch and registers the session with `agent=codex`,
+    /// the broker's ccd leg as `codex_socket`, the launch's `codex_generation`,
+    /// no `codex_thread_id` — nothing has started a thread yet, and the row's
+    /// thread identity is learned from the link rather than claimed at launch —
+    /// and no `claude_bin`, which for a Codex frame would be the inconsistent
+    /// identity the guard above refuses.
+    ///
+    /// Four mechanisms have to agree before a Codex run can be hosted at all, and
+    /// all four are asserted:
+    ///
+    ///   * `supported_agents()` admits the agent, so the fail-closed gate passes;
+    ///   * the control-link fact is complete, so `ControlLink::from_registration`
+    ///     yields a link instead of bailing;
+    ///   * `upsert_session` files the row in `codex_sessions` and **not** in
+    ///     `sessions` — read off the daemon's own database file rather than
+    ///     through `Store`, because `Store::get_session` reads both tables and so
+    ///     cannot tell a correctly filed row from one sitting in the table a
+    ///     rolled-back v0.6.0 daemon sweeps;
+    ///   * the published supervisor handle carries the generation, which is what
+    ///     the stale-generation refusal compares the *next* registration against.
+    ///     A handle that forgot it would let a relaunch settle on the older visit.
+    ///
+    /// **The socket names nothing that listens, on purpose, and that is what keeps
+    /// this test from hanging.** An accepted Codex registration spawns a control
+    /// link, and a link with nowhere to dial fails its connect and backs off — the
+    /// same arrangement
+    /// `a_registration_a_survivor_blocked_gets_its_link_from_the_recovery_sweep`
+    /// relies on. Nothing here waits on that task or on anything it would produce:
+    /// every assertion is about the row and the maps, both settled before
+    /// `register_supervisor` returns.
+    #[tokio::test]
+    async fn a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run() {
+        let (store, db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        assert!(protocol::uid::is_well_formed(uid), "{uid}");
+        let socket = std::env::temp_dir().join("ccd-a92-nothing-listens-here.sock");
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+
+        let registration = daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-7".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-7".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(socket.to_string_lossy().into_owned()),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("the Codex coordinator's own registration frame must be accepted");
+        assert_eq!(registration.session.uid, uid);
+
+        // **Which table**, asked of SQLite directly. `sessions` is the one a
+        // rolled-back daemon rewrites and prunes globally, so "not there" is a
+        // claim about the file and may not be answered through a reader that
+        // consults both.
+        let conn = rusqlite::Connection::open(&db).expect("the daemon's own database file");
+        let filed_in = |table: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                [uid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or_else(|err| panic!("counting {table}: {err}"))
+        };
+        assert_eq!(
+            filed_in("codex_sessions"),
+            1,
+            "an accepted Codex registration's row belongs in codex_sessions"
+        );
+        assert_eq!(
+            filed_in("sessions"),
+            0,
+            "and must never land in the table a rolled-back v0.6.0 daemon sweeps"
+        );
+
+        // The row is the registration's, field for field — a row filed in the
+        // right table under the wrong facts would satisfy the counts above.
+        let row = store
+            .get_session(uid)
+            .unwrap()
+            .expect("the accepted registration's row");
+        assert_eq!(row.agent, protocol::agent::AgentKind::Codex);
+        assert_eq!(row.session_id, "cc-7");
+        assert_eq!(row.tmux_session, "cc-7");
+        assert_eq!(row.tmux_socket, protocol::TMUX_SOCKET_NAME);
+        assert_eq!(row.cwd, "/work");
+        assert_eq!(
+            row.codex_socket,
+            Some(socket.to_string_lossy().into_owned()),
+            "the broker leg the link dials is carried through verbatim"
+        );
+        assert_eq!(
+            row.codex_thread_id, None,
+            "the launcher claims no thread; the link is what learns one"
+        );
+        assert!(matches!(row.lifecycle, Lifecycle::Live));
+
+        let inner = daemon.inner.lock().await;
+        let handle = inner
+            .supervisors
+            .get(uid)
+            .expect("an accepted registration publishes a supervisor handle");
+        assert_eq!(
+            handle.codex_generation,
+            Some(1),
+            "the handle must carry the launch's generation: it is the high-water the \
+             next registration's stale-generation refusal is compared against, and a \
+             handle that dropped it would let a relaunch settle on the older visit"
+        );
+        assert_eq!(
+            handle.epoch, registration.epoch,
+            "and the epoch the row was staked under"
+        );
+    }
+
     /// **The control-link slot's epoch bookkeeping**, driven directly.
     ///
-    /// Driven at [`Inner`] rather than through `register_supervisor`, because
-    /// `supported_agents()` is `[Claude]` and no Codex registration can reach the
-    /// install: the rules would otherwise ship with no coverage at all until the
-    /// ungate. The three that matter are the three that can lose a task or stop the
-    /// wrong one — a supersede, a stale release, and the agent-change case where
-    /// the incoming registration carries no link of its own.
+    /// Driven at [`Inner`] rather than through `register_supervisor`. The original
+    /// reason was that `supported_agents()` was `[Claude]` and no Codex
+    /// registration could reach the install, so the rules would otherwise have
+    /// shipped with no coverage at all until the ungate. That is no longer why:
+    /// Codex is supported and a complete registration installs a link. The
+    /// bookkeeping is kept here because it is bookkeeping — epochs superseding,
+    /// releasing and being retired — and each case wants a slot in a chosen state
+    /// rather than whatever state a transaction happens to leave. The three that
+    /// matter are the three that can lose a task or stop the wrong one: a
+    /// supersede, a stale release, and the agent-change case where the incoming
+    /// registration carries no link of its own.
     /// **A control link is always installed or joined — never detached.**
     ///
     /// Driven through the **real** registration transaction: each `try_register` is
-    /// a full gate → join-parked → ownership-check → retire → install turn. The
-    /// spawn arm cannot be reached this way (`supported_agents()` is `[Claude]`, so
-    /// no registration carries a link), so the link is installed by hand at the
-    /// epoch the real registration published — and it is the real transaction that
-    /// then retires it.
+    /// a full gate → join-parked → ownership-check → retire → install turn. Those
+    /// registrations carry no control link — `try_register` builds no socket — so
+    /// the spawn arm is not taken on this path, and the link under test is installed
+    /// by hand at the epoch the real registration published. It is then the real
+    /// transaction that retires it, which is the half that matters here. (This used
+    /// to say the spawn arm *cannot* be reached, `supported_agents()` being
+    /// `[Claude]`; it can be reached now, and reaching it would only mean this test
+    /// had less control over what it is retiring.)
     ///
     /// Dropping a `JoinHandle` detaches its task, and a detached link is one nothing
     /// can ever stop, ingesting into a session under an epoch no later release can
@@ -11003,12 +11449,16 @@ mod tests {
     /// the uid.
     ///
     /// The debt itself is staged by hand at the epoch the real registration
-    /// published, because the arm that records it cannot be reached: a Claude
-    /// registration carries no control link and `supported_agents()` is `[Claude]`,
-    /// so no registration carrying one gets past the agent gate. Same reason
-    /// `install_codex_link` and the two seeding steps are proven against [`Inner`]
-    /// directly — the rule is worth proving against the fact rather than through a
-    /// path nothing can drive.
+    /// published. **The reason for that has changed and is worth stating exactly.**
+    /// It used to be that the arm recording the debt could not be reached at all —
+    /// a Claude registration carries no control link, and `supported_agents()` was
+    /// `[Claude]`, so no registration carrying one got past the agent gate. Codex
+    /// is supported now, so that arm IS reachable: a complete Codex registration
+    /// over an unclearable park runs it. What it costs to reach that way is the
+    /// stop budget a *third* time, on top of the two this test already pays, and
+    /// the debt's own shape is a fact about [`Inner`] rather than about the
+    /// transaction. So it stays staged, for the same reason `install_codex_link`
+    /// and the two seeding steps are proven against [`Inner`] directly.
     ///
     /// Costs the stop budget twice, which is why there is one test of this shape and
     /// not four: once for the registration that gives up, and once for the sweep that
@@ -11019,13 +11469,17 @@ mod tests {
     /// second observer is installed beside a task that is still running.
     ///
     /// **And one mutation this does NOT kill, said plainly rather than left to be
-    /// discovered:** deleting the `owe_codex_install` call from the `!park_clear` arm
-    /// changes nothing here, because the debt is staged by hand. That call site is
-    /// unreachable — no registration carrying a control link gets past
-    /// `supported_agents()` — so it is not separately observable, exactly as the
-    /// redundant `owns` check in the same transaction is not. What is observable is
-    /// the arm's other half, and it is asserted: a **Claude** registration over an
-    /// unclearable park owes nothing at all.
+    /// discovered:** deleting the `owe_codex_install` call from the `!park_clear`
+    /// arm changes nothing here, because the debt is staged by hand and the
+    /// registration this test drives is a **Claude** one, which carries no control
+    /// link and so never enters that `if let`. That was previously written down as
+    /// "the call site is unreachable"; it is not, since Codex joined
+    /// `supported_agents()`, and the correction matters — the survivor is what
+    /// makes it expensive to reach, not the agent gate. The arm is therefore
+    /// unobserved rather than unreachable, which is a weaker position than the one
+    /// this doc used to claim and an honest one. What *is* observable is the arm's
+    /// other half, and it is asserted: a Claude registration over an unclearable
+    /// park owes nothing at all.
     ///
     /// **THE CLAIM, NARROWED — this test proves a HANDLE, not a BINDING.** The
     /// socket below names nothing, deliberately, so the installed task dials, fails
@@ -11530,13 +11984,17 @@ mod tests {
     /// **The real registration transaction**, driven through `register_supervisor`
     /// and `unregister_supervisor` rather than around them.
     ///
-    /// Claude is the only agent this daemon hosts, so the spawn arm is unreachable —
-    /// but every other part of the transaction runs on this path: the gate is taken,
-    /// ownership is re-validated against the freshly published supervisor epoch,
-    /// parked corpses are joined, and the slot is reclaimed. What it pins is that a
-    /// registration leaves **no** link behind on the Claude path, and that a corpse
-    /// parked by an earlier turn is collected by the next real transaction rather
-    /// than waiting for one that never comes.
+    /// Every registration here is a **Claude** one, so the spawn arm is not taken —
+    /// not because it cannot be, which is what this doc used to say when Claude was
+    /// the only agent this daemon hosted, but because a Claude frame carries no
+    /// control link and the spawn is what installing one does. The rest of the
+    /// transaction runs on this path either way: the gate is taken, ownership is
+    /// re-validated against the freshly published supervisor epoch, parked corpses
+    /// are joined, and the slot is reclaimed. What it pins is that a registration
+    /// leaves **no** link behind on the Claude path, and that a corpse parked by an
+    /// earlier turn is collected by the next real transaction rather than waiting
+    /// for one that never comes. The spawning direction is
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_real_registration_transaction_runs_the_link_lifecycle() {
         use protocol::agent::AgentKind;
@@ -11987,12 +12445,16 @@ mod tests {
     /// the same answer and this test could not tell them apart.
     ///
     /// **Driven through [`Inner::seed_codex_presence`]**, the whole rule in one named
-    /// step, for the same reason [`Inner::seed_codex_carry`] beside it is one: the
-    /// registration that calls it is reachable only through a gate that is currently
-    /// closed (`supported_agents()` refuses every Codex registration), and a rule left
-    /// inline there is a rule nothing can drive. The link it is asked about is read off
-    /// a real registration frame by `ControlLink::from_registration`, so the generation
-    /// the scoping turns on is the one a registration would actually carry.
+    /// step, for the same reason [`Inner::seed_codex_carry`] beside it is one. That
+    /// reason was originally that the registration calling it sat behind a closed
+    /// gate — `supported_agents()` refused every Codex registration — and a rule
+    /// nothing can drive is a rule nothing can prove. The gate is open now, and the
+    /// step is still driven directly: what the fleet is TOLD is a four-way claim
+    /// about one function, and reading it back out of a whole accepted transaction
+    /// would assert it through a great deal that has nothing to do with it. The link
+    /// it is asked about is read off a real registration frame by
+    /// `ControlLink::from_registration`, so the generation the scoping turns on is the
+    /// one a registration actually carries.
     ///
     /// Asserted through what the fleet is actually told — `Daemon::sessions` and
     /// `Daemon::resolve_codex_inbound` — and while the replacement's task has run
@@ -12263,9 +12725,11 @@ mod tests {
         retire_the_live_codex_link(&daemon, &uid).await;
         assert!(!nothing_retained(&daemon, &uid).await);
 
-        // The seed itself, proven against a real registration frame — the gated path
-        // (`supported_agents()` refuses every Codex registration) cannot drive it, so
-        // the rule is proven where the guard beside it is.
+        // The seed itself, proven against a real registration frame. It used to be
+        // that nothing else could drive it — `supported_agents()` refused every
+        // Codex registration — and now a complete one would; the rule is still
+        // proven where the guard beside it is, because the frame is the whole of
+        // its input and a transaction around it would only add noise.
         let frame = |thread: Option<&str>| protocol::ipc::RegisterSession {
             session_id: "cc-9".into(),
             session_uid: Some(uid.clone()),
@@ -12543,17 +13007,26 @@ mod tests {
         );
     }
 
-    /// **A `Codex → Claude → Codex` sequence does not resurrect pre-Claude state.**
+    /// **A Claude registration clears the Codex chase it took the session over from.**
     ///
     /// The uid is stable across an agent change — the same tmux session, the same
     /// row — and the retained carry is keyed by it. Retention happens when the
     /// departed link's task is proven stopped, which is right when the next
     /// registration is the same run reconnecting and wrong when it is a different
-    /// agent taking the session over. Nothing after it cleared the entry, so the
-    /// third registration was seeded from a chase belonging to neither of the two
-    /// runs in between. The generation stamp does not catch this on its own: the
-    /// relaunch can perfectly well arrive at the generation the first one used, and
-    /// this test uses that one deliberately.
+    /// agent taking the session over. Nothing after it cleared the entry, so a later
+    /// Codex link was seeded from a chase belonging to a run two agents ago. The
+    /// generation stamp does not catch this on its own: the seeding link can
+    /// perfectly well carry the generation the first one used, and this test uses
+    /// that one deliberately.
+    ///
+    /// **What leg three is, exactly** (round-3 F9). It is a direct
+    /// [`Inner::seed_codex_carry`] — the seeding step a Codex registration performs —
+    /// and NOT a third registration. It cannot be one: the Claude→Codex prohibition
+    /// this phase added refuses a Codex registration on a uid whose row is Claude, so
+    /// a real `Codex → Claude → Codex` sequence of registrations is now unreachable.
+    /// What stays reachable, and what this pins, is the seeding step reading a stale
+    /// entry — so the assertion is made where the entry is read rather than through a
+    /// registration that would be refused before it got there.
     ///
     /// The Claude leg is a **real** registration, through the whole of
     /// `register_supervisor` and into the control-link transaction, because that is
@@ -12592,7 +13065,9 @@ mod tests {
              threads belong to the run"
         );
 
-        // Leg three: Codex again, at the generation leg one used.
+        // Leg three: the seeding step a later Codex link would run, at the generation
+        // leg one used. Called directly — see the doc above for why a third
+        // registration is not the reachable shape any more.
         let relaunched = codex_link_from(&uid, 1, "th-g3-at-launch");
         let carry = crate::codex_link::LinkCarry::new();
         assert_eq!(
@@ -12602,7 +13077,7 @@ mod tests {
                 .await
                 .seed_codex_carry(&uid, &relaunched, &carry),
             None,
-            "the third registration starts from its own claim; the chase it would \
+            "the later Codex link starts from its own claim; the chase it would \
              otherwise resume belongs to a run two agents ago"
         );
         assert_eq!(
@@ -13869,11 +14344,13 @@ mod tests {
     /// past the point where its own reads and writes would have settled. Released, it
     /// lands — which is what proves the pendency was the gate and not a wedge.
     ///
-    /// The registration is a Claude one moving a Codex row, because that is the
-    /// direction the real path can drive: `supported_agents()` refuses every Codex
-    /// registration, so a fixture staging the reviewer's own direction would be
-    /// staging a registration nothing can make. The column and the mechanism are the
-    /// same either way. `cwd` is asserted beside `agent` because the hook carries no
+    /// The registration is a Claude one moving a Codex row. That used to be the only
+    /// direction the real path could drive — `supported_agents()` refused every Codex
+    /// registration, so the reviewer's own direction would have meant staging a
+    /// registration nothing could make — and both directions are now makeable. It is
+    /// kept as it stands because the column and the mechanism are the same either
+    /// way, and because this direction needs no control-link fixture to set up: what
+    /// is under test is a read-modify-write on the row, not which agent won it. `cwd` is asserted beside `agent` because the hook carries no
     /// `cwd` of its own here, which is what makes that field a read-modify-write too —
     /// and unlike `agent` it is a corruption this phase can actually reach.
     ///
@@ -14027,10 +14504,13 @@ mod tests {
     ///     goes through the real path and does it.
     ///
     /// The link in the slot is installed by hand, for the same reason the test above
-    /// installs one: `supported_agents()` is `[Claude]`, so no registration this
-    /// daemon accepts carries a control link. The destructive phase is not
-    /// Codex-only, though — it runs for every agent, on every registration — which is
-    /// what makes a Claude loser able to abort a Codex link.
+    /// installs one. That reason was that no registration this daemon accepted could
+    /// carry a control link, `supported_agents()` being `[Claude]`; a complete Codex
+    /// registration carries one now. It is still installed by hand because what this
+    /// test needs is a link *belonging to a losing epoch*, and the shortest way to
+    /// arrange that is to put one where the loser would have put it. The destructive
+    /// phase is not Codex-only — it runs for every agent, on every registration —
+    /// which is what makes a Claude loser able to abort a Codex link.
     ///
     /// **Mutation:** make `Inner::owner_of` read `supervisors` instead of the claim
     /// and the middle leg fails. The "park before the ownership check" mutation the
@@ -16750,16 +17230,200 @@ mod tests {
         );
     }
 
-    /// A live Codex run, staged through the store because there is no other way
-    /// to make one: `register_supervisor` fails closed on every agent outside
-    /// `supported_agents`, so no test can arrive at one by registering it. The
-    /// row lands in `codex_sessions` — `upsert_session` routes by agent — and the
-    /// assertion here is that every daemon read still finds it, because a gate
-    /// reading through `all_sessions` is the only reason these tests mean
+    /// A live Codex run, **registered** the way production makes one: the frame
+    /// the Codex coordinator sends, through the real `register_supervisor`.
+    ///
+    /// **This was `stage_codex_session`, and it wrote the row straight into the
+    /// store.** It had to: the doc that stood here said `register_supervisor`
+    /// failed closed on every agent outside `supported_agents`, so no test could
+    /// arrive at a Codex row by registering one, and staging was the only way to
+    /// put the three gates below in front of a Codex session at all.
+    ///
+    /// That stopped being true when Codex joined `Daemon::supported_agents` — see
+    /// [`Daemon::shared_ledgers_admit`] for the decision that day forced, which
+    /// was to keep these refusals and cut them loose from the supported list. With
+    /// registration possible, staging became the weaker fixture rather than the
+    /// only one: a row put into the store by hand proves the refusals hold for a
+    /// row this daemon might never have produced, and the interesting claim is
+    /// that they hold for a session it will actually be handed. So the row is
+    /// produced by the producer now, and the three tests below are refusals
+    /// standing in front of a session that genuinely registered.
+    ///
+    /// The row still lands in `codex_sessions` — `upsert_session` routes by agent
+    /// — and the assertion here is still that every daemon read finds it, because
+    /// a gate reading through `all_sessions` is the only reason these tests mean
     /// anything.
-    fn stage_codex_session(store: &Store, uid: &str, name: &str) {
-        let now = protocol::time::now_rfc3339();
-        store
+    ///
+    /// **The socket names nothing that listens.** The accepted registration spawns
+    /// a control link, which dials, fails and backs off; nothing below waits on it
+    /// or on anything it would produce, so the real registration costs these tests
+    /// no time and no flakiness.
+    ///
+    /// **The supervisor's receiver is dropped when this helper returns, and that
+    /// is deliberate.** A registered session now has a supervisor handle where a
+    /// staged one had none, which changes what the *ungated* path would do — see
+    /// the counterfactual in
+    /// `send_text_to_a_codex_session_is_refused_before_it_claims_anything`. A
+    /// closed channel keeps that counterfactual a prompt refusal instead of a wait
+    /// on a supervisor that will never answer.
+    async fn register_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-ledger-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("the Codex coordinator's own registration frame must be accepted");
+        assert_eq!(
+            daemon.store.get_session(uid).unwrap().unwrap().agent,
+            protocol::agent::AgentKind::Codex,
+            "a registered Codex run must read back as one, or every gate below is \
+             being handed a Claude row and passing for the wrong reason"
+        );
+    }
+
+    /// The same frame with the agent swapped, so a test can register the SAME uid
+    /// as Claude and then try to move it.
+    async fn register_claude_session(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: Some("/usr/local/bin/claude".into()),
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: Some("/usr/local/bin/claude".into()),
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **A uid does not leave Claude, and the rows are why.**
+    ///
+    /// The three gates above ask [`Daemon::shared_ledgers_admit`] of the row's
+    /// agent and then write later — `send_text` immediately, the hook seven awaits
+    /// later, `answer` five. That is only sound if the answer cannot change under
+    /// them, and the store will happily change it: an `upsert_session` whose agent
+    /// disagrees with where the row lives *moves* the row, deliberately, leaving
+    /// the four shared ledgers exactly where they were, because they are keyed by
+    /// uid and nothing walks them.
+    ///
+    /// So a Claude run that has raised one card and is then re-registered as Codex
+    /// would leave a Codex-owned `pending_approvals` row in the one table a
+    /// rolled-back v0.6.0 daemon reads *globally* and deletes — which is the
+    /// precise hazard the three refusals exist to prevent, reached by relabelling
+    /// instead of by writing.
+    ///
+    /// **Mutation:** delete the transition refusal in `register_supervisor` and
+    /// this goes red at the `expect_err` — and the row reads `codex` with its
+    /// Claude card still sitting in `pending_approvals`.
+    #[tokio::test]
+    async fn a_claude_uid_never_becomes_codex_while_its_ledger_rows_stay_behind() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_claude_session(&daemon, uid, "cc-1")
+            .await
+            .expect("a Claude registration is ordinary");
+
+        // A real card, through the real producer, so the rows this is about exist.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "touch /tmp/a" },
+                }),
+                wait: false,
+            })
+            .await;
+        let before = ledger_rows(&db, uid);
+        assert!(
+            before.iter().any(|(_, count)| *count > 0),
+            "the premise: a Claude run owns rows in the shared ledgers. {before:?}"
+        );
+
+        let refusal = register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect_err("a Claude uid must not be relabelled Codex");
+        let refusal = format!("{refusal:#}");
+        assert!(
+            refusal.contains("does not change agents"),
+            "the refusal must name what it is refusing: {refusal}"
+        );
+
+        let row = daemon.store.get_session(uid).unwrap().unwrap();
+        assert_eq!(
+            row.agent,
+            protocol::agent::AgentKind::Claude,
+            "a refused transition must leave the row where it was"
+        );
+        assert_eq!(
+            ledger_rows(&db, uid),
+            before,
+            "and must not have touched the rows it was protecting"
+        );
+    }
+
+    /// Commit a Claude row for `uid`, through the same [`Store::upsert_session`] a
+    /// registration's own acceptance calls.
+    ///
+    /// The test below holds the acceptance gate in order to stage an interleave, so
+    /// it cannot reach that acceptance through `register_supervisor` — it would park
+    /// on the very gate being held. The row commit is the whole of the other
+    /// registration that this interleave depends on: what the loser must not do is
+    /// decide from a picture taken before that row existed.
+    fn commit_claude_row(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        daemon
+            .store
             .upsert_session(&SessionRow {
                 session_uid: uid.into(),
                 session_id: name.into(),
@@ -16769,19 +17433,187 @@ mod tests {
                 claude_session_id: None,
                 transcript_path: None,
                 lifecycle: Lifecycle::Live,
-                created_at: now.clone(),
-                updated_at: now,
-                agent: protocol::agent::AgentKind::Codex,
+                created_at: protocol::time::now_rfc3339(),
+                updated_at: protocol::time::now_rfc3339(),
+                agent: protocol::agent::AgentKind::Claude,
                 codex_thread_id: None,
                 codex_socket: None,
             })
             .unwrap()
             .assert_present();
+    }
+
+    /// **The refusal has to read the row it is about to overwrite, not the one it
+    /// happened to see on the way in** (2e-7b round-2 F2).
+    ///
+    /// The sequential test above cannot expose this ordering: it registers Claude,
+    /// *then* Codex, so the Codex frame's own snapshot already contains the Claude
+    /// row and any check anywhere would refuse. The defect lives in the interleave —
+    /// a Codex registration snapshots **no row**, queues behind a Claude
+    /// registration that commits one, and then makes its transition decision from
+    /// the absent row it saw before it waited. Checked pre-gate, it passes, and
+    /// overwrites a committed Claude row as Codex: the exact shared-ledger hazard
+    /// the refusal exists to prevent, arriving by the route the refusal did not
+    /// cover.
+    ///
+    /// Staged rather than hoped for, and **ordered rather than slept through**
+    /// (round-3 F7). The gate is held from outside so the registration cannot reach
+    /// its decision, and the pre-gate snapshot signals [`snapshot_latch`] the instant
+    /// it returns — so "this frame has already read an absent row" is an observed
+    /// event, not an inference from 80ms and `!is_finished()`. Those two are equally
+    /// true of a task that was never scheduled and of one still inside the read, and
+    /// with the check regressed above the gate such a task would read the committed
+    /// Claude row and refuse for the ordinary reason, leaving this green.
+    ///
+    /// **Mutation:** move the transition check back above the gate (or drop the
+    /// re-read and test `existing` from the top of the function) and this goes red
+    /// at the `expect_err`, with the row reading `codex`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_registration_refuses_a_transition_committed_while_it_waited_for_the_gate() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        let gate = daemon.registration_gate(uid).await;
+        let held = gate.lock().await;
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "the premise: there is no row for this uid, so the frame below snapshots \
+             an absent one"
+        );
+
+        let snapshot_taken = crate::state::snapshot_latch::arm(uid);
+        let codex = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { register_codex_over(&daemon, uid, "cc-1").await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), snapshot_taken.notified())
+            .await
+            .expect(
+                "the registration never reached its pre-gate snapshot — nothing below \
+                 would be staging the interleave this test exists for",
+            );
+        assert!(
+            !codex.is_finished(),
+            "and it cannot get past the acceptance gate this test is holding"
+        );
+
+        // The other registration's row lands while this one waits.
+        commit_claude_row(&daemon, uid, "cc-1");
+
+        drop(held);
+        let refusal = format!(
+            "{:#}",
+            codex
+                .await
+                .unwrap()
+                .expect_err("a uid that became Claude under this frame must still refuse")
+        );
+        assert!(
+            refusal.contains("does not change agents"),
+            "and refuse for the reason it exists for: {refusal}"
+        );
         assert_eq!(
-            store.get_session(uid).unwrap().unwrap().agent,
-            protocol::agent::AgentKind::Codex,
-            "a staged Codex run must read back as one, or every gate below is \
-             being handed a Claude row and passing for the wrong reason"
+            daemon.store.get_session(uid).unwrap().unwrap().agent,
+            protocol::agent::AgentKind::Claude,
+            "the row the loser never saw must survive it"
+        );
+    }
+
+    /// The Codex frame [`register_codex_session`] sends, as a plain `Result` so a
+    /// test can assert the refusal rather than unwrap it.
+    async fn register_codex_over(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-move-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **The mirror of the Claude-carrying-Codex-fields guard**, which the
+    /// producer's own documentation claimed for months before it existed.
+    ///
+    /// `claude_bin` is not decoration: [`Daemon::command_catalog`] runs it to
+    /// enumerate a session's slash commands. A Codex registration carrying one
+    /// names a binary that is not driving the session it describes.
+    ///
+    /// Not producer-reachable — `registration_frame` builds all five identity
+    /// fields from one `Option<CodexSeat>` — which is exactly why it belongs on
+    /// the receiver: this daemon accepts frames from whatever can open its socket,
+    /// and a guard that lives only in a comment is one the next producer discovers
+    /// the hard way.
+    ///
+    /// **Mutation:** delete the guard and the registration is accepted, with
+    /// `claude_bin` sitting in the supervisor handle of a Codex run.
+    #[tokio::test]
+    async fn a_codex_registration_carrying_a_claude_binary_is_refused() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        let refusal = daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: Some("/usr/local/bin/claude".into()),
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: Some("/opt/homebrew/bin/codex".into()),
+                    codex_thread_id: None,
+                    codex_socket: Some("/tmp/nothing-listens.sock".into()),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect_err("a Codex registration naming a Claude binary is internally inconsistent");
+        assert!(
+            format!("{refusal:#}").contains("carried a Claude binary"),
+            "the refusal must name the inconsistency: {refusal:#}"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "a refusal before any write must leave no trace"
         );
     }
 
@@ -16789,9 +17621,13 @@ mod tests {
     async fn send_text_to_a_codex_session_is_refused_before_it_claims_anything() {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
-        stage_codex_session(&store, uid, "cc-1");
-        arm_ledger_tripwire(&db);
         let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // The run is registered before the tripwire is armed. A registration
+        // writes `codex_sessions`, which is none of the four, but scoping the
+        // audit to the call under test is what makes an empty answer mean
+        // something about the gate rather than about the fixture.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
 
         let text = "deploy";
         let hash = protocol::hash::send_text_hash(uid, text, true);
@@ -16807,10 +17643,14 @@ mod tests {
             .await;
 
         // **The reason is asserted, and it is the load-bearing assertion.**
-        // Without the gate this call still ends in a refusal — "no supervisor
-        // attached", raised inside `supervisor_request` — but only after
-        // `claim_text_mutation` has written an `applying` row, and that late
-        // refusal then releases it. So the count below reads zero either way, and
+        // Without the gate this call still ends in a refusal — the registered
+        // supervisor's channel is closed, so `supervisor_request` cannot deliver
+        // — but only after `claim_text_mutation` has written an `applying` row,
+        // and that late refusal then releases it. (Before the run was registered
+        // rather than staged, the late refusal was "no supervisor attached"
+        // instead; it is a different sentence at the same point on the path, and
+        // the point is what this test is about.) So the count below reads zero
+        // either way, and
         // only the reason says which side of the durable write the refusal
         // happened on. The window it leaves is not theoretical: a daemon killed
         // inside it leaves the `applying` row behind, and a rolled-back v0.6.0
@@ -16830,9 +17670,13 @@ mod tests {
     async fn a_permission_request_for_a_codex_session_raises_no_card() {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
-        stage_codex_session(&store, uid, "cc-1");
-        arm_ledger_tripwire(&db);
         let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Registered rather than staged — see `register_codex_session`. The hook
+        // below posts against the same `cc-1` this registration owns, so
+        // `ensure_session` finds the registration's row and preserves its agent,
+        // which is the arm the gate reads.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
 
         // Posted exactly as `raise_prompt` does, inline only because this test is
         // about the answer the hook gets back and that helper discards it.
@@ -16874,9 +17718,12 @@ mod tests {
     async fn answering_a_codex_card_is_refused_before_the_claim() {
         let (store, db) = shared_store_on_disk();
         let uid = TEST_UID;
-        stage_codex_session(&store, uid, "cc-1");
-        arm_ledger_tripwire(&db);
         let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Registered rather than staged — see `register_codex_session`. The card
+        // is still placed by hand below; what the registration buys is that
+        // `answer`'s gate is reading the agent off a row this daemon produced.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
 
         // The card is placed in memory rather than raised through the hook,
         // because the hook gate makes raising one impossible — which is the

@@ -3032,9 +3032,26 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 /// against a Codex row and read all four tables back off the daemon's own
 /// database file, and
 /// `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally` holds the
-/// floor underneath them. They all name `AgentKind::Codex` outright, so the day
-/// Codex joins `Daemon::supported_agents` and the refusals stop firing, they go
-/// red — which is the day the split stops being speculative.
+/// floor underneath them.
+///
+/// **That day came, and it did not go the way this paragraph predicted.** What
+/// stood here was: they all name `AgentKind::Codex` outright, so the day Codex
+/// joins `Daemon::supported_agents` and the refusals stop firing, they go red —
+/// which is the day the split stops being speculative. Codex joined that list
+/// when its coordinator became able to register a session, and the three tests
+/// stayed green, because the refusals did not stop firing. `shared_ledgers_admit`
+/// was rewritten in the same breath to ask `AgentKind::is_claude` instead of
+/// asking the supported list, so the refusal moved off the list rather than
+/// lifting with it — see that method for the decision and why it was taken.
+///
+/// The prediction was wrong in its mechanism and right in its substance: a Codex
+/// run really can be hosted now, and these four tables really are still closed to
+/// it. The three tests were repointed rather than deleted — they now put their
+/// refusals in front of a **registered** Codex session instead of one staged into
+/// the store, which is a stronger claim than the one they were making — and they
+/// are what a Phase-3 split has to change on purpose. The day the split stops
+/// being speculative is therefore the day somebody edits those refusals, not a
+/// day a test goes red on its own.
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"

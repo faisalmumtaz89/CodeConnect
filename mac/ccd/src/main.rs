@@ -255,24 +255,38 @@ async fn main() -> Result<()> {
     // never returns on its own, so a link never vacates the slot, and the only other
     // builder is the next registration for that uid. This is the retry.
     //
-    // **A12.2 IS NOT CLOSED, and this is the mechanism half only.** What this ticker
-    // guarantees is that a link gets BUILT. Which thread that link then binds is a
-    // second question and it is open: a first thread or a `/new` emitting its
-    // one-shot `thread/started` during the accepted observer gap is seen by nobody,
-    // and recovery has only the predecessor's carry and the registration's hint to
-    // chase — neither of which can name a thread that appeared while nothing was
-    // watching. With no hint the link stays unbound; with a stale hint the broker
-    // accepts a resume of a RETIRED thread (`is_session_thread` widens resume to
-    // retired threads on purpose, for 2e-4c switching) while the active head goes
-    // undiscovered.
+    // **A12.2's second half — WHICH thread the rebuilt link binds — is closed now,
+    // and the fix is not here.** This ticker only guarantees that a link gets
+    // BUILT. Which thread it then binds used to be open, and open in the worst way:
+    // a first thread or a `/new` emitting its one-shot `thread/started` during the
+    // accepted observer gap was seen by nobody, and recovery had only the
+    // predecessor's carry and the registration's hint to chase — neither of which
+    // can name a thread that appeared while nothing was watching. With no hint the
+    // link stayed unbound; with a stale hint the broker accepts a resume of a
+    // RETIRED thread (`is_session_thread` widens resume to retired threads on
+    // purpose, for 2e-4c switching) while the active head went undiscovered.
     //
-    // The blocker is that ccd cannot ask. The head lives in the broker's own
-    // `Binding::creation`, `thread/started` is broadcast once and never replayed, and
-    // no ccd-allowlisted method reports the binding — the broker can synthesize an
-    // error and nothing else. Closing it needs new wire (the head replayed on
-    // subscribe, or a head query), which is a design chunk, not a patch. Dormant
-    // meanwhile: the registration hint has no production producer (the supervisor
-    // sends `codex_thread_id: None`) and the command stays gated.
+    // The blocker was that ccd cannot ask: the head lives in the broker's own
+    // `Binding::creation`, and no ccd-allowlisted method reports it. What was
+    // missing was not a query but the *announcement*, and the broker still had it —
+    // so it keeps the `thread/started` it forwarded and replays those exact bytes
+    // to a `ccd` leg, gated on the thread they name being the binding the broker
+    // itself verified (`codex_broker::relay::deliver_head`). Delivery is on the
+    // BIND, not on the subscribe: a leg that arrives while a creation is still in
+    // flight has no head to be given and misses the live broadcast too (the
+    // announcement precedes the creation response — `thread-switch.jsonl:31`), so
+    // the broker asks again every time the head moves, for as long as the leg is
+    // there. Every link this ticker rebuilds therefore learns the head, and so does
+    // the link a daemon restart builds, whether the head was bound before it
+    // connected or binds after.
+    //
+    // What that does NOT cover, stated so the next reader does not over-read it: a
+    // gap in which the **broker itself** is replaced. The replay lives as long as
+    // the broker does, which is as long as the host and therefore the session does,
+    // so there is no such gap today — but a broker that restarted under a live
+    // session would be back to having nothing to replay. The registration hint
+    // still has no production producer (the supervisor sends
+    // `codex_thread_id: None`).
     //
     // Its own ticker rather than a limb of the liveness sweep: that one shells out
     // and can be turned off entirely (`liveness_sweep_secs: 0`), and this must keep

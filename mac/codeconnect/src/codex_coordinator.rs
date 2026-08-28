@@ -1284,6 +1284,16 @@ fn run_dir_is_ours(path: &std::path::Path, uid: &str, launch_nonce: &str) -> boo
 /// is not counted as serving on that pass; the bring-up loop simply looks again.
 const LEG_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The broker's ccd leg under a run dir.
+///
+/// Named once because two places depend on it being the same path: the bring-up
+/// proves this socket is *serving* before `Ready`, and the registration hands
+/// this socket to the daemon as the session's control link. A drift between them
+/// is a session the daemon is told to observe on a path nothing listens to.
+fn ccd_leg(run_dir: &std::path::Path) -> std::path::PathBuf {
+    run_dir.join(crate::codex_host::SOCKET_NAMES[2])
+}
+
 /// Whether a broker leg is **serving**: it is a unix-domain socket AND a
 /// connection attempt reaches a listener within [`LEG_CONNECT_BUDGET`].
 ///
@@ -1523,7 +1533,7 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             );
         };
         let tui_sock = self.run_dir.join("tui.sock");
-        let ccd_sock = self.run_dir.join("ccd.sock");
+        let ccd_sock = ccd_leg(&self.run_dir);
         let mut last_census: Option<std::time::Instant> = None;
         let mut censused_while_bound = false;
         loop {
@@ -1603,8 +1613,10 @@ impl CoordinatorDeps for RealCoordinatorDeps {
 }
 
 /// The `internal-codex-coordinator` subcommand. Parses the launcher's charter,
-/// runs [`coordinate`], and exits 0 (the outcome lives in the durable record;
-/// the launcher reads it there, not from this process's exit).
+/// runs [`coordinate`], and — on `Ready` — **stays, as the session's
+/// supervisor**, exiting only when the session has ended. The launch outcome
+/// lives in the durable record either way; the launcher reads it there, not from
+/// this process's exit.
 pub fn run_coordinator(args: &[String]) -> ! {
     match run_coordinator_inner(args) {
         Ok(_) => std::process::exit(0),
@@ -1825,7 +1837,7 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
         hang_in_new_session: charter.hang_in_new_session,
         hang_in_bringup: charter.hang_in_bringup,
     };
-    coordinate(
+    let outcome = coordinate(
         CoordinateSetup {
             uid: charter.uid,
             launch_nonce: charter.launch_nonce,
@@ -1836,6 +1848,72 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
             created_ms: protocol::time::now_unix_ms(),
         },
         &mut deps,
+    )?;
+    if outcome == CoordinateOutcome::Ready {
+        supervise_ready_session(&deps)?;
+    }
+    Ok(outcome)
+}
+
+/// Hold the session as its supervisor, until it ends.
+///
+/// **Why this process and not a spawned one.** A `ready` record whose
+/// coordinator is proven gone is *session-fatal*: the custodian's `ready` arm
+/// tears the live session down ([`crate::codex_custodian`], "coordinator/
+/// supervisor loss"). That rule was written for the merged role and has been
+/// waiting for it — until now the coordinator exited the moment it committed
+/// `Ready`, so committing readiness is what *started* the teardown, and every
+/// live gate that needed a session to outlive its launch held the coordinator at
+/// `--test-bringup hang` to get one. Supervising here makes the custodian's
+/// premise true rather than working around it, and it costs no new identity: the
+/// process the record already names is the one now doing the supervising, so
+/// there is no window in which the launch is `ready` and nobody is watching, and
+/// nothing has to be re-CAS'd into the record.
+///
+/// **Why no argv.** `codeconnect supervise` exists for `codeconnect claude`,
+/// which has to hand its supervisor across a process boundary. Here the facts
+/// are already in hand — the uid, the tmux name and server, the canonical cwd,
+/// the resolved codex binary, and the run dir whose ccd leg the bring-up just
+/// proved is serving — so they travel as values. No flag, no parse, nothing a
+/// caller can forget.
+///
+/// The cwd registered is the **canonical** one, the same string the broker
+/// fingerprints and the app-server reports, not the launcher's spelling of it: a
+/// session launched under a symlinked path would otherwise be listed at a path
+/// that disagrees with every other record of the same run.
+fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
+    crate::supervisor::run(
+        crate::supervisor::SupervisorArgs {
+            session_id: deps.session_name.clone(),
+            session_uid: Some(deps.uid.clone()),
+            tmux_session: deps.session_name.clone(),
+            tmux_socket: deps.tmux_socket.clone(),
+            cwd: deps.launch_cwd.clone(),
+            claude_bin: None,
+            codex: Some(crate::supervisor::CodexSeat {
+                codex_bin: deps.codex.clone(),
+                ccd_socket: ccd_leg(&deps.run_dir).to_string_lossy().into_owned(),
+                // A launch creates the thread it runs on, so this is the first
+                // visit (D4). A later visit is a `/new` inside the TUI, which
+                // this side never learns and never needs to: the daemon's link
+                // counts visits off the broker's own stream.
+                generation: 1,
+            }),
+            // **The server this launch was pinned to, handed on.** The coordinator
+            // resolved it before it brought the wrapper up and has judged every
+            // bring-up poll against it; the supervisor half needs the same pin for
+            // the opposite question. A Codex launch owns its tmux server outright,
+            // so the last session leaving drains it — and a probe with no pin can
+            // only call that `Unknown` and reset its absence streak for ever, which
+            // is a wedge and not a wait (see [`crate::supervisor::SupervisorArgs::server_a`]).
+            //
+            // `Ready` is only reachable through `bring_up_wrapper`, which refuses to
+            // judge readiness unpinned, so this is `Some` on every path that gets
+            // here. It is passed as the `Option` it is rather than unwrapped: an
+            // unpinned supervisor is the old behaviour, not a panic.
+            server_a: deps.session_a.clone(),
+        },
+        &protocol::config::Config::load(),
     )
 }
 

@@ -2803,13 +2803,17 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // enforces the same rule independently, so a client that ignores this
         // capability still cannot open one.
         terminal_pty: terminal_allowed,
-        // **Omitted while it would only say "Claude".** Advertising the legacy
-        // floor to the phone adds a diagnostic row that means nothing yet and
-        // that a shipped phone would render. It is left empty here (and so
-        // skipped on the wire, keeping the ack byte-identical to minor 14); the
-        // daemon still knows its real set through `supported_agents()` for the
-        // IPC negotiation, and this field is populated for the phone in Phase 2
-        // when it names an agent the daemon can actually drive.
+        // **Omitted while the phone can do nothing with it.** This used to read
+        // "omitted while it would only say Claude", and the set is no longer only
+        // Claude: `supported_agents()` admits Codex now that a coordinator can
+        // register one. The field stays empty anyway, because the reason to send it
+        // was never the daemon's side — it is a diagnostic row a shipped phone
+        // would render, and no shipped phone can act on "codex" yet. Left empty
+        // here it is skipped on the wire, keeping the ack byte-identical to minor
+        // 14; the daemon still knows its real set through `supported_agents()` for
+        // the IPC negotiation, which is the consumer that actually gates on it.
+        // This is populated for the phone with the client work that can render what
+        // naming an agent opens onto.
         supported_agents: Vec::new(),
     }
 }

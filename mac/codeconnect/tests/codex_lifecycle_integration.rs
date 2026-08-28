@@ -186,6 +186,28 @@ impl Sandbox {
             .unwrap_or(false)
     }
 
+    /// End one session on this sandbox's server, the way a TUI exiting does.
+    fn kill_session(&self, name: &str) {
+        let out = Command::new(&self.tmux)
+            .args([
+                "-S",
+                self.sock.to_str().unwrap(),
+                "-f",
+                "/dev/null",
+                "kill-session",
+                "-t",
+            ])
+            .arg(format!("={name}"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tmux kill-session");
+        assert!(
+            out.status.success(),
+            "could not end {name}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
     /// Put an unrelated session on this sandbox's tmux server and keep it there.
     ///
     /// **Every test needs this, and the reason is a real property, not tidiness.**
@@ -642,14 +664,15 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
     // The real host comes up in the pane and binds both broker legs — the exact
     // evidence the coordinator's bring-up waits for.
     //
-    // Observed BEFORE waiting on Ready, and the order is load-bearing. Committing
-    // `Ready` is what *starts* the teardown here: the coordinator exits, and a
-    // `ready` record whose coordinator is proven gone is session-fatal, so the
-    // custodian destroys the session and the run dir goes with it. Asserting the
-    // legs *after* Ready therefore races the teardown and loses — measured, 2 runs
-    // in 20. Waiting for them first is not a workaround: the legs are bound
-    // strictly before Ready is committed, so this is simply observing the
-    // precondition at the point it exists.
+    // This used to have to be observed BEFORE `Ready`, and the reason it no
+    // longer does is the whole of 2e-7b. Committing `Ready` used to *start* the
+    // teardown: the coordinator exited, and a `ready` record whose coordinator is
+    // proven gone is session-fatal, so the custodian destroyed the session about
+    // 200ms later and took the run dir with it (asserting the legs after `Ready`
+    // raced that and lost, 2 runs in 20). The coordinator now stays as the
+    // session's supervisor, which is what the custodian's `ready` arm always
+    // assumed, so the legs are still bound after `Ready` — and the assertions
+    // below prove it rather than merely not racing it.
     let legs = wait_until(Duration::from_secs(30), || broker_legs_bound(&run));
     assert!(
         legs,
@@ -672,17 +695,74 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
         record.contains("\"server_a\"") && record.contains("\"server_birth\""),
         "server A (with a proven birth) must be persisted in the record: {record}"
     );
-    // Bounded. Every other `coord.wait()` in this file follows a SIGKILL, so it
-    // returns as fast as the kernel reaps; this one waits on a coordinator exiting
-    // of its own accord, which is exactly the case that can fail to happen. A
-    // coordinator still running after `ready` is a finding, not a reason to block
-    // the suite forever.
+    // **The launch OUTLIVES its own readiness, and that is new.**
+    //
+    // This assertion is the inverse of the one it replaces. Until the supervisor
+    // seam landed, this test ended by requiring the coordinator to *exit* once it
+    // had committed `ready` — which was an honest description of the code and a
+    // fatal one for the product: the custodian reads a `ready` record whose
+    // coordinator is gone as session-fatal and tears the session down, so no
+    // Codex session could survive its own successful launch. Every live gate that
+    // needed a session to stay up held the coordinator at `--test-bringup hang`
+    // to get one.
+    //
+    // The coordinator now takes the supervisor role instead of exiting, so what
+    // is required here is the opposite and the session is what proves it: give
+    // the custodian many passes (its poll is 200ms) and require BOTH that the
+    // process is still there AND that the pane is. Either alone would be weak —
+    // a still-running coordinator that had let its session be destroyed would
+    // satisfy the first, and a session that has not been noticed yet would
+    // satisfy the second.
+    //
+    // **The window is longer than the supervisor's own exit threshold, and that
+    // is what makes it an assertion.** `EXIT_CONFIRMATIONS` (2) consecutive
+    // absences at a 2s poll means a supervisor that is looking at the WRONG tmux
+    // server — the operator's real one, where this sandbox's uid has never
+    // existed — reads a definite `Gone` and stops within about six seconds. A
+    // two-second window would watch it still running and call that a pass.
+    std::thread::sleep(Duration::from_secs(12));
     assert!(
-        wait_until(Duration::from_secs(30), || matches!(
+        matches!(coord.try_wait(), Ok(None)),
+        "the coordinator must stay as the session's supervisor after ready; it exited"
+    );
+    assert!(
+        sb.has_session("cc-1"),
+        "a ready session must survive its launch: the custodian tore it down"
+    );
+    assert!(
+        broker_legs_bound(&run),
+        "the run dir and both broker legs must survive a committed ready: {}",
+        run.display()
+    );
+    assert_eq!(
+        sb.state(uid).as_deref(),
+        Some("Ready"),
+        "nothing may rewrite a committed ready: {:?}",
+        sb.record_text(uid)
+    );
+
+    // **And it is a supervisor, watching THIS session on THIS server.**
+    //
+    // The session is ended the way a TUI exiting ends it, and nothing is signalled
+    // to the coordinator at all: it has to notice by looking, and then stop. That
+    // is what makes this an assertion about the liveness probe rather than about
+    // process teardown — a supervisor that probed the DEFAULT tmux server instead
+    // of the one its launch was given would read this sandbox's server as
+    // unreachable, call that `Unknown` (correctly — an unreachable server is never
+    // proof of absence), and sit here for ever holding a session that no longer
+    // exists. Which is exactly what it did while the socket was a constant.
+    sb.kill_session("cc-1");
+    assert!(
+        wait_until(Duration::from_secs(45), || matches!(
             coord.try_wait(),
             Ok(Some(_))
         )),
-        "the coordinator must exit once it has committed ready; it is still running"
+        "the supervisor must notice its own session ending and stop; it is still running"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || !run.exists()),
+        "the run dir must be swept with the session it belonged to: {}",
+        run.display()
     );
 }
 

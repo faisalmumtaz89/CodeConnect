@@ -1422,9 +1422,19 @@ pub async fn run(
 
 /// **The link state that survives a reconnect** (round-2 P6b, round-3 P7/P9).
 ///
-/// A connection is disposable; these are not. `thread/started` is broadcast exactly once
-/// per thread and never replayed, so a switch this link learned about and has not finished
-/// chasing could never be rediscovered if it died with the connection that heard it.
+/// A connection is disposable; these are not. The app-server broadcasts `thread/started`
+/// exactly once per thread, to the connections it has at that instant, so a switch this
+/// link learned about and has not finished chasing could never be rediscovered if it died
+/// with the connection that heard it.
+///
+/// **The broker now replays the HEAD to a fresh `ccd` connection, and that narrows this
+/// without replacing it** (`codex_broker::relay::deliver_head`). The replay names
+/// the one thread the broker has verified as the session's binding — where the user is —
+/// so a link whose connection died mid-chase would learn the head again on its next
+/// connection. What the replay does not carry is everything else in here: the thread this
+/// link *adopted* (which may be the one it is owed a recovery on rather than the head), the
+/// fallback, and the unpaid pre-subscription debt. Those are facts about this link's own
+/// history, and no announcement can restate them.
 ///
 /// **The three thread slots are DISTINCT, and the distinction is load-bearing** (round-3
 /// P9). An earlier form collapsed them into one "carried target", which then had to answer
@@ -7947,6 +7957,30 @@ mod tests {
              current thread would be thrown away, and the new thread may never be adopted"
         );
         assert_eq!(conn.visit.generation, 7, "nor bump the generation");
+
+        // **The broker's head delivery cannot walk this link back** (2e-7b round-2
+        // F1's D4 interaction, verified here rather than assumed). The broker
+        // delivers the head it has VERIFIED, which lags the announcement — so the
+        // frame that can arrive while a candidate is held is one naming the thread
+        // the visit is still bound to. It must move neither: it names the bound
+        // thread, so it is `Passed` to the ordinary filter and the candidate stands.
+        assert_eq!(
+            conn.note_switch_candidate(&first),
+            Switch::Passed,
+            "a late announcement of the BOUND thread is not a switch"
+        );
+        assert_eq!(
+            conn.switch_candidate.as_deref(),
+            Some(SWITCHED_THREAD),
+            "and it must not displace the candidate the person actually moved to"
+        );
+        assert_eq!(
+            conn.visit.thread_id.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "nor re-point the visit"
+        );
+        assert_eq!(conn.visit.generation, 7, "nor bump the generation");
+
         assert_eq!(
             conn.apply_switch_candidate().as_deref(),
             Some(LIFECYCLE_THREAD),

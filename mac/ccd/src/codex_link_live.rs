@@ -1543,18 +1543,20 @@ fn observed(methods: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 /// **Where that evidence stops, said out loud.** It records the hint at the
 /// `PushSender` seam — *before* either real sender reads a device row — so it
 /// proves the trigger and the subject, and nothing about delivery. Two further
-/// things stand between this and a phone that buzzes, and both are deliberate
-/// state of the build rather than gaps here: the daemon still refuses a Codex
-/// registration ([`crate::state::Daemon::supported_agents`]), and no device can
-/// be Codex-eligible yet — the shipping iOS client advertises a feature set on
-/// neither `hello` nor `register_push`, and nothing in this phase writes the
-/// column at all, so every stored device decodes as the Claude-only floor and
-/// [`crate::push_queue::recipients`] narrows a Codex doorbell to nobody. That
-/// narrowing is the read side standing on its own, which is precisely why the
-/// write side was deleted rather than repaired. Claim 7b
-/// is therefore the staged half — the doorbell rings, correctly addressed — and
-/// the delivery half arrives with the phone work that can render what it opens
-/// onto.
+/// things stood between this and a phone that buzzes, and **one of the two has
+/// since been removed.** The daemon no longer refuses a Codex registration:
+/// [`crate::state::Daemon::supported_agents`] admits Codex, so a real coordinator
+/// can register a real run and this daemon will host it. What remains is the
+/// device side, and it is deliberate state of the build rather than a gap here —
+/// no device can be Codex-eligible yet, because the shipping iOS client
+/// advertises a feature set on neither `hello` nor `register_push` and nothing in
+/// this phase writes the column at all, so every stored device decodes as the
+/// Claude-only floor and [`crate::push_queue::recipients`] narrows a Codex
+/// doorbell to nobody. That narrowing is the read side standing on its own, which
+/// is precisely why the write side was deleted rather than repaired. Claim 7b is
+/// therefore still the staged half — the doorbell rings, correctly addressed —
+/// and the delivery half arrives with the phone work that can render what it
+/// opens onto.
 fn live_daemon(
     session: &SessionKey,
 ) -> (
@@ -2205,17 +2207,36 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // moves, and it cannot drift.
     let distinct_all: std::collections::BTreeSet<&str> =
         observed_all.iter().map(String::as_str).collect();
-    // Measured on this position across every run of this gate. Four of the five are
-    // methods `codex_adapter` maps to `Vec::new()` — observation noise by construction.
-    // The fifth is `thread/started`, which is the announcement itself: it does carry a
+    // Measured on this position across every run of this gate. All but one are methods
+    // `codex_adapter` maps to `Vec::new()` — observation noise by construction. The
+    // exception is `thread/started`, which is the announcement itself: it does carry a
     // fact, and it is broadcast to merely-initialized connections by design (A1/D2).
     // That is the one delivery an unsubscribed connection is *supposed* to get.
+    //
+    // **`skills/changed` was added in round 3, and its provenance is recorded rather
+    // than assumed.** It began appearing when a `~/.codex/skills` directory came to
+    // exist on this machine; the app-server broadcasts it and this position receives
+    // it, intermittently, depending on when the watcher fires relative to the run.
+    // Two things were checked before widening the set, because this comment is the
+    // only thing standing between "measured" and "whatever showed up":
+    //
+    //   * **Against the adapter**, as the assertion below demands: `skills/changed`
+    //     matches no arm of `CodexAdapter::normalize` and falls to its unknown-method
+    //     drop, so it mints NO fact. Note the weaker footing — the other four are
+    //     listed there explicitly as observation noise, this one is merely unknown —
+    //     which is why it is called out here instead of being quietly appended.
+    //   * **Against this round's diff**: with the broker's head fan-out neutralized
+    //     back to its round-2 behaviour, `skills/changed` still arrived on 5 of 8
+    //     runs. It is environment drift, not something the fan-out change produced —
+    //     and it could not be, since the only frame that change can add to this
+    //     position is the `thread/started` already named above.
     let measured_fanout: std::collections::BTreeSet<&str> = [
         "thread/started",
         "thread/status/changed",
         "thread/goal/cleared",
         "app/list/updated",
         "remoteControl/status/changed",
+        "skills/changed",
     ]
     .into_iter()
     .collect();

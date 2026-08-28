@@ -1223,9 +1223,30 @@ enum Census {
     /// a *proven-dead* pinned server.
     NoServer,
     /// The listing could not be trusted: a probe error, a permission / lost-server
-    /// error, a truncated listing, or an empty one (a zero-session tmux server
-    /// exits, so an empty listing is a rare transient whose server id we cannot
-    /// read to bind). **Never** read as absence.
+    /// error, or a truncated listing. **Never** read as absence.
+    ///
+    /// **An empty listing used to land here, and the reason given was false**
+    /// (round-3 F5). It said a zero-session tmux server exits, so an empty listing
+    /// is a transient whose server id cannot be read. Both halves are wrong, and
+    /// both were measured on the local tmux 3.7b:
+    ///
+    /// ```text
+    /// $ tmux -S s.sock set-option -s exit-empty off   # a user's own config may do this
+    /// $ tmux -S s.sock kill-session -t only           # the last session goes
+    /// $ tmux -S s.sock list-sessions ; echo $?        # (no output)   0
+    /// $ tmux -S s.sock display-message -p '#{pid}'    # 70526         0
+    /// $ tmux -S s.sock kill-server
+    /// $ tmux -S s.sock display-message -p '#{pid}'    # no server running on s.sock   1
+    /// ```
+    ///
+    /// So an empty server does NOT exit when the user has turned `exit-empty` off,
+    /// and its identity IS readable — the same `#{pid}` the rows carry. That made
+    /// the fail-closed answer permanent rather than transient: after killing our
+    /// session on a pinned server A that stays alive and empty, every census
+    /// answered `CannotTell`, `census_served_by` refused it, and the cleanup
+    /// retried for ever with no `SessionEnd`. [`census`] now asks the server
+    /// directly, so "A answered, and it has no sessions" is the positive
+    /// observation it always was. See [`empty_listing_census`].
     CannotTell(String),
 }
 
@@ -1283,6 +1304,65 @@ fn census_from_probe(
     }
 }
 
+/// The argv that asks a server for its own pid, **whether or not it has sessions**.
+///
+/// `display-message -p '#{pid}'` is answered by the server itself, so it needs no
+/// target session; measured on tmux 3.7b it prints the pid on a zero-session server
+/// and fails `no server running on <socket>` when nothing is there — and it does NOT
+/// start a server on a socket that has none (measured: the socket file is still
+/// absent afterwards). That is exactly the distinction [`Census`] needs and the one
+/// `list-sessions` alone cannot make.
+fn server_pid_argv(socket: &str) -> Option<Vec<String>> {
+    let [flag, value] = server_args(socket)?;
+    Some(vec![
+        flag,
+        value,
+        "display-message".to_string(),
+        "-p".to_string(),
+        "#{pid}".to_string(),
+    ])
+}
+
+/// A census whose `list-sessions` came back **clean and empty** (round-3 F5).
+///
+/// An empty listing carries no row to read `#{pid}` off, so on its own it cannot be
+/// bound to a server — and an unbindable answer is `CannotTell`, which no caller may
+/// read as absence. But "our uid is not on server A" is a *positive* observation the
+/// moment the answering server can be named, and it can be: this asks it.
+///
+/// The uid is absent by construction (there are no rows at all), so the presence is
+/// [`RowPresence::Absent`]. Binding it to the PIN is still the caller's job —
+/// [`census_served_by`] compares this pid and its kernel birth against server A, so a
+/// successor that rebound the socket while A is alive is refused here exactly as it is
+/// for a populated listing.
+fn empty_listing_census(bin: &Path, socket: &str) -> Census {
+    let Some(argv) = server_pid_argv(socket) else {
+        return Census::CannotTell(format!("{socket:?} is not addressable"));
+    };
+    match run_probe(bin, &argv) {
+        Ok((true, stdout, _, false)) => match stdout.trim().parse::<i64>() {
+            Ok(server_pid) if server_pid > 0 => Census::Served {
+                server_pid,
+                presence: RowPresence::Absent,
+            },
+            _ => Census::CannotTell(
+                "the tmux listing was empty and the server would not name itself".into(),
+            ),
+        },
+        // The server went between the listing and this question — or was never there.
+        // Same fail-closed reading as any other unserved socket: never absence on its
+        // own, only meaningful beside a proven-dead pin.
+        Ok((false, _, stderr, _)) => match classify_absence(&stderr) {
+            SessionPresence::Gone => Census::NoServer,
+            _ => Census::CannotTell(stderr.trim().to_string()),
+        },
+        Ok((_, _, _, true)) => {
+            Census::CannotTell("the tmux server-identity answer was truncated".into())
+        }
+        Err(why) => Census::CannotTell(why),
+    }
+}
+
 /// Run a bounded census of `uid` on `socket`.
 fn census(socket: &str, uid: &str) -> Census {
     let Some(bin) = tmux_bin() else {
@@ -1292,6 +1372,12 @@ fn census(socket: &str, uid: &str) -> Census {
         return Census::CannotTell(format!("{socket:?} is not addressable"));
     };
     match run_probe(&bin, &argv) {
+        // A clean, untruncated, EMPTY listing is the one answer whose server cannot be
+        // named from the rows. It is asked for directly rather than given up on — see
+        // [`empty_listing_census`] for what that closes.
+        Ok((true, stdout, _, false)) if stdout.trim().is_empty() => {
+            empty_listing_census(&bin, socket)
+        }
         Ok((ok, stdout, stderr, truncated)) => {
             census_from_probe(socket, uid, ok, &stdout, &stderr, truncated)
         }
@@ -1842,7 +1928,16 @@ pub enum OwnedLiveness {
 ///   * The **healthy path stays `Live`**: a real live session on a reachable
 ///     server with the uid present (birth proven, pin matching or absent) ⇒
 ///     `Live`.
-///   * A successful census that lacks our uid is a proven `Gone`.
+///   * **Absence proves `Gone` only on server A** (2e-7b round-2 F3): a successful
+///     census lacking our uid says the *responding* server does not have it, which
+///     is a statement about our session only if the responder IS the server the
+///     session was resolved against. A live A that dropped and recreated its socket
+///     (`SIGUSR1`) can be answered at that address by some other server, and that
+///     server has never heard of our uid — two such polls would have carried
+///     [`EXIT_CONFIRMATIONS`] and reported a false `SessionEnd` for a session that
+///     is still running. Bound to the pin, the same census is `Unknown`, and the
+///     supervisor's own `server_is_proven_dead` arm is what still turns a genuinely
+///     dead A into an exit.
 pub fn owned_liveness(socket: &str, uid: &str, pin: Option<&OwnedSession>) -> OwnedLiveness {
     match census(socket, uid) {
         // Socket loss / no server: cannot tell. NEVER a durable Gone (finding 2).
@@ -1874,8 +1969,32 @@ pub fn owned_liveness(socket: &str, uid: &str, pin: Option<&OwnedSession>) -> Ow
                 }
                 OwnedLiveness::Live
             }
-            // A successful listing lacking our uid ⇒ proven gone.
-            RowPresence::Absent => OwnedLiveness::Gone,
+            // A successful listing lacking our uid ⇒ proven gone — **on the server
+            // the session was resolved against, and on no other**. Unpinned (the
+            // Claude path) this is byte-for-byte the rule it always was. Pinned,
+            // the responder has to BE A: only its pid and birth can be checked,
+            // because the row that carried the rest of the pin is the row that is
+            // absent. That pair is what `server_gone_evidence` binds on too, and
+            // it is a fact about a process rather than about an address.
+            RowPresence::Absent => match pin {
+                None => OwnedLiveness::Gone,
+                Some(pin) if server_pid != pin.server_pid => OwnedLiveness::Unknown(
+                    "the socket is answered by a different server, which cannot prove our \
+                     session is gone"
+                        .into(),
+                ),
+                Some(pin) => match proc_identity::read_birth_identity(server_pid as i32) {
+                    Some(birth) if Some(birth) == pin.server_birth => OwnedLiveness::Gone,
+                    // A pid match with no readable or non-matching birth is a
+                    // same-pid stranger (or a server we cannot identify): not A,
+                    // so not evidence about A's sessions.
+                    _ => OwnedLiveness::Unknown(
+                        "the responding server's birth does not prove it is ours; absence \
+                         proves nothing"
+                            .into(),
+                    ),
+                },
+            },
             // Two claimants / a malformed row is not evidence ours is alive.
             RowPresence::Ambiguous(why) => OwnedLiveness::Unknown(why),
             RowPresence::Malformed(why) => OwnedLiveness::Unknown(why),
@@ -3334,6 +3453,97 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// **A server that stays alive and EMPTY is still an answer** (round-3 F5).
+    ///
+    /// The drained-server closure assumed A exits with its last session. It does not
+    /// when the user's own configuration turns `exit-empty` off — which the
+    /// coordinator loads and does not override — and an alive empty A then answered
+    /// `list-sessions` with a clean, empty, unbindable listing. That was `CannotTell`,
+    /// `census_served_by` refused it, and the destroy retried for ever: the supervisor
+    /// and the run directory wedged with no `SessionEnd`, on a session that had in fact
+    /// been killed successfully.
+    ///
+    /// Driven against real tmux with the option actually off, so the premise is a
+    /// measurement and not a story about a config file. Every other cleanup test either
+    /// keeps a second session alive or lets A die, which is exactly why this arm was
+    /// never exercised.
+    ///
+    /// **Mutation:** send the empty listing back to `census_from_probe` (drop the
+    /// `empty_listing_census` arm) and this returns `Unavailable`, not `Killed`.
+    #[test]
+    fn a_kill_on_a_server_that_stays_alive_and_empty_is_still_proven() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let tmux = |args: &[&str]| {
+            std::process::Command::new(&bin)
+                .args(["-S", &sock, "-f", "/dev/null"])
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+
+        let uid = crate::uid::new().unwrap();
+        let out = tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "cc-empty",
+            "-e",
+            &format!("{}={uid}", crate::ENV_SESSION_UID),
+            "--",
+            "/bin/sh",
+            "-c",
+            "while :; do sleep 1; done",
+        ]);
+        assert!(
+            out.status.success(),
+            "new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The user's config, staged as the server option it really is. `-f /dev/null`
+        // above means nothing else could have set it, so this line is the only reason
+        // the server below outlives its last session.
+        assert!(
+            tmux(&["set-option", "-s", "exit-empty", "off"])
+                .status
+                .success(),
+            "the premise needs exit-empty off"
+        );
+        let pin = resolve_owned_session(&sock, &uid).expect("the pinned session resolves");
+
+        assert_eq!(
+            destroy_owned_session(&sock, &uid, Some(&pin)),
+            CleanupOutcome::Killed,
+            "our session was killed on the server we pinned; an empty A is proof of \
+             that, not a reason to keep retrying"
+        );
+
+        // The premise, asserted AFTER the fact so it cannot be assumed: A is still
+        // alive, it has no sessions, and it names itself when asked.
+        let listing = tmux(&["list-sessions"]);
+        assert!(
+            listing.status.success() && String::from_utf8_lossy(&listing.stdout).trim().is_empty(),
+            "the premise: A survived its last session and lists none — stdout {:?} stderr {:?}",
+            String::from_utf8_lossy(&listing.stdout),
+            String::from_utf8_lossy(&listing.stderr)
+        );
+        let named = tmux(&["display-message", "-p", "#{pid}"]);
+        assert_eq!(
+            String::from_utf8_lossy(&named.stdout).trim(),
+            pin.server_pid.to_string(),
+            "and the server that answered is the pinned A itself"
+        );
+
+        tmux(&["kill-server"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A tmux server restart inside the check/act window: `owned_liveness` and a
     /// destroy pinned to the pre-restart epoch must not act on a same-id session
     /// on the *new* server. Exercised by pinning to a resolved epoch, restarting
@@ -4120,6 +4330,88 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         ));
 
         std::fs::rename(&aside, &sock).unwrap();
+        kill_server(&bin, &sock);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **2e-7b round-2 F3: absence proves nothing unless the server proving it is
+    /// ours.**
+    ///
+    /// `owned_liveness` read `RowPresence::Absent` as a durable `Gone` from
+    /// *whatever* server happened to answer the socket address. A live server A that
+    /// dropped and recreated its socket can have that address answered by some other
+    /// server B, and B has never heard of our uid — so two polls of a session that
+    /// is still running would have carried `EXIT_CONFIRMATIONS` and reported a false
+    /// `SessionEnd`. Driven here against real tmux servers, both directions:
+    ///
+    ///   * B answering A's address ⇒ `Unknown` while A is not proven dead; and
+    ///   * absence **on A itself** ⇒ still the proven `Gone` it always was, so the
+    ///     fix narrows the rule rather than disabling it.
+    ///
+    /// (The third direction — A genuinely dead, so `Unknown` becomes an exit anyway
+    /// — is the supervisor's own `server_is_proven_dead` arm, asserted in
+    /// `codeconnect::supervisor`.)
+    #[test]
+    fn a_different_server_answering_the_address_cannot_prove_our_session_gone() {
+        let Some(bin) = tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-f3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        let uid = crate::uid::new().unwrap();
+
+        // Server A, holding our session and a keeper so A outlives it.
+        start_session(&bin, &sock, "keep", &crate::uid::new().unwrap());
+        start_session(&bin, &sock, "cc-1", &uid);
+        let a = resolve_owned_session(&sock, &uid).expect("A resolves our uid");
+        assert_eq!(owned_liveness(&sock, &uid, Some(&a)), OwnedLiveness::Live);
+
+        // A stays ALIVE but loses the address (its `SIGUSR1` recreation window),
+        // and a different server B comes up answering it. B is a complete, healthy
+        // census that simply does not know our uid.
+        let aside = dir.join("sock-aside");
+        std::fs::rename(&sock, &aside).unwrap();
+        start_session(&bin, &sock, "stranger", &crate::uid::new().unwrap());
+        let b = resolve_owned_session(&sock, &crate::uid::new().unwrap());
+        assert!(
+            b.is_err(),
+            "B does not host our uid — that is the whole point"
+        );
+        assert!(
+            matches!(
+                owned_liveness(&sock, &uid, Some(&a)),
+                OwnedLiveness::Unknown(_)
+            ),
+            "a stranger's absence is not evidence about our session; two of these \
+             used to be a false SessionEnd for a session that is still running"
+        );
+
+        // Put A back and prove it never went anywhere.
+        kill_server(&bin, &sock);
+        std::fs::rename(&aside, &sock).unwrap();
+        assert_eq!(
+            owned_liveness(&sock, &uid, Some(&a)),
+            OwnedLiveness::Live,
+            "A was alive throughout"
+        );
+
+        // The narrowing, not a disabling: absence reported by A ITSELF is still a
+        // proven Gone. The keeper holds A up so the census is `Served`, not
+        // `NoServer`.
+        assert!(std::process::Command::new(&bin)
+            .args(["-S", &sock, "kill-session", "-t", "=cc-1"])
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            owned_liveness(&sock, &uid, Some(&a)),
+            OwnedLiveness::Gone,
+            "our own server saying the uid is not there is exactly what Gone means"
+        );
+
         kill_server(&bin, &sock);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -215,12 +215,39 @@ async fn read_loop(
             ClientFrame::NegotiateSupport { agent, .. } => {
                 let supported_agents = daemon.supported_agents();
                 let supported = supported_agents.contains(&agent);
-                let _ = tx
+                // **Logged because this answer is otherwise unobservable from
+                // outside the asking process** (2e-7b round-2 F5). The launcher
+                // refuses only on a decoded `false`, and treats an absent or
+                // undecodable answer exactly like a hosting one — so "the launcher
+                // got past the preflight" is not evidence that any daemon said yes.
+                // A harness could previously only ask on a SECOND connection of its
+                // own, which is a different round trip against a daemon that may
+                // have died in between. This is the daemon reporting what it told
+                // the connection that actually asked.
+                //
+                // **Logged AFTER the enqueue, and only if it succeeded** (round-3
+                // F6). Written first and with the result discarded, the line was an
+                // affirmative the harness could read while the answer was dropped on
+                // the floor — and a dropped answer is an EOF the launcher reads as
+                // `Indeterminate`, which reaches the same launch gate. The one thing
+                // the count assertion has to exclude was the one thing it could not
+                // see. Bound honestly at its real strength: this says the answer was
+                // handed to THIS connection's write queue, not that the bytes were
+                // flushed — a daemon killed between the two still logs it, the same
+                // strength the supervisor's own "delivered" has.
+                let answered = tx
                     .send(DaemonFrame::SupportedAgents {
                         supported_agents,
                         supported,
                     })
-                    .await;
+                    .await
+                    .is_ok();
+                if answered {
+                    crate::log_info!(
+                        "ipc: negotiate_support for {} answered supported={supported}",
+                        agent.as_str()
+                    );
+                }
             }
             ClientFrame::SupervisorResponse { id, result } => {
                 let responder = inflight

@@ -114,7 +114,10 @@ cleanup() {
   # started it, and whatever else shares that group. An unset variable here
   # means the process was never started, so there is nothing to kill.
   local pid
-  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}"; do
+  # `NEWPID` included (round-2 F8): a failure after step 7(g) spawns the sandbox
+  # daemon and before its explicit kill would otherwise leak it, and it is the one
+  # child here holding the home directory this script removes.
+  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true
@@ -676,19 +679,26 @@ echo "  (d) the new binary reopened with nothing to repair and put no Codex uid 
 # (e) WITH THE WITHHOLD: the same daemon, the same run, and the negotiation's
 # answer read as the supervisor now reads it — so no Register is sent at all.
 #
-# **Why this half is a hand-written frame and (f) below is not.** Driving the
-# real supervisor here would need it to send a Codex `Register`, and nothing that
-# ships can: `supervisor::registration_frame` writes `agent: AgentKind::Claude`
-# as a literal, `codeconnect supervise` parses only `--session`,
-# `--session-uid`, `--tmux-session`, `--cwd` and `--claude-bin`, and there is no
-# environment variable on that path — `codeconnect codex` itself still `bail!`s
-# before it launches anything. `withhold_unless_hosted` returns `Ok` immediately
-# for Claude, so a real supervisor pointed at this daemon would register, not
-# withhold: it would measure the opposite of this arm's claim. The seam does not
-# exist yet, and inventing an `--agent` flag to make a harness reachable would be
-# shipping production surface for a test. So the wire is written by hand HERE,
-# where the input is one the live system cannot yet produce, and the real binary
-# is run in (f), where it can.
+# **Why this half is still a hand-written frame, and what changed under it.**
+# The reason used to be that nothing that ships could send a Codex `Register` at
+# all: `registration_frame` wrote `agent: AgentKind::Claude` as a literal. That
+# is no longer true — 2e-7b built the producer, and `registration_frame` now
+# reads the agent off a Codex seat. What is deliberately still absent is an
+# *argv* path to it: the producer is the Codex coordinator, which supervises its
+# own launch in-process and hands the seat across as values, so there is no
+# `--agent` flag on `codeconnect supervise` for a harness to reach for. Reaching
+# the real producer therefore means launching a real Codex session — a real
+# codex binary, a real tmux server, a real app-server and TUI — which is exactly
+# what this harness is built not to need, and what the live registration gate
+# does instead (`codeconnect`'s `live_codex_registration`).
+#
+# So the frame stays hand-written, and it is not fiction: it is the frame
+# `supervisor::registration_frame` produces from a seat, asserted field by field
+# on the wire — agent, control-link socket, generation, no `claude_bin` and no
+# thread id — by
+# `supervisor::tests::a_codex_registration_is_sent_once_the_daemon_says_it_hosts_codex`.
+# What (g) below adds is the half of the producer that this harness CAN drive
+# with the real binary and no codex session at all: the launcher's preflight.
 q "DELETE FROM deleted_sessions WHERE session_uid='$CX';
    DELETE FROM events WHERE session_uid='$CX';
    INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
@@ -754,10 +764,37 @@ SUPLOG="$H/logs/supervisor-cc-sup-$SUP_UID.log"
 # than an absolute expectation.
 daemon_ipc_conns() { lsof -nP -a -p "$1" -U 2>/dev/null | tail -n +2 | wc -l | tr -d ' '; }
 
+# Wait until a daemon under `$1` (a CODECONNECT_HOME) is **accepting**, not until
+# its socket file exists.
+#
+# Every daemon in this script binds the same `$H/ccd.sock`, and `ccd` creates the
+# file before it accepts on it — so `[ -S ... ]` can be satisfied instantly by the
+# inode the PREVIOUS daemon left behind, and the arm that follows then races a
+# daemon that is not up yet. A connect is the only readiness signal that is about
+# this daemon. (The Rust live harness makes the same correction for the same
+# reason.)
+daemon_accepting() {
+  for _ in $(seq 1 60); do
+    if CC_SOCK="$1/ccd.sock" python3 - <<'PY'
+import os, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(1)
+try:
+    s.connect(os.environ["CC_SOCK"])
+except Exception:
+    sys.exit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 CODEX_BEFORE_SUP="$(codex_state)"
 CODECONNECT_HOME="$H" "$OLD" > "$H/old-live4.log" 2>&1 &
 OLDPID=$!
-for _ in $(seq 1 40); do [ -S "$H/ccd.sock" ] && break; sleep 0.25; done
+daemon_accepting "$H" || { echo "FAIL: the old daemon did not accept for step 7(f)"; tail -20 "$H/old-live4.log"; exit 1; }
 kill -0 $OLDPID 2>/dev/null || { echo "FAIL: the old daemon did not come up for step 7(f)"; tail -20 "$H/old-live4.log"; exit 1; }
 CONNS_BASE="$(daemon_ipc_conns $OLDPID)"
 # An lsof that reports nothing for a daemon that is demonstrably listening would
@@ -887,6 +924,129 @@ echo "      report_exit replayed that registration onto a row deleted under it a
 echo "      run. The daemon's IPC descriptors went $CONNS_BASE -> $CONNS_MAX -> $CONNS_AFTER: one"
 echo "      connection at a time through the whole reconnect backoff, and none left behind."
 
+# (g) THE LAUNCHER'S PREFLIGHT, with the real new binary against the real old daemon.
+#
+# The withhold in (e) is what protects this daemon's history once a session is
+# running. This is the half in front of it: `codeconnect codex` asks the same
+# question, on the same wire, BEFORE it creates anything, and refuses to start a
+# session that the daemon it can see could never be told about. Without it the
+# operator gets a working TUI that no fleet, phone or `sessions list` will ever
+# show, and no error anywhere.
+#
+# **Why a stub codex, and what it does not stand in for.** The launcher resolves
+# and version-pins its binary before it asks the daemon anything, so reaching the
+# preflight at all needs *a* codex on the path — and a native one: a `#!` script
+# is refused as a wrapper by design. The stub is a four-line C program that
+# answers `--version` with a pinned version and nothing else, which is all the
+# steps before the preflight ask of it. It stands in for the binary, never for
+# the daemon: both daemons below are real, and the answers they give are their
+# own. `cc` is present by construction — cargo linked the binaries this harness
+# is running a few hundred lines above.
+STUB="$H/stub"
+mkdir -p "$STUB"
+cat > "$STUB/codex.c" <<'STUBC'
+#include <stdio.h>
+int main(void) { printf("codex-cli 0.147.0\n"); return 0; }
+STUBC
+cc -o "$STUB/codex" "$STUB/codex.c" 2>"$H/stub-cc.log" \
+  || { echo "FAIL: could not build the stub codex, so the preflight arm cannot run"; cat "$H/stub-cc.log"; exit 1; }
+
+CODECONNECT_HOME="$H" "$OLD" > "$H/old-live6.log" 2>&1 &
+OLDPID=$!
+daemon_accepting "$H" || { echo "FAIL: the old daemon did not accept for step 7(g)"; tail -20 "$H/old-live6.log"; exit 1; }
+kill -0 $OLDPID 2>/dev/null || { echo "FAIL: the old daemon did not come up for step 7(g)"; tail -20 "$H/old-live6.log"; exit 1; }
+CODEX_BEFORE_PREFLIGHT="$(codex_state)"
+# **This daemon's own descriptor baseline**, taken here rather than reused.
+# `CONNS_BASE` belongs to the arm-(f) daemon, which was killed hundreds of lines
+# ago; comparing a DIFFERENT process's count against it is comparing two
+# unrelated numbers that happen to be equal for a daemon whose listener count is
+# the same. Same timing doctrine as the `codex_state` bracket above: capture it
+# against the process the claim is about, immediately before the thing being
+# measured.
+CONNS_G_OLD="$(daemon_ipc_conns $OLDPID)"
+[ "$CONNS_G_OLD" -ge 1 ] \
+  || { echo "FAIL: lsof sees no unix socket for the step 7(g) daemon, so its connection count proves nothing"; kill $OLDPID 2>/dev/null; exit 1; }
+PRE_RC=0
+CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
+  "$NEWCC" codex > "$H/preflight-old.log" 2>&1 || PRE_RC=$?
+[ "$PRE_RC" -ne 0 ] \
+  || { echo "FAIL: the launcher started a Codex session against a daemon that cannot host one"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
+grep -q "refusing to launch" "$H/preflight-old.log" \
+  || { echo "FAIL: the launcher's refusal is not the preflight's:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
+grep -q "predates the agent seam" "$H/preflight-old.log" \
+  || { echo "FAIL: the refusal does not name what the daemon actually answered:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
+# Non-mutating, and measured rather than argued: the question is one frame on a
+# fresh connection and the daemon's own state is unchanged by having been asked.
+[ "$(codex_state)" = "$CODEX_BEFORE_PREFLIGHT" ] \
+  || { echo "FAIL: the preflight mutated Codex state"; kill $OLDPID 2>/dev/null; exit 1; }
+[ "$(daemon_ipc_conns $OLDPID)" = "$CONNS_G_OLD" ] \
+  || { echo "FAIL: the preflight left a connection behind on the old daemon"; kill $OLDPID 2>/dev/null; exit 1; }
+kill $OLDPID 2>/dev/null; wait $OLDPID 2>/dev/null
+
+# **The falsifiability arm.** A launcher that refused for some unrelated reason —
+# a bad stub, a missing home, an argv it disliked — would satisfy every check
+# above. So the identical command is run again with the only difference being
+# WHICH DAEMON IS LISTENING, and it must get further: past the preflight, all the
+# way to the gate that is still in front of the launch itself. Same binary, same
+# stub, same home; a different answer on the wire.
+CODECONNECT_HOME="$H" "$NEW" > "$H/new-live-preflight.log" 2>&1 &
+NEWPID=$!
+daemon_accepting "$H" || { echo "FAIL: the new daemon did not accept for step 7(g)"; tail -20 "$H/new-live-preflight.log"; exit 1; }
+kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for step 7(g)"; tail -20 "$H/new-live-preflight.log"; exit 1; }
+# **The affirmative answer, DRIVEN — on the LAUNCHER'S OWN connection.**
+#
+# Reaching the launch gate is not proof that this daemon said yes:
+# `refuse_unless_hostable` refuses only a decoded "no", so an `Absent` or
+# `Indeterminate` preflight — a daemon that never came up, a socket that was not
+# there, a reply that could not be parsed — reaches the same gate and prints the
+# same line. That would make this arm's whole claim ("a different answer on the
+# wire") true of no answer at all.
+#
+# Round-2 F5: asking on a SECOND connection of the harness's own did not fix that.
+# The probe's `supported:true` came back on a different round trip, so killing or
+# wedging the daemon between the probe and the launcher left this arm passing on
+# an answer the launcher never received. The observation has to be of the
+# launcher's own negotiation, and the only party that sees that is the daemon.
+#
+# So the harness asks NOTHING here, and afterwards reads what the daemon logged.
+# The count is what ties the line to the launcher: this daemon is fresh, this arm
+# runs one command against it, and `daemon_accepting` only connects — so exactly
+# one negotiation reached it, and it was the launcher's.
+CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
+  "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
+# The daemon writes its line once the answer is ON the connection's write queue
+# (round-3 F6: written before the enqueue and with the result discarded, this line
+# was an affirmative that a DROPPED answer could still produce). The enqueue and the
+# log file write race for a moment; give the line a bounded chance to land rather
+# than reading an empty file and calling it a failure.
+for _ in $(seq 1 40); do
+  grep -q 'negotiate_support for' "$H/new-live-preflight.log" && break
+  sleep 0.1
+done
+NEGOTIATIONS="$(grep -c 'negotiate_support for' "$H/new-live-preflight.log" || true)"
+[ "$NEGOTIATIONS" = "1" ] \
+  || { echo "FAIL: expected exactly one negotiation on this daemon — the launcher's — and saw $NEGOTIATIONS:"; grep 'negotiate_support' "$H/new-live-preflight.log" || true; exit 1; }
+grep -q 'negotiate_support for codex answered supported=true' "$H/new-live-preflight.log" \
+  || { echo "FAIL: the daemon did not answer the LAUNCHER's support question affirmatively:"; grep 'negotiate_support' "$H/new-live-preflight.log" || true; exit 1; }
+kill $NEWPID 2>/dev/null; wait $NEWPID 2>/dev/null; NEWPID=""
+# `if`, not `&&`: under this script's `set -e`, a `grep -q … && { … }` whose grep
+# finds nothing is a compound statement that returned non-zero, so the script
+# would exit HERE — on the PASSING path, with every assertion below silently
+# unrun. The same shape as the `timeout`/143 note above.
+if grep -q "refusing to launch" "$H/preflight-new.log"; then
+  echo "FAIL: the preflight refused a daemon that hosts Codex, so the refusal above proves nothing about the daemon"
+  cat "$H/preflight-new.log"
+  exit 1
+fi
+grep -q "not yet enabled" "$H/preflight-new.log" \
+  || { echo "FAIL: against a hosting daemon the launcher did not reach the gate; it stopped somewhere else:"; cat "$H/preflight-new.log"; exit 1; }
+echo "  (g) the REAL launcher refused to start a Codex session against the rolled-back daemon,"
+echo "      naming the daemon's own answer, mutating nothing and leaving no connection — and"
+echo "      the same command against the new daemon got past the preflight to the launch gate,"
+echo "      with the new daemon's OWN log showing exactly one negotiation — the launcher's —"
+echo "      answered supported=true, so the affirmative control is the launcher's round trip"
+echo "      rather than a second one the harness made on its own connection"
+
 echo "PASS: a REAL v3-binary-opens-a-v4-database downgrade, driven 4 -> 3 -> 4 by the"
 echo "      real binaries: the old daemon rewrote user_version to its own 3, as measured,"
 echo "      and that is harmless because the isolation never rested on the number."
@@ -920,7 +1080,14 @@ echo "      daemon: its serve_once registered over real IPC, re-registered acros
 echo "      daemon bounce, and its report_exit replayed the registration onto a row"
 echo "      deleted under it before ending the run — with the daemon holding exactly one"
 echo "      IPC descriptor for it at a time through the whole reconnect backoff, and"
-echo "      none of them left behind. The Codex half of step 7 stays hand-written for"
-echo "      one reason and it is written down beside it: registration_frame hardcodes"
-echo "      agent=Claude and no flag or environment variable overrides it, so no"
-echo "      shipping binary can send the Codex Register the withhold refuses."
+echo "      none of them left behind. The Codex Register of step 7 stays hand-written for"
+echo "      one reason and it is written down beside it: the producer is now real, but it"
+echo "      is the Codex coordinator supervising its own launch, so reaching it means"
+echo "      running a real codex session — which this harness is built not to need."
+echo ""
+echo "      What the real new binary DID drive here is the half in front of the withhold:"
+echo "      \`codeconnect codex\` asked the rolled-back daemon the same question, read the"
+echo "      same undecodable-variant error, and REFUSED TO START — naming the daemon's own"
+echo "      answer, mutating no Codex state and leaving no connection behind. The identical"
+echo "      command against the new daemon got past that preflight to the launch gate, so"
+echo "      the refusal is the daemon's doing and not the launcher's mood."

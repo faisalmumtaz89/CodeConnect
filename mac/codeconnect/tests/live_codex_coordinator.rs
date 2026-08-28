@@ -351,7 +351,14 @@ struct LiveSandbox {
     base: PathBuf,
     home: PathBuf,
     codex_home: PathBuf,
-    sock: PathBuf,
+    /// This sandbox's private `TMUX_TMPDIR`.
+    ///
+    /// The server is addressed the way production addresses its own — by the
+    /// NAME `codeconnect`, not by a path — and isolated by pointing `TMUX_TMPDIR`
+    /// at this directory instead. That is what lets `codeconnect ls`, which
+    /// hardcodes that name, look at the same server the coordinator created;
+    /// a path-addressed sandbox server is one no shipping command can reach.
+    tmux_tmpdir: PathBuf,
     tmux: PathBuf,
     uid: String,
     nonce: String,
@@ -496,17 +503,32 @@ impl LiveSandbox {
             .take(16)
             .collect();
         let run_dir = PathBuf::from(format!("/tmp/cch.{uid_slug}.{nonce_slug}"));
-        let sock = base.join("t.sock");
+        let tmux_tmpdir = base.join("tmux");
+        create_private_dir(&tmux_tmpdir).expect("mk TMUX_TMPDIR");
         LiveSandbox {
             base,
             home,
             codex_home,
-            sock,
+            tmux_tmpdir,
             tmux: tmux_bin().expect("tmux checked by the gate"),
             uid,
             nonce,
             run_dir,
         }
+    }
+
+    /// A tmux command against this sandbox's own server.
+    ///
+    /// Named `codeconnect` — production's name — and isolated by `TMUX_TMPDIR`,
+    /// so every party addresses one server: the coordinator, the supervisor it
+    /// becomes, and `codeconnect ls`.
+    fn tmux_cmd(&self) -> Command {
+        let mut command = Command::new(&self.tmux);
+        command
+            .args(["-L", protocol::TMUX_SOCKET_NAME])
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
+            .stdin(Stdio::null());
+        command
     }
 
     fn spawn_coordinator(&self, codex: &Path) -> Child {
@@ -521,7 +543,7 @@ impl LiveSandbox {
             .args(["--custodian-nonce", "livecust"])
             .args(["--session-name", "cc-live"])
             .args(["--cwd", "/tmp"])
-            .args(["--tmux-socket", self.sock.to_str().unwrap()])
+            .args(["--tmux-socket", protocol::TMUX_SOCKET_NAME])
             .args(["--deadline-ms", "60000"])
             .args(["--codex", codex.to_str().expect("codex path is utf-8")])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
@@ -550,6 +572,7 @@ impl LiveSandbox {
             .args(extra)
             .env("CODECONNECT_HOME", &self.home)
             .env("CODECONNECT_TMUX", &self.tmux)
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
             .env("TERM", "xterm-256color")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -574,16 +597,8 @@ impl LiveSandbox {
     }
 
     fn has_session(&self) -> bool {
-        Command::new(&self.tmux)
-            .args([
-                "-S",
-                self.sock.to_str().unwrap(),
-                "-f",
-                "/dev/null",
-                "has-session",
-                "-t",
-                "=cc-live",
-            ])
+        self.tmux_cmd()
+            .args(["-f", "/dev/null", "has-session", "-t", "=cc-live"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -669,8 +684,9 @@ impl Drop for LiveSandbox {
                 .stderr(Stdio::null())
                 .status();
         }
-        let _ = Command::new(&self.tmux)
-            .args(["-S", self.sock.to_str().unwrap(), "kill-server"])
+        let _ = self
+            .tmux_cmd()
+            .arg("kill-server")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -769,20 +785,35 @@ fn the_coordinator_commits_ready_on_the_hosts_evidence_and_teardown_leaves_nothi
     );
 
     // --- 4. Teardown, by the custodian --------------------------------------
-    // The coordinator exits once ready is committed; a `ready` record whose
-    // coordinator is proven gone is session-fatal, so the custodian destroys the
-    // session itself. Nothing here issues a kill.
-    // Bounded: a coordinator that does not exit must cost this budget, not the
-    // suite. Its exit is expected within moments of committing `ready` — that IS
-    // the coordinator's whole life — so a timeout here is a real finding.
-    let exited = wait_until(Duration::from_secs(30), || {
-        matches!(coord.try_wait(), Ok(Some(_)))
-    });
+    //
+    // **This used to begin by waiting for the coordinator to exit, and that was
+    // the defect, not the design.** Committing `ready` ended the coordinator, a
+    // `ready` record with no coordinator is session-fatal, and so the custodian
+    // destroyed every successfully launched session about a poll later. The
+    // coordinator now stays as the session's supervisor — the role the
+    // custodian's rule was always written for — so `ready` is followed by a
+    // session that is simply UP.
+    //
+    // Which means teardown has to be asked for. Ending the supervisor is how,
+    // and it drives exactly the rule this test always meant to exercise: a ready
+    // session whose supervisor is proven gone is torn down by the custodian,
+    // with nothing else issuing a kill.
     assert!(
-        exited,
-        "the coordinator must exit once it has committed ready; it is still running"
+        matches!(coord.try_wait(), Ok(None)),
+        "a ready session must outlive its own launch; the coordinator exited"
     );
-    println!("coordinator exited; the custodian now owns the ready session");
+    assert!(
+        sb.has_session(),
+        "a ready session must still be running before anything asks for a teardown"
+    );
+    println!("READY AND UP — the supervisor holds the session; asking for teardown now");
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    println!("supervisor lost; the custodian now owns the ready session");
     assert_torn_down_clean(&sb, &tag);
     println!(
         "PASS the_coordinator_commits_ready_on_the_hosts_evidence_and_teardown_leaves_nothing"
@@ -859,10 +890,9 @@ fn a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane() {
     // the same directory". tmux is asked who its pane's process is, and the chain
     // is walked from there: pane pid → host → the codex children.
     let pane_pid: i32 = {
-        let out = Command::new(&sb.tmux)
+        let out = sb
+            .tmux_cmd()
             .args([
-                "-S",
-                sb.sock.to_str().unwrap(),
                 "-f",
                 "/dev/null",
                 "list-panes",
@@ -1163,4 +1193,421 @@ fn assert_torn_down_clean(sb: &LiveSandbox, tag: &str) {
     println!(
         "TEARDOWN PASS — session destroyed by the custodian, no leaked processes, run dir removed"
     );
+}
+
+// ============================ THE REGISTRATION GATE ============================
+//
+// A9.2: until 2e-7b there was no producer of a Codex registration at all —
+// `registration_frame` named Claude as a literal, no Codex launch ran a
+// supervisor, and so `ccd` had nothing to admit, `codeconnect ls` rendered a
+// Codex pane's uid as `—`, and every Codex row any test ever saw had been staged
+// into the store by hand. This is the gate for the producer, driven end to end
+// with real binaries: a real `ccd`, a real coordinator, a real codex TUI in a
+// real tmux pane, and the real CLI reading it back.
+
+/// Build `ccd` and return the binary this tree just produced.
+///
+/// Built rather than assumed present, for the reason `resolve_codeconnect` in
+/// `ccd`'s own live harness records: `cargo test -p codeconnect` does not rebuild
+/// `ccd`, and a live gate that can run against a daemon built before the change
+/// under test is not a gate. `cargo build` is a no-op when nothing changed.
+fn resolve_ccd() -> PathBuf {
+    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "-p", "ccd"])
+        .current_dir(workspace_root())
+        .stdin(Stdio::null())
+        .status()
+        .expect("run cargo build -p ccd");
+    assert!(status.success(), "cargo build -p ccd failed");
+    let exe = std::env::current_exe().expect("this test binary's own path");
+    let profile_dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("target/<profile>/deps/<test binary>");
+    let bin = profile_dir.join("ccd");
+    assert!(
+        bin.is_file(),
+        "ccd is not built at {} (same CARGO_TARGET_DIR?)",
+        bin.display()
+    );
+    bin
+}
+
+/// The workspace directory `cargo build` must run in — derived from this file's
+/// own location at compile time, so it does not depend on the caller's cwd.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("<workspace>/codeconnect")
+        .to_path_buf()
+}
+
+impl LiveSandbox {
+    /// Start a real `ccd` on this sandbox's home and wait for its IPC socket.
+    ///
+    /// A private `ws_port` because this daemon shares a machine with whatever
+    /// the operator is already running, and two daemons on one port is a
+    /// startup failure that would look like an unrelated timeout here.
+    fn spawn_daemon(&self, ccd: &Path) -> Child {
+        // Port 0: the kernel picks one. This daemon shares a machine with
+        // whatever the operator is already running and with a second daemon this
+        // test starts after the bounce, and a port collision is a startup failure
+        // that arrives here as an unrelated timeout. Nothing in this gate dials
+        // the WS listener; only the IPC socket is used.
+        std::fs::write(self.home.join("config.json"), "{\"ws_port\": 0}")
+            .expect("write the sandbox daemon config");
+        let log = std::fs::File::create(self.base.join("ccd.log")).expect("ccd log");
+        let child = Command::new(ccd)
+            .env("CODECONNECT_HOME", &self.home)
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
+            .env("CODECONNECT_TMUX", &self.tmux)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().expect("clone the log")))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("spawn the real ccd");
+        // Readiness is a CONNECT, not the presence of the inode: `ccd` creates
+        // the socket file before it accepts on it, and a daemon that exits
+        // during startup leaves the file behind — so `exists()` reports ready
+        // for a daemon that is already dead.
+        assert!(
+            wait_until(Duration::from_secs(30), || {
+                std::os::unix::net::UnixStream::connect(self.home.join("ccd.sock")).is_ok()
+            }),
+            "the real daemon never accepted on its IPC socket. ccd.log:\n{}",
+            read_file(&self.base.join("ccd.log"))
+        );
+        child
+    }
+
+    /// One IPC round trip against this sandbox's daemon.
+    fn ipc(&self, frame: &protocol::ipc::ClientFrame) -> protocol::ipc::DaemonFrame {
+        use std::io::{BufRead, BufReader, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(self.home.join("ccd.sock"))
+            .expect("connect to the sandbox daemon");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound the read");
+        let mut line = serde_json::to_vec(frame).expect("encode");
+        line.push(b'\n');
+        stream.write_all(&line).expect("write the frame");
+        stream.flush().expect("flush");
+        let mut response = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .expect("read the reply");
+        serde_json::from_str(response.trim())
+            .unwrap_or_else(|e| panic!("undecodable reply {response:?}: {e}"))
+    }
+
+    /// What the daemon says its fleet is — its own answer, the one every client
+    /// gets, rather than a query this harness composes against the database.
+    fn fleet(&self) -> Vec<protocol::event::SessionSummary> {
+        match self.ipc(&protocol::ipc::ClientFrame::ListSessions) {
+            protocol::ipc::DaemonFrame::Sessions { sessions } => sessions,
+            other => panic!("unexpected reply to list_sessions: {other:?}"),
+        }
+    }
+
+    fn this_run(&self) -> Option<protocol::event::SessionSummary> {
+        self.fleet().into_iter().find(|s| s.session_uid == self.uid)
+    }
+
+    /// Run the real CLI against this sandbox, exactly as a person would.
+    fn cli(&self, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
+            .args(args)
+            .env("CODECONNECT_HOME", &self.home)
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
+            .env("CODECONNECT_TMUX", &self.tmux)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("run codeconnect {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "codeconnect {args:?} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+/// **A9.2, end to end: a real Codex launch registers itself with a real daemon,
+/// the fleet shows it, and a daemon bounce neither loses it nor churns it.**
+///
+/// Every previous live gate here had to hold the coordinator at `--test-bringup
+/// hang` to keep a session up, because committing `ready` used to *end* the
+/// coordinator and a `ready` record with no coordinator is session-fatal. This
+/// one commits `ready` for real and the session stays, because the coordinator
+/// is now the supervisor — which is also the only reason there is a registration
+/// to observe at all.
+///
+/// What is deliberately NOT asserted: anything about a phone. No device is
+/// paired in this sandbox and none could advertise Codex if it were (`ccd`'s WS
+/// capabilities still send no `supported_agents`), so a "no Codex push was
+/// delivered" assertion here would pass against any build whatsoever. That
+/// narrowing is held where it can fail — the `push_queue` recipient tests.
+#[test]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
+    let Some(codex) = live_gate() else { return };
+    let ccd = resolve_ccd();
+    let sb = LiveSandbox::new("register");
+    let mut daemon = sb.spawn_daemon(&ccd);
+
+    // The fleet is empty before the launch, so every assertion below is about a
+    // row this run produced rather than one that was already lying around.
+    assert!(
+        sb.fleet().is_empty(),
+        "a fresh sandbox daemon must start with no sessions: {:?}",
+        sb.fleet()
+    );
+
+    let mut coord = sb.spawn_coordinator(&codex);
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .record_field("state")
+            .as_deref()
+            == Some("Ready")),
+        "the coordinator never committed ready. record: {:?}",
+        sb.record_text()
+    );
+
+    // **The registration.** The supervisor the coordinator became introduces the
+    // session; the daemon admits it because `supported_agents()` now names Codex.
+    assert!(
+        wait_until(Duration::from_secs(30), || sb.this_run().is_some()),
+        "a ready Codex launch never appeared in the daemon's fleet. ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    let row = sb.this_run().expect("the row");
+    assert_eq!(
+        row.agent,
+        protocol::agent::AgentKind::Codex,
+        "the run must be filed as the agent it is"
+    );
+    assert_eq!(row.session_id, "cc-live");
+    assert_eq!(row.tmux_session, "cc-live");
+    assert_eq!(
+        row.lifecycle,
+        protocol::event::Lifecycle::Live,
+        "a running session must be live in the fleet"
+    );
+    // The CANONICAL cwd, which on this platform is not the one the coordinator
+    // was given: `/tmp` is a symlink to `/private/tmp`, and the registration
+    // carries the resolved spelling every other record of this run uses.
+    assert_eq!(
+        row.cwd,
+        std::fs::canonicalize("/tmp")
+            .expect("canonical /tmp")
+            .to_string_lossy(),
+        "the fleet must record the canonical launch cwd"
+    );
+
+    // **The thread, adopted off the live wire rather than claimed by the
+    // launch.** The registration carries no thread id — the launcher never
+    // learns one — so a thread appearing here is one the daemon's control link
+    // bound by observing the broker's own `thread/started`.
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .this_run()
+            .and_then(|s| s.codex_thread_id)
+            .is_some()),
+        "the daemon never adopted a thread for the registered session. ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    let thread = sb
+        .this_run()
+        .and_then(|s| s.codex_thread_id)
+        .expect("an adopted thread");
+    assert!(
+        !thread.trim().is_empty(),
+        "an adopted thread id must not be blank"
+    );
+
+    // **On the ccd leg, and provably not the TUI's.** The registration names a
+    // socket, and which socket it names is what decides the ROLE the broker gives
+    // the daemon: the legs are two different allowlists, and the TUI's is the one
+    // that may assert ownership. Nothing downstream would notice the difference —
+    // a link on the TUI leg still hears `thread/started` and still adopts a
+    // thread, so every assertion above passes either way (measured, by pointing
+    // the registration at `tui.sock`). The broker's own log is what tells the two
+    // apart, because it names the role it opened each leg as.
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    // `forward`, not `leg opened`: the coordinator's own bring-up probe connects
+    // to both legs and hangs up, so a leg being OPENED says only that the broker
+    // was listening. A frame FORWARDED under the Ccd role is the daemon's link
+    // and can be nothing else. (Measured: with the registration pointed at
+    // `tui.sock`, `Ccd: leg opened` is still there — from the probe — and every
+    // other assertion in this test still passes.)
+    assert!(
+        broker_log.contains("Ccd: forward"),
+        "the daemon must reach the broker on the CCD leg — the role that cannot assert \
+         ownership — and be seen doing it. broker.log:\n{broker_log}"
+    );
+
+    // **The day-1 rendering defect.** `codeconnect ls` asks tmux what is running
+    // and the daemon who it is; with no row the uid column rendered `—` for
+    // every Codex session ever launched. The row exists now, and the same
+    // command that showed the defect is what proves it gone.
+    let ls = sb.cli(&["ls"]);
+    let line = ls
+        .lines()
+        .find(|l| l.starts_with("cc-live"))
+        .unwrap_or_else(|| panic!("`codeconnect ls` did not list the running session:\n{ls}"));
+    assert!(
+        line.contains(&sb.uid),
+        "`codeconnect ls` must show the run's uid, not a dash:\n{ls}"
+    );
+    assert!(
+        !line.contains('—'),
+        "`codeconnect ls` still renders an unknown column for a registered session:\n{ls}"
+    );
+    assert!(
+        line.contains("/private/tmp") || line.contains("/tmp"),
+        "`codeconnect ls` must show the session's cwd:\n{ls}"
+    );
+
+    // And the daemon-only view agrees with it.
+    let sessions = sb.cli(&["sessions", "list"]);
+    assert!(
+        sessions.contains(&sb.uid) && sessions.contains("live"),
+        "`codeconnect sessions` must list the registered run as live:\n{sessions}"
+    );
+
+    // **The bounce.** The daemon goes away under a live session and comes back.
+    // The supervisor is in its reconnect loop the whole time; what must NOT
+    // happen is a second identity, a rewritten history, or a session torn down
+    // because its daemon blinked.
+    let created_at = row.created_at.clone();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert!(
+        sb.has_session(),
+        "killing ccd must not touch the session: the daemon never owned it"
+    );
+    let mut daemon = sb.spawn_daemon(&ccd);
+    // **Waited for on NEW-registration evidence, not on `lifecycle == Live`.**
+    //
+    // `Live` is a durable column: it was `Live` before the bounce and the fresh
+    // daemon reads it straight back off disk, so a wait on it is satisfied by the
+    // daemon merely having started — with the supervisor's reconnect broken, every
+    // identity assertion below would still pass, and so would the thread assertion,
+    // for the wrong reason.
+    //
+    // `link` is the supervisor's own IPC presence (`ccd::state`, `Link::Attached`
+    // requires a live supervisor handle *and* a heartbeat since), and it is
+    // memory-only: a fresh daemon has no supervisors at all, so nothing but a real
+    // re-registration on a real connection can make it `Attached`. That is the
+    // edge this gate is about.
+    assert!(
+        wait_until(Duration::from_secs(60), || sb
+            .this_run()
+            .map(|s| s.link == protocol::event::Link::Attached)
+            .unwrap_or(false)),
+        "the supervisor did not re-register the session after the daemon came back. ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    let after = sb.this_run().expect("the row after the bounce");
+    assert_eq!(
+        after.lifecycle,
+        protocol::event::Lifecycle::Live,
+        "and the re-registered run must still be live"
+    );
+    assert_eq!(
+        after.session_uid, sb.uid,
+        "a re-registration must not mint a second identity"
+    );
+    assert_eq!(
+        after.created_at, created_at,
+        "a re-registration must not rewrite when the run started"
+    );
+    assert_eq!(
+        after.agent,
+        protocol::agent::AgentKind::Codex,
+        "a re-registration must not change the run's agent"
+    );
+    // Compared, not printed. The success line below claims cwd survived the
+    // bounce, and until now nothing checked it — the only cwd comparison was
+    // before the daemon went away.
+    assert_eq!(
+        after.cwd, row.cwd,
+        "a re-registration must not move the run's directory"
+    );
+    assert_eq!(after.session_id, row.session_id);
+    assert_eq!(after.tmux_session, row.tmux_session);
+    assert_eq!(
+        sb.fleet().len(),
+        1,
+        "the bounce must leave exactly one row for one session: {:?}",
+        sb.fleet()
+    );
+    // **THE THREAD SURVIVES THE BOUNCE, and this is where the residual closed.**
+    //
+    // It used to be pinned here as a boundary: the link learned the thread by
+    // watching `thread/started`, which the app-server broadcasts once, to the
+    // connections it has at that instant — so a fresh link on a fresh daemon
+    // attached, initialized, and had nothing to resume. The registration carries
+    // no thread id and this side has no honest way to produce one, so nothing
+    // downstream could repair it.
+    //
+    // The repair is in the broker, which is the one process that still holds the
+    // fact: it keeps the `thread/started` it forwarded and, when a `ccd` leg
+    // subscribes afterwards, replays those exact bytes — but only when the thread
+    // they name is the binding this broker itself verified against the launch cwd
+    // (`codex_broker::relay::deliver_head`). The reconnecting link is
+    // therefore handed the same frame an early one would have received.
+    //
+    // Note what this is NOT: it is not durable evidence. It lives as long as the
+    // broker does, which is as long as the session does, and that is exactly the
+    // lifetime the question has — a session whose host is gone has no thread to be
+    // on. The alternative that WAS refuted stays refuted and must not be reached
+    // for: seeding a replacement from the event log was MEASURED wrong in 2e-4c
+    // (the log's newest `SessionStart` can name a thread the link demonstrably
+    // could not read, and the log has no representation of the fallback that
+    // rescued it).
+    //
+    // **This is also the strongest re-registration evidence this gate has.** A
+    // thread id can only reappear here if a new registration was accepted, built a
+    // control link, reached the broker's ccd leg, and bound — four things, none of
+    // which survives a broken reconnect.
+    assert!(
+        wait_until(Duration::from_secs(60), || sb
+            .this_run()
+            .and_then(|s| s.codex_thread_id)
+            .is_some()),
+        "the thread did not come back across the daemon restart. ccd.log:\n{}\nbroker.log:\n{}",
+        read_file(&sb.base.join("ccd.log")),
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    assert_eq!(
+        sb.this_run().and_then(|s| s.codex_thread_id),
+        Some(thread.clone()),
+        "the replayed announcement must name the SAME thread the session was on \
+         before the bounce, not some other one"
+    );
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    assert!(
+        broker_log.contains("replayed thread/started"),
+        "and it must have come from the broker's replay rather than from a second \
+         live announcement this test cannot tell apart. broker.log:\n{broker_log}"
+    );
+
+    println!(
+        "REGISTRATION PASS — uid {} filed as codex on thread {thread}, rendered by `ls` and \
+         `sessions`, identity/agent/cwd/created_at unchanged across a daemon bounce, the \
+         supervisor re-attached, and the thread re-bound from the broker's replayed \
+         announcement",
+        sb.uid
+    );
+
+    // Teardown: the supervisor is what holds the session, so ending it is what
+    // ends the run (proven deterministically in `codex_lifecycle_integration`).
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .status();
+    let _ = coord.wait();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }
