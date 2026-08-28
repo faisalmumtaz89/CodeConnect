@@ -88,7 +88,28 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     without a bump (it is an additive `ALTER`, and the GLOB normalizer proves
 ///     a column can arrive that way); what needs the bump is the one-shot data
 ///     repair, not the column.
-const SCHEMA_VERSION: i64 = 3;
+///   * `4` — agent-scoped session storage: Codex runs live in `codex_sessions`,
+///     a second physical table with the same shape, and `sessions` goes back to
+///     being Claude-only. See [`create_schema`] for why a second table rather
+///     than the `agent` column that is already there, and
+///     [`needs_codex_session_move`] for the migration that moves existing rows.
+///     The `sessions_refuse_codex_shadow` trigger ships with them, and it is the
+///     part of this version a rolled-back binary keeps: a trigger lives in the
+///     schema, so it goes on refusing v0.6.0's own upsert while v0.6.0 is the
+///     one running.
+///
+///     **The bump is honest but load-bearing for nothing.** It is here because
+///     the schema genuinely changed, and it makes a real v3-binary-opens-a-v4-
+///     database downgrade happen for the first time. That downgrade is harmless
+///     for a *measured* reason, not a hoped-for one: v0.6.0 reads
+///     `user_version`, ignores what it finds, and unconditionally writes `3`
+///     back — so a version fence could never have protected anything, and the
+///     isolation cannot rest on one. It rests on the table name instead: v0.6.0
+///     contains no statement that names `codex_sessions`. The migration below
+///     is deliberately **not** gated on this number for the mirror-image reason
+///     — a rollback resets `user_version` to 3, and the move still has to
+///     re-run correctly on the way back up.
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -404,7 +425,37 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
-/// Everything a run owns, besides its own row in `sessions`.
+/// Where a run of this agent is stored, and where it therefore must not be.
+///
+/// Returns `(table, other)`. The pair rather than just the table, because every
+/// caller that writes one has to be able to say something about the other: the
+/// upsert **moves** a uid it finds in the other rather than adding a second copy
+/// — see [`Store::upsert_session`] for why moving and not refusing — and the two
+/// removal paths delete from both and check the total.
+///
+/// **Everything that is not Claude goes to `codex_sessions`**, including an
+/// [`AgentKind::Unsupported`] run. That is deliberate and it is the same rule
+/// [`needs_codex_session_move`] uses: `sessions` is the table a rolled-back
+/// v0.6.0 daemon sweeps, and an agent this build understands even less than
+/// Codex is not the one to leave in it. The table is named for the agent it was
+/// built for, not for the only agent it can ever hold.
+fn session_tables_for(agent: &AgentKind) -> (&'static str, &'static str) {
+    if agent.is_claude() {
+        ("sessions", "codex_sessions")
+    } else {
+        ("codex_sessions", "sessions")
+    }
+}
+
+/// Both tables a session row can live in, for the paths that must reach a run
+/// without first knowing which agent it belongs to.
+///
+/// `sessions` first, so a Claude run — still the overwhelming majority — is
+/// found by the first statement and the second is a no-op on an indexed miss.
+const SESSION_TABLES: &[&str] = &["sessions", "codex_sessions"];
+
+/// Everything a run owns, besides its own identity row in one of
+/// [`SESSION_TABLES`].
 ///
 /// One list, in one place, because removing a session has to remove all of it:
 /// a table left off leaves rows keyed to a `session_uid` that no longer exists,
@@ -415,6 +466,13 @@ pub enum DeleteOutcome {
 /// delete from every one of them — sharing this list is what stops the two paths
 /// drifting — and `every_session_scoped_table_is_named_in_the_prune_list` reads
 /// the schema back to prove the list has not fallen behind it.
+///
+/// These stay **shared between the two agents**, and that is measured rather
+/// than assumed: a rolled-back v0.6.0 daemon reaches `events`, `tail_cursors`
+/// and `mutation_ledger` only by a uid it walked from a `sessions` row, and
+/// after the move there is no such row for a Codex run. The other four —
+/// `answers`, `pending_approvals`, `answer_claims`, `text_mutations` — it reads
+/// *globally*, so they carry the open obligation described on [`create_schema`].
 const SESSION_SCOPED_TABLES: &[&str] = &[
     "events",
     "answers",
@@ -548,15 +606,81 @@ impl Store {
         if needs_session_uid_migration(&conn)? {
             migrate_to_session_uids(&mut conn)?;
         }
-        create_schema(&conn)?;
+        // **One `BEGIN IMMEDIATE` over all three, and the transaction is the
+        // isolation.** Creating `codex_sessions` publishes a schema that
+        // *promises* Codex runs are out of the swept table; the move is what
+        // makes that true. Run as three autocommitting steps there is a window
+        // between them, and a v0.6.0 daemon that starts inside it finds the
+        // promise made and unkept — measured, with the old daemon's own two
+        // statements against a database mid-migration:
+        //
+        // ```text
+        // three steps:  old enumerated=[AA, CX]  update_rows=2
+        // one txn:      old enumerated=[AA, CX]  update_rows=None  database is locked
+        //               (after COMMIT) enumerated=[AA]  update_rows=1
+        // ```
+        //
+        // Under WAL the old daemon's *reads* mid-transaction see the snapshot as
+        // it was before any of this ran — the old schema, with the Codex row
+        // still in `sessions` and no `codex_sessions` to be seen — and its
+        // *writes* are refused until the commit lands. So it finds either the
+        // state before the migration or the state after it, never the half
+        // state in between; and because v0.6.0 sets `busy_timeout` to 5000ms
+        // (its `open_connection`, unchanged from ours), what it actually does is
+        // wait a few milliseconds and then proceed against the isolated schema.
+        //
+        // Every statement below is transactional in SQLite — `CREATE TABLE`,
+        // `CREATE INDEX`, `CREATE VIEW` and `ALTER TABLE … ADD COLUMN` all roll
+        // back cleanly, measured rather than assumed. `create_schema` is one
+        // `execute_batch` of pure DDL with no transaction control of its own, so
+        // it nests here without a second `BEGIN`.
+        //
+        // `migrate_to_session_uids` above stays outside on purpose: it is a
+        // whole-table rebuild for a database that predates session uids, and
+        // such a database predates the `agent` column too, so there is no Codex
+        // row for it to expose. `drop_retired_columns` below stays outside for
+        // the opposite reason — it is deliberately never fatal, and a failure
+        // inside this transaction would take the schema down with it.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        create_schema(&tx)?;
         // Additive, and applied after `create_schema` for the reason the note
         // above gives in reverse: `CREATE TABLE IF NOT EXISTS` will not widen a
         // table that already exists, so a database written before push existed
         // keeps its old `devices` shape and every push statement fails on a
         // missing column.
-        if needs_column_additions(&conn)? {
-            add_missing_columns(&mut conn)?;
+        if needs_column_additions(&tx)? {
+            add_missing_columns(&tx)?;
         }
+        // **Third, and it has to be here.** The move reads `sessions.agent`, so
+        // it must follow `add_missing_columns` on a database written before the
+        // agent seam; it writes `codex_sessions`, so it must follow
+        // `create_schema`.
+        //
+        // Not gated on `from_version`: see [`needs_codex_session_move`]. A
+        // rollback resets the number and the rows are the only honest question.
+        //
+        // **This repairs; it does not have to also race.** An earlier shape
+        // followed the commit with a timed re-ask, because `BEGIN IMMEDIATE`
+        // defers a v0.6.0 statement rather than refusing it, and a deferred
+        // upsert lands after the commit and re-files the uid this just moved.
+        // That window is now closed where it cannot be missed — the
+        // `sessions_refuse_codex_shadow` trigger in `create_schema` refuses the
+        // deferred statement outright — so what is left here is the one job a
+        // trigger cannot do: rows that were already misfiled before this build
+        // ever opened the database.
+        if needs_codex_session_move(&tx)? {
+            let done = move_codex_sessions(&tx)?;
+            crate::log_info!(
+                "schema: took {} misfiled session row(s) out of the shared sessions table, \
+                 where a rolled-back v0.6 daemon cannot enumerate, update, delete or prune \
+                 them: {} carried whole into codex_sessions, {} merged into an isolated row \
+                 that was already there",
+                done.moved + done.reconciled,
+                done.moved,
+                done.reconciled
+            );
+        }
+        tx.commit()?;
         // Ordered after `create_schema` so a database that never had these
         // tables gets them in the current shape and finds nothing to do here.
         // Never fatal: a daemon that refuses to open its own database is
@@ -582,6 +706,10 @@ impl Store {
         // not LIKE: LIKE is case-insensitive and the prefix is an exact
         // contract. Ordered after `migrate_to_session_uids`, whose synthesized
         // rows this must also catch on a legacy database.
+        //
+        // Deliberately still the physical `sessions` table, not `all_sessions`:
+        // `claude:` is the prefix cc-hook mints, so every row this can match is
+        // Claude's by construction, and a view is not updatable anyway.
         conn.execute(
             "UPDATE sessions SET tmux_session = '', tmux_socket = ''
               WHERE session_id GLOB 'claude:*'
@@ -700,7 +828,11 @@ impl Store {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let known: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_uid = ?1)",
+            // `all_sessions`: "does this run still exist" is a question about
+            // the fleet, not about one table. Asked of Claude's half alone it
+            // answers "no" for a live Codex run, rolls the batch back, and — the
+            // part that does not recover — leaves the cursor where it was.
+            "SELECT EXISTS(SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
             params![session_uid],
             |row| row.get(0),
         )?;
@@ -752,6 +884,11 @@ impl Store {
     }
 
     /// Make every session query fail, on the same terms and for the same reason.
+    ///
+    /// Dropping the Claude table alone is enough, and that is not an accident of
+    /// this fixture: every session read goes through `all_sessions`, and a view
+    /// whose base table is gone fails to prepare. One `DROP` therefore breaks
+    /// both halves of the fleet, which is what "every session query" means.
     #[cfg(test)]
     pub fn break_session_lookups_for_tests(&self) {
         let conn = self.write();
@@ -906,32 +1043,100 @@ impl Store {
     /// Callers must not treat `Tombstoned` as success: whatever they were about
     /// to set up for this session — a tail, a push, an in-memory supervisor —
     /// must not happen.
+    ///
+    /// **Which table a run is written to is decided by its `agent`, here and
+    /// nowhere else.** Claude goes to `sessions`, everything else to
+    /// `codex_sessions`; that single choice is what keeps `sessions` Claude-only
+    /// and therefore keeps a rolled-back v0.6.0 daemon's sweeps off the rest of
+    /// the fleet. See [`create_schema`].
+    ///
+    /// The cross-table check is the invariant `all_sessions` depends on: one uid
+    /// in both tables would be returned twice by the view, and `get_session`
+    /// would answer with whichever the planner reached first. So a write whose
+    /// agent disagrees with where the row currently lives **moves the row**
+    /// rather than adding a second copy.
+    ///
+    /// **Moving, not refusing, and that choice is deliberate.** A re-registration
+    /// really can arrive under a different agent — `register_supervisor` treats
+    /// the registration as the authority on which agent a run is, and
+    /// `the_resolver_never_pairs_one_registrations_row_with_anothers_addressee`
+    /// exercises exactly that path. Whether a run may change agents at all is a
+    /// question about registration adoption (plan A5.1, generation-aware
+    /// adoption), not about storage, and answering it here would be this layer
+    /// inventing a policy the layer that owns it has not adopted. So the store
+    /// does the one thing it can do without deciding anything: it carries the
+    /// whole row across first, and then applies the ordinary upsert on top of
+    /// it. The `COALESCE`d fields survive the move because the row that arrives
+    /// in the new table is the row that left the old one — a delete-and-insert
+    /// would silently drop the transcript path and the Codex identity a later
+    /// heartbeat does not carry.
+    ///
+    /// The carry is `SELECT *`, which is only correct because the two tables
+    /// have one column order — `both_session_tables_have_one_shape` is what
+    /// keeps that true.
     pub fn upsert_session(&self, row: &SessionRow) -> Result<SessionUpsert> {
-        let conn = self.write();
-        let changed = conn.execute(
-            "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
-                                  claude_session_id, transcript_path, lifecycle,
-                                  created_at, updated_at,
-                                  agent, codex_thread_id, codex_socket)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-             WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)
-             ON CONFLICT(session_uid) DO UPDATE SET
-                session_id        = excluded.session_id,
-                tmux_session      = excluded.tmux_session,
-                tmux_socket       = excluded.tmux_socket,
-                cwd               = excluded.cwd,
-                -- COALESCE keeps a known value when a later update has none:
-                -- SessionStart learns the transcript path, a heartbeat does not.
-                claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
-                transcript_path   = COALESCE(excluded.transcript_path, sessions.transcript_path),
-                lifecycle         = excluded.lifecycle,
-                updated_at        = excluded.updated_at,
-                -- The agent is set by whoever introduces the run and is the
-                -- authority; the Codex identity columns are COALESCE-preserved so
-                -- a later heartbeat that does not carry them cannot blank them.
-                agent             = excluded.agent,
-                codex_thread_id   = COALESCE(excluded.codex_thread_id, sessions.codex_thread_id),
-                codex_socket      = COALESCE(excluded.codex_socket, sessions.codex_socket)",
+        let (table, other) = session_tables_for(&row.agent);
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Inside the transaction that writes, so the row cannot move, or be
+        // deleted, between the carry and the upsert that expects it.
+        //
+        // **The same tombstone guard as the upsert below, and it is not
+        // redundant.** The argument for leaving it off was that a tombstone is
+        // only ever written in the same transaction that deletes the run from
+        // *both* tables, so a tombstoned uid has no row anywhere for this to
+        // find. That is true of every delete **this** build performs — and the
+        // build this schema exists to survive performs a different one. v0.6.0's
+        // prune deletes from `sessions` and writes `deleted_sessions`; it has no
+        // statement that names `codex_sessions` and cannot touch it. So a uid can
+        // end up tombstoned with an isolated row still standing, and without this
+        // clause the next registration under the other agent would carry that row
+        // into `sessions`, watch the guarded upsert below write zero, commit the
+        // carry anyway, and return `Tombstoned` for a run it had just
+        // resurrected. One indexed lookup makes the invariant structural instead
+        // of an argument about another binary's delete.
+        let carried = tx.execute(
+            // Both table names are compile-time literals from
+            // `session_tables_for`; nothing a caller supplies reaches the text.
+            &format!(
+                "INSERT INTO {table} SELECT * FROM {other}
+                  WHERE session_uid = ?1
+                    AND NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)"
+            ),
+            params![row.session_uid],
+        )?;
+        if carried == 1 {
+            tx.execute(
+                &format!("DELETE FROM {other} WHERE session_uid = ?1"),
+                params![row.session_uid],
+            )?;
+        }
+        let changed = tx.execute(
+            &format!(
+                "INSERT INTO {table}(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                     claude_session_id, transcript_path, lifecycle,
+                                     created_at, updated_at,
+                                     agent, codex_thread_id, codex_socket)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)
+                 ON CONFLICT(session_uid) DO UPDATE SET
+                    session_id        = excluded.session_id,
+                    tmux_session      = excluded.tmux_session,
+                    tmux_socket       = excluded.tmux_socket,
+                    cwd               = excluded.cwd,
+                    -- COALESCE keeps a known value when a later update has none:
+                    -- SessionStart learns the transcript path, a heartbeat does not.
+                    claude_session_id = COALESCE(excluded.claude_session_id, {table}.claude_session_id),
+                    transcript_path   = COALESCE(excluded.transcript_path, {table}.transcript_path),
+                    lifecycle         = excluded.lifecycle,
+                    updated_at        = excluded.updated_at,
+                    -- The agent is set by whoever introduces the run and is the
+                    -- authority; the Codex identity columns are COALESCE-preserved so
+                    -- a later heartbeat that does not carry them cannot blank them.
+                    agent             = excluded.agent,
+                    codex_thread_id   = COALESCE(excluded.codex_thread_id, {table}.codex_thread_id),
+                    codex_socket      = COALESCE(excluded.codex_socket, {table}.codex_socket)"
+            ),
             params![
                 row.session_uid,
                 row.session_id,
@@ -948,6 +1153,7 @@ impl Store {
                 row.codex_socket,
             ],
         )?;
+        tx.commit()?;
         // `INSERT ... SELECT ... WHERE NOT EXISTS` writes zero rows exactly when
         // the tombstone matched; `ON CONFLICT` paths always write one.
         Ok(if changed == 0 {
@@ -985,7 +1191,7 @@ impl Store {
                 "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
                         claude_session_id, transcript_path, lifecycle, created_at, updated_at,
                         agent, codex_thread_id, codex_socket
-                   FROM sessions WHERE session_uid = ?1",
+                   FROM all_sessions WHERE session_uid = ?1",
                 params![session_uid],
                 session_row_from,
             )
@@ -1026,7 +1232,7 @@ impl Store {
                 "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
                         claude_session_id, transcript_path, lifecycle, created_at, updated_at,
                         agent, codex_thread_id, codex_socket
-                   FROM sessions
+                   FROM all_sessions
                   WHERE session_id = ?1
                   ORDER BY created_at DESC, session_uid DESC
                   LIMIT 1",
@@ -1037,13 +1243,19 @@ impl Store {
         Ok(row)
     }
 
+    /// The whole fleet, both agents, oldest first.
+    ///
+    /// Reads `all_sessions` — see [`create_schema`]. This daemon owns Codex runs
+    /// as well as Claude ones, so every read projection answers for both; only
+    /// the *old* daemon is meant to be blind to half of them, and it is blind by
+    /// not knowing the name of the second table, not by anything written here.
     pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
                     claude_session_id, transcript_path, lifecycle, created_at, updated_at,
                     agent, codex_thread_id, codex_socket
-               FROM sessions ORDER BY created_at ASC, session_uid ASC",
+               FROM all_sessions ORDER BY created_at ASC, session_uid ASC",
         )?;
         let rows = stmt.query_map([], session_row_from)?;
         let mut out = Vec::new();
@@ -1068,10 +1280,33 @@ impl Store {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
+        // **The least deletable copy is the one that answers, and the `ORDER BY`
+        // is what makes that true.** A uid is supposed to have exactly one
+        // identity row across the two physical tables, and
+        // `sessions_refuse_codex_shadow` is what keeps that so. If one ever
+        // survives anyway, `all_sessions` returns the run twice and an
+        // unordered `query_row` takes whichever the planner reached first —
+        // which, with a rollback shadow reading `exited` beside a live isolated
+        // run, is a coin toss that decides whether the guard below fires. The
+        // children are deleted *before* the identity rows, and the exit
+        // predicate the identity delete restates matches only the shadow, so
+        // losing that toss commits: the live run's events and ledgers are gone
+        // and its row is still standing. Sorting the undeletable copies first
+        // makes the guard read the copy that refuses, so the predicate has to
+        // hold for **every** identity row of the uid rather than for one of
+        // them.
+        //
+        // The plan is unchanged where it matters — still two covering-index
+        // seeks, one per table — with a temp b-tree over the at most two rows
+        // they return. Measured over 2,000 sessions: 0.0023ms to 0.0040ms per
+        // lookup.
         let row: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT lifecycle, tmux_socket, session_id FROM sessions WHERE session_uid = ?1",
-                params![session_uid],
+                "SELECT lifecycle, tmux_socket, session_id FROM all_sessions
+                  WHERE session_uid = ?1
+                  ORDER BY (lifecycle = ?2 OR tmux_socket = '') ASC
+                  LIMIT 1",
+                params![session_uid, lifecycle_str(Lifecycle::Exited)],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -1110,11 +1345,24 @@ impl Store {
                 params![session_uid],
             )?;
         }
-        let gone = tx.execute(
-            "DELETE FROM sessions
-              WHERE session_uid = ?1 AND (lifecycle = ?2 OR tmux_socket = '')",
-            params![session_uid, lifecycle_str(Lifecycle::Exited)],
-        )?;
+        // Both tables, and the *total* is what must be one. The run is in
+        // exactly one of them, so the other statement matches nothing; summing
+        // rather than dispatching keeps the guarded predicate — and the
+        // assertion below that it removed precisely one row — as the single
+        // safety rule it has always been, instead of making it conditional on
+        // having guessed the agent right.
+        let mut gone = 0usize;
+        for table in SESSION_TABLES {
+            gone += tx.execute(
+                // A compile-time list in this file; nothing a caller supplies
+                // reaches the statement text.
+                &format!(
+                    "DELETE FROM {table}
+                      WHERE session_uid = ?1 AND (lifecycle = ?2 OR tmux_socket = '')"
+                ),
+                params![session_uid, lifecycle_str(Lifecycle::Exited)],
+            )?;
+        }
         if gone != 1 {
             // The row changed underneath the transaction. Roll back rather than
             // report a deletion that did not happen. Unreachable as things
@@ -1182,9 +1430,30 @@ impl Store {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         let candidates: Vec<(String, String, String, String, String)> = {
+            // **Ended has to be true of every copy of the uid, not of one.** The
+            // same duplicate `delete_exited_session` guards against: a rollback
+            // shadow reading `exited` in `sessions` beside the live isolated run
+            // in `codex_sessions`. Without the `NOT EXISTS` the shadow is a
+            // candidate, the loop below deletes the uid's children before it
+            // touches either identity row, and the identity delete then restates
+            // `lifecycle = 'exited'` — matching the shadow and not the live copy,
+            // so `gone == 1`, the sweep commits, and a running agent's events and
+            // ledgers are gone. `sessions_refuse_codex_shadow` is what stops the
+            // duplicate existing; this is what stops it being destructive if one
+            // ever does.
+            //
+            // The `NOT EXISTS` is two index seeks per candidate, not a second
+            // scan: measured, SQLite pushes it into both branches of the view
+            // the same way the outer query is pushed. Over 2,000 sessions the
+            // candidate sweep goes from 0.76ms to 1.18ms, for a command a human
+            // runs by hand.
             let mut stmt = tx.prepare(
                 "SELECT session_uid, session_id, cwd, created_at, updated_at
-                   FROM sessions WHERE lifecycle = ?1
+                   FROM all_sessions AS a
+                  WHERE a.lifecycle = ?1
+                    AND NOT EXISTS(SELECT 1 FROM all_sessions AS b
+                                    WHERE b.session_uid = a.session_uid
+                                      AND b.lifecycle <> ?1)
                   ORDER BY created_at ASC, session_uid ASC",
             )?;
             let rows = stmt.query_map(params![lifecycle_str(Lifecycle::Exited)], |row| {
@@ -1219,10 +1488,23 @@ impl Store {
                         params![session_uid],
                     )?;
                 }
-                let gone = tx.execute(
-                    "DELETE FROM sessions WHERE session_uid = ?1 AND lifecycle = ?2",
-                    params![session_uid, lifecycle_str(Lifecycle::Exited)],
-                )?;
+                // Both tables, total must be one — see `delete_exited_session`.
+                // **The prune reaches Codex runs on purpose.** The isolation
+                // this schema buys is from the *old* daemon, which cannot name
+                // the second table; it is not isolation from ourselves. An
+                // operator who asks this daemon to remove ended sessions is
+                // asking about their whole fleet, and a prune that quietly kept
+                // half of it would be the same kind of lie in the other
+                // direction.
+                let mut gone = 0usize;
+                for table in SESSION_TABLES {
+                    gone += tx.execute(
+                        // A compile-time list in this file; nothing a caller
+                        // supplies reaches the statement text.
+                        &format!("DELETE FROM {table} WHERE session_uid = ?1 AND lifecycle = ?2"),
+                        params![session_uid, lifecycle_str(Lifecycle::Exited)],
+                    )?;
+                }
                 // Belt and braces over the query above. If this ever removes
                 // anything other than exactly the one ended run it named, the
                 // whole transaction is abandoned rather than half-applied.
@@ -1277,27 +1559,70 @@ impl Store {
     /// whose provenance is not understood is exactly the data an automatic
     /// cleanup must not touch. Reported so the operator can see that it exists,
     /// which is more than was true before.
+    ///
+    /// Reads `all_sessions`, so a Codex run's events are not counted as
+    /// orphans. Left on the physical `sessions` table this would report every
+    /// event of every live Codex session as history whose provenance nobody
+    /// understands — a number an operator would read as corruption.
     pub fn orphan_event_count(&self) -> Result<u64> {
         let conn = self.read();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM events
-              WHERE session_uid NOT IN (SELECT session_uid FROM sessions)",
+              WHERE session_uid NOT IN (SELECT session_uid FROM all_sessions)",
             [],
             |row| row.get(0),
         )?;
         Ok(count as u64)
     }
 
+    /// Move one run to a new lifecycle, whichever table holds it.
+    ///
+    /// Both tables, not a lookup then a dispatch: the uid is a primary key in
+    /// each and lives in exactly one, so the statement that does not match it
+    /// updates nothing. Doing it this way removes the failure the dispatch
+    /// version would have — a wrong guess about the agent leaves a run that can
+    /// never be marked `Exited`, and therefore can never be deleted or pruned,
+    /// while `set_lifecycle` still returns `Ok(())`. That is exactly the
+    /// silence this method has no way to report.
+    ///
+    /// **One stamp for both statements, read before the loop rather than inside
+    /// it.** One lifecycle transition happened, at one time, and reading the
+    /// clock per table would say it happened twice — a millisecond apart if the
+    /// two reads land in different milliseconds. That is invisible while the uid
+    /// is in exactly one table, which is the invariant, and it is exactly the
+    /// wrong thing to have when it is not: [`move_codex_sessions`] decides a
+    /// whole column family by comparing the two copies' `updated_at`, so two
+    /// stamps for one transition are what would let a merge keep one row's
+    /// `lifecycle` and discard the other's newer `cwd`. Hoisting the read costs
+    /// nothing and means the tear has no mechanism, rather than no reachable
+    /// caller.
+    ///
+    /// **One stamp is not the whole answer, and this is only half of it.** A
+    /// single stamp written to two divergent copies *levels* them, and an equal
+    /// `updated_at` is exactly what the merge reads as "the shared side is at
+    /// least as fresh". So the other half lives in [`move_codex_sessions`],
+    /// which compares per family: `lifecycle` on `>=`, and every location column
+    /// on strict `>`, because this write advances a stamp without touching a
+    /// location and its equality is therefore not evidence about one.
+    ///
+    /// Scoping this statement to the rows whose `lifecycle` actually changed was
+    /// the other candidate and it was **measured not to be a fix**: when both
+    /// copies genuinely change — the ordinary case, two `live` rows being ended
+    /// — both are still stamped, still levelled, and the merge still hands the
+    /// stale rollback copy the whole family.
     pub fn set_lifecycle(&self, session_uid: &str, lifecycle: Lifecycle) -> Result<()> {
         let conn = self.write();
-        conn.execute(
-            "UPDATE sessions SET lifecycle = ?2, updated_at = ?3 WHERE session_uid = ?1",
-            params![
-                session_uid,
-                lifecycle_str(lifecycle),
-                protocol::time::now_rfc3339()
-            ],
-        )?;
+        let now = protocol::time::now_rfc3339();
+        for table in SESSION_TABLES {
+            conn.execute(
+                // A compile-time list in this file; nothing a caller supplies
+                // reaches the statement text.
+                &format!(
+                    "UPDATE {table} SET lifecycle = ?2, updated_at = ?3 WHERE session_uid = ?1"
+                ),
+                params![session_uid, lifecycle_str(lifecycle), now],
+            )?;
+        }
         Ok(())
     }
 
@@ -1342,7 +1667,7 @@ impl Store {
             // a row nothing can ever name again.
             "INSERT INTO answers(session_uid, request_id, payload_hash, outcome, created_at)
              SELECT ?1, ?2, ?3, ?4, ?5
-              WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)",
+              WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
             params![
                 session_uid,
                 request_id,
@@ -2010,14 +2335,30 @@ impl Store {
     pub fn upsert_pending_approval(&self, row: &PendingApprovalRow) -> Result<bool> {
         let conn = self.write();
         let changed = conn.execute(
-            // `SELECT ... WHERE EXISTS(sessions)` rather than VALUES: an
+            // `SELECT ... WHERE EXISTS(all_sessions)` rather than VALUES: an
             // approval for a session that was deleted mid-flight must not leave
             // an orphan row that is later recovered as an indeterminate answer
             // for a run nobody can name.
+            //
+            // **`pending_approvals` is not agent-scoped, and that is a bound
+            // obligation, not an oversight.** A v0.6.0 daemon reads this table
+            // GLOBALLY — `list_pending_approvals` there does not go through a
+            // `sessions` row — so a Codex card sitting here after a rollback is
+            // visible to it, and its recovery can delete one.
+            //
+            // The guard above deliberately does not stop that: it asks
+            // `all_sessions`, so it accepts a Codex uid. What stops it is
+            // upstream, in the daemon — `Daemon::handle_permission_request`
+            // refuses a non-Claude session before a card is built at all, which
+            // is scaffolding that lifts when Phase 3 splits this table. The
+            // refusal is up there rather than down here on purpose: a store
+            // guard that quietly dropped a Codex card would report success and
+            // lose the card, which is the failure this whole chunk exists to
+            // prevent in the other direction. See [`create_schema`].
             "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
                                            generation, created_ms)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6
-              WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)
+              WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)
              ON CONFLICT(session_uid, request_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 card       = excluded.card,
@@ -2186,10 +2527,24 @@ impl Store {
                 tx.execute(
                     // Same rule as `answers`: no new claim for a session that
                     // was deleted while the request was in flight.
+                    //
+                    // The same bound obligation as `pending_approvals`, and the
+                    // sharper one: a rolled-back v0.6.0 daemon does not merely
+                    // read this table globally, its `recover_text_mutations`
+                    // WRITES to it — every `applying` row becomes
+                    // `indeterminate`, whoever it belongs to.
+                    //
+                    // And this row is written EARLY: `Daemon::send_text` claims
+                    // here before it has any idea whether a supervisor is
+                    // attached, so a crash between the two used to leave an
+                    // `applying` row for the old daemon to rewrite. What stops
+                    // that is `send_text` refusing a non-Claude session before
+                    // it reaches this call — scaffolding that lifts when Phase 3
+                    // splits the table. See [`create_schema`].
                     "INSERT INTO text_mutations(session_uid, request_id, payload_hash,
                                                 status, matched, started_at, settled_at)
                      SELECT ?1, ?2, ?3, 'applying', NULL, ?4, NULL
-                      WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?1)",
+                      WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
                     params![session_uid, request_id, payload_hash, now],
                 )?;
                 TextClaim::Claimed
@@ -2320,7 +2675,7 @@ impl Store {
                                                  target_turn_id, status, outcome, started_at,
                                                  settled_at)
                      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'applying', NULL, ?9, NULL
-                      WHERE EXISTS (SELECT 1 FROM sessions WHERE session_uid = ?2)",
+                      WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?2)",
                     params![
                         operation_kind,
                         session_uid,
@@ -2581,6 +2936,105 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 
 /// Create anything that is missing. Idempotent, and the whole schema for a
 /// database that has never been opened before.
+///
+/// ## Why sessions live in two tables
+///
+/// `sessions` holds Claude runs. `codex_sessions` holds Codex runs, in exactly
+/// the same columns. That looks like the duplication the `agent` column was
+/// added to avoid, and it is deliberate, because the thing it has to survive is
+/// not a query this build writes — it is a **binary this build cannot change**.
+///
+/// Measured against the real v0.6.0 daemon, with a Codex row sitting in
+/// `sessions`:
+///
+///   * its liveness sweep enumerated the row through an agent-agnostic
+///     positional `SELECT`, looked for the tmux session on its own socket,
+///     found nothing there — it never can, a Codex session is not on it — and
+///     marked a live run `exited`;
+///   * `codeconnect sessions prune` then enumerated that same row and **deleted
+///     it and all four of its events**.
+///
+/// Neither is incidental. Both follow from v0.6.0 reading `sessions` by
+/// position and knowing nothing about agents, and both are total data loss for
+/// the Codex half of the fleet after a rollback.
+///
+/// Two smaller shapes were tried and refuted by measurement, and are recorded
+/// here so they are not re-proposed:
+///
+///   * **A `user_version` fence.** v0.6.0 reads `user_version` and then ignores
+///     it: its `migrate()` writes `3` back unconditionally. A released binary
+///     cannot be taught to refuse a schema it does not know.
+///   * **A view named `sessions` shadowing a renamed table.** `CREATE TABLE IF
+///     NOT EXISTS sessions` against a view is a silent no-op, so v0.6.0 would
+///     open — but `UPDATE sessions …` fails with "cannot modify sessions
+///     because it is a view", and v0.6.0 must `INSERT`, `UPDATE` and `DELETE`
+///     it. `INSTEAD OF` triggers for all three would then have to reproduce
+///     `changes()` exactly, because v0.6.0's prune asserts it removed one row.
+///     That puts the old daemon's *Claude* path at risk to protect the Codex
+///     one, which is the trade this gate forbids.
+///
+/// What is left is the table name. v0.6.0 contains no statement that names
+/// `codex_sessions`, so every one of its sessions projections — enumerate,
+/// update, delete, prune — is structurally unable to reach a Codex run. Not
+/// "unlikely to": there is no code path.
+///
+/// The children v0.6.0 reaches **only** by a uid it walked from a `sessions`
+/// row — `events`, `tail_cursors`, `mutation_ledger` — stay shared, because
+/// after the move there is no such row for a Codex run to be walked from.
+///
+/// `answers` is **not** one of them and is deliberately not listed here: v0.6.0
+/// queries it by `request_id`, with no `sessions` row anywhere in the path. It
+/// belongs to the four-table obligation below, and the census there is the one
+/// that governs.
+///
+/// ### The one residual, measured rather than assumed
+///
+/// v0.6.0's orphan count is defined over `sessions`, so after a rollback it
+/// reports every Codex event as belonging to "runs with no session row". Its
+/// own prune output, verbatim against the real binary: *"note: 2 event(s)
+/// belong to runs with no session row and are reachable by nothing here; they
+/// were left untouched"*. That is a cosmetic over-count in one line of one
+/// report, and it is safe for the reason the note itself gives — that path
+/// counts and never deletes, deliberately, because data whose provenance is not
+/// understood is exactly what an automatic cleanup must not touch. This build's
+/// [`Store::orphan_event_count`] reads `all_sessions` and does not over-count.
+///
+/// ### The obligation this leaves open, named so Phase 3 cannot miss it
+///
+/// Four tables — `pending_approvals`, `answer_claims`, `text_mutations` and
+/// `answers` — are reached by v0.6.0 **globally**, without going through a
+/// `sessions` row at all: it reads the first three by no key but their own, it
+/// queries `answers` by `request_id`, and its `recover_text_mutations` *writes*
+/// `text_mutations`, turning every `applying` row into `indeterminate` whoever
+/// it belongs to. Its recovery can delete `answer_claims` rows and the pending
+/// cards that match them. The table-name isolation the rest of this schema
+/// rests on does not cover any of that.
+///
+/// They are still not split, and the reason has changed shape since it was
+/// first written down. It was "no producer exists". That was **wrong**: three
+/// daemon paths reach these tables agent-agnostically today — `send_text`,
+/// which claims `text_mutations` before it knows whether a supervisor is even
+/// attached; the `PermissionRequest` hook, whose `ensure_session` *preserves* an
+/// existing row's agent rather than filtering on it; and `answer`, which claims
+/// `answer_claims` before every one of its refusals. All three would have
+/// written for a Codex run.
+///
+/// So the real reason is a decision: **each of those three producers now refuses
+/// a non-Claude session outright, before any durable write.** That is
+/// scaffolding, deliberately — it makes Codex approvals and Codex text mutations
+/// impossible rather than merely unbuilt, and it is what a Phase-3 split
+/// removes. It is cheap and reversible where splitting four tables now would be
+/// machinery built ahead of the wire that will shape it. The refusals live in
+/// `Daemon::send_text`, `Daemon::handle_permission_request` and `Daemon::answer`;
+/// `send_text_to_a_codex_session_is_refused_before_it_claims_anything`,
+/// `a_permission_request_for_a_codex_session_raises_no_card` and
+/// `answering_a_codex_card_is_refused_before_the_claim` drive those real paths
+/// against a Codex row and read all four tables back off the daemon's own
+/// database file, and
+/// `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally` holds the
+/// floor underneath them. They all name `AgentKind::Codex` outright, so the day
+/// Codex joins `Daemon::supported_agents` and the refusals stop firing, they go
+/// red — which is the day the split stops being speculative.
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -2606,18 +3060,169 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- through `AgentKind::from_str_lossy`, so an unrecognised value fails
             -- closed rather than posing as Claude.
             --
-            -- Phase 1 has no writer that sets this to anything but 'claude': the
-            -- column and the query discipline are the seam, and the agent-scoped
-            -- isolation of Codex durable rows lands when a Codex writer exists.
+            -- Every row in THIS table is 'claude' — the move below keeps it that
+            -- way, and `upsert_session` routes by this value so nothing else can
+            -- land here. The column stays because it is what the move is defined
+            -- over: a rollback writes rows here again, and the way back up has to
+            -- be able to ask which of them are not Claude's. Decoded through
+            -- `AgentKind::from_str_lossy`, so an unrecognised value fails closed
+            -- rather than posing as Claude.
             agent             TEXT NOT NULL DEFAULT 'claude',
             -- Codex thread identity and broker socket. NULL for Claude and for
-            -- any row predating the seam.
+            -- any row predating the seam. Carried on this table too, so the two
+            -- tables have one shape and a row can be moved between them by
+            -- copying columns rather than by mapping them.
             codex_thread_id   TEXT,
             codex_socket      TEXT
         );
 
         -- Resolving a legacy `cc-1` to the newest run under that name.
         CREATE INDEX IF NOT EXISTS sessions_name ON sessions(session_id);
+
+        -- Codex runs. The same thirteen columns in the same order as `sessions`
+        -- — see the note on `create_schema` for why this is a second table and
+        -- not a `WHERE agent = 'codex'`. `both_session_tables_have_one_shape`
+        -- reads both back off the schema, so a column added to one and not the
+        -- other fails a test instead of failing a query.
+        CREATE TABLE IF NOT EXISTS codex_sessions(
+            session_uid       TEXT PRIMARY KEY,
+            session_id        TEXT NOT NULL,
+            tmux_session      TEXT NOT NULL,
+            tmux_socket       TEXT NOT NULL,
+            cwd               TEXT NOT NULL,
+            claude_session_id TEXT,
+            transcript_path   TEXT,
+            lifecycle         TEXT NOT NULL,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL,
+            -- Declared identically to `sessions`, `DEFAULT 'claude'` and all,
+            -- because "identical" is the property that matters: `upsert_session`
+            -- moves a run between the two tables with `INSERT … SELECT *`, which
+            -- is correct only while the column ORDER matches. Every insert here
+            -- names `agent` explicitly, so the default is never reached; it is
+            -- carried so the two declarations can be read side by side and seen
+            -- to be the same.
+            agent             TEXT NOT NULL DEFAULT 'claude',
+            codex_thread_id   TEXT,
+            codex_socket      TEXT
+        );
+
+        -- The twin of `sessions_name`: without it, resolving a tmux name would
+        -- index-seek Claude's half and full-scan Codex's.
+        CREATE INDEX IF NOT EXISTS codex_sessions_name ON codex_sessions(session_id);
+
+        -- **The shadow is refused, not repaired afterwards.**
+        --
+        -- A rolled-back v0.6.0 daemon has no `agent` column of its own: its
+        -- `upsert_session` names ten columns, so the eleventh takes the
+        -- `DEFAULT 'claude'` above and a reconnecting Codex run is re-filed into
+        -- the shared table beside its real row in `codex_sessions`. One uid, two
+        -- tables — and from there its liveness sweep ends the shadow, its prune
+        -- deletes the events keyed by the uid underneath it, and it records a
+        -- tombstone the surviving isolated row contradicts.
+        --
+        -- Repairing that *after the fact* needs a timing argument, and there is
+        -- no sound one: `BEGIN IMMEDIATE` defers a v0.6.0 statement rather than
+        -- neutralising it, so a re-ask after the commit has to guess how long
+        -- the old daemon's busy handler will sleep — and on a database with
+        -- nothing to repair there is no evidence to know the re-ask is even
+        -- needed. This trigger closes it at the schema layer instead, where no
+        -- scheduling argument exists to be wrong: the shadow is never written.
+        --
+        -- **It fires for v0.6.0 because it lives in the schema, not in a
+        -- binary.** A rollback swaps the daemon; it does not drop the trigger.
+        -- Measured against v0.6.0's verbatim ten-column upsert — the
+        -- `INSERT … SELECT … WHERE NOT EXISTS … ON CONFLICT DO UPDATE` shape —
+        -- on a uid already in `codex_sessions`: `SQLITE_CONSTRAINT`, zero rows
+        -- written, on the fresh-insert path and on the conflict path alike.
+        -- `NEW.agent` carries the column default there, which is what makes the
+        -- `WHEN` clause able to see the old daemon at all.
+        --
+        -- **What it costs the old daemon is one refused registration, and that
+        -- was measured against the real binary rather than reasoned about.**
+        -- The error surfaces from `upsert_session` through
+        -- `register_supervisor` into v0.6.0's `read_loop`, which ends *that
+        -- connection* (logging it at debug) while the accept loop releases the
+        -- permit and carries on. Driven against `8e5b172` on a v4 database
+        -- holding one live Codex run with two events under it:
+        --
+        -- ```text
+        -- old daemon opens it:      user_version 4 -> 3, serves normally
+        -- register(codex uid):      connection closed, no ack; daemon ALIVE
+        -- register(claude uid):     {"type":"ack"}
+        -- list_sessions:            the Claude run, as normal
+        -- register(codex) again:    closed again; daemon still ALIVE
+        -- afterwards:               0 shadow rows, codex row byte-identical,
+        --                           2 events intact, 0 tombstones
+        -- ```
+        --
+        -- So a Codex run stays unregistered on a rolled-back daemon — which is
+        -- the outcome the supervisor's own `withhold_unless_hosted` already
+        -- produces, and the only alternative on offer is the deleted history
+        -- above. Claude is untouched: its uid is never in `codex_sessions`, so
+        -- the `WHEN` clause is false and the statement is not even examined.
+        --
+        -- **What it costs the hot path, measured rather than waved at.** Every
+        -- insert into `sessions` pays one indexed seek into `codex_sessions`.
+        -- Over 3,000 committed Claude upserts against 200 Codex rows: 23.3us to
+        -- 42.1us each. That is a real 1.8x on the statement and it is nothing on
+        -- the daemon — a session is upserted on registration and on hooks, not
+        -- per heartbeat, so a fleet writing a hundred times a second spends
+        -- under two milliseconds of that second on it. The `EXISTS` seeks the
+        -- `codex_sessions` primary key; there is no cheaper shape that still
+        -- answers the question.
+        --
+        -- **And it does not catch this build's own writes.** The one statement
+        -- here that inserts into `sessions` for a uid living in
+        -- `codex_sessions` is `upsert_session`'s carry, which is
+        -- `INSERT INTO sessions SELECT * FROM codex_sessions` — so `NEW.agent`
+        -- is that row's real agent, not `'claude'`, and the guard is a
+        -- registration re-filing a run under a different agent rather than a
+        -- daemon that cannot see the second table. The guarded upsert that
+        -- follows it runs after the source row has been deleted.
+        CREATE TRIGGER IF NOT EXISTS sessions_refuse_codex_shadow
+        BEFORE INSERT ON sessions
+        WHEN NEW.agent = 'claude'
+         AND EXISTS(SELECT 1 FROM codex_sessions AS c
+                     WHERE c.session_uid = NEW.session_uid)
+        BEGIN
+            SELECT RAISE(ABORT, 'this session_uid is a Codex run and lives in codex_sessions; \
+refusing to file a second copy of it in the shared sessions table');
+        END;
+
+        -- The whole fleet, for the reads that must see all of it.
+        --
+        -- Splitting the write side does not mean splitting the read side: this
+        -- daemon owns both agents and every projection it shows a human — the
+        -- listing, the resolver, the prune's candidate sweep — has to answer for
+        -- both. So the reads changed their FROM clause and nothing else.
+        --
+        -- A view, and named something v0.6.0 has never heard of, on purpose. It
+        -- sits *beside* the real `sessions` table rather than shadowing it, so
+        -- the old daemon still finds a table it can INSERT, UPDATE and DELETE —
+        -- which the shadowing shape could not offer without triggers.
+        --
+        -- `UNION ALL`, not `UNION`: a uid lives in exactly one of the two tables
+        -- (`upsert_session` moves a run rather than copying it), so there is
+        -- nothing to deduplicate and `UNION` would only buy a sort.
+        --
+        -- Measured, not assumed, on the owner's real store: SQLite pushes the
+        -- predicate into both branches rather than materialising the union
+        -- first. `WHERE session_uid = ?` becomes two covering-index seeks,
+        -- `WHERE session_id = ?` two seeks on `sessions_name` /
+        -- `codex_sessions_name`, and the prune's `WHERE lifecycle = ?` two
+        -- scans — which is exactly what it was against the one table, because
+        -- there is no index on `lifecycle` and never was.
+        CREATE VIEW IF NOT EXISTS all_sessions AS
+            SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
+                   claude_session_id, transcript_path, lifecycle,
+                   created_at, updated_at, agent, codex_thread_id, codex_socket
+              FROM sessions
+            UNION ALL
+            SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
+                   claude_session_id, transcript_path, lifecycle,
+                   created_at, updated_at, agent, codex_thread_id, codex_socket
+              FROM codex_sessions;
 
         CREATE TABLE IF NOT EXISTS events(
             session_uid     TEXT    NOT NULL,
@@ -2844,6 +3449,285 @@ fn needs_session_uid_migration(conn: &Connection) -> Result<bool> {
     Ok(!column_exists(conn, "sessions", "session_uid")?)
 }
 
+/// Is there a non-Claude run still sitting in the shared `sessions` table?
+///
+/// **Asked of the data, never of `user_version`**, and that is the whole design
+/// of this migration rather than a stylistic echo of
+/// [`needs_session_uid_migration`]. A version gate would fire exactly once, on
+/// the way up from 3 to 4. But the scenario this exists for is a *rollback*: a
+/// v0.6.0 daemon opens the database, writes `user_version = 3` back
+/// unconditionally, and may create session rows of its own while it runs. On
+/// the way back up a version gate would either re-fire on a database that has
+/// nothing to do (harmless) or — if it were remembered some other way — not
+/// fire on one that does (a Codex row left where the *next* rollback deletes
+/// it). Asking the rows removes the question: the move runs when there is
+/// something to move, every start, whatever the number on the file says.
+///
+/// `agent <> 'claude'` rather than `agent = 'codex'`: an
+/// [`AgentKind::Unsupported`] row is not Claude's either, and leaving it in a
+/// table the old daemon prunes would be the same data loss for an agent we
+/// understand even less.
+///
+/// ## Why the `agent` column is not the whole predicate
+///
+/// **A rollback can put a Codex run back in `sessions` wearing `claude`.**
+/// v0.6.0 has no `agent` column of its own: its `upsert_session` names ten
+/// columns, so the eleventh takes this schema's `DEFAULT 'claude'`. A Codex
+/// supervisor that reconnects while the old daemon is running is therefore
+/// re-filed into the swept table under the wrong agent, while its real row is
+/// still sitting in `codex_sessions`. One uid, two tables, and every downstream
+/// invariant broken at once: `all_sessions` is a `UNION ALL` and returns the run
+/// twice, the old daemon's prune can walk the `sessions` copy and delete the
+/// shared events underneath it, and the next agent flip through
+/// [`Store::upsert_session`] carries a row onto a uid that is already a primary
+/// key in the destination and fails.
+///
+/// An `agent`-only predicate never sees that row and the damage is permanent.
+/// So the question this asks is not "is this row's agent Codex" but **"does this
+/// row belong in `sessions` at all"**, and a uid that already exists in
+/// `codex_sessions` answers no whatever the `agent` column says. Nothing this
+/// build writes can make that pair — [`Store::upsert_session`] moves a run
+/// rather than copying it — so the only thing that produces one is a rollback,
+/// and treating it as Codex-owned is what makes a rollback round trip
+/// self-healing rather than terminal. [`move_codex_sessions`] does the
+/// reconciling.
+///
+/// ## The producer, and where it is actually closed
+///
+/// This repair is the *third* lock, and saying which ones come first matters,
+/// because a repair that runs after the damage is not a substitute for not doing
+/// the damage. Census of everything at `8e5b172` that can put a row in
+/// `sessions` under a uid an external peer supplies: `ClientFrame::Register` →
+/// `register_supervisor`, and `ClientFrame::Hook` → `ensure_session`. Nothing
+/// else — `Heartbeat` reads and touches an in-memory map, `SessionExited` can
+/// only `UPDATE` a row that already exists, and every other frame is read-only
+/// or writes another table. The hook path is Claude's by construction: it is
+/// driven by `cc-hook`, which a Codex run neither installs nor invokes.
+///
+/// So the producer is exactly one frame, and it is refused twice over:
+///
+///   1. **At the peer.** `codeconnect`'s supervisor withholds the frame — before
+///      registering a non-Claude run it asks the daemon, on the same connection,
+///      whether that agent is hosted, and a daemon that predates the agent seam
+///      cannot even decode the question.
+///   2. **At the database**, for the statement the withhold cannot reach: one
+///      already in flight when this migration takes the write lock, or one from
+///      a peer that is not this supervisor at all. `sessions_refuse_codex_shadow`
+///      lives in the schema, so it fires for the old binary's own upsert
+///      whenever it lands, and no argument about scheduling is needed anywhere.
+///
+/// What is left for this migration is the one thing neither can do: rows that
+/// were already misfiled before the refusal existed. `sessions` carried the
+/// `agent` column for a release before `codex_sessions` and the trigger did.
+fn needs_codex_session_move(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "sessions")? || !column_exists(conn, "sessions", "agent")? {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM sessions AS s WHERE {MISFILED})"),
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// A `sessions` row that does not belong in `sessions`.
+///
+/// One predicate, named once, so the question "which rows leave" cannot be
+/// answered differently by the three statements that ask it: the check in
+/// [`needs_codex_session_move`], and the insert and the delete in
+/// [`move_codex_sessions`]. Written against the alias `s`.
+///
+/// The reconcile between those two does not name it and does not need to: its
+/// `WHERE s.session_uid = c.session_uid` is the second disjunct written as a
+/// join, so it matches exactly the rows this matches for that reason.
+///
+/// See [`needs_codex_session_move`] for why the second disjunct is there.
+const MISFILED: &str = "s.agent <> 'claude'
+     OR EXISTS(SELECT 1 FROM codex_sessions AS c WHERE c.session_uid = s.session_uid)";
+
+/// What one run of [`move_codex_sessions`] did, split by which arm took it.
+struct CodexSessionMove {
+    /// Rows carried whole into an empty destination.
+    moved: usize,
+    /// Rows whose uid was already in `codex_sessions` and were merged into it.
+    reconciled: usize,
+}
+
+/// Move every misfiled run out of `sessions` and into `codex_sessions`.
+///
+/// Runs inside [`Store::migrate`]'s `BEGIN IMMEDIATE`, so a run is never in both
+/// tables and never in neither, and the `codex_sessions` table it writes into
+/// becomes visible to another process in the same commit that empties `sessions`
+/// of Codex rows. Interrupting the daemon mid-move — a `SIGKILL`, a power cut —
+/// leaves the transaction unfinished, SQLite rolls it back out of the WAL on the
+/// next open, and [`needs_codex_session_move`] answers `true` again because the
+/// rows are still where they were. There is no half-moved state to detect and no
+/// partial state to repair.
+///
+/// The events, answers and cursors filed under these uids are **not** touched:
+/// they are keyed by uid, the uid does not change, and the whole point is that
+/// nothing reaches them without a `sessions` row to walk from.
+///
+/// ## The collision arm, which is a repair and not a discard
+///
+/// [`needs_codex_session_move`] explains where a uid in both tables comes from:
+/// a rollback, re-filing a reconnecting Codex run into `sessions` under the
+/// `DEFAULT 'claude'` v0.6.0 cannot override. Both rows are then real history —
+/// the isolated one holds the run's identity, the shared one holds whatever the
+/// old daemon learned while it was in charge — so keeping either and dropping
+/// the other loses something. They are **merged**, by one rule with two families:
+///
+///   * **Identity never regresses.** `created_at`, `agent`, `codex_thread_id`
+///     and `codex_socket` are simply not in the `SET` list. v0.6.0 cannot write
+///     any of them — it names ten columns and the other three are not among
+///     them — so anything the shared copy holds for these is a default or a
+///     `NULL`, never news.
+///   * **Everything else is freshest-wins, decided together by `updated_at`.**
+///     Census of v0.6.0's own writes to `sessions`: `upsert_session` sets
+///     `session_id`, `tmux_session`, `tmux_socket`, `cwd`, `lifecycle`,
+///     `updated_at` and `COALESCE`s `claude_session_id` / `transcript_path`;
+///     `set_lifecycle` sets `lifecycle` and `updated_at`. Both advance
+///     `updated_at` in the same statement, so one comparison decides the whole
+///     family and cannot tear it. (Its third writer, the `claude:*` GLOB
+///     normalizer, blanks a tmux location *without* touching `updated_at` — and
+///     is the one v0.6.0 write this can never see, because it matches on a
+///     `session_id` prefix `cc-hook` mints and a Codex run does not carry.)
+///     `updated_at` is RFC3339 UTC at millisecond precision from a formatter
+///     that is byte-identical in both builds, so the lexicographic comparison
+///     SQLite performs is the chronological one.
+///
+/// The two `COALESCE`d columns keep the store's existing rule on top of that: a
+/// known value is not blanked by a later write that has none, whichever side is
+/// fresher.
+///
+/// ## The tie-break is per family, because an equal stamp means two things
+///
+/// An equal `updated_at` is not one situation. It is two, and they want opposite
+/// answers:
+///
+///   * **A genuine tie** — two writes landing in the same millisecond. Here the
+///     shared copy is the causally later one by construction: it exists only
+///     because a rolled-back daemon was in charge and a run reconnected to it,
+///     so whatever it holds was written after the isolated row stopped being
+///     maintained.
+///   * **A manufactured tie** — [`Store::set_lifecycle`] writes *both* physical
+///     tables under one stamp, because the uid is a primary key in each and is
+///     supposed to live in exactly one. When it does not, that one write levels
+///     the two stamps while changing nothing but `lifecycle`. The equality is
+///     then an artefact of our own write and says nothing about location at all.
+///
+/// So the comparison is split rather than picked:
+///
+///   * `lifecycle` keeps `>=`. On a genuine tie the shared side is the one that
+///     was live most recently. On a manufactured tie the two sides already hold
+///     the same value — `set_lifecycle` wrote it to both — so the direction
+///     cannot decide anything, and the ratified reading of the genuine case is
+///     kept intact.
+///   * Everything else — `session_id`, `tmux_session`, `tmux_socket`, `cwd`, and
+///     the two `COALESCE`d columns — takes strict `>`. A shared-side *location*
+///     is news only if a v0.6.0 `upsert_session` actually wrote it, and that
+///     write is precisely what makes `s.updated_at` strictly greater. An equal
+///     stamp is therefore not evidence of a location write, and moving location
+///     on it is what tears the family: the manufactured tie would hand the whole
+///     of a stale rollback row over a `cwd` this build had since refreshed.
+///
+/// What strictness costs in the genuine case is nothing reachable. For the two
+/// stamps to be equal there, the last isolated write and the first shared write
+/// must fall in the same millisecond — with a daemon shutdown, a v0.6.0 start,
+/// and a supervisor reconnect in between, whose backoff floor alone
+/// (`RECONNECT_MIN`) is 500ms. And the `COALESCE`d pair loses nothing in either
+/// direction: a tie takes the isolated value and falls back to the shared one,
+/// so no known value is discarded, only ordered differently.
+///
+/// The identity columns are not in the `SET` list at all, so neither branch of
+/// this can regress them.
+///
+/// **The bound this leaves, stated rather than papered over.** `updated_at` is a
+/// wall stamp, and this repository's own [`protocol::time`] notes that wall time
+/// can step backwards. A backward step *smaller* than the rollback window is
+/// absorbed by the tie-break above, because the shared write still lands at or
+/// after the isolated one. A backward step *larger* than the window would stamp
+/// the causally-later shared write with an earlier time, and freshest-wins would
+/// then keep the isolated row's `cwd` and `lifecycle`. That is the residual: it
+/// costs the fields one old-daemon session advanced, never identity and never
+/// history — the events are keyed by uid and are not part of this merge at all —
+/// and closing it would need a monotonic write counter on a table v0.6.0 writes
+/// without one. Named here so it is a known bound and not a surprise.
+///
+/// The alternative — fail closed, quarantine the shared copy, and let the
+/// operator sort it out — was rejected as the larger change for a strictly worse
+/// outcome: it needs a table to quarantine into, a reader for it, and something
+/// to tell the operator; and it still leaves `all_sessions` returning a
+/// duplicate until a human acts. Merging repairs the invariant at the one moment
+/// the new binary is in a position to act on it.
+fn move_codex_sessions(tx: &Connection) -> Result<CodexSessionMove> {
+    // First, while both copies still exist. Freshest-wins over the family
+    // v0.6.0 can advance; the identity columns are absent from the `SET` list
+    // and therefore cannot regress.
+    let reconciled = tx.execute(
+        "UPDATE codex_sessions AS c
+            SET session_id        = CASE WHEN s.updated_at > c.updated_at
+                                         THEN s.session_id   ELSE c.session_id   END,
+                tmux_session      = CASE WHEN s.updated_at > c.updated_at
+                                         THEN s.tmux_session ELSE c.tmux_session END,
+                tmux_socket       = CASE WHEN s.updated_at > c.updated_at
+                                         THEN s.tmux_socket  ELSE c.tmux_socket  END,
+                cwd               = CASE WHEN s.updated_at > c.updated_at
+                                         THEN s.cwd          ELSE c.cwd          END,
+                lifecycle         = CASE WHEN s.updated_at >= c.updated_at
+                                         THEN s.lifecycle    ELSE c.lifecycle    END,
+                claude_session_id = CASE WHEN s.updated_at > c.updated_at
+                                         THEN COALESCE(s.claude_session_id, c.claude_session_id)
+                                         ELSE COALESCE(c.claude_session_id, s.claude_session_id)
+                                    END,
+                transcript_path   = CASE WHEN s.updated_at > c.updated_at
+                                         THEN COALESCE(s.transcript_path, c.transcript_path)
+                                         ELSE COALESCE(c.transcript_path, s.transcript_path)
+                                    END,
+                updated_at        = MAX(s.updated_at, c.updated_at)
+           FROM sessions AS s
+          WHERE s.session_uid = c.session_uid",
+        [],
+    )?;
+    // Then the ordinary arm: a misfiled row with nothing at its uid in the
+    // destination. `NOT EXISTS` rather than `INSERT OR IGNORE`, so the rows the
+    // reconcile just handled are excluded by the statement instead of being
+    // swallowed by a conflict clause that would look identical if the reconcile
+    // had never run.
+    let moved = tx.execute(
+        &format!(
+            "INSERT INTO codex_sessions(session_uid, session_id, tmux_session, tmux_socket,
+                                        cwd, claude_session_id, transcript_path, lifecycle,
+                                        created_at, updated_at, agent, codex_thread_id,
+                                        codex_socket)
+             SELECT s.session_uid, s.session_id, s.tmux_session, s.tmux_socket, s.cwd,
+                    s.claude_session_id, s.transcript_path, s.lifecycle, s.created_at,
+                    s.updated_at, s.agent, s.codex_thread_id, s.codex_socket
+               FROM sessions AS s
+              WHERE ({MISFILED})
+                AND NOT EXISTS(SELECT 1 FROM codex_sessions AS c
+                                WHERE c.session_uid = s.session_uid)"
+        ),
+        [],
+    )?;
+    // And the same predicate one last time. Nothing is lost by it: every row it
+    // matches is either one the reconcile merged — the `UPDATE`'s own `WHERE`
+    // is the second disjunct of [`MISFILED`], so the two sets are the same set
+    // — or one the `INSERT` above copied whole. Sharing the predicate is what
+    // makes that true by construction rather than by an assertion that could
+    // never fire.
+    tx.execute(&format!("DELETE FROM sessions AS s WHERE {MISFILED}"), [])?;
+    if reconciled > 0 {
+        crate::log_error!(
+            "schema: {reconciled} Codex run(s) had been re-filed into the shared sessions table \
+             under the default agent, which only a rolled-back v0.6 daemon can do; the two copies \
+             were merged — identity from the isolated row, freshest-wins on everything the old \
+             daemon can advance — and the shared copy removed"
+        );
+    }
+    Ok(CodexSessionMove { moved, reconciled })
+}
+
 /// Columns added to an existing table after the fact.
 ///
 /// Every entry must be nullable or carry a default: SQLite cannot add a `NOT
@@ -2950,33 +3834,36 @@ fn needs_column_additions(conn: &Connection) -> Result<bool> {
     Ok(!missing_columns(conn)?.is_empty())
 }
 
-/// Widen the tables that predate a column, in one immediate transaction.
+/// Widen the tables that predate a column.
 ///
 /// `ALTER TABLE … ADD COLUMN` has no `IF NOT EXISTS`, so a second attempt at a
 /// column that is already there fails with a duplicate-column error — which,
 /// raised from here, is a daemon that will not open its own database.
-fn add_missing_columns(conn: &mut Connection) -> Result<()> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
+///
+/// Takes the caller's connection rather than opening a transaction of its own,
+/// because [`Store::migrate`] now runs this inside the one `BEGIN IMMEDIATE`
+/// that also creates `codex_sessions` and moves the Codex rows into it. The
+/// write lock that used to be taken here is taken there, earlier, and held
+/// across all three.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
     // Asked again under the write lock, for the reason spelled out in
     // `migrate_to_session_uids`: two daemons starting at once can both pass the
     // unlocked check, and the one that arrives second must find nothing left to
     // do rather than repeat an `ALTER` the first one already committed.
-    let additions = missing_columns(&tx)?;
+    let additions = missing_columns(conn)?;
     if additions.is_empty() {
         crate::log_debug!("another process widened these tables first; nothing to do");
         return Ok(());
     }
 
     for (table, column, kind) in additions {
-        tx.execute(
+        conn.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
             [],
         )?;
         crate::log_info!("schema: added {table}.{column}");
     }
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -3356,8 +4243,14 @@ fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Resul
     // orphan shape `append_batch_with_cursor` refuses, enforced here so every
     // single-event path shares the rule. `None` is the shape callers already
     // tolerate for a dedup miss.
+    //
+    // `all_sessions`, and this is the single highest-consequence line of the
+    // split: every fact either agent records passes through here. Pointed at
+    // the Claude table alone it reads a live Codex run as gone and drops the
+    // event as if it were a dedup miss — silently, because `Ok(None)` is
+    // exactly what a duplicate returns.
     let known: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_uid = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
         params![pending.session_uid],
         |row| row.get(0),
     )?;
@@ -3497,7 +4390,7 @@ mod tests {
     use super::*;
     use protocol::ws::{AnswerDecision, AnswerPath, ResolvedBy};
     use serde_json::json;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -4113,6 +5006,1854 @@ mod tests {
         assert_eq!(store.count_events(&neighbour.uid).unwrap(), 4);
     }
 
+    // ------------------------------------------- agent-scoped session storage
+
+    /// A Codex run, in the shape a registration will write once one exists.
+    fn codex_session_row(session: &SessionKey) -> SessionRow {
+        let mut row = session_row(session);
+        row.agent = AgentKind::Codex;
+        row.codex_thread_id = Some("th_ABC123".into());
+        row.codex_socket = Some("/tmp/cch.test/ccd.sock".into());
+        row
+    }
+
+    /// How many rows each physical table holds, so an assertion can say *where*
+    /// a run is rather than only that the daemon can still find it.
+    fn table_counts(store: &Store) -> (i64, i64) {
+        let conn = store.read();
+        let claude: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let codex: i64 = conn
+            .query_row("SELECT COUNT(*) FROM codex_sessions", [], |row| row.get(0))
+            .unwrap();
+        (claude, codex)
+    }
+
+    /// **The whole point of the split.** A Codex run is written to
+    /// `codex_sessions` and is not in `sessions` at all, while every read this
+    /// daemon performs still finds it.
+    #[test]
+    fn a_codex_run_is_written_to_its_own_table_and_never_to_the_shared_one() {
+        let (store, _path) = temp_store();
+        let claude = key("AA", "cc-1");
+        let codex = key("CX", "cx-1");
+        store
+            .upsert_session(&session_row(&claude))
+            .unwrap()
+            .assert_present();
+        store
+            .upsert_session(&codex_session_row(&codex))
+            .unwrap()
+            .assert_present();
+
+        assert_eq!(
+            table_counts(&store),
+            (1, 1),
+            "each agent's run belongs to exactly one table"
+        );
+
+        // And every read still answers for the whole fleet.
+        let listed: Vec<String> = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.session_uid)
+            .collect();
+        assert!(listed.contains(&claude.uid) && listed.contains(&codex.uid));
+        let found = store.get_session(&codex.uid).unwrap().expect("by uid");
+        assert_eq!(found.agent, AgentKind::Codex);
+        assert_eq!(found.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(found.cwd, "/tmp", "the row round-trips whole, not partly");
+        assert_eq!(
+            store
+                .find_session("cx-1")
+                .unwrap()
+                .map(|row| row.session_uid),
+            Some(codex.uid.clone()),
+            "resolving by tmux name reaches the Codex half too"
+        );
+    }
+
+    /// The isolation itself, stated as the old daemon's own SQL.
+    ///
+    /// v0.6.0 cannot be imported, so its statements are reproduced here verbatim
+    /// — the agent-agnostic positional listing its liveness sweep enumerates
+    /// from, the `UPDATE` that sweep issues when tmux says a session is gone,
+    /// and the `DELETE` its prune runs. All three name `sessions`, because that
+    /// is the only session table that build has ever heard of. Every one of them
+    /// must come away with nothing.
+    ///
+    /// Measured against the real binary before this change, with the Codex row
+    /// in the shared table: the sweep marked a live Codex session `exited` and
+    /// the prune deleted the row and all its events.
+    #[test]
+    fn a_rolled_back_daemons_own_statements_cannot_reach_a_codex_run() {
+        let (store, _path) = temp_store();
+        let claude = key("AA", "cc-1");
+        let codex = key("CX", "cx-1");
+        seed_run(&store, &claude, Lifecycle::Live, 2);
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+        for i in 0..2 {
+            store
+                .append_event(&pending(
+                    &codex,
+                    EventKind::ToolCall,
+                    Some(&format!("cx-{i}")),
+                ))
+                .unwrap();
+        }
+
+        let conn = store.write();
+
+        // 1. Enumeration — v0.6.0's `list_sessions`, ten columns by position.
+        let enumerated: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_uid, session_id, tmux_session, tmux_socket, cwd,
+                            claude_session_id, transcript_path, lifecycle, created_at, updated_at
+                       FROM sessions ORDER BY created_at ASC, session_uid ASC",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            enumerated,
+            vec![claude.uid.clone()],
+            "the old daemon's listing sees Claude's run and nothing else"
+        );
+
+        // 2. Mutation — the liveness sweep's write, applied to every uid it
+        //    could possibly have reached.
+        let marked = conn
+            .execute(
+                "UPDATE sessions SET lifecycle = 'exited', updated_at = 'then'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(marked, 1, "only Claude's run was reachable to be marked");
+
+        // 3. Destruction — the prune, over every ended run the old build knows.
+        let pruned = conn
+            .execute("DELETE FROM sessions WHERE lifecycle = 'exited'", [])
+            .unwrap();
+        assert_eq!(pruned, 1, "the prune took Claude's run and only Claude's");
+        drop(conn);
+
+        // The Codex run and its whole log are untouched.
+        let survivor = store.get_session(&codex.uid).unwrap().expect("codex row");
+        assert_eq!(survivor.lifecycle, Lifecycle::Live);
+        assert_eq!(survivor.updated_at, row.updated_at);
+        assert_eq!(store.count_events(&codex.uid).unwrap(), 2);
+    }
+
+    /// The move is defined over the rows, not over `user_version`.
+    ///
+    /// Seeded the way a rollback leaves it: a Codex row sitting in the shared
+    /// table, written there by a build that had no other place to put it. The
+    /// first open moves it. The second finds nothing to do. And a third, with
+    /// `user_version` forced back to 3 the way a v0.6.0 daemon leaves it, still
+    /// finds nothing to do — which is the property a version gate could not
+    /// have, because the version it would gate on is not ours to keep.
+    #[test]
+    fn the_codex_move_is_driven_by_the_rows_and_survives_a_reset_version() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let claude = key("AA", "cc-1");
+        seed_run(&store, &claude, Lifecycle::Live, 1);
+        drop(store);
+
+        // A v0.6-shaped write: straight into `sessions`, agent and all.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                      claude_session_id, transcript_path, lifecycle,
+                                      created_at, updated_at, agent, codex_thread_id, codex_socket)
+                 VALUES(?1, 'cx-1', 'cx-1', 'codeconnect', '/work', NULL, NULL, 'live',
+                        't', 't', 'codex', 'th_ABC123', '/tmp/s.sock')",
+                params![codex.uid],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            table_counts(&store),
+            (1, 1),
+            "the move put the Codex run where the old daemon cannot reach it"
+        );
+        let moved = store.get_session(&codex.uid).unwrap().expect("moved row");
+        assert_eq!(moved.agent, AgentKind::Codex);
+        assert_eq!(moved.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(
+            moved.cwd, "/work",
+            "every column came across, not just the key"
+        );
+        drop(store);
+
+        // Idempotent: a second open has nothing to move and changes nothing.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(table_counts(&store), (1, 1));
+        drop(store);
+
+        // And the rollback's parting gift — `user_version` back at 3 — does not
+        // make it re-run, because it never asked.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(table_counts(&store), (1, 1));
+        assert!(store.get_session(&codex.uid).unwrap().is_some());
+        assert!(store.get_session(&claude.uid).unwrap().is_some());
+        assert_eq!(store.count_events(&claude.uid).unwrap(), 1);
+    }
+
+    /// The ten-column `INSERT … ON CONFLICT DO UPDATE` v0.6.0's `upsert_session`
+    /// issues, character for character from `git show 8e5b172:…/store.rs:727`.
+    ///
+    /// Written out rather than approximated because the whole question is what
+    /// *that build's own statement* does to *this* schema: the eleventh column
+    /// it does not name is what takes `DEFAULT 'claude'`, and an approximation
+    /// that named `agent` would be testing something else entirely.
+    const V060_UPSERT: &str = "INSERT INTO sessions(session_uid, session_id, tmux_session,
+                                                    tmux_socket, cwd, claude_session_id,
+                                                    transcript_path, lifecycle,
+                                                    created_at, updated_at)
+                               SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+                                WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions
+                                                   WHERE session_uid = ?1)
+                                  ON CONFLICT(session_uid) DO UPDATE SET
+                                     session_id        = excluded.session_id,
+                                     tmux_session      = excluded.tmux_session,
+                                     tmux_socket       = excluded.tmux_socket,
+                                     cwd               = excluded.cwd,
+                                     claude_session_id = COALESCE(excluded.claude_session_id,
+                                                                  sessions.claude_session_id),
+                                     transcript_path   = COALESCE(excluded.transcript_path,
+                                                                  sessions.transcript_path),
+                                     lifecycle         = excluded.lifecycle,
+                                     updated_at        = excluded.updated_at";
+
+    /// Run that statement for one uid, exactly as the old daemon would.
+    fn v060_upsert(
+        conn: &Connection,
+        uid: &str,
+        cwd: &str,
+        stamp: &str,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            V060_UPSERT,
+            params![
+                uid,
+                "cx-1",
+                "cx-1",
+                "codeconnect",
+                cwd,
+                None::<String>,
+                None::<String>,
+                "live",
+                stamp,
+                stamp
+            ],
+        )
+    }
+
+    /// Run a seeding block against the schema as it was **before** the shadow
+    /// became unwritable.
+    ///
+    /// `sessions_refuse_codex_shadow` is what stops a second copy of a Codex run
+    /// reaching the shared table, which is the point of it — and which means
+    /// every test *about* a duplicate has to stage one from before the refusal
+    /// existed. That state is real rather than contrived: `sessions` carried the
+    /// `agent` column for a release before `codex_sessions` and the trigger did,
+    /// so a first upgrade can genuinely find one on disk.
+    ///
+    /// Taking the trigger away, writing the row, and putting the trigger back is
+    /// what that history looks like. The trigger returns through
+    /// [`create_schema`] rather than through a copy of its text, so the staged
+    /// database ends at the schema this build actually publishes.
+    fn from_before_the_refusal<T>(conn: &Connection, seed: impl FnOnce(&Connection) -> T) -> T {
+        conn.execute_batch("DROP TRIGGER sessions_refuse_codex_shadow")
+            .unwrap();
+        let seeded = seed(conn);
+        create_schema(conn).unwrap();
+        seeded
+    }
+
+    /// The common case of [`from_before_the_refusal`]: v0.6.0's own statement.
+    fn stage_a_shadow_from_before_the_refusal(
+        conn: &Connection,
+        uid: &str,
+        cwd: &str,
+        stamp: &str,
+    ) {
+        from_before_the_refusal(conn, |conn| {
+            v060_upsert(conn, uid, cwd, stamp).unwrap();
+        });
+    }
+
+    /// Put the database into the shape the *first* upgrade finds: `sessions`
+    /// carrying the agent column and some non-Claude rows, and no
+    /// `codex_sessions` or `all_sessions` yet.
+    ///
+    /// Built by opening a store and then taking the two v4 objects away again,
+    /// rather than by hand-writing a v3 schema, so it cannot drift from what
+    /// `create_schema` actually builds.
+    fn wind_back_to_the_shape_before_the_split(path: &std::path::Path, misfiled: u32) {
+        let conn = Connection::open(path).unwrap();
+        // The trigger goes with them, because it ships with them: it names
+        // `codex_sessions` in its `WHEN` clause and is created by the same
+        // `create_schema` batch. Leaving it behind would be a shape no build
+        // ever wrote, and would refuse the seeding below on a table that is not
+        // there to be consulted.
+        conn.execute_batch(
+            "DROP TRIGGER sessions_refuse_codex_shadow;
+             DROP VIEW all_sessions;
+             DROP TABLE codex_sessions;",
+        )
+        .unwrap();
+        for i in 0..misfiled {
+            conn.execute(
+                "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                      claude_session_id, transcript_path, lifecycle,
+                                      created_at, updated_at, agent, codex_thread_id,
+                                      codex_socket)
+                 VALUES(?1, 'cx-1', 'cx-1', 'codeconnect', '/work', NULL, NULL, 'live',
+                        't', 't', 'codex', 'th_ABC123', '/tmp/s.sock')",
+                params![format!("CXFILL{i:020}")],
+            )
+            .unwrap();
+        }
+    }
+
+    /// **The schema and the rows it is about must become true in one commit.**
+    ///
+    /// Creating `codex_sessions` publishes the claim that Codex runs are out of
+    /// the table a rolled-back v0.6.0 daemon sweeps; the move is what makes the
+    /// claim true. Committed separately there is a state on disk where the claim
+    /// is published and unkept — the new table exists and the Codex rows are
+    /// still in `sessions` — and an old daemon starting inside it does exactly
+    /// what it did before the split.
+    ///
+    /// Measured against the old daemon's own two statements, with a database
+    /// mid-migration:
+    ///
+    /// ```text
+    /// three autocommitting steps:  enumerated=[AA, CX]  update_rows=2
+    /// one BEGIN IMMEDIATE:         enumerated=[AA, CX]  update_rows=None (database is locked)
+    ///                              after COMMIT: enumerated=[AA]  update_rows=1
+    /// ```
+    ///
+    /// The observer here is the reading half of that, run continuously for the
+    /// whole of `Store::open`. Each sample is one transaction, so under WAL it
+    /// reads a snapshot of a single *committed* state and cannot smear two
+    /// together: seeing the half state means the half state was committed. A
+    /// deferred read transaction rather than the old daemon's `BEGIN IMMEDIATE`,
+    /// because a writer sampling in a tight loop would spend the test fighting
+    /// the migration for the write lock and prove nothing extra — the question
+    /// is what is *visible*, and WAL readers never block.
+    ///
+    /// The rows are seeded in bulk because the window this hunts for is exactly
+    /// as wide as the move is long: it opens when `create_schema` commits and
+    /// closes when the move commits, so more rows to move is a wider window and
+    /// a test with more power, not less.
+    #[test]
+    fn the_new_tables_and_the_moved_rows_become_visible_in_the_same_commit() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let (store, path) = temp_store();
+        drop(store);
+        wind_back_to_the_shape_before_the_split(&path, 20_000);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready, sampling) = std::sync::mpsc::channel();
+        let observer = {
+            let path = path.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut conn = Connection::open(&path).unwrap();
+                conn.busy_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                let (mut samples, mut half_states) = (0u64, 0u64);
+                let mut ready = Some(ready);
+                while !stop.load(Ordering::Relaxed) {
+                    let tx = conn.transaction().unwrap();
+                    // `EXISTS`, not `COUNT`, on both halves: the question is
+                    // whether the half state is visible at all, and a count over
+                    // twenty thousand rows would make each sample a full scan
+                    // and the sampling too coarse to see the window it is
+                    // hunting for.
+                    let published: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                                            WHERE name = 'codex_sessions')",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    let still_shared: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM sessions WHERE agent <> 'claude')",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    tx.commit().unwrap();
+                    samples += 1;
+                    if published && still_shared {
+                        half_states += 1;
+                    }
+                    // Only once the first sample has actually been taken, so the
+                    // measured window is the migration and not this thread's
+                    // startup.
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(());
+                    }
+                }
+                (samples, half_states)
+            })
+        };
+        sampling.recv().unwrap();
+
+        let store = Store::open(&path).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let (samples, half_states) = observer.join().unwrap();
+
+        assert_eq!(
+            half_states, 0,
+            "{half_states} of {samples} samples caught a committed state in which \
+             codex_sessions had been published while sessions still held Codex runs — \
+             a v0.6.0 daemon starting there sweeps and prunes them"
+        );
+        assert!(
+            samples > 500,
+            "the observer only managed {samples} samples, which is too few for its \
+             silence to mean anything"
+        );
+        assert_eq!(table_counts(&store), (0, 20_000));
+    }
+
+    /// How many times an old-shaped statement had to wait for this build's write
+    /// lock, counted by the statement's own busy handler.
+    ///
+    /// A `static` because SQLite's busy handler is a bare `fn` pointer with
+    /// nothing to capture into — and the witness has to be the *real* statement's
+    /// waiting, not a sleep the test guessed at.
+    static OLD_WRITE_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_a_wait(tries: i32) -> bool {
+        OLD_WRITE_WAITS.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        // v0.6.0's own bound: `busy_timeout(5000)`, an instruction to wait for
+        // the lock rather than fail on it.
+        tries < 5_000
+    }
+
+    /// **An old-shaped write never lands a shadow, on any schedule.**
+    ///
+    /// The observer above proves nobody *sees* a half state. It says nothing
+    /// about a writer, and `BEGIN IMMEDIATE` does not neutralise one — it defers
+    /// it. v0.6.0's `open_connection` sets `busy_timeout` to 5000ms, so its
+    /// ten-column upsert resumes *after* our commit, against the schema we have
+    /// just published, and would file the uid we just moved straight back into
+    /// `sessions` under `DEFAULT 'claude'`.
+    ///
+    /// A repair after the fact cannot answer that, and the review that found this
+    /// said why: on a database with nothing misfiled there is no evidence a
+    /// re-ask is needed at all, and even where there is, no interval has a
+    /// happens-before relationship with another process's scheduling. So the
+    /// answer is not a repair, it is a refusal — `sessions_refuse_codex_shadow`,
+    /// which lives in the schema and therefore fires for the old binary's own
+    /// statement. This drives that across **all three schedules**, with the
+    /// verbatim v0.6.0 statement on its own connection:
+    ///
+    ///   * `Before` — the write lands before `Store::open` is called at all.
+    ///   * `Deferred` — the write is held until it has *observed* the migration
+    ///     holding the write lock, then blocks behind it and resumes after the
+    ///     commit. Nothing sleeps to arrange that: the writer probes for
+    ///     `SQLITE_BUSY` itself, and [`OLD_WRITE_WAITS`] counts the real
+    ///     statement's retries, so the round asserts it was blocked rather than
+    ///     assuming a sleep was long enough. That was the masking the review
+    ///     found — a 40ms sleep and an assertion that ran before `Store::open`.
+    ///   * `After` — on a **clean** database, with nothing misfiled and nothing
+    ///     for the migration to move, the write lands strictly after
+    ///     `Store::open` has returned. This is the schedule the review named, and
+    ///     it is deterministic: no timing argument is involved anywhere in it.
+    ///
+    /// In every one the write is **refused** rather than repaired, and the
+    /// refusal is what is asserted. A shadow count of zero would also be
+    /// satisfied by a repair that ran afterwards, which is precisely the claim
+    /// this can no longer make.
+    #[test]
+    fn an_old_shaped_write_racing_the_migration_never_leaves_a_shadow() {
+        #[derive(Clone, Copy, Debug)]
+        enum Schedule {
+            Before,
+            Deferred,
+            After,
+        }
+
+        const ROUNDS: u32 = 4;
+        for round in 0..ROUNDS {
+            for schedule in [Schedule::Before, Schedule::Deferred, Schedule::After] {
+                let (store, path) = temp_store();
+                let codex = key("CX", "cx-1");
+                let mut row = codex_session_row(&codex);
+                row.lifecycle = Lifecycle::Live;
+                store.upsert_session(&row).unwrap().assert_present();
+                assert_eq!(table_counts(&store), (0, 1));
+                store
+                    .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
+                    .unwrap();
+                drop(store);
+
+                // Rows for the move to chew through, so the migration's
+                // transaction is wide enough for the deferred arm to catch it
+                // holding the lock *and* still have work left when the old
+                // statement fires. The `After` arm gets none on purpose: a
+                // database with nothing to repair is exactly the case a
+                // post-commit re-ask has no evidence to run for, and it is the
+                // schedule the review named.
+                let fill = match schedule {
+                    Schedule::After => 0,
+                    Schedule::Before => 8_000,
+                    Schedule::Deferred => 40_000,
+                };
+                {
+                    let conn = Connection::open(&path).unwrap();
+                    for i in 0..fill {
+                        conn.execute(
+                            "INSERT INTO sessions(session_uid, session_id, tmux_session,
+                                                  tmux_socket, cwd, claude_session_id,
+                                                  transcript_path, lifecycle, created_at,
+                                                  updated_at, agent, codex_thread_id,
+                                                  codex_socket)
+                             VALUES(?1, 'cx-f', 'cx-f', 'codeconnect', '/work', NULL, NULL,
+                                    'live', 't', 't', 'codex', NULL, NULL)",
+                            params![format!("CXFILL{i:020}")],
+                        )
+                        .unwrap();
+                    }
+                }
+
+                OLD_WRITE_WAITS.store(0, Ordering::SeqCst);
+                let old_write = {
+                    let path = path.clone();
+                    let uid = codex.uid.clone();
+                    move |wait_for_the_lock: bool| -> rusqlite::Result<usize> {
+                        let conn = Connection::open(&path).unwrap();
+                        conn.busy_handler(Some(count_a_wait)).unwrap();
+                        if wait_for_the_lock {
+                            // Held back until the migration is *certainly*
+                            // inside its transaction, established by two
+                            // observations together rather than by a sleep:
+                            //
+                            //   * the write lock is held — asked for without
+                            //     waiting, and refused;
+                            //   * and the move has not committed — a WAL read,
+                            //     which never blocks, so it is answerable while
+                            //     the lock is held.
+                            //
+                            // Both are needed. `Store::open` takes the write
+                            // lock more than once (`drop_retired_columns` runs
+                            // its own short transaction after the commit), so
+                            // "somebody holds it" alone would let this fire on
+                            // the far side of the migration and race an empty
+                            // window. The second condition is what makes the
+                            // holder the migration.
+                            //
+                            // Separate connections, so the counter above stays a
+                            // record of the real statement's waiting and nothing
+                            // else.
+                            // Two of them, because they want opposite settings:
+                            // the lock ask must *not* wait, or it would sit in
+                            // the busy handler instead of reporting what it
+                            // found, while the read must wait like any other
+                            // reader — a WAL read never blocks on a writer, but
+                            // it can still meet a moment of WAL recovery.
+                            let probe = Connection::open(&path).unwrap();
+                            probe.busy_timeout(std::time::Duration::ZERO).unwrap();
+                            let watch = Connection::open(&path).unwrap();
+                            let last_fill = format!("CXFILL{:020}", fill - 1);
+                            let moved = |watch: &Connection| -> bool {
+                                watch
+                                    .query_row(
+                                        "SELECT EXISTS(SELECT 1 FROM codex_sessions
+                                                        WHERE session_uid = ?1)",
+                                        params![last_fill],
+                                        |r| r.get::<_, bool>(0),
+                                    )
+                                    .unwrap()
+                            };
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(30);
+                            loop {
+                                assert!(
+                                    !moved(&watch),
+                                    "the migration committed before this could catch it holding \
+                                     the lock, so the deferred schedule was never driven"
+                                );
+                                if probe.execute_batch("BEGIN IMMEDIATE").is_err() {
+                                    break;
+                                }
+                                probe.execute_batch("ROLLBACK").unwrap();
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "the migration never held the write lock where this could \
+                                     see it, so the deferred schedule was never driven"
+                                );
+                                // Room for the migration to take the lock. Only
+                                // on the path where it does not hold it — the
+                                // refusal is what ends this loop, and nothing
+                                // sleeps between seeing it and issuing the
+                                // statement.
+                                std::thread::sleep(std::time::Duration::from_micros(200));
+                            }
+                        }
+                        v060_upsert(&conn, &uid, "/work/moved", "2099-01-01T00:00:00.000Z")
+                    }
+                };
+
+                let refusal = match schedule {
+                    Schedule::Before => {
+                        let refusal = old_write(false);
+                        Store::open(&path).unwrap();
+                        refusal
+                    }
+                    Schedule::Deferred => {
+                        let writer = std::thread::spawn(move || old_write(true));
+                        Store::open(&path).unwrap();
+                        writer.join().unwrap()
+                    }
+                    Schedule::After => {
+                        Store::open(&path).unwrap();
+                        old_write(false)
+                    }
+                };
+
+                let err = refusal.expect_err(&format!(
+                    "round {round} {schedule:?}: the shared table accepted a second copy of a \
+                     Codex run. Whether a later repair would have removed it is beside the \
+                     point — a rolled-back daemon acts on the row it has just written."
+                ));
+                assert!(
+                    matches!(
+                        err.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::ConstraintViolation)
+                    ),
+                    "round {round} {schedule:?}: refused, but not by the constraint that is \
+                     supposed to be doing it: {err}"
+                );
+                if matches!(schedule, Schedule::Deferred) {
+                    assert!(
+                        OLD_WRITE_WAITS.load(Ordering::SeqCst) > 0,
+                        "round {round}: the statement was supposed to block behind the \
+                         migration's write lock and never did, so this round proved nothing \
+                         about the deferred schedule"
+                    );
+                }
+
+                let store = Store::open(&path).unwrap();
+                let shadows: i64 = {
+                    let conn = store.read();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sessions WHERE session_uid = ?1",
+                        params![codex.uid],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    shadows, 0,
+                    "round {round} {schedule:?}: a default-Claude shadow of a Codex run is in \
+                     the shared table"
+                );
+                let isolated = store.get_session(&codex.uid).unwrap().expect("one row");
+                assert_eq!(
+                    isolated.agent,
+                    AgentKind::Codex,
+                    "round {round} {schedule:?}: identity must survive"
+                );
+                assert_eq!(isolated.codex_thread_id.as_deref(), Some("th_ABC123"));
+                assert_eq!(
+                    isolated.cwd, row.cwd,
+                    "round {round} {schedule:?}: the refused write must not have advanced the \
+                     surviving row either"
+                );
+                assert_eq!(
+                    store.count_events(&codex.uid).unwrap(),
+                    1,
+                    "round {round} {schedule:?}: the children are keyed by uid and are never \
+                     part of this"
+                );
+                let listed = store
+                    .list_sessions()
+                    .unwrap()
+                    .iter()
+                    .filter(|s| s.session_uid == codex.uid)
+                    .count();
+                assert_eq!(
+                    listed, 1,
+                    "round {round} {schedule:?}: the UNION ALL is returning the run twice"
+                );
+            }
+        }
+    }
+
+    /// The refusal is narrow enough to leave Claude and the agent flip alone.
+    ///
+    /// A trigger written on the uid alone would refuse two writes it must not.
+    ///
+    ///   * An ordinary Claude registration. Its uid is not in `codex_sessions`
+    ///     and never will be, so the `EXISTS` is false and the statement is not
+    ///     examined — but that is the claim, and it is worth pinning.
+    ///   * A re-registration that moves a run *from* Codex *to* Claude. That
+    ///     genuinely does insert into `sessions` for a uid living in
+    ///     `codex_sessions`: [`Store::upsert_session`]'s carry is
+    ///     `INSERT INTO sessions SELECT * FROM codex_sessions`. `NEW.agent` is
+    ///     that row's real agent rather than the default, which is exactly what
+    ///     the `WHEN` clause distinguishes, so the flip goes through and every
+    ///     `COALESCE`d field survives it.
+    #[test]
+    fn the_refusal_is_narrow_enough_to_leave_claude_and_the_agent_flip_alone() {
+        let (store, _path) = temp_store();
+
+        let claude = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&claude))
+            .unwrap()
+            .assert_present();
+        assert_eq!(table_counts(&store), (1, 0));
+
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.transcript_path = Some("/tmp/codex.jsonl".into());
+        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(table_counts(&store), (1, 1));
+
+        // The flip: same uid, now announcing itself as Claude.
+        let mut flipped = session_row(&codex);
+        flipped.transcript_path = None;
+        store.upsert_session(&flipped).unwrap().assert_present();
+        assert_eq!(
+            table_counts(&store),
+            (2, 0),
+            "the carry is what moves the row, and the trigger must not stand in front of it"
+        );
+        let moved = store.get_session(&codex.uid).unwrap().expect("one row");
+        assert_eq!(moved.agent, AgentKind::Claude);
+        assert_eq!(
+            moved.transcript_path.as_deref(),
+            Some("/tmp/codex.jsonl"),
+            "the carry moves the row rather than rebuilding it, so a COALESCEd field survives"
+        );
+    }
+
+    /// A shadow written before this schema shipped is still repaired at open.
+    ///
+    /// `sessions_refuse_codex_shadow` stops the shadow being *written*; it says
+    /// nothing about one already on disk when the trigger arrives. That is the
+    /// migration's remaining job, and it is not hypothetical: `sessions` carried
+    /// the `agent` column for a release before `codex_sessions` existed, so a
+    /// non-Claude run really can be sitting in the shared table on first upgrade.
+    ///
+    /// Staged by taking the trigger away and writing the row the old binary
+    /// writes — the only honest way to produce a shadow no trigger was there to
+    /// refuse. Both shapes at once: a uid that is also in `codex_sessions`
+    /// (merged) and one that is not (carried whole).
+    #[test]
+    fn a_shadow_written_before_this_schema_shipped_is_repaired_at_open() {
+        let (store, path) = temp_store();
+        let merged = key("CX", "cx-1");
+        let carried = key("CY", "cx-2");
+        let mut row = codex_session_row(&merged);
+        row.lifecycle = Lifecycle::Live;
+        row.cwd = "/work/before".into();
+        row.updated_at = "2020-01-01T00:00:00.000Z".into();
+        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(table_counts(&store), (0, 1));
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TRIGGER sessions_refuse_codex_shadow")
+            .unwrap();
+        // Exactly what a v0.6.0 daemon writes: ten columns, `agent` taking this
+        // schema's default, and nothing present to refuse it.
+        v060_upsert(
+            &conn,
+            &merged.uid,
+            "/work/after",
+            "2099-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        // And the other shape, for a uid the old daemon knew and this build does
+        // not have isolated: still not Claude's, still must leave.
+        conn.execute(
+            "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                  claude_session_id, transcript_path, lifecycle,
+                                  created_at, updated_at, agent, codex_thread_id, codex_socket)
+             VALUES(?1, 'cx-2', 'cx-2', 'codeconnect', '/work', NULL, NULL, 'live',
+                    't', 't', 'codex', 'th_XYZ', NULL)",
+            params![carried.uid],
+        )
+        .unwrap();
+        assert!(
+            needs_codex_session_move(&conn).unwrap(),
+            "the seeded state is the one the repair exists for"
+        );
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        assert!(
+            !needs_codex_session_move(&store.read()).unwrap(),
+            "the repair left the shared table holding a run that does not belong in it"
+        );
+        let healed = store.get_session(&merged.uid).unwrap().expect("one row");
+        assert_eq!(healed.agent, AgentKind::Codex, "identity is not regressed");
+        assert_eq!(healed.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(
+            healed.cwd, "/work/after",
+            "and the strictly fresher of the two copies still wins on the family the old \
+             daemon advances"
+        );
+        assert_eq!(
+            store.get_session(&carried.uid).unwrap().unwrap().agent,
+            AgentKind::Codex
+        );
+        assert_eq!(table_counts(&store), (0, 2));
+        // And the trigger is back, so the next old-shaped write is refused
+        // rather than repaired at the start after that.
+        let conn = Connection::open(&path).unwrap();
+        assert!(
+            v060_upsert(
+                &conn,
+                &merged.uid,
+                "/work/again",
+                "2099-01-02T00:00:00.000Z"
+            )
+            .is_err(),
+            "the repair must leave the refusal in place behind it"
+        );
+    }
+
+    /// **An ended shadow cannot take a live run's history with it.**
+    ///
+    /// The destructive shape, and it is not a near miss. With
+    /// `sessions(CX) = exited` beside `codex_sessions(CX) = live`, both the
+    /// single delete and the prune used to:
+    ///
+    ///   1. accept the uid, because the guard read *an* identity row and the
+    ///      unordered `all_sessions` lookup could hand it the ended one;
+    ///   2. delete every `SESSION_SCOPED_TABLES` row under the uid — the live
+    ///      run's events, answers and ledgers — **before** touching either
+    ///      identity row;
+    ///   3. delete identity rows under the exit predicate, which matched the
+    ///      shadow and not the live copy, so the "exactly one row" assertion saw
+    ///      `1` and was satisfied;
+    ///   4. commit, tombstone the uid, and leave the live identity standing with
+    ///      its whole history gone and a `deleted_sessions` row now forbidding
+    ///      anything from being filed under it again.
+    ///
+    /// `sessions_refuse_codex_shadow` is what stops that state existing, so this
+    /// stages it from before the refusal. The guard is kept anyway and is not
+    /// redundant belt: the trigger stops the duplicate being *written*, and this
+    /// is what stops a duplicate already on disk — one that arrived on an older
+    /// schema and has not yet met `Store::open` — being *destructive*. The exit
+    /// predicate now has to hold for every identity row of the uid, not for one
+    /// of them.
+    ///
+    /// Both callers, because they are two statements and only shared a comment.
+    #[test]
+    fn an_ended_shadow_cannot_take_a_live_runs_history_with_it() {
+        for prune in [false, true] {
+            let (store, path) = temp_store();
+            let codex = key("CX", "cx-1");
+            let mut row = codex_session_row(&codex);
+            row.lifecycle = Lifecycle::Live;
+            store.upsert_session(&row).unwrap().assert_present();
+            store
+                .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
+                .unwrap();
+            store
+                .append_event(&pending(&codex, EventKind::ToolCall, Some("e1")))
+                .unwrap();
+            store
+                .record_answer(
+                    &codex.uid,
+                    "req-1",
+                    "hash-1",
+                    &outcome("req-1", AnswerDecision::Allow),
+                )
+                .unwrap();
+
+            // The shadow, staged on a second connection while the store above is
+            // still open — `Store::open` repairs one, so a reopen here would
+            // remove the very state under test.
+            {
+                let conn = Connection::open(&path).unwrap();
+                stage_a_shadow_from_before_the_refusal(
+                    &conn,
+                    &codex.uid,
+                    "/work/shadow",
+                    "2099-01-01T00:00:00.000Z",
+                );
+                conn.execute(
+                    "UPDATE sessions SET lifecycle = 'exited' WHERE session_uid = ?1",
+                    params![codex.uid],
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                table_counts(&store),
+                (1, 1),
+                "prune={prune}: the staged state is one uid in both tables"
+            );
+
+            if prune {
+                let removed = store.prune_exited_sessions(&[], false).unwrap();
+                assert!(
+                    !removed.iter().any(|r| r.session_uid == codex.uid),
+                    "prune={prune}: the sweep reported removing a uid whose Codex run is live"
+                );
+            } else {
+                assert_eq!(
+                    store.delete_exited_session(&codex.uid).unwrap(),
+                    DeleteOutcome::NotExited {
+                        lifecycle: lifecycle_str(Lifecycle::Live).into()
+                    },
+                    "prune={prune}: the delete accepted a uid whose Codex run is live"
+                );
+            }
+
+            // The live run, and everything filed under it, is exactly as it was.
+            assert_eq!(
+                store.count_events(&codex.uid).unwrap(),
+                2,
+                "prune={prune}: the live run's events were deleted through its ended shadow"
+            );
+            let conn = store.read();
+            for table in SESSION_SCOPED_TABLES {
+                let left: i64 = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                        params![codex.uid],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let expected = match *table {
+                    "events" => 2,
+                    "answers" => 1,
+                    _ => 0,
+                };
+                assert_eq!(
+                    left, expected,
+                    "prune={prune}: {table} lost the live run's rows"
+                );
+            }
+            let tombstoned: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)",
+                    params![codex.uid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                !tombstoned,
+                "prune={prune}: a uid whose run is still live was tombstoned, so nothing may be \
+                 filed under it again"
+            );
+            let live: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM codex_sessions WHERE session_uid = ?1",
+                    params![codex.uid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(live, 1, "prune={prune}: the live identity row is gone");
+        }
+    }
+
+    /// An equal `updated_at` splits: lifecycle to the shared copy, location to
+    /// the isolated one.
+    ///
+    /// The two branches of [`move_codex_sessions`]'s tie-break, pinned together
+    /// because they are one rule and the reason they differ is the whole point.
+    /// `lifecycle` takes the shared side on a tie, which is the causal reading of
+    /// a genuine same-millisecond collision. The location family takes the
+    /// isolated side, because a shared-side location is news only if a v0.6.0
+    /// `upsert_session` wrote it — and that write is exactly what makes
+    /// `s.updated_at` strictly greater. An equal stamp is therefore not evidence
+    /// of a location write, and the next test shows what moving on it costs.
+    #[test]
+    fn an_equal_updated_at_gives_lifecycle_to_the_shared_copy_and_location_to_the_isolated_one() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Exited;
+        row.cwd = "/work/before".into();
+        row.updated_at = "2026-08-28T12:00:00.000Z".into();
+        let born = row.created_at.clone();
+        store.upsert_session(&row).unwrap().assert_present();
+        drop(store);
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            // The same stamp, to the millisecond. `v060_upsert` writes
+            // `lifecycle = 'live'`, so the two sides genuinely disagree on both
+            // families and each one has something to decide.
+            stage_a_shadow_from_before_the_refusal(
+                &conn,
+                &codex.uid,
+                "/work/after",
+                "2026-08-28T12:00:00.000Z",
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        let healed = store.get_session(&codex.uid).unwrap().expect("one row");
+        assert_eq!(
+            healed.lifecycle,
+            Lifecycle::Live,
+            "on a tie the rollback-written copy is the one that was live most recently, and \
+             lifecycle is the family that reading is about"
+        );
+        assert_eq!(
+            healed.cwd, "/work/before",
+            "an equal stamp is not evidence that a location was written, so location does not \
+             move on one"
+        );
+        // And the tie decides only the family v0.6.0 can advance. Identity is
+        // absent from the SET list, so it cannot regress in either direction.
+        assert_eq!(healed.agent, AgentKind::Codex);
+        assert_eq!(healed.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(healed.created_at, born);
+        assert_eq!(table_counts(&store), (0, 1));
+    }
+
+    /// A strictly later shared write still takes the whole family.
+    ///
+    /// The counterpart to the test above, and the reason the split is a split
+    /// rather than a reversal: an old daemon that really did re-register a run
+    /// wrote its location, that write advanced `updated_at` past the isolated
+    /// copy's, and the merge must keep it. Only the *tie* is ambiguous.
+    #[test]
+    fn a_strictly_later_shared_write_still_wins_the_whole_family() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Exited;
+        row.cwd = "/work/before".into();
+        row.updated_at = "2026-08-28T12:00:00.000Z".into();
+        store.upsert_session(&row).unwrap().assert_present();
+        drop(store);
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            stage_a_shadow_from_before_the_refusal(
+                &conn,
+                &codex.uid,
+                "/work/after",
+                "2026-08-28T12:00:00.001Z",
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        let healed = store.get_session(&codex.uid).unwrap().expect("one row");
+        assert_eq!(healed.cwd, "/work/after");
+        assert_eq!(healed.lifecycle, Lifecycle::Live);
+        assert_eq!(healed.agent, AgentKind::Codex);
+        assert_eq!(table_counts(&store), (0, 1));
+    }
+
+    /// One lifecycle transition stamps one time, and that stamp does not decide
+    /// a location.
+    ///
+    /// [`Store::set_lifecycle`] writes both physical tables, because the uid is a
+    /// primary key in each and is supposed to live in exactly one. Two things
+    /// follow when it does not, and this covers both:
+    ///
+    ///   * **One transition, one time.** Reading the clock per statement would
+    ///     let one transition claim two different `updated_at` values.
+    ///   * **And that one time must not tear the merge.** The stamp levels the
+    ///     two copies while changing nothing but `lifecycle`, so the equality it
+    ///     creates says nothing about location. This runs the reconciliation
+    ///     afterwards and asserts *which family survives*: the fresher isolated
+    ///     `cwd` must still be there. Checking only that the stamps matched — the
+    ///     shape the review found — passes just as well while the merge hands the
+    ///     whole of a stale rollback row over the top of it.
+    ///
+    /// **Repeated, because once proves nothing about the first claim.** Two clock
+    /// reads a few microseconds apart usually land in the same millisecond, so a
+    /// single transition passes whether the read is hoisted or not — that version
+    /// of this test was written, run against the un-hoisted code, and *passed*.
+    /// What separates them is a read pair straddling a millisecond boundary,
+    /// which is a few percent of attempts; several hundred transitions make it a
+    /// certainty. Measured: the un-hoisted shape fails within the first hundred.
+    #[test]
+    fn ending_a_run_stamps_one_time_across_both_tables() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        row.cwd = "/work/isolated".into();
+        store.upsert_session(&row).unwrap().assert_present();
+        // A duplicate, staged from before the refusal, because the point is what
+        // happens when the invariant does not hold.
+        {
+            let conn = Connection::open(&path).unwrap();
+            stage_a_shadow_from_before_the_refusal(
+                &conn,
+                &codex.uid,
+                "/work/shared",
+                "2020-01-01T00:00:00.000Z",
+            );
+        }
+
+        for attempt in 0..600 {
+            let to = if attempt % 2 == 0 {
+                Lifecycle::Exited
+            } else {
+                Lifecycle::Live
+            };
+            store.set_lifecycle(&codex.uid, to).unwrap();
+
+            let conn = store.read();
+            let stamps: Vec<String> = SESSION_TABLES
+                .iter()
+                .map(|table| {
+                    conn.query_row(
+                        &format!("SELECT updated_at FROM {table} WHERE session_uid = ?1"),
+                        params![codex.uid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                stamps[0], stamps[1],
+                "attempt {attempt}: one transition wrote two different times, and a later merge \
+                 compares exactly these two values to decide a whole column family"
+            );
+        }
+
+        // And now the merge that comparison feeds. The isolated copy's `cwd` was
+        // written by this build and is the fresher of the two by construction;
+        // the shared copy's is from a rollback in 2020. The levelled stamp must
+        // not be what hands the stale one the whole family.
+        store.set_lifecycle(&codex.uid, Lifecycle::Exited).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let healed = store.get_session(&codex.uid).unwrap().expect("one row");
+        assert_eq!(
+            healed.cwd, "/work/isolated",
+            "the lifecycle write levelled the two stamps without touching either location, and \
+             the merge took the stale rollback copy's whole family on the strength of it"
+        );
+        assert_eq!(healed.agent, AgentKind::Codex);
+        assert_eq!(healed.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(table_counts(&store), (0, 1));
+    }
+
+    /// **The rollback round trip, and it heals itself.**
+    ///
+    /// v0.6.0 has no `agent` column of its own: its `upsert_session` names ten
+    /// columns, so the eleventh takes this schema's `DEFAULT 'claude'`. A Codex
+    /// run that reconnects while a rolled-back daemon is in charge is therefore
+    /// re-filed into the swept table wearing the wrong agent, while its real row
+    /// is still in `codex_sessions`. One uid, two tables — and an `agent`-only
+    /// move predicate never sees it, so the damage would be permanent: the
+    /// `UNION ALL` view returns the run twice, the old daemon's prune can walk
+    /// the shared copy and take the events with it, and the next agent flip
+    /// carries a row onto a uid that is already a primary key in the
+    /// destination and fails outright.
+    ///
+    /// Driven as the whole cycle rather than as a seeded end state — v4, a
+    /// v0.6.0-shaped reconnect with `user_version` put back to 3, then v4 again
+    /// — because the claim is about the round trip and not about one row.
+    #[test]
+    fn a_rollback_that_refiles_a_codex_run_under_the_default_agent_is_repaired_on_the_way_up() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        row.transcript_path = Some("/tmp/codex.jsonl".into());
+        let born = row.created_at.clone();
+        store.upsert_session(&row).unwrap().assert_present();
+        for i in 0..2 {
+            store
+                .append_event(&pending(
+                    &codex,
+                    EventKind::ToolCall,
+                    Some(&format!("e{i}")),
+                ))
+                .unwrap();
+        }
+        assert_eq!(table_counts(&store), (0, 1));
+        drop(store);
+
+        // The rollback. Ten columns, exactly as v0.6.0's own upsert names them,
+        // and the version number it writes back unconditionally. The run has
+        // moved on while the old daemon was in charge: a new cwd, and ended.
+        {
+            let conn = Connection::open(&path).unwrap();
+            from_before_the_refusal(&conn, |conn| {
+                conn.execute(
+                    "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                          claude_session_id, transcript_path, lifecycle,
+                                          created_at, updated_at)
+                     VALUES(?1, 'cx-1', 'cx-1', 'codeconnect', '/work/moved', NULL, NULL,
+                            'exited', '2099-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+                    params![codex.uid],
+                )
+                .unwrap();
+            });
+            conn.pragma_update(None, "user_version", 3i64).unwrap();
+            // The shape this test exists for, stated rather than assumed.
+            let agent: String = conn
+                .query_row(
+                    "SELECT agent FROM sessions WHERE session_uid = ?1",
+                    params![codex.uid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                agent, "claude",
+                "the old build cannot write any other value"
+            );
+            let duplicated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM all_sessions WHERE session_uid = ?1",
+                    params![codex.uid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(duplicated, 2, "one uid, both tables — the damage to repair");
+        }
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(
+            table_counts(&store),
+            (0, 1),
+            "the shared copy is gone and the run is back to living in one table"
+        );
+        assert_eq!(
+            store.list_sessions().unwrap().len(),
+            1,
+            "the fleet listing sees one run, not the two the UNION ALL was returning"
+        );
+        assert_eq!(
+            store.count_events(&codex.uid).unwrap(),
+            2,
+            "the shared children were never keyed on which table the identity sat in"
+        );
+
+        let healed = store.get_session(&codex.uid).unwrap().expect("one row");
+        // Identity, which v0.6.0 cannot write and therefore can only have lost.
+        assert_eq!(healed.agent, AgentKind::Codex);
+        assert_eq!(healed.codex_thread_id.as_deref(), Some("th_ABC123"));
+        assert_eq!(
+            healed.codex_socket.as_deref(),
+            Some("/tmp/cch.test/ccd.sock")
+        );
+        assert_eq!(
+            healed.created_at, born,
+            "a run is not born again by a rollback"
+        );
+        // History, which it can legitimately have advanced — and did.
+        assert_eq!(healed.lifecycle, Lifecycle::Exited);
+        assert_eq!(healed.cwd, "/work/moved");
+        assert_eq!(healed.updated_at, "2099-01-01T00:00:00.000Z");
+        // And the `COALESCE` rule on top: a known value the fresher write does
+        // not carry is still not blanked.
+        assert_eq!(healed.transcript_path.as_deref(), Some("/tmp/codex.jsonl"));
+
+        // The failure that was waiting downstream: an agent flip now carries the
+        // row instead of colliding with a second copy of it.
+        store
+            .upsert_session(&session_row(&codex))
+            .unwrap()
+            .assert_present();
+        assert_eq!(table_counts(&store), (1, 0));
+    }
+
+    /// The other half of the merge rule: the isolated row is the fresher one.
+    ///
+    /// Freshest-wins has to be a comparison and not a preference for whichever
+    /// side the code happens to read first, or a rollback that touched nothing
+    /// would still roll a live run backwards to whatever it looked like when the
+    /// old daemon adopted it.
+    #[test]
+    fn reconciling_keeps_the_isolated_rows_history_when_it_is_the_fresher_one() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        row.cwd = "/work/current".into();
+        row.updated_at = "2099-01-01T00:00:00.000Z".into();
+        row.transcript_path = None;
+        store.upsert_session(&row).unwrap().assert_present();
+        drop(store);
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            from_before_the_refusal(&conn, |conn| {
+                conn.execute(
+                    "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                          claude_session_id, transcript_path, lifecycle,
+                                          created_at, updated_at)
+                     VALUES(?1, 'cx-1', 'cx-1', 'codeconnect', '/work/stale', NULL,
+                            '/tmp/learned.jsonl', 'exited',
+                            '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')",
+                    params![codex.uid],
+                )
+                .unwrap();
+            });
+        }
+
+        let store = Store::open(&path).unwrap();
+        let healed = store.get_session(&codex.uid).unwrap().expect("one row");
+        assert_eq!(table_counts(&store), (0, 1));
+        assert_eq!(
+            healed.lifecycle,
+            Lifecycle::Live,
+            "a stale copy cannot end a live run"
+        );
+        assert_eq!(healed.cwd, "/work/current");
+        assert_eq!(healed.updated_at, "2099-01-01T00:00:00.000Z");
+        assert_eq!(
+            healed.transcript_path.as_deref(),
+            Some("/tmp/learned.jsonl"),
+            "but a value only the stale copy holds is still not thrown away"
+        );
+    }
+
+    /// An agent this build does not understand is moved out too.
+    ///
+    /// `sessions` is the table the old daemon sweeps. A `gemini` row left in it
+    /// is the same total loss as a Codex one, for an agent we can say even less
+    /// about — so the move is defined as "not Claude's", not as "Codex's".
+    #[test]
+    fn an_unsupported_agents_run_is_moved_out_of_the_swept_table_as_well() {
+        let (store, path) = temp_store();
+        let stranger = key("ZZ", "gx-1");
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                      claude_session_id, transcript_path, lifecycle,
+                                      created_at, updated_at, agent, codex_thread_id, codex_socket)
+                 VALUES(?1, 'gx-1', 'gx-1', 'codeconnect', '/work', NULL, NULL, 'live',
+                        't', 't', 'gemini', NULL, NULL)",
+                params![stranger.uid],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(table_counts(&store), (0, 1));
+        assert_eq!(
+            store.get_session(&stranger.uid).unwrap().unwrap().agent,
+            AgentKind::Unsupported("gemini".into()),
+            "moved without being reinterpreted as an agent we do know"
+        );
+    }
+
+    /// Ending, deleting and pruning all reach a Codex run.
+    ///
+    /// The isolation is from the *old* daemon. This one owns both agents, and an
+    /// operator who asks it to clean up is asking about their whole fleet. A
+    /// Codex run that could never be marked `Exited` — the shape a dispatch that
+    /// guessed the wrong table would produce — would be immortal and silent.
+    #[test]
+    fn this_daemon_still_ends_deletes_and_prunes_a_codex_run() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let doomed = key("CY", "cx-2");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+        let mut second = codex_session_row(&doomed);
+        second.lifecycle = Lifecycle::Live;
+        store.upsert_session(&second).unwrap().assert_present();
+        store
+            .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
+            .unwrap();
+
+        store.set_lifecycle(&codex.uid, Lifecycle::Exited).unwrap();
+        assert_eq!(
+            store.get_session(&codex.uid).unwrap().unwrap().lifecycle,
+            Lifecycle::Exited,
+            "a Codex run can be ended, or it can never be removed"
+        );
+
+        assert_eq!(
+            store.delete_exited_session(&codex.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 1 }
+        );
+        assert_eq!(table_counts(&store), (0, 1));
+        assert_eq!(store.count_events(&codex.uid).unwrap(), 0);
+
+        // And the prune reaches the other one.
+        store.set_lifecycle(&doomed.uid, Lifecycle::Exited).unwrap();
+        let removed = store.prune_exited_sessions(&[], false).unwrap();
+        assert_eq!(
+            removed
+                .iter()
+                .map(|p| p.session_uid.clone())
+                .collect::<Vec<_>>(),
+            vec![doomed.uid.clone()],
+            "the prune this daemon runs is over the whole fleet"
+        );
+        assert_eq!(table_counts(&store), (0, 0));
+    }
+
+    /// A run is in one table or the other, never both — including when its agent
+    /// changes under it.
+    ///
+    /// `all_sessions` is a `UNION ALL`, so a uid in both halves would be listed
+    /// twice and resolved arbitrarily. A re-registration really can arrive under
+    /// a different agent (`register_supervisor` treats it as the authority), so
+    /// this is a shape the store must handle rather than one it may declare
+    /// impossible. It moves the row, and — the half a delete-and-insert would
+    /// silently lose — it moves the `COALESCE`-preserved fields with it: the
+    /// transcript path and the Codex identity that a later write does not carry
+    /// are properties of the run, not of the table it is filed in.
+    #[test]
+    fn changing_a_runs_agent_moves_its_row_rather_than_duplicating_it() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        let mut learned = session_row(&session);
+        learned.transcript_path = Some("/tmp/x.jsonl".into());
+        store.upsert_session(&learned).unwrap().assert_present();
+        assert_eq!(table_counts(&store), (1, 0));
+
+        // Claude -> Codex. A heartbeat-shaped write: it knows the new agent and
+        // carries no transcript path.
+        let mut flipped = codex_session_row(&session);
+        flipped.transcript_path = None;
+        store.upsert_session(&flipped).unwrap().assert_present();
+        assert_eq!(
+            table_counts(&store),
+            (0, 1),
+            "the run moved; it was not copied — the shared table is empty again"
+        );
+        let moved = store.get_session(&session.uid).unwrap().expect("one row");
+        assert_eq!(moved.agent, AgentKind::Codex);
+        assert_eq!(
+            moved.transcript_path.as_deref(),
+            Some("/tmp/x.jsonl"),
+            "a learned field survived the move, as it survives every other update"
+        );
+        assert_eq!(moved.codex_thread_id.as_deref(), Some("th_ABC123"));
+
+        // And back again, still one row, still carrying what it learned.
+        let mut back = session_row(&session);
+        back.transcript_path = None;
+        store.upsert_session(&back).unwrap().assert_present();
+        assert_eq!(table_counts(&store), (1, 0));
+        let returned = store.get_session(&session.uid).unwrap().expect("one row");
+        assert_eq!(returned.agent, AgentKind::Claude);
+        assert_eq!(returned.transcript_path.as_deref(), Some("/tmp/x.jsonl"));
+        assert_eq!(
+            returned.codex_thread_id.as_deref(),
+            Some("th_ABC123"),
+            "COALESCE preserves it here exactly as it does within one table"
+        );
+        assert_eq!(
+            store.list_sessions().unwrap().len(),
+            1,
+            "the fleet listing sees one run, not two"
+        );
+    }
+
+    /// A tombstoned uid stays deleted whichever agent asks for it back.
+    ///
+    /// The pre-existing tombstone test writes the same agent the run had; this
+    /// one comes back as the *other* one, which is the write that now also
+    /// carries rows between tables. Nothing may be recreated and nothing may be
+    /// relocated — the run was removed from both tables and the tombstone is
+    /// what keeps it that way.
+    #[test]
+    fn a_deleted_uid_is_not_recreated_by_a_write_that_names_a_different_agent() {
+        let (store, _path) = temp_store();
+        let session = key("AA", "cc-1");
+        seed_run(&store, &session, Lifecycle::Exited, 1);
+        assert_eq!(
+            store.delete_exited_session(&session.uid).unwrap(),
+            DeleteOutcome::Deleted { events: 1 }
+        );
+
+        assert_eq!(
+            store.upsert_session(&codex_session_row(&session)).unwrap(),
+            SessionUpsert::Tombstoned
+        );
+        assert_eq!(
+            table_counts(&store),
+            (0, 0),
+            "the deletion stands, in both tables"
+        );
+    }
+
+    /// **The old binary's delete, not this one's, and it must not resurrect the
+    /// run.**
+    ///
+    /// `a_deleted_uid_is_not_recreated_by_a_write_that_names_a_different_agent`
+    /// above deletes through [`Store::delete_exited_session`], which removes the
+    /// run from *both* tables — so the tombstone it leaves has nothing standing
+    /// behind it and the claim it proves is the easy one. v0.6.0 deletes
+    /// differently, and that difference is the whole point of this schema: its
+    /// prune removes the `sessions` row and writes `deleted_sessions`, and it has
+    /// no statement that names `codex_sessions`. A uid can therefore be
+    /// tombstoned with an isolated row still standing.
+    ///
+    /// So this stages exactly that — the old binary's two statements, verbatim in
+    /// shape — and then does the thing that used to make it worse: a
+    /// registration under the other agent, whose carry moves rows between tables
+    /// before the guarded upsert ever runs. Nothing may come back. The run stays
+    /// deleted, in both tables, and the caller is told so.
+    ///
+    /// (The shadow this needs is itself only producible by a supervisor that
+    /// registers a Codex run with a daemon that cannot host one — which
+    /// `codeconnect`'s pre-`Register` negotiation now withholds. This is the
+    /// second lock, on the store side, for the databases that already went
+    /// through it.)
+    #[test]
+    fn the_old_binarys_delete_cannot_resurrect_a_run_through_the_carry() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Exited;
+        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .append_event(&pending(&codex, EventKind::ToolCall, Some("e0")))
+            .unwrap();
+        assert_eq!(table_counts(&store), (0, 1));
+        drop(store);
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            // The shadow a rolled-back daemon filed when a Codex supervisor
+            // registered with it, back when nothing refused one: ten columns,
+            // `agent` taking the default.
+            stage_a_shadow_from_before_the_refusal(
+                &conn,
+                &codex.uid,
+                "/work",
+                "2099-01-01T00:00:00.000Z",
+            );
+            conn.execute(
+                "UPDATE sessions SET lifecycle = 'exited' WHERE session_uid = ?1",
+                params![codex.uid],
+            )
+            .unwrap();
+            // And v0.6.0's prune, in its own two statements. `codex_sessions` is
+            // not named because that build contains no statement that names it.
+            let removed = conn
+                .execute(
+                    "DELETE FROM sessions WHERE session_uid = ?1 AND lifecycle = 'exited'",
+                    params![codex.uid],
+                )
+                .unwrap();
+            assert_eq!(removed, 1, "the old prune removes the shared copy");
+            conn.execute(
+                "INSERT OR IGNORE INTO deleted_sessions(session_uid, deleted_at) VALUES(?1, ?2)",
+                params![codex.uid, "2099-01-01T00:00:00.000Z"],
+            )
+            .unwrap();
+            // The state this test exists for, stated rather than assumed: a
+            // tombstone with an isolated row still standing behind it.
+            let isolated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM codex_sessions WHERE session_uid = ?1",
+                    params![codex.uid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(isolated, 1, "the old binary cannot reach codex_sessions");
+        }
+
+        let store = Store::open(&path).unwrap();
+        // A registration under the *other* agent, which is the write whose carry
+        // moves a row between tables before the guarded upsert runs.
+        assert_eq!(
+            store.upsert_session(&session_row(&codex)).unwrap(),
+            SessionUpsert::Tombstoned,
+            "a tombstoned uid is refused whichever agent asks for it back"
+        );
+        assert_eq!(
+            table_counts(&store),
+            (0, 1),
+            "the carry must not have moved the isolated row into the swept table"
+        );
+        let conn = store.read();
+        let shadows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_uid = ?1",
+                params![codex.uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            shadows, 0,
+            "a run came back into the shared table under a uid its own tombstone says is gone"
+        );
+    }
+
+    /// The two tables must not drift apart.
+    ///
+    /// `all_sessions` selects the same thirteen columns from each, so a column
+    /// added to one and forgotten on the other turns every session read into a
+    /// prepare error at runtime. Read off the schema rather than restated, so a
+    /// future `COLUMN_ADDITIONS` entry that names only `sessions` fails here.
+    #[test]
+    fn both_session_tables_have_one_shape() {
+        let (store, _path) = temp_store();
+        let conn = store.read();
+        let columns = |table: &str| -> Vec<(String, String, i64)> {
+            let mut info = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let rows = info
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            columns("sessions"),
+            columns("codex_sessions"),
+            "the two session tables disagree on name, type, order or primary key"
+        );
+        // And the view really does read both halves through that shape.
+        let stmt = conn.prepare("SELECT * FROM all_sessions").unwrap();
+        let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
+        let declared: Vec<String> = columns("sessions").into_iter().map(|c| c.0).collect();
+        assert_eq!(
+            names, declared,
+            "all_sessions does not project the row shape"
+        );
+    }
+
+    /// Every "does this run still exist?" guard asks about the fleet.
+    ///
+    /// Six statements gate a write on the session being there, and each one
+    /// answers a *question*, not a table. Pointed at Claude's half alone every
+    /// one of them reads a live Codex run as gone, and five of the six say so by
+    /// doing nothing and reporting success — an event that looks like a dedup
+    /// miss, an answer never filed, a card retired, a `send_text` claim reported
+    /// as taken without being taken. This asserts the store's own contract; it
+    /// says nothing about which of these the daemon can reach today, which is
+    /// the separate question
+    /// `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally`
+    /// answers.
+    #[test]
+    fn every_existence_guard_asks_about_the_whole_fleet() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+        let now = protocol::time::now_rfc3339();
+
+        // `append_in_tx` — every fact either agent records.
+        assert!(store
+            .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
+            .unwrap()
+            .is_some());
+
+        // `append_batch_with_cursor` — the batch AND its cursor.
+        let cursor = TailCursor {
+            path: "/tmp/x.jsonl".into(),
+            dev: 1,
+            ino: 2,
+            offset: 4096,
+            last_line_start: 4000,
+            last_line_sha: "abc".into(),
+        };
+        let batch = [pending(&codex, EventKind::ToolCall, Some("two"))];
+        assert_eq!(
+            store
+                .append_batch_with_cursor(&codex.uid, &batch, &cursor)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.load_cursor(&codex.uid).unwrap().is_some());
+
+        // `orphan_event_count` — a Codex run's log is history with an owner, not
+        // history whose provenance nobody understands.
+        assert_eq!(store.orphan_event_count().unwrap(), 0);
+
+        // `record_answer` — and the replay that proves the first one landed
+        // rather than being silently dropped by a guard that said "no session".
+        let answer = outcome("req-1", AnswerDecision::Allow);
+        assert!(matches!(
+            store
+                .record_answer(&codex.uid, "req-1", "hash", &answer)
+                .unwrap(),
+            LedgerWrite::Recorded
+        ));
+        assert!(matches!(
+            store
+                .record_answer(&codex.uid, "req-1", "hash", &answer)
+                .unwrap(),
+            LedgerWrite::Existing { .. }
+        ));
+
+        // `upsert_pending_approval`, `claim_text_mutation`, `claim_mutation`.
+        // Their guards accept a Codex run *on purpose*: what keeps these tables
+        // free of Codex rows is an explicit refusal in the daemon, at the three
+        // producers, and a store guard that silently dropped the row instead
+        // would report success and lose it. The refusal is the layer that can
+        // tell the caller; this layer can only obey. See
+        // `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally`.
+        assert!(store
+            .upsert_pending_approval(&PendingApprovalRow {
+                session_uid: codex.uid.clone(),
+                session_id: codex.name.clone(),
+                request_id: "req-2".into(),
+                card: "{}".into(),
+                generation: 1,
+                created_ms: 0,
+            })
+            .unwrap());
+        assert_eq!(
+            store
+                .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
+                .unwrap(),
+            TextClaim::Claimed
+        );
+        // Asked a second time, because `Claimed` is what this returns when the
+        // guarded `INSERT` writes nothing as well as when it writes the row —
+        // the one place in the six where the return value cannot tell a claim
+        // that was durably taken from one that silently was not. Only the replay
+        // can: a claim that landed comes back `Indeterminate`, an unwritten one
+        // comes back `Claimed` again and the caller types twice.
+        assert_eq!(
+            store
+                .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
+                .unwrap(),
+            TextClaim::Indeterminate {
+                started_at: now.clone()
+            },
+            "the claim was reported taken but nothing was written"
+        );
+        assert_eq!(
+            store
+                .claim_mutation(
+                    "compose",
+                    &codex.uid,
+                    "req-4",
+                    &ClaimedMaterial {
+                        thread_id: "th_ABC123".into(),
+                        generation: 1,
+                        route: "turn_start".into(),
+                        target_turn_id: None,
+                        claimed_hash: "hash".into(),
+                    },
+                    &now,
+                )
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+    }
+
+    /// Four tables a rolled-back v0.6.0 daemon reaches **without walking a
+    /// `sessions` row**, named once so no reader has to rediscover the list.
+    ///
+    /// `pending_approvals`, `answer_claims` and `text_mutations` it reads
+    /// globally, and `recover_text_mutations` *writes* one of them — every
+    /// `applying` row becomes `indeterminate`, whoever it belongs to. `answers`
+    /// it queries by `request_id` alone. So the table-name isolation the rest of
+    /// this schema rests on does not cover any of them.
+    const GLOBALLY_SWEPT_TABLES: [&str; 4] = [
+        "pending_approvals",
+        "answer_claims",
+        "text_mutations",
+        "answers",
+    ];
+
+    /// **The store's half of the tripwire for the obligation this chunk leaves
+    /// open**, and it is the weaker half on purpose.
+    ///
+    /// The four tables in [`GLOBALLY_SWEPT_TABLES`] are not split. What keeps
+    /// them empty of Codex rows is not the store — the store's own API will
+    /// happily write all four for a Codex run, and
+    /// `every_existence_guard_asks_about_the_whole_fleet` proves it does, which
+    /// is deliberate: a guard that silently dropped a Codex card would leave a
+    /// test like this green for ever and ship the bug. What keeps them empty is
+    /// an explicit refusal at each of the three producers that can reach them,
+    /// in the daemon: `Daemon::send_text`, `Daemon::handle_permission_request`
+    /// and `Daemon::answer` each refuse a non-Claude row before any durable
+    /// write, and `send_text_to_a_codex_session_is_refused_before_it_claims_anything`,
+    /// `a_permission_request_for_a_codex_session_raises_no_card` and
+    /// `answering_a_codex_card_is_refused_before_the_claim` drive those real
+    /// paths and read these same four tables back off the daemon's own database
+    /// file. Those are the tests that can see a producer; this one cannot, and
+    /// saying so is the point of this comment.
+    ///
+    /// What this one still adds is the floor underneath them: the paths a Codex
+    /// run *does* travel in this build — facts — must not reach these tables by
+    /// some route that has nothing to do with the three gated producers.
+    #[test]
+    fn no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+
+        // Everything a Codex run reaches in the store as things stand: facts,
+        // and the generalized mutation ledger built for it.
+        store
+            .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
+            .unwrap();
+        store
+            .append_event(&pending(&codex, EventKind::TurnComplete, None))
+            .unwrap();
+        assert_eq!(store.count_events(&codex.uid).unwrap(), 2);
+
+        let conn = store.read();
+        for table in GLOBALLY_SWEPT_TABLES {
+            let leaked: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table}
+                          WHERE session_uid IN (SELECT session_uid FROM codex_sessions)"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                leaked, 0,
+                "a Codex run now has a row in {table}, which a rolled-back v0.6 daemon reaches \
+                 without going through a sessions row — and, for text_mutations, rewrites. That \
+                 table has to become agent-scoped before the producer that put this row here can \
+                 ship. See `create_schema`."
+            );
+        }
+    }
+
     /// **The write that arrives after the delete.** Ending a run stops its tail
     /// by queueing a command, so one more transcript poll can already be under
     /// way when the phone removes the run. Landing it afterwards would file
@@ -4429,7 +7170,16 @@ mod tests {
         drop(tables);
 
         for name in names {
-            if name == "sessions" || name.starts_with("sqlite_") {
+            // Both session-identity tables, and `codex_sessions` for a reason
+            // worth stating rather than pattern-matching: it is keyed by
+            // `session_uid` like the child tables are, but it is not filed
+            // *under* a session — it IS the session. Adding it to
+            // `SESSION_SCOPED_TABLES` would make both removal paths delete the
+            // identity row in their unguarded loop, ahead of and instead of the
+            // guarded `DELETE` that restates `lifecycle = 'exited'` and insists
+            // it matched exactly one row. That guard is the whole safety
+            // property of the prune.
+            if name == "sessions" || name == "codex_sessions" || name.starts_with("sqlite_") {
                 continue;
             }
             // The one deliberate exception: tombstones are the record that a
@@ -5701,14 +8451,16 @@ mod tests {
         }
         drop(Store::open(&path).unwrap());
 
-        let mut conn = Connection::open(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
         assert!(!needs_column_additions(&conn).unwrap());
         // The state a second `ccd` sees when it passes the unlocked check and
-        // then reaches the transaction after the first one committed. `ALTER
-        // TABLE … ADD COLUMN` has no `IF NOT EXISTS`, so the recheck taken
-        // under the write lock is the whole difference between this and a
-        // duplicate-column error that stops the daemon from opening.
-        add_missing_columns(&mut conn).expect("a redundant widening must not error");
+        // then reaches the write lock after the first one committed. `ALTER
+        // TABLE … ADD COLUMN` has no `IF NOT EXISTS`, so the recheck this makes
+        // for itself, once it holds the lock, is the whole difference between
+        // this and a duplicate-column error that stops the daemon from opening.
+        // The lock now belongs to [`Store::migrate`]'s single transaction; the
+        // recheck is still this function's own, which is what this exercises.
+        add_missing_columns(&conn).expect("a redundant widening must not error");
         assert!(column_exists(&conn, "devices", "push_token").unwrap());
         assert!(column_exists(&conn, "devices", "push_environment").unwrap());
         assert!(column_exists(&conn, "devices", "push_credential").unwrap());
@@ -5941,10 +8693,25 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 3, "the schema version other builds will read");
+        assert_eq!(version, 4, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());
+        // Both halves of the fleet and the view that reads them, built by the
+        // first open rather than by a migration a fresh file would never run.
+        assert!(table_exists(&conn, "codex_sessions").unwrap());
+        assert!(!needs_codex_session_move(&conn).unwrap());
+        let view: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'all_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            view, 1,
+            "the fleet-wide read surface is a view, and it exists"
+        );
         // No retired column is ever built, so a first start has nothing to
         // remove and every start after it has nothing either.
         assert!(retired_columns_present(&conn).unwrap().is_empty());

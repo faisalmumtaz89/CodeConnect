@@ -1627,6 +1627,38 @@ impl Daemon {
         vec![protocol::agent::AgentKind::Claude]
     }
 
+    /// Whether a run hosted by `agent` may put a row in the four tables that are
+    /// still shared between agents: `text_mutations`, `pending_approvals`,
+    /// `answer_claims`, `answers`.
+    ///
+    /// **Temporary scaffolding, and the reason it exists is a rollback.** Sessions
+    /// were split by agent so a rolled-back v0.6.0 daemon cannot touch a Codex
+    /// run; these four were deliberately left shared, because that daemon reads
+    /// them *globally* rather than by walking a `sessions` row and no split would
+    /// have hidden them anyway. What it does with them is not passive:
+    /// `recover_text_mutations` rewrites every `applying` row it finds to
+    /// `indeterminate`, and its approval recovery deletes `answer_claims` and the
+    /// pending cards that match them — for runs it has no other way of seeing.
+    /// The justification for leaving them shared was that no Codex row could
+    /// reach them, and that holds only while the three entry producers refuse
+    /// one: [`Daemon::send_text`], the `PermissionRequest` hook, and
+    /// [`Daemon::answer`]. This is that refusal, in one place, so the three read
+    /// as one decision rather than three coincidences.
+    ///
+    /// Phase 3 splits these tables per agent, and this method and its three call
+    /// sites are what it deletes.
+    ///
+    /// Asked of [`Daemon::supported_agents`] rather than `AgentKind::is_claude`
+    /// for the reason `AgentKind` gives for having no `is_supported`: what a
+    /// build can drive is the daemon's list, not a property of the value. The
+    /// coupling cuts both ways and that is intended — adding Codex to that list
+    /// opens this gate, so the three `..._is_refused_before_...` tests below name
+    /// `AgentKind::Codex` outright and go red on the day it is added, which is
+    /// the day the tables have to be split or this gate rewritten.
+    fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
+        self.supported_agents().contains(agent)
+    }
+
     /// Re-derive from the database everything a restart would otherwise lose.
     ///
     /// Two things, both of which used to be memory-only:
@@ -2362,6 +2394,40 @@ impl Daemon {
         post: &HookPost,
         input: &HookInput,
     ) -> Result<HookDecision> {
+        // **Refused before the card is built, let alone written.** See
+        // [`Daemon::shared_ledgers_admit`]. `ensure_session` has just upserted
+        // this run, and its agent arm preserves whatever the row already said —
+        // a Codex row stays Codex — so a hook posted against a Codex uid arrives
+        // here with nothing downstream that ever looks at the agent again: the
+        // approval event is appended, `persist_pending` writes
+        // `pending_approvals`, and the card is answerable. The row read is a read
+        // this path did not previously make; it costs one indexed lookup on the
+        // one hook that can create a card.
+        //
+        // Passthrough, not a denial, and for the same reason the deleted-session
+        // arm above passes through: this daemon is declining to *observe* the
+        // request, and an observer's refusal must never be mistaken for the
+        // human's answer. Nothing else on this path is reached, which is what
+        // also makes `bind_prompt_identity` — the second writer of
+        // `pending_approvals` — unreachable for a non-Claude run: it is only ever
+        // called from the task spawned below, for an entry inserted below.
+        match self.db.get_session(session.uid.clone()).await? {
+            Some(row) if !self.shared_ledgers_admit(&row.agent) => {
+                crate::log_info!(
+                    "dropping a PermissionRequest for {}: it is a {} session, and a card for one \
+                     would be a row in tables a rolled-back daemon rewrites",
+                    session.uid,
+                    row.agent.as_str()
+                );
+                return Ok(HookDecision::passthrough());
+            }
+            // Absent means the row was deleted between `ensure_session` and here.
+            // There is no non-Claude run to protect and no agent to read; the
+            // existing session-existence guards inside the writers below refuse
+            // it on their own, exactly as they did before this gate.
+            _ => {}
+        }
+
         let tool_name = input.tool_name.clone().unwrap_or_else(|| "unknown".into());
         let tool_input = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
         let display_text = approval_payload_text(&tool_name, &tool_input);
@@ -3664,6 +3730,42 @@ impl Daemon {
             Ok(uid) => uid,
             Err(reason) => return AnswerResult::Rejected { reason },
         };
+
+        // **Refused before the claim, and before the decision below.** See
+        // [`Daemon::shared_ledgers_admit`]. `approval_target` answers *which run*
+        // and never *which agent*, and no check between here and step 4 asks:
+        // `claim_answer` writes `answer_claims` with no existence guard of its
+        // own, and every refusal that could stop a non-Claude answer lives later
+        // — inside `apply_decision`, or in `supervisor_request`. Those late
+        // refusals release the claim they find, so the leak they leave is a
+        // window rather than a residue: a rolled-back daemon starting inside it
+        // deletes the claim and the card as its own, and a crash inside it leaves
+        // a claim only `settle_indeterminate` can retire — into `answers`, the
+        // fourth shared table.
+        match self.db.get_session(session_uid.clone()).await {
+            Ok(Some(row)) if !self.shared_ledgers_admit(&row.agent) => {
+                return AnswerResult::Rejected {
+                    reason: format!(
+                        "{session_uid} is a {} session and this daemon only answers Claude \
+                         cards; nothing was typed",
+                        row.agent.as_str()
+                    ),
+                }
+            }
+            // No row: the uid came from the answers ledger for a run since
+            // deleted (`approval_target`'s replay arm), so there is no agent to
+            // read and step 1 below replays the stored outcome as it always has.
+            Ok(_) => {}
+            // The same shape `approval_target` uses for a failed session lookup.
+            // Unreadable is not evidence of Claude, and this gate is the one
+            // check on this path that may not be skipped on a bad day.
+            Err(err) => {
+                return AnswerResult::Rejected {
+                    reason: format!("session lookup failed: {err}"),
+                }
+            }
+        }
+
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
 
         // **A Codex-only decision on the Claude answer path — refused before any
@@ -4214,6 +4316,25 @@ impl Daemon {
             };
         }
         let session_uid = match self.resolve(session_ref).await {
+            // **Refused here, on the row the resolver already read.** See
+            // [`Daemon::shared_ledgers_admit`] for what a rolled-back daemon does
+            // to a `text_mutations` row it finds. The position is the whole
+            // point: the claim below is durable and is written *before* anything
+            // is typed, while the refusal that would otherwise have stopped a
+            // non-Claude takeover is "no supervisor attached", raised inside
+            // `supervisor_request` after the claim exists. A daemon killed in
+            // that window leaves an `applying` row behind, which is exactly the
+            // row the old build rewrites.
+            Ok(row) if !self.shared_ledgers_admit(&row.agent) => {
+                return SendTextResult::Refused {
+                    reason: format!(
+                        "{} is a {} session and this daemon only types into Claude sessions; \
+                         nothing was typed",
+                        row.session_uid,
+                        row.agent.as_str()
+                    ),
+                }
+            }
             Ok(row) => row.session_uid,
             Err(err) => {
                 return SendTextResult::Refused {
@@ -7243,6 +7364,14 @@ mod tests {
     /// A store two daemons can share, so a test can express "ccd was killed and
     /// came back" as literally that rather than as a mock of it.
     fn shared_store() -> Arc<Store> {
+        shared_store_on_disk().0
+    }
+
+    /// The same store, keeping the file it lives in — for the tests that have to
+    /// ask SQLite directly what is in a table. `Store` exposes readers for the
+    /// rows *it* knows how to make, and a test whose whole claim is "no row of
+    /// any shape landed here" must not be answered through that surface.
+    fn shared_store_on_disk() -> (Arc<Store>, std::path::PathBuf) {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
             "ccd-state-{}-{}-{}.db",
@@ -7251,7 +7380,7 @@ mod tests {
             protocol::time::now_unix_ms()
         ));
         let _ = std::fs::remove_file(&path);
-        Arc::new(Store::open(&path).unwrap())
+        (Arc::new(Store::open(&path).unwrap()), path)
     }
 
     fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
@@ -16508,5 +16637,307 @@ mod tests {
             &input,
         );
         assert_eq!(event.source_event_id, None);
+    }
+
+    // ======================================= the still-shared ledger tables
+
+    /// The four tables a rolled-back v0.6.0 daemon reads — and writes — without
+    /// walking a session row, which is why splitting sessions by agent did not
+    /// hide them and why [`Daemon::shared_ledgers_admit`] exists.
+    ///
+    /// `store.rs` holds the same line one layer down, in
+    /// `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally`. That
+    /// test constructs a bare `Store` and so cannot see the three producers; it
+    /// stays green while a producer leaks, which is what the three tests below
+    /// are for. They drive the real entry points against a real Codex row.
+    const SHARED_LEDGERS: [&str; 4] = [
+        "text_mutations",
+        "pending_approvals",
+        "answer_claims",
+        "answers",
+    ];
+
+    /// What each of the four holds for `session_uid`, asked of SQLite on a
+    /// connection of our own. Deliberately not asked through `Store`: its readers
+    /// answer for the rows it knows how to make, and the claim here is the
+    /// stronger "no row of any shape landed", which only the table can settle.
+    fn ledger_rows(db: &std::path::Path, session_uid: &str) -> Vec<(&'static str, i64)> {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        SHARED_LEDGERS
+            .into_iter()
+            .map(|table| {
+                let count = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                        [session_uid],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or_else(|err| panic!("counting {table}: {err}"));
+                (table, count)
+            })
+            .collect()
+    }
+
+    fn assert_no_ledger_rows(db: &std::path::Path, session_uid: &str) {
+        let rows = ledger_rows(db, session_uid);
+        assert!(
+            rows.iter().all(|(_, count)| *count == 0),
+            "a Codex run must own no row in the tables a rolled-back daemon sweeps \
+             globally: {rows:?}"
+        );
+    }
+
+    /// **A durable audit of insert *attempts*, because counting rows afterwards
+    /// cannot tell a gate from a tidy-up.**
+    ///
+    /// Most of these producers end in a refusal whether or not they are gated,
+    /// and those ungated shapes clean up after themselves: `send_text` claims a
+    /// `text_mutations` row, discovers there is no supervisor, and *releases*
+    /// the claim; `answer` claims, and when nothing actuates it settles. The
+    /// exceptions do the opposite and prove the same point: an ungated
+    /// `PermissionRequest` persists a card, and a responder-backed `answer`
+    /// records an answer row — durable rows the final-state assertions DO see.
+    /// For the cleaning shapes the final table contents read zero either way,
+    /// and a gate moved to after the claim would leave those tests green while
+    /// restoring
+    /// the exact window the rollback story is about — a daemon killed between
+    /// the claim and the release leaves the `applying` row behind, and a
+    /// rolled-back v0.6.0 rewrites every one it finds.
+    ///
+    /// An `AFTER INSERT` trigger per table settles it. It fires inside the
+    /// producer's own transaction, so its audit row commits when the claim
+    /// commits — and the release that follows deletes the claim, not the audit.
+    /// The question the audit answers is therefore "did a row ever exist", which
+    /// is the question the rollback cares about, rather than "does one exist
+    /// now".
+    ///
+    /// Installed on a connection of our own after the store is open; SQLite's
+    /// schema cookie makes the daemon's connections pick them up.
+    fn arm_ledger_tripwire(db: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        conn.execute_batch(
+            "CREATE TABLE ledger_insert_audit(table_name TEXT NOT NULL, session_uid TEXT);",
+        )
+        .expect("arming the audit table");
+        for table in SHARED_LEDGERS {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER audit_{table} AFTER INSERT ON {table}
+                 BEGIN
+                     INSERT INTO ledger_insert_audit(table_name, session_uid)
+                     VALUES('{table}', NEW.session_uid);
+                 END;"
+            ))
+            .unwrap_or_else(|err| panic!("arming the audit trigger on {table}: {err}"));
+        }
+    }
+
+    /// What the tripwire caught. Empty is the only acceptable answer for a
+    /// Codex run.
+    fn assert_no_insert_was_attempted(db: &std::path::Path, session_uid: &str) {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        let caught: Vec<String> = conn
+            .prepare("SELECT table_name FROM ledger_insert_audit WHERE session_uid = ?1")
+            .unwrap()
+            .query_map([session_uid], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            caught.is_empty(),
+            "the gate let a durable write BEGIN before refusing: rows were inserted into \
+             {caught:?} for a Codex run and then cleaned up again. A daemon killed in that \
+             window leaves them behind, and a rolled-back v0.6.0 rewrites every one it finds"
+        );
+    }
+
+    /// A live Codex run, staged through the store because there is no other way
+    /// to make one: `register_supervisor` fails closed on every agent outside
+    /// `supported_agents`, so no test can arrive at one by registering it. The
+    /// row lands in `codex_sessions` — `upsert_session` routes by agent — and the
+    /// assertion here is that every daemon read still finds it, because a gate
+    /// reading through `all_sessions` is the only reason these tests mean
+    /// anything.
+    fn stage_codex_session(store: &Store, uid: &str, name: &str) {
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store.get_session(uid).unwrap().unwrap().agent,
+            protocol::agent::AgentKind::Codex,
+            "a staged Codex run must read back as one, or every gate below is \
+             being handed a Claude row and passing for the wrong reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_text_to_a_codex_session_is_refused_before_it_claims_anything() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        stage_codex_session(&store, uid, "cc-1");
+        arm_ledger_tripwire(&db);
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        let text = "deploy";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+        let result = daemon
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
+            .await;
+
+        // **The reason is asserted, and it is the load-bearing assertion.**
+        // Without the gate this call still ends in a refusal — "no supervisor
+        // attached", raised inside `supervisor_request` — but only after
+        // `claim_text_mutation` has written an `applying` row, and that late
+        // refusal then releases it. So the count below reads zero either way, and
+        // only the reason says which side of the durable write the refusal
+        // happened on. The window it leaves is not theoretical: a daemon killed
+        // inside it leaves the `applying` row behind, and a rolled-back v0.6.0
+        // rewrites every one it finds.
+        match &result {
+            SendTextResult::Refused { reason } => assert!(
+                reason.contains("codex session") && reason.contains("nothing was typed"),
+                "the refusal must name the agent it refused, before the claim: {reason}"
+            ),
+            other => panic!("a Codex session must not be typed into: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_for_a_codex_session_raises_no_card() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        stage_codex_session(&store, uid, "cc-1");
+        arm_ledger_tripwire(&db);
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        // Posted exactly as `raise_prompt` does, inline only because this test is
+        // about the answer the hook gets back and that helper discards it.
+        let decision = daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "touch /tmp/a" },
+                }),
+                wait: true,
+            })
+            .await;
+
+        // The durable half first, because it is the one the rollback story turns
+        // on: `persist_pending` writes `pending_approvals` unconditionally once a
+        // card exists, and that row survives everything.
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "no card may exist for a run whose answers cannot be typed"
+        );
+        // Declining to observe is not answering: a refusal that reached the agent
+        // as `Deny` would be this daemon denying a tool call nobody was asked
+        // about.
+        assert!(
+            matches!(decision.decision, Decision::Passthrough),
+            "an unobserved request must pass through, never deny: {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn answering_a_codex_card_is_refused_before_the_claim() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        stage_codex_session(&store, uid, "cc-1");
+        arm_ledger_tripwire(&db);
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        // The card is placed in memory rather than raised through the hook,
+        // because the hook gate makes raising one impossible — which is the
+        // arrangement this test is about. `answer` is the gate *behind* that one,
+        // and it has to hold for a card that got into memory some other way: a
+        // `pending_approvals` projection written by a build without this
+        // scaffolding and restored by `recover`, or the Codex producer Phase 3
+        // adds.
+        let request_id = "toolu_codex_1";
+        let tool_input = json!({ "command": "touch /tmp/a" });
+        let payload_hash = approval_payload_hash("Bash", &tool_input);
+        let card = ApprovalCard {
+            request_id: request_id.to_string(),
+            payload_hash: payload_hash.clone(),
+            tool_name: "Bash".into(),
+            tool_input: tool_input.clone(),
+            display_text: approval_payload_text("Bash", &tool_input),
+            permission_suggestions: None,
+            prompt_id: Some("p1".into()),
+            permission_mode: None,
+            risk: None,
+            generation: 1,
+            identity_bound: false,
+        };
+        // A live receiver, because a held hook is the case that writes the most:
+        // with a responder to answer through, `apply_decision` needs no supervisor
+        // and no prompt fingerprint, returns `Applied`, and `record_answer` puts a
+        // permanent row in `answers`. Ungated, that is what this call does.
+        let (responder_tx, responder_rx) = oneshot::channel::<HookDecision>();
+        daemon.inner.lock().await.pending.insert(
+            (uid.to_string(), request_id.to_string()),
+            PendingApproval {
+                card,
+                session: SessionKey::new(uid, "cc-1"),
+                created_ms: protocol::time::now_unix_ms(),
+                responder: Some(responder_tx),
+                claimed: false,
+                local_misses: 0,
+                tool_ran: false,
+                project_label: "cc-1".into(),
+                generation: 1,
+                prompt: None,
+            },
+        );
+
+        let result = daemon
+            .answer(request_id, &payload_hash, AnswerDecision::Allow, Some(uid))
+            .await;
+
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("codex session") && reason.contains("nothing was typed"),
+                "the refusal must name the agent it refused, before the claim: {reason}"
+            ),
+            other => panic!("a Codex card must not be answerable: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        // Held open for the whole call: a dropped receiver would send
+        // `apply_decision` down the typing path instead, which is not the path
+        // that writes the most.
+        drop(responder_rx);
     }
 }

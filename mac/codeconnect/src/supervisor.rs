@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use protocol::config::Config;
 use protocol::ipc::{
     ClientFrame, DaemonFrame, PromptFingerprint, PromptPresence, RegisterSession,
@@ -197,10 +197,21 @@ fn serve_once(
         stream.try_clone().context("cloning the socket")?,
     ));
     // Published before the first read so the liveness thread can always reach
-    // it; cleared on the way out so a stale handle is never shut down twice.
-    *link.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some(stream.try_clone().context("cloning the socket")?);
-    let reader = BufReader::new(stream);
+    // it, and unpublished by the guard's `Drop` on **every** way out. That is
+    // the whole reason it is a guard: this function returns early — a withheld
+    // registration, a failed heartbeat spawn — and each of those paths used to
+    // walk past the one manual `take()` at the bottom, leaving the clone
+    // published. A published clone is an open descriptor, so the daemon went on
+    // holding the connection and its bounded IPC permit for the whole reconnect
+    // backoff of a supervisor it had already refused.
+    let _link = LinkGuard::publish(link, stream.try_clone().context("cloning the socket")?);
+    let mut reader = BufReader::new(stream);
+
+    // **Withheld, not sent, when this daemon cannot host what we are.** Ordered
+    // after the link is published so the liveness thread can still break a
+    // blocked read out from the outside, and before the `Register` below so
+    // nothing has been introduced when the answer is no.
+    withhold_unless_hosted(&writer, &mut reader, registration)?;
 
     // The same frame `report_exit` replays. Built once, in one place, so a
     // registration that introduces a session cannot drift from the one that
@@ -237,15 +248,159 @@ fn serve_once(
             .context("spawning the heartbeat thread")?;
     }
 
-    let outcome = read_frames(reader, args, config, &writer);
-    // The handle is dropped whether the loop ended cleanly or not: leaving a
-    // closed socket published would make the liveness thread shut down a
-    // descriptor that the next connection may already have reused.
-    let _ = link
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    outcome
+    read_frames(reader, args, config, &writer)
+}
+
+/// Holds the published connection for exactly as long as `serve_once` is using
+/// it.
+///
+/// The handle has to be *published* so the liveness thread can shut the socket
+/// down from the outside and break a blocked read — without that, a session that
+/// ends while `ccd` is healthy is never reported. It has to be *unpublished* on
+/// the way out for two separate reasons, and only one of them was ever a
+/// question of tidiness:
+///
+///   * A closed socket left published would have the liveness thread shut down a
+///     descriptor number the next connection may already have reused.
+///   * The clone is a live descriptor. Left published across a return, the
+///     daemon still sees the connection open and still holds the permit its
+///     bounded accept limit hands out — so a supervisor that has been *refused*
+///     goes on occupying a connection slot for its whole reconnect backoff,
+///     starving hooks, Claude supervisors and CLI calls behind it. Measured at
+///     one connection per withheld supervisor rather than a growing pile: the
+///     next attempt's publish drops the previous clone, so what is held is the
+///     latest refused connection for the length of the backoff. One slot,
+///     permanently, per supervisor the daemon has told to go away.
+///
+/// A guard rather than a call at the bottom because the second reason turns
+/// every early return into that starvation, and `serve_once` returns early on
+/// purpose: [`withhold_unless_hosted`] is a `?` above the registration.
+struct LinkGuard<'a>(&'a Link);
+
+impl<'a> LinkGuard<'a> {
+    fn publish(link: &'a Link, stream: UnixStream) -> Self {
+        *link.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stream);
+        Self(link)
+    }
+}
+
+impl Drop for LinkGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+/// Refuse to introduce this session to a daemon that cannot host its agent.
+///
+/// **What goes wrong without it, and it is not a refusal — it is silence.** A
+/// daemon that predates the agent seam has no `agent` column and no
+/// `deny_unknown_fields` on `RegisterSession`: it drops `agent`,
+/// `codex_thread_id` and `codex_socket` on the floor, registers the run as an
+/// ordinary Claude session, and answers `Ack`. The row it writes lands in the
+/// shared `sessions` table wearing that schema's `DEFAULT 'claude'` — beside the
+/// run's real row in `codex_sessions`, which it cannot see. Its liveness sweep
+/// then ends that shadow, its `sessions prune` deletes it and every event and
+/// answer keyed by the uid underneath it, and it records a uid tombstone the
+/// surviving Codex row now contradicts. So `Ack` is not evidence of support; it
+/// is precisely the failure. The introduction has to be withheld *before* it is
+/// made.
+///
+/// **The signal, and why it is a frame rather than a field.** Nothing in the
+/// registration handshake distinguishes the two daemons: both answer `Register`
+/// with the same fieldless `Ack`, and no version travels on that path.
+/// `ClientFrame` is internally tagged with no catch-all variant, though, so
+/// `negotiate_support` is a *variant* the older daemon cannot decode, and
+/// unknown variants — unlike unknown fields — fail loudly. Measured against the
+/// real v0.6.0 binary, one `negotiate_support` frame on a fresh connection:
+///
+/// ```text
+/// v0.6.0:  {"type":"error","message":"undecodable frame: unknown variant
+///           `negotiate_support`, expected one of `hook`, `register`, ..."}
+/// this build: {"type":"supported_agents","supported_agents":["claude"],"supported":false}
+/// ```
+///
+/// Both leave the connection open, so the ask costs one round trip and no
+/// reconnect. Every answer other than `supported: true` withholds, including the
+/// ones that are not answers at all — a closed connection, an undecodable line,
+/// some frame we did not ask for. Fail-closed is the only safe direction here:
+/// the cost of withholding wrongly is a session the daemon does not list until
+/// the next reconnect, and the cost of registering wrongly is deleted history.
+///
+/// **Asked only for a non-Claude agent, deliberately.** Claude is every build's
+/// floor — the daemon's own `supported_agents()` says so — and asking anyway
+/// would send a frame the older daemon logs as an error on every reconnect of
+/// every ordinary session, to learn something already known. The gate therefore
+/// reads the registration it is about to send rather than a separate flag, so it
+/// cannot be bypassed by a caller that forgets it: the day `registration_frame`
+/// names Codex is the day this starts asking.
+///
+/// A withheld registration returns `Err`, which puts the caller into the
+/// existing reconnect loop with its exponential backoff — the same state the
+/// supervisor is already in whenever `ccd` is down. The session stays alive and
+/// unregistered, the tmux pane is untouched, and the next upgraded daemon gets
+/// the introduction. Returning `Ok` would reset the backoff to 500ms and spin.
+fn withhold_unless_hosted(
+    writer: &Arc<Mutex<UnixStream>>,
+    reader: &mut BufReader<UnixStream>,
+    registration: &RegisterSession,
+) -> Result<()> {
+    let agent = &registration.agent;
+    if *agent == protocol::agent::AgentKind::Claude {
+        return Ok(());
+    }
+    send(
+        writer,
+        &ClientFrame::NegotiateSupport {
+            agent: agent.clone(),
+            agent_version: None,
+        },
+    )?;
+    let mut line = String::new();
+    if reader
+        .read_line(&mut line)
+        .context("reading ccd's support answer")?
+        == 0
+    {
+        bail!(
+            "withholding Register: ccd closed the connection without answering whether it hosts {}",
+            agent.as_str()
+        );
+    }
+    match serde_json::from_str::<DaemonFrame>(&line) {
+        Ok(DaemonFrame::SupportedAgents {
+            supported: true, ..
+        }) => Ok(()),
+        Ok(DaemonFrame::SupportedAgents {
+            supported_agents, ..
+        }) => bail!(
+            "withholding Register: this ccd does not host {}; it hosts {}",
+            agent.as_str(),
+            supported_agents
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Ok(DaemonFrame::Error { message }) => bail!(
+            "withholding Register: this ccd could not read the support negotiation ({message}), \
+             so it predates the agent seam and cannot host {}",
+            agent.as_str()
+        ),
+        Ok(other) => bail!(
+            "withholding Register: ccd answered the support negotiation with {other:?}, which \
+             says nothing about {}",
+            agent.as_str()
+        ),
+        Err(err) => bail!(
+            "withholding Register: ccd's answer to the support negotiation was undecodable \
+             ({err}), so it cannot be read as hosting {}",
+            agent.as_str()
+        ),
+    }
 }
 
 fn read_frames(
@@ -1257,7 +1412,16 @@ fn authorise(
 /// reconnecting after a daemon restart already takes.
 fn report_exit(socket: &std::path::Path, registration: &RegisterSession) -> Result<()> {
     let stream = UnixStream::connect(socket)?;
+    let mut reader = BufReader::new(stream.try_clone().context("cloning the socket")?);
     let writer = Arc::new(Mutex::new(stream));
+    // **The same withhold as the live path, because this is the same
+    // introduction.** The replay is a `Register`, and a daemon that cannot host
+    // this agent files it exactly as it would have filed the live one — so a
+    // supervisor that correctly withheld for its whole run would undo that work
+    // in its last act, creating the shadow row on the way out. Withholding here
+    // costs nothing that was not already lost: a daemon that was never told the
+    // session exists has nothing to end.
+    withhold_unless_hosted(&writer, &mut reader, registration)?;
     // Best-effort: a daemon that rejects the introduction may still accept the
     // exit for a session it already knows about, so a failure here must not
     // stop the news getting through.
@@ -3396,6 +3560,388 @@ means the full history gets re-read on your next message.
         assert_eq!(frames[1]["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ------------------------------------------------- the withhold
+    //
+    // A registration is the only thing that makes a daemon create a session
+    // row, so these tests use the *daemon* as the observer: the scripted
+    // listener records every frame it was actually sent, and the claim is about
+    // what is absent from that list. Asserting on a return value, or on the
+    // supervisor's log, would leave the question of whether the frame went out
+    // before the refusal — and a `register` that reached a v0.6.0 daemon has
+    // already created the shadow row by the time anything refuses.
+
+    fn withhold_socket(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cc-supervisor-{tag}-{}-{}.sock",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A daemon that answers the supervisor's first frame with one canned line
+    /// and then records everything else it is sent until the supervisor hangs
+    /// up. `answer: None` is a daemon that says nothing, which is what the
+    /// Claude path expects to be talking to.
+    fn scripted_daemon(
+        listener: UnixListener,
+        answer: Option<&'static str>,
+        then_read: usize,
+    ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut out = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut frames = Vec::new();
+            fn read_one(
+                reader: &mut BufReader<UnixStream>,
+                frames: &mut Vec<serde_json::Value>,
+            ) -> bool {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => false,
+                    Ok(_) => {
+                        if !line.trim().is_empty() {
+                            frames.push(serde_json::from_str(&line).unwrap());
+                        }
+                        true
+                    }
+                }
+            }
+            read_one(&mut reader, &mut frames);
+            if let Some(answer) = answer {
+                let _ = writeln!(out, "{answer}");
+                let _ = out.flush();
+            }
+            for _ in 0..then_read {
+                if !read_one(&mut reader, &mut frames) {
+                    break;
+                }
+            }
+            frames
+        })
+    }
+
+    fn codex_registration() -> RegisterSession {
+        let args = SupervisorArgs {
+            session_id: "cx-1".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPCX".into()),
+            tmux_session: "cx-1".into(),
+            cwd: "/work".into(),
+            claude_bin: None,
+        };
+        RegisterSession {
+            agent: protocol::agent::AgentKind::Codex,
+            codex_thread_id: Some("th_ABC123".into()),
+            codex_socket: Some("/tmp/s.sock".into()),
+            ..registration_frame(&args, "2026-08-28T00:00:00.000Z")
+        }
+    }
+
+    fn drive_serve_once(path: &std::path::Path, registration: &RegisterSession) -> Result<()> {
+        drive_serve_once_on(path, registration, &Arc::new(Mutex::new(None)))
+    }
+
+    /// The same, with the caller's own `Link` — the one `run` holds for the life
+    /// of the supervisor, rather than a temporary that takes whatever was left
+    /// published down with it when the call returns.
+    fn drive_serve_once_on(
+        path: &std::path::Path,
+        registration: &RegisterSession,
+        link: &Link,
+    ) -> Result<()> {
+        let args = SupervisorArgs {
+            session_id: registration.session_id.clone(),
+            session_uid: registration.session_uid.clone(),
+            tmux_session: registration.tmux_session.clone(),
+            cwd: registration.cwd.clone(),
+            claude_bin: None,
+        };
+        serve_once(
+            path,
+            &args,
+            registration,
+            &Config::load(),
+            &Arc::new(AtomicBool::new(false)),
+            link,
+        )
+    }
+
+    /// **The exact line the real v0.6.0 binary answers with**, captured from it
+    /// rather than imagined: `ClientFrame` is internally tagged with no
+    /// catch-all, so `negotiate_support` is a variant that build cannot decode,
+    /// and its read loop reports the failure and keeps the connection open.
+    const V060_ANSWER: &str = "{\"type\":\"error\",\"message\":\"undecodable frame: unknown \
+                               variant `negotiate_support`, expected one of `hook`, `register`, \
+                               `supervisor_response`, `heartbeat`, `session_exited`, \
+                               `list_sessions`, `prune_sessions`\"}";
+    const REFUSED: &str =
+        "{\"type\":\"supported_agents\",\"supported_agents\":[\"claude\"],\"supported\":false}";
+    const HOSTED: &str =
+        "{\"type\":\"supported_agents\",\"supported_agents\":[\"claude\",\"codex\"],\"supported\":true}";
+
+    /// A daemon that predates the agent seam is never told a Codex session
+    /// exists.
+    ///
+    /// This is the whole rollback producer, closed at its source. That daemon
+    /// would answer the registration `ack`, drop the three fields it has no
+    /// columns for, and file the run in the shared `sessions` table under
+    /// `DEFAULT 'claude'` — beside the real row in `codex_sessions` it cannot
+    /// see. Its sweep then ends that shadow, its prune deletes it *and* the
+    /// events, answers and cursors keyed by the uid underneath it, and it leaves
+    /// a tombstone the surviving Codex row contradicts. None of that is
+    /// recoverable afterwards, so the only place to stop it is before the frame
+    /// goes out — which is what the daemon-side observer here measures.
+    #[test]
+    fn a_codex_registration_is_withheld_from_a_daemon_that_predates_the_agent_seam() {
+        for (label, answer) in [("v0.6.0", V060_ANSWER), ("a daemon that says no", REFUSED)] {
+            let path = withhold_socket("withhold");
+            let listener = UnixListener::bind(&path).unwrap();
+            let daemon = scripted_daemon(listener, Some(answer), 1);
+
+            let err = drive_serve_once(&path, &codex_registration())
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{label}: the registration must be withheld, not merely regretted")
+                });
+            assert!(
+                format!("{err:#}").contains("withholding Register"),
+                "{label}: {err:#}"
+            );
+
+            let frames = daemon.join().unwrap();
+            assert_eq!(
+                frames.len(),
+                1,
+                "{label}: the supervisor sent more than the question: {frames:?}"
+            );
+            assert_eq!(frames[0]["type"], "negotiate_support", "{label}");
+            assert_eq!(frames[0]["agent"], "codex", "{label}");
+            assert!(
+                !frames.iter().any(|f| f["type"] == "register"),
+                "{label}: a register frame reached the daemon — the shadow row already exists"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A withheld registration hands the connection back.
+    ///
+    /// The refusal is a `?` on the way out of `serve_once`, and the tests above
+    /// cannot see what that costs: they pass a `Link` that is created for the
+    /// call and dropped with it, so whatever was left published goes down with
+    /// the temporary. `run` holds one `Link` for the life of the supervisor, and
+    /// against *that* the leak is visible — the published clone is a live
+    /// descriptor, so the daemon goes on seeing an open connection, and holding
+    /// the permit its bounded accept limit handed out, for the whole of a
+    /// reconnect backoff that ends in another refusal. A handful of withheld
+    /// Codex supervisors would sit on connection slots that hooks, Claude
+    /// supervisors and CLI calls are queueing for.
+    ///
+    /// So the observer is the daemon, and what it observes is the **end** of the
+    /// connection: after answering the negotiation it reads again, and the only
+    /// acceptable answer is `EOF`. A read that times out instead is a descriptor
+    /// the supervisor is still holding. Driven for several reconnects, because
+    /// one refusal releasing tells you nothing about a loop of them.
+    ///
+    /// Measured against the leaking shape, so the size of it is on the record
+    /// rather than assumed: one connection, not a growing pile. Each attempt's
+    /// publish drops the previous clone, so what a withheld supervisor holds is
+    /// the *latest* refused connection, for as long as the backoff before its
+    /// next attempt — which is a permit denied to somebody else for that whole
+    /// time, once per withheld supervisor.
+    #[test]
+    fn a_withheld_registration_hands_back_the_connection_it_was_refused_on() {
+        const ATTEMPTS: usize = 3;
+        let path = withhold_socket("released");
+        let listener = UnixListener::bind(&path).unwrap();
+        // One verdict per attempt, and the main thread waits for it before
+        // starting the next. Without that handshake this measures far less than
+        // it looks like it does: the leaking shape releases attempt N's
+        // descriptor when attempt N+1 *publishes* over it, so a main thread that
+        // races ahead rescues the very connection the daemon is trying to catch
+        // being held. Serialised, every attempt is discriminating — and the
+        // healthy path never waits, because a released connection reports EOF at
+        // once.
+        let (verdict, verdicts) = std::sync::mpsc::channel();
+
+        let daemon = std::thread::spawn(move || {
+            for _ in 0..ATTEMPTS {
+                let (stream, _) = listener.accept().unwrap();
+                let mut out = stream.try_clone().unwrap();
+                // Generous, because it is only ever reached when the claim is
+                // already false: a supervisor that let go answers immediately,
+                // and one that did not is holding the descriptor for the whole
+                // of its reconnect backoff — `RECONNECT_MAX` is ten seconds.
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                writeln!(out, "{REFUSED}").unwrap();
+                out.flush().unwrap();
+                // Refused. The supervisor's end of this connection has to be
+                // gone, so the only acceptable answer is `EOF`; a read that
+                // blocks is a descriptor it is still holding, and a frame would
+                // be worse.
+                let mut rest = String::new();
+                let held = !matches!(reader.read_line(&mut rest), Ok(0));
+                if verdict.send(held).is_err() {
+                    return;
+                }
+            }
+        });
+
+        // The persistent link, exactly as `run` builds it.
+        let link: Link = Arc::new(Mutex::new(None));
+        for attempt in 0..ATTEMPTS {
+            assert!(
+                drive_serve_once_on(&path, &codex_registration(), &link).is_err(),
+                "attempt {attempt}: the registration must be withheld"
+            );
+            assert!(
+                link.lock().unwrap().is_none(),
+                "attempt {attempt}: the refused connection is still published, so it is still \
+                 open and the daemon is still holding its permit"
+            );
+            assert!(
+                !verdicts.recv().unwrap(),
+                "attempt {attempt}: the daemon was still holding the refused connection open \
+                 after the supervisor had given up on it, so its accept permit is spent on a \
+                 supervisor it has already turned away"
+            );
+        }
+        daemon.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// And it *is* sent to a daemon that says it can host the agent, on the same
+    /// connection, so the negotiation costs a round trip and not a reconnect.
+    #[test]
+    fn a_codex_registration_is_sent_once_the_daemon_says_it_hosts_codex() {
+        let path = withhold_socket("hosted");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, Some(HOSTED), 1);
+
+        drive_serve_once(&path, &codex_registration())
+            .expect("a hosting daemon is registered with");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            2,
+            "expected question then register: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "negotiate_support");
+        assert_eq!(frames[1]["type"], "register");
+        assert_eq!(frames[1]["agent"], "codex");
+        assert_eq!(frames[1]["codex_thread_id"], "th_ABC123");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A Claude session does not ask, and that is not an oversight.
+    ///
+    /// Claude is every build's floor — the daemon's own `supported_agents()`
+    /// says so — so the answer is known before the question. Asking anyway would
+    /// send a frame a v0.6.0 daemon logs as an undecodable-frame error on every
+    /// reconnect of every ordinary session, which is noise in the one log an
+    /// operator reads when something is wrong.
+    #[test]
+    fn a_claude_registration_does_not_negotiate_at_all() {
+        let path = withhold_socket("claude");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, None, 0);
+
+        let args = SupervisorArgs {
+            session_id: "cc-7".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
+            tmux_session: "cc-7".into(),
+            cwd: "/tmp/project".into(),
+            claude_bin: None,
+        };
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        assert_eq!(registration.agent, protocol::agent::AgentKind::Claude);
+        drive_serve_once(&path, &registration).expect("the Claude path is unchanged");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "the Claude path sent extra frames: {frames:?}"
+        );
+        assert_eq!(
+            frames[0]["type"], "register",
+            "a Claude supervisor's first word is still its registration"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The exit replay is a `Register` too, so it is withheld by the same rule.
+    ///
+    /// Without this a supervisor that correctly withheld for its whole run would
+    /// create the shadow row in its last act — and an exit replay is the worst
+    /// moment for it, because the row it creates arrives already `exited` and
+    /// therefore immediately prunable by the old binary.
+    #[test]
+    fn the_exit_replay_is_withheld_from_a_daemon_that_cannot_host_the_agent() {
+        let path = withhold_socket("exit-withhold");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, Some(V060_ANSWER), 2);
+
+        report_exit(&path, &codex_registration())
+            .expect_err("the replay must be withheld like the live registration");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "the exit path sent more than the question: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "negotiate_support");
+        assert!(
+            !frames.iter().any(|f| f["type"] == "register"),
+            "the replay reached the daemon: {frames:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every answer that is not `supported: true` withholds — including the ones
+    /// that are not answers.
+    ///
+    /// Fail-closed is the only safe direction: withholding wrongly costs a
+    /// session the daemon does not list until the next reconnect, and
+    /// registering wrongly costs the run's history. So a daemon that hangs up, a
+    /// line that will not decode, and a frame nobody asked for are all treated
+    /// as "cannot host".
+    #[test]
+    fn a_non_answer_to_the_negotiation_withholds_like_a_refusal() {
+        for (label, answer, then_read) in [
+            // Hangs up without a word: nothing more to read, so the scripted
+            // daemon returns and drops the connection rather than deadlocking
+            // against a supervisor that is also waiting.
+            ("hung up", None, 0),
+            ("undecodable", Some("{\"type\":\"nonsense\"}"), 1),
+            ("not an answer", Some("{\"type\":\"ack\"}"), 1),
+        ] {
+            let path = withhold_socket("nonanswer");
+            let listener = UnixListener::bind(&path).unwrap();
+            let daemon = scripted_daemon(listener, answer, then_read);
+
+            if drive_serve_once(&path, &codex_registration()).is_ok() {
+                panic!("{label}: a non-answer must withhold");
+            }
+
+            let frames = daemon.join().unwrap();
+            assert!(
+                !frames.iter().any(|f| f["type"] == "register"),
+                "{label}: a register frame reached the daemon: {frames:?}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]
