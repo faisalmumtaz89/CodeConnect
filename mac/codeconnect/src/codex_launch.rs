@@ -356,6 +356,11 @@ pub struct LaunchRecord {
     /// proven dead means tmux has already reaped the pane and the session with it.
     #[serde(default)]
     pub host_identity: Option<ProcessIdentity>,
+    /// Whether the host holding this launch's lease got **past the run-dir
+    /// claim** — the exclusive publish in
+    /// `codex_host::create_run_dir_atomically`.
+    #[serde(default)]
+    pub host_claimed_run_dir: bool,
     /// Whether a custodian ever positively observed this launch's session present.
     ///
     /// Durable rather than process-local: a custodian that dies and is replaced by
@@ -741,6 +746,45 @@ fn take_dir_fsync_fault() -> bool {
 
 #[cfg(test)]
 thread_local! {
+    /// One-shot: the next [`store_atomic`] fails **before** its rename, so the
+    /// target record is left exactly as it was. Per test *thread*, like
+    /// [`test_sessions_root`], so parallel tests cannot arm each other's faults.
+    static PUBLISH_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm the one-shot **pre-publish** write failure (see [`store_atomic`]).
+///
+/// The deliberate COMPLEMENT of [`fail_next_dir_fsync`], and the two must not be
+/// confused: that one fails the directory fsync *after* the rename has already
+/// made the successor visible, so the record DID change and the fault is about
+/// durability. This one fails while the pre-image is still the published record,
+/// so the caller gets an `Err` for a write that changed **nothing** — which is the
+/// only shape that stages a caller whose contract is "if the write did not land,
+/// do not proceed".
+///
+/// Stands for the whole pre-publish failure class — `ENOSPC` on the temp write,
+/// `EIO` on its fsync, `EIO` on the rename itself — because every member of it
+/// leaves the same observable state: the old record, intact. Injected rather than
+/// simulated for the reason the fsync fault is: only the filesystem decides when a
+/// write fails, and a test that merely refrained from calling the writer would
+/// prove nothing about what a FAILED writer leaves behind.
+#[cfg(test)]
+pub(crate) fn fail_next_record_publish() {
+    PUBLISH_FAULT.with(|armed| armed.set(true));
+}
+
+#[cfg(test)]
+fn take_publish_fault() -> bool {
+    PUBLISH_FAULT.with(|armed| armed.replace(false))
+}
+
+#[cfg(not(test))]
+fn take_publish_fault() -> bool {
+    false
+}
+
+#[cfg(test)]
+thread_local! {
     /// One-shot: the next [`remove_tree_beneath`] `readdir` reports a read error
     /// instead of an entry. Thread-local for the same reason the fsync fault is.
     static READDIR_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -852,6 +896,21 @@ fn store_atomic(uid: &str, record: &LaunchRecord) -> Result<()> {
         f.sync_all()
             .context("fsync of the launch record temp file")?;
     }
+    // The complement of the fault below, and the one A11.8's arrival-write boundary
+    // turns on: the rename has NOT happened, so `target` still holds the pre-image
+    // and the caller's `Err` describes a write that changed nothing. Sited exactly
+    // at the rename because that is the last instant at which that is true — and
+    // the temp is deliberately left where a failed `rename(2)` would leave it,
+    // rather than tidied, so the staged aftermath is the real one. It is inert:
+    // every reader resolves `launch.json`, and the next `store_atomic` reopens the
+    // temp with `create_private`, which truncates.
+    if take_publish_fault() {
+        bail!(
+            "injected fault: publishing {} failed BEFORE the rename, leaving the \
+             existing record untouched",
+            target.display()
+        );
+    }
     std::fs::rename(&temp, &target)
         .with_context(|| format!("renaming {} over {}", temp.display(), target.display()))?;
     // The one fault this module cannot otherwise stage, and the one A9.3 turns on:
@@ -930,6 +989,7 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         run_dir: None,
         host_reached_gate: false,
         host_identity: None,
+        host_claimed_run_dir: false,
         session_observed: false,
         remain_on_exit_asserted: false,
         children: Vec::new(),
@@ -1046,6 +1106,42 @@ pub fn record_host_child(
         return Ok(());
     }
     record.children.push(entry);
+    store_atomic(uid, &record)
+}
+
+/// Note that this launch's host got **past the run-dir claim**.
+///
+/// History, not state, and the mirror image of [`note_host_reached_gate`]: that
+/// one says the pane ran, this one says the pane's host owned the directory it
+/// was sent to own. Between them they name the STAGE a dead host reached, which
+/// is the one thing a refused host's own sentence cannot say — it goes to the
+/// pane's pty and the pane dies with it.
+///
+/// Lease-guarded exactly like [`record_host_child`]: only the host this launch
+/// admitted may write it.
+pub fn note_host_claimed_run_dir(
+    _lock: &LaunchLock,
+    uid: &str,
+    by: &ProcessIdentity,
+) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.state != LaunchState::Pending {
+        bail!(
+            "refusing to note the run-dir claim: the launch is {:?}, not pending",
+            record.state
+        );
+    }
+    match &record.host_lease {
+        Some(lease) if &lease.identity == by => {}
+        Some(_) => {
+            bail!("refusing to note the run-dir claim: the lease belongs to a different host")
+        }
+        None => bail!("refusing to note the run-dir claim: no host holds this launch's lease"),
+    }
+    if record.host_claimed_run_dir {
+        return Ok(());
+    }
+    record.host_claimed_run_dir = true;
     store_atomic(uid, &record)
 }
 
@@ -3519,6 +3615,174 @@ mod tests {
             ),
             "a live incumbent lease is not proven gone, so takeover must refuse"
         );
+    }
+
+    /// **A takeover landing MID-readiness** (A11.8, the takeover-mid-readiness
+    /// boundary).
+    ///
+    /// [`a_host_lease_is_taken_over_only_from_a_proven_gone_incumbent`] stages the
+    /// takeover at the two ENDPOINTS of readiness — before any child is confirmed,
+    /// and after both are — and proves the retain/don't-count split at each. What it
+    /// never interleaves is the middle: a successor admitted *between* one
+    /// [`record_host_child`] and its [`confirm_host_child_exec`], so the predecessor
+    /// is displaced holding a half-established readiness. That is the state a real
+    /// takeover of a still-starting host produces, and it is the one where the two
+    /// guards below could plausibly disagree with each other.
+    ///
+    /// The sharp edge is the DISPLACED host's late confirmation. Host A spawned its
+    /// TUI, was displaced while proving it past `execve`, and then completes that
+    /// proof — a write arriving from a host that no longer holds the lease, naming a
+    /// role the current lease also needs. It must not become readiness for anybody.
+    /// Two independent guards say so and both are exercised here: the lease fence in
+    /// `confirm_host_child_exec` refuses the write outright, and — had it not —
+    /// [`host_children_ready`]'s `recorded_by == lease.identity` conjunct would still
+    /// refuse to count an entry stamped with the predecessor.
+    #[test]
+    fn a_takeover_midway_through_readiness_neither_completes_nor_discards_it() {
+        let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
+        let uid = "lease-mid";
+        let lock = LaunchLock::acquire(uid).unwrap();
+        create_pending(&lock, a_pending(uid, far)).unwrap();
+        arm(&lock, uid, live_custodian());
+
+        // Host A is a dead identity, so it is takeable-over on the `liveness_is_gone`
+        // gate; its CHILDREN are real processes, because readiness demands `Alive`.
+        let host_a = fake_identity(0x3FFF_FFF5);
+        assert_eq!(
+            admit_host(&lock, uid, "cafef00d", &host_a, host_a.pid, "codex-host").unwrap(),
+            Admission::Admitted
+        );
+        let (mut a_app, a_app_id) = LiveProc::spawn();
+        let (mut a_tui, a_tui_id) = LiveProc::spawn();
+        let entry = |role: &str, id: ProcessIdentity| ChildEntry {
+            role: role.to_string(),
+            identity: id,
+            pgid: id.pid,
+            nonce: "cafef00d".into(),
+            argv_hash: String::new(),
+            recorded_by: None,
+            exec_confirmed: false,
+        };
+        // A gets exactly HALFWAY: app-server recorded and proven past `execve`; TUI
+        // recorded but not yet proven. This is the interleaving point.
+        record_host_child(&lock, uid, &host_a, entry("app-server", a_app_id)).unwrap();
+        confirm_host_child_exec(&lock, uid, &host_a, "app-server", &a_app_id).unwrap();
+        record_host_child(&lock, uid, &host_a, entry("tui", a_tui_id)).unwrap();
+        assert!(
+            !host_children_ready(&load(uid).unwrap()),
+            "half-established readiness is not readiness, even for the host that owns it"
+        );
+
+        // …and the successor arrives HERE.
+        let host_b = fake_identity(0x3FFF_FFF6);
+        assert_eq!(
+            admit_host(&lock, uid, "cafef00d", &host_b, host_b.pid, "codex-host").unwrap(),
+            Admission::Admitted
+        );
+
+        // NEITHER COMPLETED NOR LOST. B inherits nothing…
+        let mid = load(uid).unwrap();
+        assert!(
+            !host_children_ready(&mid),
+            "a successor must not inherit a predecessor's partial readiness: {:?}",
+            mid.children
+        );
+        assert!(
+            !mid.children.iter().any(|c| c.recorded_by == Some(host_b)),
+            "B has recorded nothing yet, so nothing in the record can speak for it"
+        );
+        // …and BOTH of A's entries survive for cleanup — the confirmed one and, the
+        // case this test exists for, the half-recorded one. The TUI A spawned is a
+        // real running process; losing its entry would orphan it with no identity by
+        // which anything could ever stop it.
+        for (role, confirmed) in [("app-server", true), ("tui", false)] {
+            let retained = mid
+                .children
+                .iter()
+                .find(|c| c.role == role && c.recorded_by == Some(host_a))
+                .unwrap_or_else(|| panic!("the displaced host's {role} entry must be RETAINED"));
+            assert_eq!(
+                retained.exec_confirmed, confirmed,
+                "and must be retained exactly as it stood at displacement, not \
+                 promoted or reset: {role}"
+            );
+        }
+        assert_eq!(liveness(&a_tui_id), Liveness::Alive);
+
+        // THE SHARP EDGE: the displaced host completes the proof it was interrupted
+        // mid-way through. The lease it holds is no longer the record's lease.
+        let late = confirm_host_child_exec(&lock, uid, &host_a, "tui", &a_tui_id)
+            .expect_err("a displaced host must not be able to confirm anything");
+        assert!(
+            format!("{late:#}").contains("the lease belongs to a different host"),
+            "and must be refused ON THE LEASE, not incidentally: {late:#}"
+        );
+        // Refused means refused: the write did not half-land.
+        let after_late = load(uid).unwrap();
+        assert!(
+            !after_late
+                .children
+                .iter()
+                .any(|c| c.role == "tui" && c.recorded_by == Some(host_a) && c.exec_confirmed),
+            "the refused confirmation must not have been written anyway"
+        );
+        assert!(!host_children_ready(&after_late));
+        // The same fence stops the displaced host APPENDING, which is the other way a
+        // stale host could put identities in front of cleanup.
+        let (_a_extra, a_extra_id) = LiveProc::spawn();
+        let appended = record_host_child(&lock, uid, &host_a, entry("tui", a_extra_id))
+            .expect_err("a displaced host must not be able to append either");
+        assert!(format!("{appended:#}").contains("the lease belongs to a different host"));
+
+        // THE SECOND GUARD, exercised rather than argued. Grant the displaced host
+        // the write the fence just refused — flip the bit in a COPY of the record,
+        // which is exactly the state the record would hold had that fence not been
+        // there — and readiness must still refuse, because A's entries are stamped
+        // with a lease that is no longer the record's.
+        //
+        // Done in memory, deliberately: writing it would require defeating the very
+        // fence under test, and the claim is about `host_children_ready`, which is a
+        // pure predicate over a record. This is the assertion that fails if
+        // `recorded_by == lease.identity` is dropped from that predicate — without
+        // it, both of A's roles are confirmed and alive and B inherits readiness it
+        // never earned.
+        let mut as_if_confirmed = after_late.clone();
+        for c in &mut as_if_confirmed.children {
+            if c.recorded_by == Some(host_a) {
+                c.exec_confirmed = true;
+            }
+        }
+        assert!(
+            as_if_confirmed
+                .children
+                .iter()
+                .filter(|c| HOST_CHILD_ROLES.contains(&c.role.as_str()))
+                .all(|c| c.exec_confirmed && liveness(&c.identity) == Liveness::Alive),
+            "the premise: in this counterfactual both of A's roles are confirmed and \
+             alive, so only the lease stamp can be what withholds readiness"
+        );
+        assert!(
+            !host_children_ready(&as_if_confirmed),
+            "even a displaced host's COMPLETED readiness must not become the \
+             successor's: the entries are stamped with the old lease"
+        );
+
+        // And B establishes readiness the only way left — on its own processes —
+        // without A's evidence being discarded to get there.
+        let (_b_app, b_app_id) = LiveProc::spawn();
+        let (_b_tui, b_tui_id) = LiveProc::spawn();
+        record_and_confirm_children(&lock, uid, &host_b, [b_app_id, b_tui_id]);
+        let after_b = load(uid).unwrap();
+        assert!(host_children_ready(&after_b));
+        assert_eq!(
+            after_b.children.len(),
+            5,
+            "custodian + A's two retained + B's two: the interleaving discarded \
+             nothing: {:?}",
+            after_b.children
+        );
+        a_app.kill();
+        a_tui.kill();
     }
 
     /// A stand-in for the identity `ServerA::from_owned` extracts from a resolved

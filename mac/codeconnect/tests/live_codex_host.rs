@@ -70,6 +70,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// The A7.1 digest of the codex binary under test: the identity a launcher would
+/// have pinned at resolution, which the host re-verifies immediately before each of
+/// its two execs. Computed here rather than written down because these harnesses
+/// build (or copy) their codex at run time.
+fn codex_sha256(path: &Path) -> String {
+    protocol::hash::sha256_file(path).expect("hash the codex binary under test")
+}
+
 // ---------------------------------------------------------------------------
 // SUN_LEN: a unix-domain socket PATH must be shorter than `sun_len` (~104 bytes
 // on macOS); binding a longer path fails `path must be shorter than SUN_LEN`. A
@@ -1022,6 +1030,9 @@ impl PtyHost {
                 "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("codex path is utf-8"),
+                // A7.1: the identity the host re-verifies before each exec.
+                "--codex-sha256",
+                &codex_sha256(codex),
                 "--run-dir",
                 run,
                 "--codex-home",

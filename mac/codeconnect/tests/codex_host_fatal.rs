@@ -51,6 +51,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// The A7.1 digest of the codex binary under test: the identity a launcher would
+/// have pinned at resolution, which the host re-verifies immediately before each of
+/// its two execs. Computed here rather than written down because these harnesses
+/// build (or copy) their codex at run time.
+fn codex_sha256(path: &Path) -> String {
+    protocol::hash::sha256_file(path).expect("hash the codex binary under test")
+}
+
 /// A unix socket path must be shorter than `sun_len` (~104 on macOS), so every
 /// path here lives under a SHORT `/tmp` dir, never a deep build path.
 const SUN_LEN_LIMIT: usize = 104;
@@ -339,6 +347,9 @@ impl Host {
                 "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("utf-8"),
+                // A7.1: the identity the host re-verifies before each exec.
+                "--codex-sha256",
+                &codex_sha256(codex),
                 "--run-dir",
                 run_dir,
                 "--codex-home",
@@ -686,6 +697,8 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
             "/tmp/cc-host-harness-no-server.sock",
             "--codex",
             fake.to_str().expect("utf-8"),
+            "--codex-sha256",
+            &codex_sha256(&fake),
             "--run-dir",
             run.as_str(),
             "--codex-home",
@@ -739,6 +752,256 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
         run.path.display()
     );
     println!("PASS app_server_dying_before_bind_fails_closed_with_its_stderr");
+}
+
+/// **A7.1, staged end to end in a real process.** The launcher pins the codex
+/// binary by digest; the file at that path is then replaced *before the host runs*
+/// — the `standalone/current` flip, the npm overwrite, the install landing
+/// mid-launch. The host must refuse, and must refuse having spawned nothing at all:
+/// the point of the pin is that those bytes never become a process.
+///
+/// The fake here is a perfectly good, perfectly working codex both before and after
+/// the swap. Nothing about it is malformed — a magic check, an `--version` and an
+/// exec would all be happy with it. Only the identity check sees the difference,
+/// which is exactly the hole A7 named.
+///
+/// **This stages the swap that has already SETTLED by the time the host looks**, and
+/// that is the easy half. The digest comparison alone is enough to catch it, which is
+/// precisely why this test stayed green through the window where a swap landing
+/// *during* the verification read was not caught at all: the read holds the old vnode
+/// to its last byte, so the digest matches and the spawn runs the replacement. That
+/// half needs a real mid-read race and lives with the guard that closes it — see
+/// `protocol::hash`'s `a_rename_landing_mid_hash_is_refused_rather_than_hashed_clean`
+/// and `codex`'s `a_binary_renamed_over_mid_inspection_is_never_resolved`.
+#[test]
+fn a_codex_replaced_after_the_pin_is_refused_before_anything_is_spawned() {
+    let python = python3();
+    use std::os::unix::fs::PermissionsExt;
+    let fake_home = ScratchDir::new("fakeswap");
+    let codex_home = ScratchDir::new("homeswap");
+    let run = OwnedByHost::new("runswap");
+
+    // The codex that gets pinned: a working app-server fake that binds nothing but
+    // would otherwise be spawned and waited on.
+    let fake = fake_home.path.join("fake-codex-swap");
+    let sleeper = format!(
+        "#!{}\nimport time\nwhile True: time.sleep(3600)\n",
+        python.display()
+    );
+    std::fs::write(&fake, &sleeper).expect("write the pinned fake");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+    // Pin it — this is what `codex::resolve_codex_bin` would have handed the
+    // coordinator, and what the coordinator puts on the host's argv.
+    let pinned = codex_sha256(&fake);
+
+    // The swap. Same path, same mode, still an executable that runs: only the bytes
+    // differ. A marker in the replacement proves, if it ever ran, that it ran.
+    let replacement = format!(
+        "#!{}\nimport time\n# swapped-{}\nwhile True: time.sleep(3600)\n",
+        python.display(),
+        run.as_str()
+    );
+    std::fs::write(&fake, &replacement).expect("swap the fake");
+    assert_ne!(
+        pinned,
+        codex_sha256(&fake),
+        "the staged swap must actually change the digest, or this test proves nothing"
+    );
+
+    let launch = Launch::admissible("direct");
+    let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
+        .args([
+            "internal-codex-host",
+            "--uid",
+            &launch.uid,
+            "--nonce",
+            &launch.nonce,
+            "--tmux-socket",
+            "/tmp/cc-host-harness-no-server.sock",
+            "--codex",
+            fake.to_str().expect("utf-8"),
+            // The identity of the bytes as they were when they were inspected —
+            // NOT as they are now.
+            "--codex-sha256",
+            &pinned,
+            "--run-dir",
+            run.as_str(),
+            "--codex-home",
+            codex_home.as_str(),
+            "--approval-policy",
+            "untrusted",
+            "--approvals-reviewer",
+            "user",
+            "--sandbox",
+            "read-only",
+            "--hooks-enabled",
+            "true",
+            "--launch-cwd",
+            "/tmp",
+        ])
+        .env("CODECONNECT_HOME", &launch.home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the host");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(EX_HOST_FATAL),
+        "a swapped codex must be session-fatal: {stderr}"
+    );
+    assert!(
+        stderr.contains("not the one this launch pinned"),
+        "the refusal must be the identity check itself: {stderr}"
+    );
+    assert!(
+        stderr.contains(&pinned),
+        "it must name the digest that was pinned: {stderr}"
+    );
+    assert!(
+        stderr.contains("immediately before the app-server spawn"),
+        "and WHERE the check ran, so this is provably the pre-exec guard and not \
+         some later failure: {stderr}"
+    );
+    // Nothing ran. Not the app-server, not the TUI — the marker is unique to this
+    // run dir, so a live match would be this test's own swapped binary.
+    assert!(
+        processes_matching(run.as_str()).is_empty(),
+        "a refused launch spawned something: {:?}",
+        processes_matching(run.as_str())
+    );
+    assert!(
+        !run.path.exists(),
+        "a refused launch left its run dir behind: {}",
+        run.path.display()
+    );
+    println!("PASS a_codex_replaced_after_the_pin_is_refused_before_anything_is_spawned");
+}
+
+/// **The second exec has its own window, and its own guard.** The app-server's
+/// check says nothing about the TUI: the app-server's bring-up and the broker's
+/// bind stand between them, seconds during which the path is not watched. So the
+/// swap here is staged *inside* that interval — the fake app-server replaces its own
+/// binary (by `os.replace`, a rename onto the pathname, which is the shape a
+/// `standalone/current` flip and an installer both have) before it binds the socket
+/// the host is waiting on, so the replacement is provably complete by the time
+/// bring-up proceeds.
+///
+/// The first verify passed. The app-server is running. The broker is bound. And the
+/// TUI must still not start — and the app-server that was legitimately spawned must
+/// be torn down, because a refused launch leaves nothing behind.
+#[test]
+fn a_codex_replaced_between_the_two_spawns_stops_the_tui() {
+    let python = python3();
+    use std::os::unix::fs::PermissionsExt;
+    let fake_home = ScratchDir::new("fakemid");
+    let codex_home = ScratchDir::new("homemid");
+    let run = OwnedByHost::new("runmid");
+
+    let fake = fake_home.path.join("fake-codex-mid");
+    let script = format!(
+        r#"#!{}
+import os, socket, sys, time
+
+argv = sys.argv[1:]
+if argv and argv[0] == "app-server":
+    path = None
+    for i, a in enumerate(argv):
+        if a == "--listen" and i + 1 < len(argv):
+            path = argv[i + 1]
+    path = path[len("unix://"):]
+    # Replace our OWN binary, by rename, BEFORE binding. The host is blocked on
+    # that socket appearing, so the swap is complete before bring-up moves on.
+    me = os.path.realpath(sys.argv[0])
+    with open(me) as f:
+        body = f.read()
+    tmp = me + ".new"
+    with open(tmp, "w") as f:
+        f.write(body + "\n# swapped between the two spawns\n")
+    os.chmod(tmp, 0o700)
+    os.replace(tmp, me)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(path)
+    os.chmod(path, 0o600)
+    s.listen(16)
+
+while True:
+    time.sleep(3600)
+"#,
+        python.display()
+    );
+    std::fs::write(&fake, &script).expect("write the self-swapping fake");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let pinned = codex_sha256(&fake);
+
+    let launch = Launch::admissible("direct");
+    let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
+        .args([
+            "internal-codex-host",
+            "--uid",
+            &launch.uid,
+            "--nonce",
+            &launch.nonce,
+            "--tmux-socket",
+            "/tmp/cc-host-harness-no-server.sock",
+            "--codex",
+            fake.to_str().expect("utf-8"),
+            "--codex-sha256",
+            &pinned,
+            "--run-dir",
+            run.as_str(),
+            "--codex-home",
+            codex_home.as_str(),
+            "--approval-policy",
+            "untrusted",
+            "--approvals-reviewer",
+            "user",
+            "--sandbox",
+            "read-only",
+            "--hooks-enabled",
+            "true",
+            "--launch-cwd",
+            "/tmp",
+        ])
+        .env("CODECONNECT_HOME", &launch.home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the host");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The swap must actually have happened, or this test proves nothing.
+    assert_ne!(
+        pinned,
+        codex_sha256(&fake),
+        "the fake app-server did not replace its own binary: {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(EX_HOST_FATAL),
+        "a codex swapped before the TUI spawn must be session-fatal: {stderr}"
+    );
+    assert!(
+        stderr.contains("not the one this launch pinned"),
+        "the refusal must be the identity check: {stderr}"
+    );
+    assert!(
+        stderr.contains("immediately before the TUI spawn"),
+        "and it must be the SECOND check that caught it — the first one passed: {stderr}"
+    );
+    // The app-server that legitimately started is gone, and so is the run dir: a
+    // refusal on the second exec still ends the session cleanly.
+    assert!(
+        processes_matching(run.as_str()).is_empty(),
+        "the refused launch left processes behind: {:?}",
+        processes_matching(run.as_str())
+    );
+    assert!(
+        !run.path.exists(),
+        "the refused launch left its run dir behind: {}",
+        run.path.display()
+    );
+    println!("PASS a_codex_replaced_between_the_two_spawns_stops_the_tui");
 }
 
 /// A signal delivered *during* bring-up must tear down whatever started. The fake
@@ -824,6 +1087,12 @@ fn an_existing_run_dir_is_refused() {
             "/tmp/cc-host-harness-no-server.sock",
             "--codex",
             fake.to_str().expect("utf-8"),
+            // A7.1: a well-formed digest that will never be checked — the
+            // run-dir refusal must happen BEFORE anything is inspected or
+            // spawned, so a codex path that does not even exist is the
+            // sharper probe here too.
+            "--codex-sha256",
+            "4444444444444444444444444444444444444444444444444444444444444444",
             "--run-dir",
             run.as_str(),
             "--codex-home",

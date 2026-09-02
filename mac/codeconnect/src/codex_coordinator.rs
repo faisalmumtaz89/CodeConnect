@@ -846,6 +846,24 @@ pub struct RealCoordinatorDeps {
     /// single canonicalised path through is what keeps the recorded, checked and
     /// executed binaries the same file.
     pub codex: String,
+    /// The SHA-256 of that executable as the launcher inspected it (A7.1), carried
+    /// to the host as `--codex-sha256` and re-verified there before each exec.
+    ///
+    /// **Carried, never computed here.** A path is not a file, so a digest is only
+    /// worth anything if it comes from the process that did the inspecting: hashing
+    /// `codex` in this process would pin whatever is at that name now and would say
+    /// nothing about the bytes that passed the native-executable check and reported
+    /// `--version`. The coordinator is the courier for the same reason it is the
+    /// courier for `launch_cwd` — the authority upstream resolved it once, and a
+    /// second, later derivation is a second answer that can disagree.
+    ///
+    /// **Not verified here either**, and that is deliberate rather than an omission.
+    /// This process never execs codex; the only check that can bound an exec is the
+    /// one taken immediately before it, which the host does twice. A verify here
+    /// would be a third answer about a third moment, and its passing would tempt a
+    /// reader into believing the launch was bound when the binding that matters
+    /// still lives entirely in the host.
+    pub codex_sha256: String,
     /// The isolated `CODEX_HOME` for this session.
     pub codex_home: String,
     /// The four launch-policy dimensions the broker enforces, carried verbatim to
@@ -1145,6 +1163,10 @@ impl RealCoordinatorDeps {
             self.tmux_socket.clone(),
             "--codex".into(),
             self.codex.clone(),
+            // A7.1: the path's identity travels beside the path. The host refuses
+            // without it rather than falling back to trusting the name.
+            "--codex-sha256".into(),
+            self.codex_sha256.clone(),
             "--run-dir".into(),
             self.run_dir.to_string_lossy().into_owned(),
             "--codex-home".into(),
@@ -1642,6 +1664,7 @@ struct Charter {
     tmux_socket: String,
     deadline_ms: u64,
     codex: String,
+    codex_sha256: String,
     codex_home: String,
     approval_policy: String,
     approvals_reviewer: String,
@@ -1693,6 +1716,7 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
     let mut tmux_socket = None;
     let mut deadline_ms: Option<u64> = None;
     let mut codex = None;
+    let mut codex_sha256 = None;
     let mut codex_home = None;
     let mut approval_policy = None;
     let mut approvals_reviewer = None;
@@ -1720,6 +1744,13 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
                 set_once(&mut deadline_ms, flag, parsed)?;
             }
             "--codex" => set_once(&mut codex, flag, value_of(&mut it, flag)?)?,
+            // A7.1, checked against `crate::codex`'s grammar — the same one the
+            // launcher writes it with and the host reads it back with.
+            "--codex-sha256" => {
+                let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
+                    .with_context(|| flag.to_string())?;
+                set_once(&mut codex_sha256, flag, parsed)?;
+            }
             "--codex-home" => set_once(&mut codex_home, flag, value_of(&mut it, flag)?)?,
             "--approval-policy" => set_once(&mut approval_policy, flag, value_of(&mut it, flag)?)?,
             "--approvals-reviewer" => {
@@ -1760,6 +1791,15 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
     crate::codex::validate_codex_argv(&tui_args)
         .map_err(|refusal| anyhow::anyhow!("refused passthrough TUI argument: {refusal}"))?;
 
+    // A7.1's other charter rule, applied by the same function the host applies —
+    // `crate::codex` owns both the digest grammar and this one so the two parsers
+    // cannot drift. Checked HERE and not only at the host because this process is the
+    // one that mints a run directory and opens a tmux pane: a relative or bare
+    // `--codex` used to survive parsing, acquire all of that, and only then die in a
+    // pane the operator never sees. The refusal now lands before anything exists.
+    let codex = codex.context("--codex <path> is required (the coordinator resolves nothing)")?;
+    crate::codex::require_absolute_codex(std::path::Path::new(&codex))?;
+
     Ok(Charter {
         uid: uid.context("--uid <value> is required")?,
         launch_nonce: launch_nonce.unwrap_or_else(codex_launch::mint_nonce),
@@ -1768,7 +1808,11 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
         cwd: cwd.unwrap_or_else(|| "/".into()),
         tmux_socket: tmux_socket.unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
         deadline_ms: deadline_ms.unwrap_or(DEFAULT_DEADLINE_MS),
-        codex: codex.context("--codex <path> is required (the coordinator resolves nothing)")?,
+        codex,
+        codex_sha256: codex_sha256.context(
+            "--codex-sha256 <hex> is required (the coordinator inspects nothing, so the \
+             identity of the binary it hands the host has to come from whoever did)",
+        )?,
         codex_home: codex_home.context("--codex-home <path> is required")?,
         approval_policy: approval_policy
             .context("--approval-policy <value> is required (no default is applied)")?,
@@ -1825,6 +1869,7 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
         launch_nonce: charter.launch_nonce.clone(),
         coordinator,
         codex: charter.codex,
+        codex_sha256: charter.codex_sha256,
         codex_home: charter.codex_home,
         approval_policy: charter.approval_policy,
         approvals_reviewer: charter.approvals_reviewer,
@@ -2881,6 +2926,9 @@ mod tests {
             "45000",
             "--codex",
             "/opt/codex/bin/codex",
+            // A7.1: the identity of those bytes, as the launcher inspected them.
+            "--codex-sha256",
+            "1111111111111111111111111111111111111111111111111111111111111111",
             "--codex-home",
             "/tmp/cch.home",
             "--approval-policy",
@@ -2914,12 +2962,13 @@ mod tests {
 
     #[test]
     fn the_charter_requires_every_host_dimension_and_never_defaults_one() {
-        // The seven values the host itself refuses to default. The coordinator
+        // The eight values the host itself refuses to default. The coordinator
         // must refuse them too: it is the process a human is looking at, so a
         // missing dimension has to fail here rather than inside a pane.
         for flag in [
             "--uid",
             "--codex",
+            "--codex-sha256",
             "--codex-home",
             "--approval-policy",
             "--approvals-reviewer",
@@ -2937,6 +2986,10 @@ mod tests {
         // And a full charter parses, carrying the values through verbatim.
         let charter = parse_charter(&full_charter()).expect("a full charter parses");
         assert_eq!(charter.codex, "/opt/codex/bin/codex");
+        assert_eq!(
+            charter.codex_sha256,
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
         assert_eq!(charter.codex_home, "/tmp/cch.home");
         assert_eq!(charter.approval_policy, "untrusted");
         assert_eq!(charter.approvals_reviewer, "user");
@@ -2944,6 +2997,41 @@ mod tests {
         assert!(charter.hooks_enabled);
         assert_eq!(charter.deadline_ms, 45_000);
         assert!(!charter.hang_in_new_session && !charter.hang_in_bringup);
+    }
+
+    /// The coordinator applies the host's `--codex` rule, at the charter, before it
+    /// has built anything.
+    ///
+    /// It is the same function the host calls (`codex::require_absolute_codex`), for
+    /// the same reason the two share the digest grammar: a coordinator that accepted
+    /// a spelling the host refuses is not a lenient parser, it is a run directory, a
+    /// tmux session and a launched host created for an invocation that was always
+    /// going to die — and dying in a pane, where the operator is not looking.
+    #[test]
+    fn the_charter_refuses_a_codex_the_host_would_refuse_later() {
+        // A bare name is the case that matters: the identity check opens `./codex`
+        // and the spawn searches PATH, so the verify can pass about a file that is
+        // not the one that runs.
+        let err = parse_charter(&charter_with("--codex", Some("codex")))
+            .expect_err("a bare --codex name must be refused at the charter")
+            .to_string();
+        assert!(err.contains("absolute"), "names the requirement: {err}");
+        assert!(
+            err.contains("PATH"),
+            "and says why the two resolvers disagree: {err}"
+        );
+
+        // Relative spellings resolve alike for both, but make both depend on a cwd.
+        for relative in ["./codex", "../bin/codex", "bin/codex"] {
+            assert!(
+                parse_charter(&charter_with("--codex", Some(relative))).is_err(),
+                "--codex {relative:?} must be refused"
+            );
+        }
+
+        // And the two parsers agree on the accepting case as well, which is the half
+        // that would otherwise let them drift apart unnoticed.
+        assert!(parse_charter(&full_charter()).is_ok());
     }
 
     #[test]
@@ -3443,6 +3531,7 @@ mod tests {
             launch_nonce: "0123456789abcdef0123456789abcdef".into(),
             coordinator: current_identity().unwrap(),
             codex: "/opt/codex/bin/codex".into(),
+            codex_sha256: "1111111111111111111111111111111111111111111111111111111111111111".into(),
             codex_home: "/tmp/cch.home".into(),
             approval_policy: "untrusted".into(),
             approvals_reviewer: "user".into(),
@@ -3495,6 +3584,10 @@ mod tests {
                 "/tmp/t.sock",
                 "--codex",
                 "/opt/codex/bin/codex",
+                // A7.1: the identity travels beside the path, in the exact place
+                // the host's parser expects it.
+                "--codex-sha256",
+                "1111111111111111111111111111111111111111111111111111111111111111",
                 "--run-dir",
                 "/tmp/cch.01JQXV9K7B.0123456789abcdef",
                 "--codex-home",

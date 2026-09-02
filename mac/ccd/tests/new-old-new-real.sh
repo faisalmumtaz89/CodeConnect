@@ -12,9 +12,13 @@
 # gate A5 always pointed at:
 #
 #   * **Additive-column round-trip.** The seam columns the new binary writes
-#     (`sessions.agent`, `codex_thread_id`, `codex_socket`;
+#     (`sessions.agent`, `codex_thread_id`, `codex_socket`, `codex_generation`;
 #     `devices.features`, `features_epoch`) come back byte-for-byte through the
 #     real old daemon's own write, because it names none of them.
+#     `codex_generation` is the A5.1 durable high-water — the number a Codex
+#     registration is refused against — so its round-trip is not just data
+#     preservation: a blanked value would let a stale supervisor re-adopt a
+#     session at any generation on the way back up.
 #
 #   * **A REAL schema downgrade, and agent-scoped isolation under it.** The new
 #     binary is now `SCHEMA_VERSION` 4 (agent-scoped session storage); v0.6.0 is
@@ -227,7 +231,15 @@ assert_uv() {
 
 # The authoritative list of columns the agent-seam migration adds
 # (store.rs COLUMN_ADDITIONS / create_schema): every one must round-trip.
-SEAM_COLS_SESSIONS="agent codex_thread_id codex_socket"
+#
+# `codex_generation` is the A5.1 durable high-water and joins this list for a
+# reason the other three do not have. The other three are identity a rollback
+# merely has to leave alone; this one is the number a Codex registration is
+# REFUSED against (`Daemon::register_supervisor`). If a trip through the old
+# binary blanked it, a stale supervisor could re-adopt the session at any
+# generation it liked on the way back up — so "the old daemon cannot reach it"
+# is a claim this harness has to make about it by name.
+SEAM_COLS_SESSIONS="agent codex_thread_id codex_socket codex_generation"
 SEAM_COLS_DEVICES="features features_epoch"
 assert_seam_columns_exist() {
   local when="$1" table col
@@ -245,7 +257,8 @@ assert_seam_columns_exist() {
 # touches these, so they must round-trip byte-for-byte through the whole
 # new -> old -> new sequence.
 session_seam() {
-  q "SELECT agent, COALESCE(codex_thread_id,''), COALESCE(codex_socket,'') \
+  q "SELECT agent, COALESCE(codex_thread_id,''), COALESCE(codex_socket,''), \
+            COALESCE(codex_generation,'') \
      FROM sessions WHERE session_uid='01K1B3XQ8ZC0DE5FGH7JKMNPQR';"
 }
 # The DEVICE seam columns, pipe-joined. They round-trip byte-for-byte through
@@ -268,7 +281,7 @@ device_seam() {
   q "SELECT COALESCE(features,''), COALESCE(features_epoch,'') \
      FROM devices WHERE device_id='dev-probe';"
 }
-SESSION_SEAM_EXPECT="claude|th_probe|/sock_probe"
+SESSION_SEAM_EXPECT="claude|th_probe|/sock_probe|99"
 DEVICE_SEAM_SEEDED='{"agents":["codex"]}|epoch_probe'
 
 echo "== 1) new ccd migrates the DB =="
@@ -287,8 +300,8 @@ echo "== 2) seed a live Claude session + a device, with PROBE values in every se
 # binary knows none of these columns, so its positional writes must not touch
 # them. (A real build never puts Codex identity on a Claude row — this is a
 # storage-layer round-trip probe, not a registration.)
-q "INSERT INTO sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket)
-   VALUES('01K1B3XQ8ZC0DE5FGH7JKMNPQR','cc-9','cc-9','codeconnect','/tmp',NULL,NULL,'live','t','t','claude','th_probe','/sock_probe');
+q "INSERT INTO sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+   VALUES('01K1B3XQ8ZC0DE5FGH7JKMNPQR','cc-9','cc-9','codeconnect','/tmp',NULL,NULL,'live','t','t','claude','th_probe','/sock_probe',99);
    INSERT INTO devices(device_id,name,token_hash,created_at,features,features_epoch)
    VALUES('dev-probe','iPhone','th-1','t','{\"agents\":[\"codex\"]}','epoch_probe');"
 [ "$(session_seam)" = "$SESSION_SEAM_EXPECT" ] || { echo "FAIL: session seed did not land: $(session_seam)"; exit 1; }
@@ -297,8 +310,12 @@ q "INSERT INTO sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,clau
 echo "== 2b) seed a LIVE Codex run in codex_sessions, with events =="
 # Where a real Codex registration will put it. The old binary has no statement
 # that names this table, so nothing it does can reach the row.
-q "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket)
-   VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex',NULL,NULL,'live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock');
+# `codex_generation` is seeded with a real value, not left NULL: `codex_state`
+# below is `SELECT *`, so a NULL would round-trip through the old binary
+# whether or not the column survived, and the hash would prove nothing about
+# the one seam column that decides which registrations get refused.
+q "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+   VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex',NULL,NULL,'live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
    INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
    VALUES('$CX','cx-1',1,'t','tool_call','{}','hook','x1'),('$CX','cx-1',2,'t','tool_call','{}','hook','x2');"
 # The complete durable Codex state, hashed. Anything the old daemon or the old

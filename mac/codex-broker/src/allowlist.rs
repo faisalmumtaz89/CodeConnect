@@ -117,7 +117,10 @@ pub enum Disposition {
     /// The executor implements the **pre-D2 subset**: a `turn/start` may only name the
     /// session's ONE **verified** thread — one whose creation this broker admitted AND
     /// whose creation response it correlated and verified ([`crate::session`]) — and must
-    /// carry exactly the `cwd`/`runtimeWorkspaceRoots` bound at that creation. This is also
+    /// carry exactly the `cwd`/`runtimeWorkspaceRoots` bound at that creation — both of which
+    /// were themselves anchored to the coordinator-owned launch cwd before being bound
+    /// (`cwd` equals it; `runtimeWorkspaceRoots` equals `[launch cwd]` — A10 follow-on,
+    /// 2e-7c). This is also
     /// the ONLY thing that discharges the measured `sandboxPolicy: null` deferral (see
     /// [`crate::fingerprint`]). D2 — the latch, acknowledged quiesce, acceptance fence and
     /// upstream seal — replaces the subset wholesale when it lands; it fills in the

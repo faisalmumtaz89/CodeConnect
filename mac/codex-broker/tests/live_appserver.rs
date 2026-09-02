@@ -207,6 +207,18 @@ impl LiveAppServer {
     /// 0600 socket to appear. Fails clearly — printing the child's captured stderr — if the
     /// process exits before binding.
     fn spawn(codex: &Path) -> LiveAppServer {
+        LiveAppServer::spawn_in(codex, None)
+    }
+
+    /// As [`LiveAppServer::spawn`], but optionally in a chosen working directory.
+    ///
+    /// The app-server's own cwd is what it reports as `thread/start`'s `result.cwd`
+    /// (MEASURED), so a test that needs a real creation to satisfy the broker's launch-cwd
+    /// anchor has to put the app-server in the directory it claims to have launched in.
+    /// That is exactly the production arrangement: the coordinator's
+    /// `tmux new-session -c <launch cwd>` pane holds the host, and the app-server and TUI
+    /// both inherit it.
+    fn spawn_in(codex: &Path, cwd: Option<&Path>) -> LiveAppServer {
         let sock_dir = ShortTmpDir::new("sock").expect("mk sock dir");
         let codex_home = ShortTmpDir::new("home").expect("mk codex home");
         let sock_path = sock_dir.join("as.sock");
@@ -218,16 +230,18 @@ impl LiveAppServer {
         let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr log");
 
         let listen = format!("unix://{}", sock_path.display());
-        let child = Command::new(codex)
-            .arg("app-server")
+        let mut cmd = Command::new(codex);
+        cmd.arg("app-server")
             .arg("--listen")
             .arg(&listen)
             .env("CODEX_HOME", &codex_home.path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr_file))
-            .spawn()
-            .expect("spawn codex app-server");
+            .stderr(Stdio::from(stderr_file));
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        let child = cmd.spawn().expect("spawn codex app-server");
 
         let mut server = LiveAppServer {
             child,
@@ -316,13 +330,27 @@ impl Drop for LiveAppServer {
 // Broker harness over the LIVE upstream
 // ---------------------------------------------------------------------------
 
+/// The launch fingerprint for the tests that never create a thread.
+///
+/// Its `launch_cwd` is the sanitized placeholder `/work/proj`, and that is honest here for a
+/// precise reason: `launch_cwd` is consulted ONLY on `thread/start` — by the creation-request
+/// guards and the creation-response verifier — and none of the `initialize` /
+/// allowlisted-read / code-exec-bypass tests sends one. A test that DOES create a thread must
+/// use [`fingerprint_in`] with a real directory; see
+/// `a_real_thread_start_is_admitted_with_the_workspace_anchor_in_place`.
 fn fingerprint() -> LaunchFingerprint {
+    fingerprint_in("/work/proj")
+}
+
+/// The same fingerprint anchored to a REAL directory — required for a real creation, because
+/// the broker checks both `result.cwd` and `result.runtimeWorkspaceRoots` against this value.
+fn fingerprint_in(launch_cwd: &str) -> LaunchFingerprint {
     LaunchFingerprint {
         approval_policy: "untrusted".into(),
         approvals_reviewer: "user".into(),
         sandbox: "read-only".into(),
         hooks_enabled: true,
-        launch_cwd: "/work/proj".into(),
+        launch_cwd: launch_cwd.into(),
     }
 }
 
@@ -338,6 +366,10 @@ struct LiveBroker {
 
 impl LiveBroker {
     fn start(upstream_sock: &Path) -> LiveBroker {
+        LiveBroker::start_with(upstream_sock, fingerprint())
+    }
+
+    fn start_with(upstream_sock: &Path, fingerprint: LaunchFingerprint) -> LiveBroker {
         let sock_dir = ShortTmpDir::new("broker").expect("mk broker sock dir");
         let tui_sock = sock_dir.join("t.sock");
         let ccd_sock = sock_dir.join("c.sock");
@@ -345,7 +377,7 @@ impl LiveBroker {
         assert_sun_len(&ccd_sock);
 
         let factory = WsUdsUpstreamFactory::new(upstream_sock.to_path_buf());
-        let broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint(), factory);
+        let broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint, factory);
         let task = tokio::spawn(async move {
             let _ = broker.serve().await;
         });
@@ -465,6 +497,19 @@ async fn recv_response(
 fn initialize_frame(id: i64) -> Message {
     Message::Text(format!(
         r#"{{"id":{id},"method":"initialize","params":{{"clientInfo":{{"name":"cc","title":"cc","version":"0.0.0"}}}}}}"#
+    ))
+}
+
+/// The same `initialize`, additionally declaring the `experimentalApi` capability.
+///
+/// MEASURED on this gate: without it the app-server refuses `thread/start`'s
+/// `runtimeWorkspaceRoots` outright with its own `-32600
+/// "thread/start.runtimeWorkspaceRoots requires experimentalApi capability"`. The field is
+/// capability-gated, so any client that populates it — the real TUI included — must declare
+/// this at `initialize` first.
+fn initialize_frame_experimental(id: i64) -> Message {
+    Message::Text(format!(
+        r#"{{"id":{id},"method":"initialize","params":{{"clientInfo":{{"name":"cc","title":"cc","version":"0.0.0"}},"capabilities":{{"experimentalApi":true}}}}}}"#
     ))
 }
 
@@ -652,4 +697,445 @@ async fn code_exec_bypass_returns_policy_refusal_and_leg_remains_usable() {
     let init = recv_response(&mut ws, 3, Duration::from_secs(10)).await;
     assert_initialize_result(&init, 3, server.codex_home());
     println!("PASS code_exec_bypass_returns_policy_refusal_and_leg_remains_usable");
+}
+
+/// Test 4 — the A10 follow-on workspace anchor, proven on the REAL wire.
+///
+/// A `thread/start` naming the session's one launch workspace through BOTH channels
+/// (`cwd` and `runtimeWorkspaceRoots`) must still be ADMITTED and reach the live app-server,
+/// and the response it comes back with must still install a binding. This is the "the anchor
+/// does not refuse real traffic" half of the gate — the half a unit test with synthetic
+/// constants cannot honestly claim, because it chooses both sides of the comparison.
+///
+/// The harness is made production-honest rather than the rule weakened: the app-server is
+/// spawned IN a real directory and the fingerprint's `launch_cwd` is that same directory,
+/// canonicalized — exactly what the coordinator does (`canonical_launch_cwd`, then
+/// `tmux new-session -c` for the pane that both the host and the TUI inherit). The sanitized
+/// `/work/proj` placeholder cannot be used here, and that is the anchor doing its job.
+#[tokio::test]
+#[ignore = "live: needs a real codex app-server; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_real_thread_start_is_admitted_with_the_workspace_anchor_in_place() {
+    let Some(codex) = live_gate() else { return };
+
+    // The launch workspace: a real directory, canonicalized exactly once — the coordinator's
+    // discipline, reproduced. On macOS this resolves /tmp → /private/tmp, which is the very
+    // symlink that makes exact string equality fail without it.
+    let workspace = ShortTmpDir::new("ws").expect("mk workspace dir");
+    let launch_cwd = std::fs::canonicalize(&workspace.path).expect("canonicalize workspace");
+    let launch_cwd = launch_cwd
+        .to_str()
+        .expect("utf-8 workspace path")
+        .to_string();
+
+    let server = LiveAppServer::spawn_in(&codex, Some(Path::new(&launch_cwd)));
+    let broker = LiveBroker::start_with(server.sock_path(), fingerprint_in(&launch_cwd));
+
+    // MEASURED on this very gate: a plain `initialize` makes the app-server answer a
+    // `thread/start` carrying `runtimeWorkspaceRoots` with its OWN error, `-32600
+    // "thread/start.runtimeWorkspaceRoots requires experimentalApi capability"`. The field is
+    // capability-gated at `initialize`, so the real TUI must declare it — and so must this
+    // harness, or the creation never gets far enough to exercise the anchor.
+    let mut ws = connect(&broker.tui_sock).await;
+    send_frame(&mut ws, initialize_frame_experimental(0)).await;
+    let init = recv_response(&mut ws, 0, Duration::from_secs(10)).await;
+    assert_initialize_result(&init, 0, server.codex_home());
+
+    // The production-shaped creation: `runtimeWorkspaceRoots: [<the TUI's own cwd>]`, which
+    // in production IS the launch cwd (MEASURED against a real codex 0.147 TUI).
+    let start = serde_json::json!({
+        "id": 1,
+        "method": "thread/start",
+        "params": {
+            "approvalPolicy": "untrusted",
+            "approvalsReviewer": "user",
+            "sandbox": "read-only",
+            "cwd": serde_json::Value::Null,
+            "runtimeWorkspaceRoots": [&launch_cwd]
+        }
+    });
+    send_frame(&mut ws, Message::Text(start.to_string())).await;
+    let v = recv_response(&mut ws, 1, Duration::from_secs(20)).await;
+
+    // THE LOAD-BEARING ASSERTION: whatever came back is the APP-SERVER's own answer, not the
+    // broker's synthetic policy refusal. If the anchor were wrong about the production shape,
+    // this frame would carry E_POLICY_REFUSED and zero bytes would have left the broker.
+    assert_ne!(
+        v["error"]["code"].as_i64(),
+        Some(E_POLICY_REFUSED),
+        "the anchored creation must be ADMITTED, not policy-refused: {v}"
+    );
+
+    // ROUND-5 FINDING 10a — THIS BLOCK USED TO BE OPTIONAL, AND THAT MADE THE TEST HOLLOW.
+    //
+    // It was `if let Some(result) = … { assert }` with an `else { println!("NOTE …") }`, on
+    // the argument that an unauthenticated isolated `CODEX_HOME` might answer with the
+    // app-server's own error. So ANY upstream error passed, and the test could go green
+    // having created and bound nothing — masking exactly the regressions it exists to catch.
+    //
+    // MEASURED (live 0.147.0, isolated `CODEX_HOME`, no auth, `initialize` declaring
+    // `experimentalApi`): a `thread/start` in this shape returns a RESULT every time, and the
+    // hedge was never true. Creation is now asserted unconditionally.
+    let result = v
+        .get("result")
+        .filter(|r| r.is_object())
+        .unwrap_or_else(|| panic!("the live creation must return a result, not an error: {v}"));
+    let created = result["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a real creation carries result.thread.id: {v}"));
+    assert!(!created.is_empty(), "a non-empty thread id: {v}");
+    assert_eq!(
+        result["cwd"].as_str(),
+        Some(launch_cwd.as_str()),
+        "the live app-server reports the launch cwd it was started in: {v}"
+    );
+    assert_eq!(
+        result["runtimeWorkspaceRoots"],
+        serde_json::json!([&launch_cwd]),
+        "the live app-server echoes runtimeWorkspaceRoots back verbatim — the measured \
+         behaviour this anchor is built on: {v}"
+    );
+    println!("PASS live creation CREATED thread {created}, both halves of the anchor verified");
+
+    // …AND THAT THE BROKER ACTUALLY BOUND IT. Creating a thread upstream proves nothing about
+    // `crate::session`: the binding is installed only when the correlated creation RESPONSE on
+    // the SAME connection passes `verify_creation_result`. The observable is
+    // `check_resume_binding`, which admits a `thread/resume` for a session thread and refuses
+    // one for anything else — so the pair below distinguishes "bound" from "the broker forwards
+    // every resume", which a single positive could not.
+    send_frame(
+        &mut ws,
+        Message::Text(
+            serde_json::json!({"id": 2, "method": "thread/resume",
+                               "params": {"threadId": created}})
+            .to_string(),
+        ),
+    )
+    .await;
+    let bound = recv_response(&mut ws, 2, Duration::from_secs(10)).await;
+    assert_ne!(
+        bound["error"]["code"].as_i64(),
+        Some(E_POLICY_REFUSED),
+        "a resume of the thread the broker just bound must be ADMITTED, not policy-refused \
+         — if this is -32001 the creation response never installed a binding: {bound}"
+    );
+    send_frame(
+        &mut ws,
+        Message::Text(
+            r#"{"id":3,"method":"thread/resume","params":{"threadId":"01a0399e-0000-0000-0000-000000000000"}}"#.into(),
+        ),
+    )
+    .await;
+    let stranger = recv_response(&mut ws, 3, Duration::from_secs(10)).await;
+    assert_eq!(
+        stranger["error"]["code"].as_i64(),
+        Some(E_POLICY_REFUSED),
+        "a resume of a thread this session never bound must be refused — otherwise the \
+         positive above proves only that resumes forward: {stranger}"
+    );
+    println!("PASS live creation BOUND: {created} resumes, a stranger id does not");
+
+    // And the NEGATIVE, on the same live wire: a creation naming any OTHER root is refused by
+    // the broker itself. A fresh leg, because the slot machinery is per-session.
+    let mut ws2 = connect(&broker.tui_sock).await;
+    send_frame(&mut ws2, initialize_frame_experimental(10)).await;
+    let _ = recv_response(&mut ws2, 10, Duration::from_secs(10)).await;
+    let mut wide = start.clone();
+    wide["id"] = serde_json::json!(11);
+    wide["params"]["runtimeWorkspaceRoots"] = serde_json::json!([&launch_cwd, "/"]);
+    send_frame(&mut ws2, Message::Text(wide.to_string())).await;
+    let refused = recv_response(&mut ws2, 11, Duration::from_secs(10)).await;
+    assert_eq!(
+        refused["error"]["code"].as_i64(),
+        Some(E_POLICY_REFUSED),
+        "a creation widening the workspace is refused by the broker on the live wire: {refused}"
+    );
+    println!("PASS a_real_thread_start_is_admitted_with_the_workspace_anchor_in_place");
+}
+
+/// Connect DIRECTLY to the live app-server's own socket, bypassing the broker entirely, and
+/// complete its handshake.
+///
+/// This is the negative control the rest of this file cannot express: a client-side test sees
+/// only what the broker returns, so "the broker refused it" and "the upstream would have
+/// refused it anyway" are indistinguishable from the client leg. Speaking to the app-server on
+/// the same socket the broker's own [`WsUdsUpstreamFactory`] uses settles that question with a
+/// measurement instead of an argument — a pin over a field the upstream rejects on its own is
+/// a pin nobody needs, and a pin over a field the upstream ACCEPTS is a hole that was open.
+async fn connect_direct(server: &LiveAppServer, id: i64) -> WebSocketStream<UnixStream> {
+    let stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        UnixStream::connect(server.sock_path()),
+    )
+    .await
+    .expect("direct connect to the app-server socket timed out")
+    .expect("direct connect to the app-server socket failed");
+    let (mut ws, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::client_async("ws://localhost/", stream),
+    )
+    .await
+    .expect("direct app-server handshake timed out")
+    .expect("direct app-server handshake failed");
+    send_frame(&mut ws, initialize_frame_experimental(id)).await;
+    let init = recv_response(&mut ws, id, Duration::from_secs(10)).await;
+    assert!(
+        init["result"].is_object(),
+        "the direct app-server handshake succeeded: {init}"
+    );
+    ws
+}
+
+/// Test 5 — the `thread/start` capability boundary (round-5 finding 5), proven on the REAL
+/// wire in BOTH directions.
+///
+/// Every frame here satisfies the 2e-7c workspace anchor and the full launch fingerprint; the
+/// only thing wrong with it is a populated capability channel. The test asserts two things
+/// that only a live run can pair:
+///
+/// 1. the broker REFUSES it (`-32001`, its own synthetic code, which the app-server cannot
+///    emit), and
+/// 2. the app-server, asked the same question DIRECTLY, **ACCEPTS it and creates a real
+///    thread** — i.e. the pin closes a hole that was genuinely open, not one the upstream was
+///    already covering.
+///
+/// `environments` is deliberately excluded from half 2 and asserted separately below: the
+/// installed build rejects an UNREGISTERED environment id on its own, which is a real bound
+/// but one that lives in the upstream's lookup table rather than in this broker.
+#[tokio::test]
+#[ignore = "live: needs a real codex app-server; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn populated_capability_channels_are_refused_but_the_app_server_would_accept_them() {
+    let Some(codex) = live_gate() else { return };
+    let workspace = ShortTmpDir::new("ws").expect("mk workspace dir");
+    let launch_cwd = std::fs::canonicalize(&workspace.path).expect("canonicalize workspace");
+    let launch_cwd = launch_cwd.to_str().expect("utf-8 path").to_string();
+    let server = LiveAppServer::spawn_in(&codex, Some(Path::new(&launch_cwd)));
+    let broker = LiveBroker::start_with(server.sock_path(), fingerprint_in(&launch_cwd));
+
+    let creation = |id: i64, key: &str, value: serde_json::Value| {
+        let mut f = serde_json::json!({
+            "id": id,
+            "method": "thread/start",
+            "params": {
+                "approvalPolicy": "untrusted",
+                "approvalsReviewer": "user",
+                "sandbox": "read-only",
+                "cwd": serde_json::Value::Null,
+                "runtimeWorkspaceRoots": [&launch_cwd]
+            }
+        });
+        f["params"][key] = value;
+        f
+    };
+    let cap_root = serde_json::json!([{"id": "probe-root",
+        "location": {"type": "environment", "environmentId": "probe-env", "path": "/"}}]);
+    let dyn_tools = serde_json::json!([{"type": "function", "name": "probe_tool",
+        "description": "probe", "inputSchema": {"type": "object"}}]);
+    let envs = serde_json::json!([{"environmentId": "probe-env", "cwd": "/",
+        "runtimeWorkspaceRoots": ["/"]}]);
+
+    // HALF 1 — the broker refuses all three, on the live wire, with its own code.
+    let mut ws = connect(&broker.tui_sock).await;
+    send_frame(&mut ws, initialize_frame_experimental(0)).await;
+    let _ = recv_response(&mut ws, 0, Duration::from_secs(10)).await;
+    for (id, key, value) in [
+        (1, "selectedCapabilityRoots", cap_root.clone()),
+        (2, "dynamicTools", dyn_tools.clone()),
+        (3, "environments", envs.clone()),
+    ] {
+        send_frame(&mut ws, Message::Text(creation(id, key, value).to_string())).await;
+        let v = recv_response(&mut ws, id, Duration::from_secs(20)).await;
+        assert_eq!(
+            v["error"]["code"].as_i64(),
+            Some(E_POLICY_REFUSED),
+            "a populated {key} must be refused by the BROKER on the live wire: {v}"
+        );
+    }
+    println!("PASS all three capability channels refused by the broker on the live wire");
+
+    // HALF 2 — the app-server, asked directly, creates a real thread for two of them. This is
+    // the vulnerability the pin closes, measured rather than argued.
+    let mut direct = connect_direct(&server, 100).await;
+    for (id, key, value) in [
+        (101, "selectedCapabilityRoots", cap_root),
+        (102, "dynamicTools", dyn_tools),
+    ] {
+        send_frame(
+            &mut direct,
+            Message::Text(creation(id, key, value).to_string()),
+        )
+        .await;
+        let v = recv_response(&mut direct, id, Duration::from_secs(20)).await;
+        let created = v["result"]["thread"]["id"].as_str().unwrap_or_else(|| {
+            panic!(
+                "the live app-server ACCEPTS a populated {key} — if this ever stops being \
+                 true the pin's justification must be re-grounded, not the pin removed: {v}"
+            )
+        });
+        println!("PASS unpinned {key} would have created live thread {created}");
+    }
+
+    // `environments` is the one the installed build defends on its own, and the defence is
+    // named rather than relied on: the app-server rejects an unregistered environment id, and
+    // the only method that registers one — `environment/add` — is `Refuse(NotAllowlisted)` on
+    // both legs. A defence in the upstream's lookup table is not one this broker can assert.
+    send_frame(
+        &mut direct,
+        Message::Text(creation(103, "environments", envs).to_string()),
+    )
+    .await;
+    let v = recv_response(&mut direct, 103, Duration::from_secs(20)).await;
+    println!("NOTE direct environments answer (upstream-side bound, not the broker's): {v}");
+    println!("PASS populated_capability_channels_are_refused_but_the_app_server_would_accept_them");
+}
+
+/// Test 6 — the `thread/resume` captured boundary (round-5 finding 6), on the REAL wire.
+///
+/// Every resume below names the session's OWN bound thread, so the binding check that used to
+/// be a resume's only gate passes on all of them. Three halves:
+///
+/// 1. the broker refuses each bypass with its own `-32001`;
+/// 2. the ccd's own legitimate resume — literally `{"threadId": <id>}`, which is what
+///    `mac/ccd/src/codex_link.rs` constructs — is still ADMITTED and reaches the app-server;
+/// 3. asked DIRECTLY, the app-server honours `history` and `runtimeWorkspaceRoots`: the same
+///    resume that errors without `history` instead returns a **brand-new thread id** whose
+///    preview is the injected text, and adding `runtimeWorkspaceRoots: ["/"]` binds the whole
+///    filesystem as that thread's runtime workspace root.
+#[tokio::test]
+#[ignore = "live: needs a real codex app-server; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn resume_bypasses_are_refused_but_the_app_server_would_honour_them() {
+    let Some(codex) = live_gate() else { return };
+    let workspace = ShortTmpDir::new("ws").expect("mk workspace dir");
+    let launch_cwd = std::fs::canonicalize(&workspace.path).expect("canonicalize workspace");
+    let launch_cwd = launch_cwd.to_str().expect("utf-8 path").to_string();
+    let server = LiveAppServer::spawn_in(&codex, Some(Path::new(&launch_cwd)));
+    let broker = LiveBroker::start_with(server.sock_path(), fingerprint_in(&launch_cwd));
+
+    let mut ws = connect(&broker.tui_sock).await;
+    send_frame(&mut ws, initialize_frame_experimental(0)).await;
+    let _ = recv_response(&mut ws, 0, Duration::from_secs(10)).await;
+    send_frame(
+        &mut ws,
+        Message::Text(
+            serde_json::json!({
+                "id": 1, "method": "thread/start",
+                "params": {
+                    "approvalPolicy": "untrusted", "approvalsReviewer": "user",
+                    "sandbox": "read-only", "cwd": serde_json::Value::Null,
+                    "runtimeWorkspaceRoots": [&launch_cwd]
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    let created = recv_response(&mut ws, 1, Duration::from_secs(20)).await;
+    let bound = created["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live creation must bind a thread: {created}"))
+        .to_string();
+
+    let injected = serde_json::json!([{"type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "INJECTED HISTORY"}]}]);
+    let resume = |id: i64, key: &str, value: serde_json::Value, thread: &str| {
+        let mut f = serde_json::json!({
+            "id": id, "method": "thread/resume", "params": {"threadId": thread}
+        });
+        f["params"][key] = value;
+        f
+    };
+
+    // HALF 1 — every bypass refused by the broker, naming the session's own bound thread.
+    for (id, key, value) in [
+        (2, "runtimeWorkspaceRoots", serde_json::json!(["/"])),
+        (3, "cwd", serde_json::json!("/")),
+        (4, "history", injected.clone()),
+        (5, "path", serde_json::json!("/tmp/rollout-other.jsonl")),
+        (
+            6,
+            "selectedCapabilityRoots",
+            serde_json::json!([{"id": "r",
+                "location": {"type": "environment", "environmentId": "e", "path": "/"}}]),
+        ),
+    ] {
+        send_frame(
+            &mut ws,
+            Message::Text(resume(id, key, value, &bound).to_string()),
+        )
+        .await;
+        let v = recv_response(&mut ws, id, Duration::from_secs(10)).await;
+        assert_eq!(
+            v["error"]["code"].as_i64(),
+            Some(E_POLICY_REFUSED),
+            "a resume carrying {key} must be refused by the BROKER, even naming the bound \
+             thread: {v}"
+        );
+    }
+    println!("PASS every resume bypass refused by the broker on the live wire");
+
+    // HALF 2 — THE NON-NEGOTIABLE ONE. The ccd's own resume still reaches the app-server.
+    send_frame(
+        &mut ws,
+        Message::Text(
+            serde_json::json!({"id": 7, "method": "thread/resume",
+                               "params": {"threadId": &bound}})
+            .to_string(),
+        ),
+    )
+    .await;
+    let ccd_shape = recv_response(&mut ws, 7, Duration::from_secs(10)).await;
+    assert_ne!(
+        ccd_shape["error"]["code"].as_i64(),
+        Some(E_POLICY_REFUSED),
+        "the ccd's own legitimate resume must still be ADMITTED — a guard that breaks the \
+         real resume is a worse bug than the one it fixes: {ccd_shape}"
+    );
+    println!("PASS the ccd's own resume shape is still admitted: {ccd_shape}");
+
+    // HALF 3 — what the unpinned path would have allowed, straight from the app-server. The
+    // resumed thread is NOT running on this direct connection, which is the state the schema
+    // note is about ("If specified for a non-running thread, the thread_id param will be
+    // ignored") — and it is the state a reconnecting client is always in.
+    let mut direct = connect_direct(&server, 200).await;
+    let absent = "01a0399e-0000-0000-0000-0000000000ab";
+    send_frame(
+        &mut direct,
+        Message::Text(
+            serde_json::json!({"id": 201, "method": "thread/resume",
+                               "params": {"threadId": absent}})
+            .to_string(),
+        ),
+    )
+    .await;
+    let control = recv_response(&mut direct, 201, Duration::from_secs(20)).await;
+    assert!(
+        control["error"].is_object(),
+        "CONTROL: a resume of a non-running thread with no rollout must ERROR without \
+         history, or half 3 proves nothing: {control}"
+    );
+
+    let mut steer = resume(202, "history", injected, absent);
+    steer["params"]["runtimeWorkspaceRoots"] = serde_json::json!(["/"]);
+    send_frame(&mut direct, Message::Text(steer.to_string())).await;
+    let v = recv_response(&mut direct, 202, Duration::from_secs(20)).await;
+    let minted = v["result"]["thread"]["id"].as_str().unwrap_or_else(|| {
+        panic!(
+            "the live app-server honours a substituted history on a non-running thread — if \
+             this stops being true the pin's justification must be re-grounded, not the pin \
+             removed: {v}"
+        )
+    });
+    assert_ne!(
+        minted, absent,
+        "the whole point: the answer names a thread the client never asked for and the \
+         broker never bound: {v}"
+    );
+    assert_eq!(
+        v["result"]["runtimeWorkspaceRoots"],
+        serde_json::json!(["/"]),
+        "…and its runtime workspace root is the WHOLE FILESYSTEM: {v}"
+    );
+    println!(
+        "PASS unpinned resume would have minted thread {minted} (asked for {absent}) rooted at /"
+    );
+    println!("PASS resume_bypasses_are_refused_but_the_app_server_would_honour_them");
 }

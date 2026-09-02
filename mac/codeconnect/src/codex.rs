@@ -6,7 +6,10 @@
 //! → `PATH`, with the same self-resolution guard so an
 //! `alias codex=codeconnect codex` cannot spawn-loop), requires the resolved file
 //! to be the **native standalone executable** and not a `#!`-script / `.js`
-//! wrapper (which could swap the real CLI out from under a pinned path), pins the
+//! wrapper (which could swap the real CLI out from under a pinned path), pins it
+//! by **byte identity** rather than by pathname so the bytes inspected here are
+//! provably the bytes every later `execve` runs (A7.1 — see [`ResolvedCodex`] and
+//! [`verify_codex_identity`]), pins the
 //! resolved binary to a compiled-in tested-version set, and parses the user's
 //! argv against the reserved grammar that keeps CodeConnect the sole owner of the
 //! launch's transport, working directory, profile, approval policy and — per
@@ -45,20 +48,79 @@ use protocol::config::{self, Config, CODEX_PINNED_VERSIONS};
 /// `CODECONNECT_CLAUDE_BIN`.
 const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 
-/// A resolved `codex` executable.
+/// A resolved `codex` executable: a pathname **and the identity of the bytes
+/// behind it**.
 ///
 /// [`path`](Self::path) is the fully-canonicalised versioned executable: the
 /// invocation candidate with every symlink resolved. On a standalone install the
 /// invocation hops through a moving `standalone/current` symlink to a
 /// version-stamped release directory (A1). Resolution canonicalises **once** and
-/// fails closed if it cannot, and this single path is what gets version-checked
-/// and — in later chunks — recorded as launch evidence and exec'd by the wrapper,
-/// app-server and TUI alike, so a `standalone/current` flip cannot make the
-/// recorded, checked and executed binaries disagree (CODEX-PLAN.md launch
-/// coordination; "all spawned Codex processes use the same resolved executable").
+/// fails closed if it cannot, and this single path is what gets version-checked,
+/// recorded as launch evidence and exec'd by the app-server and TUI alike, so a
+/// `standalone/current` flip cannot make the recorded, checked and executed
+/// binaries disagree (CODEX-PLAN.md launch coordination; "all spawned Codex
+/// processes use the same resolved executable").
+///
+/// # Why the digest exists (A7.1)
+///
+/// **A canonical path is a name, not an executable.** Canonicalising pins which
+/// name is used; it says nothing about which bytes that name reaches at any later
+/// instant. Between resolution and the last `execve` this launch performs, the
+/// pathname is opened by the kernel three separate times — `codex --version`, the
+/// app-server spawn, the TUI spawn — in two different processes, and every one of
+/// those opens is free to see a different file. An install, an `npm` replacement or
+/// a `standalone/current` flip landing in that window would let the bytes that ran
+/// differ from the bytes that were magic-checked and version-pinned, which is
+/// exactly the pre-ungate hole A7 names.
+///
+/// [`sha256`](Self::sha256) closes it by carrying the *identity* forward instead of
+/// the name alone: it is the SHA-256 of the exact bytes read during resolution,
+/// **from the same single read whose first four bytes produced the Mach-O verdict**
+/// (see [`inspect_candidate`]). Every site that is about to run this binary
+/// re-derives the digest from the path and refuses on a mismatch
+/// ([`verify_codex_identity`]), so a replacement anywhere along
+/// inspect → version → coordinator → app-server → TUI is caught rather than
+/// executed.
+///
+/// # The hash alone was not enough, and that was measured, not argued
+///
+/// A digest is taken through an **open file**; an `execve` is performed on a
+/// **pathname**. A hash of this binary is about half a second of wall clock
+/// (measured on the real 219,997,536-byte codex 0.147: 0.478 / 0.459 / 0.460 s
+/// through the release-built hasher, ~8 s unoptimised), and an atomic `rename`
+/// landing anywhere inside it leaves the read completely undisturbed — the fd still
+/// refers to the old vnode, the digest still equals the pin, the check *passes*, and
+/// the spawn that follows opens the name afresh and runs the replacement. That was
+/// staged end to end against the real binary: three of three runs the digest matched
+/// exactly and the substituted executable ran. So the window was never "the moment
+/// before the spawn"; it was the entire read, at every one of the three sites.
+///
+/// Both the resolution read ([`inspect_candidate`]) and every verification read
+/// ([`protocol::hash::sha256_file`]) therefore hold the fd open across a comparison
+/// of `(st_dev, st_ino)` between the handle and the name — one rule,
+/// [`protocol::hash::refuse_unless_path_still_names`], written once and applied at
+/// both kinds of site.
+///
+/// # What it still does **not** claim
+///
+/// The residual is now the interval between that `stat` and the kernel's own open
+/// inside `execve` — microseconds rather than half a second — and on macOS it cannot
+/// be closed at all, because there is no way to exec the handle that was hashed.
+/// Measured on this platform: `fexecve` is not declared anywhere in the SDK (a call
+/// to it fails to compile and `grep -rl fexecve` over the SDK headers matches
+/// nothing); `posix_spawn` has no descriptor-based variant; and
+/// `execve("/dev/fd/N", …)` returns `EACCES` for a read handle *and* for an `O_EXEC`
+/// handle, while an `O_EXEC` descriptor cannot be `read` at all (`EBADF`) and so
+/// could never have been hashed. See
+/// [`protocol::hash::refuse_unless_path_still_names`] for the full measurement.
+///
+/// Nor can any verify-by-content scheme see a replacement that is *reverted* before
+/// the check runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCodex {
     pub path: PathBuf,
+    /// Lowercase-hex SHA-256 of the whole file, as read during resolution.
+    pub sha256: String,
 }
 
 /// The `codex` command entry point.
@@ -75,7 +137,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // missing or untested executable must surface before anything else. The
     // canonicalised path is what we version-check and would exec.
     let resolved = resolve_codex_bin(&config)?;
-    let version = read_codex_version(&resolved.path)?;
+    let version = read_codex_version(&resolved)?;
     ensure_pinned_version(&version)?;
 
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
@@ -92,9 +154,10 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // land. A later chunk removes this line.
     bail!(
         "codex support is not yet enabled in this build; \
-         resolved {} ({}), arguments accepted, but the launcher is still gated",
+         resolved {} ({}, sha256 {}), arguments accepted, but the launcher is still gated",
         resolved.path.display(),
-        version
+        version,
+        resolved.sha256
     );
 }
 
@@ -143,6 +206,12 @@ fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
 /// refuses. The returned path is the versioned executable behind any
 /// `standalone/current` hop, and it is the single path everything downstream
 /// uses.
+///
+/// **A7.1.** Canonicalisation pins a pathname; it does not pin a file. So each
+/// candidate is read exactly once ([`inspect_candidate`]) and that single read
+/// yields both the Mach-O verdict and the SHA-256 that every later exec site
+/// verifies against — see [`ResolvedCodex`] for why the name alone is not enough
+/// and what the pin does and does not claim.
 fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
     let candidates = codex_candidates(
         config,
@@ -155,9 +224,12 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         .ok()
         .and_then(|exe| exe.canonicalize().ok());
 
-    // If the only thing found is a wrapper, the error names it — the supported
-    // install is the standalone native binary, not a script/JS shim.
-    let mut wrapper_seen: Option<PathBuf> = None;
+    // If nothing usable is found, the error names the FIRST thing that was found
+    // and rejected, and says which of the two rejections it was — the supported
+    // install is the standalone native binary, not a script/JS shim, and "we could
+    // not read it" is a different fact from "it is a wrapper" and must not be
+    // reported as one.
+    let mut rejected: Option<(PathBuf, String)> = None;
 
     for candidate in candidates {
         if !candidate.is_file() {
@@ -166,20 +238,6 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         // Canonicalise once. `is_file` already followed the symlink to a real
         // file, so a failure here is a race or a permission fault — fail closed
         // rather than exec an executable we cannot pin an identity to.
-        //
-        // A7 PRE-UNGATE (tracked for the launch/exec chunk, not fixed here — the
-        // command is gated so this is not exploitable now): canonicalisation pins
-        // a **pathname**, not a **file identity**. The race is wider than
-        // check→launch: the version-check below already spawns this pathname, so
-        // the window spans magic-check → `codex --version` exec → the later
-        // app-server/TUI spawns, and a `standalone/current` flip or same-path
-        // replacement at any point could swap the executable. The native-Mach-O
-        // check is also not sufficient: it proves "a native executable", not
-        // "standalone Codex" — a compiled native dispatcher would pass it. Before
-        // ungating, bind to the file's identity (open a handle here and exec by
-        // that handle / verify identity at spawn) AND verify the standalone
-        // package layout, so every spawned Codex process is provably the one we
-        // version-pinned.
         let canonical = candidate.canonicalize().with_context(|| {
             format!(
                 "resolving the codex binary at {} to a versioned path",
@@ -199,18 +257,37 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         // unchanged, defeating both the version pin and the parser grammar. Skip
         // a wrapper so a native candidate later in the list still wins; only if
         // none is native do we refuse, naming the wrapper.
-        if !is_native_executable(&canonical) {
-            wrapper_seen.get_or_insert(canonical);
-            continue;
+        //
+        // The same read produces the digest, which is what makes the verdict and
+        // the pin describe one file rather than two consecutive opens of one name.
+        match inspect_candidate(&canonical) {
+            CandidateIdentity::Native { sha256 } => {
+                return Ok(ResolvedCodex {
+                    path: canonical,
+                    sha256,
+                })
+            }
+            CandidateIdentity::Wrapper => {
+                rejected.get_or_insert((
+                    canonical,
+                    "it is a wrapper, not a native executable".to_string(),
+                ));
+            }
+            // Unusable is skipped rather than fatal, exactly as a wrapper is: a
+            // candidate we could not pin an identity to, early in the list, must not
+            // stop a perfectly good one later in it. It can never be *used*, because
+            // A7.1 forbids running bytes no digest is attributable to.
+            CandidateIdentity::Unusable(why) => {
+                rejected.get_or_insert((canonical, why));
+            }
         }
-        return Ok(ResolvedCodex { path: canonical });
     }
-    match wrapper_seen {
-        Some(wrapper) => bail!(
-            "the codex at {} is a wrapper, not a native executable; \
+    match rejected {
+        Some((path, why)) => bail!(
+            "the codex at {} cannot be used: {why}; \
              CodeConnect supports the standalone native codex \
              (e.g. ~/.local/bin/codex → …/standalone/releases/…/bin/codex)",
-            wrapper.display()
+            path.display()
         ),
         None => {
             bail!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
@@ -218,18 +295,139 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
     }
 }
 
-/// Whether the file at `path` is a native Mach-O executable (thin or universal),
-/// as opposed to a `#!`-script or `.js` wrapper. Read as the first four bytes and
-/// matched against the Mach-O / universal-binary magic numbers.
-fn is_native_executable(path: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
+/// What one candidate turned out to be, decided from a **single** read of it.
+enum CandidateIdentity {
+    /// A native Mach-O executable, carrying the SHA-256 of the very bytes whose
+    /// leading four produced that verdict.
+    Native { sha256: String },
+    /// Read end to end, but not a native Mach-O — a `#!`-script or `.js` shim.
+    Wrapper,
+    /// **No digest could be attributed to this pathname**, with the reason. Two
+    /// different failures land here and they are one fact: the file could not be
+    /// opened or read end to end, or it *was* read end to end but the pathname
+    /// stopped naming it partway through (see [`inspect_candidate`]). In both cases
+    /// there is nothing this launch could honestly pin — a digest of bytes we cannot
+    /// reach by the name we would `execve` is not an identity — and A7.1 forbids
+    /// running what cannot be pinned. Not `Unreadable`: the second case reads
+    /// perfectly, which is exactly what makes it dangerous.
+    Unusable(String),
+}
+
+/// Read the file at `path` **once**, and derive from that one read both whether it
+/// is a native Mach-O executable (thin or universal) and the SHA-256 of its bytes.
+///
+/// The single read is the whole point, and it is why the magic number comes back
+/// out of the hashing pass rather than from a `read_exact` before it. Two opens of
+/// one pathname can see two files; even two reads of one *handle* can straddle an
+/// in-place rewrite. With one pass, "this is a native binary" and "this is its
+/// digest" are statements about the same bytes by construction — so the digest
+/// every exec site later verifies is provably the digest of the thing that passed
+/// the wrapper check.
+///
+/// The price is that a candidate which turns out to be a wrapper has still been
+/// read in full, because the verdict is only available once the pass that produced
+/// it has finished. That is the right trade: wrappers on this candidate list are
+/// shebang scripts of a few hundred bytes, and the alternative — peek, then hash —
+/// is the two-read hole this exists to close. The cost that matters is the native
+/// case, one whole-file read (measured: ~0.5 s for the 220 MB standalone codex in a
+/// release build, ~8 s unoptimised).
+///
+/// # One read is not enough on its own: the name has to still be the file
+///
+/// That whole-file read is exactly the window a rename fits in, and this site has
+/// the same hole every verification site had. The digest and the verdict come out of
+/// a handle the kernel pinned at `open`; the thing they get attributed to is a
+/// *pathname* that the rest of the launch carries around and eventually `execve`s.
+/// An installer landing an atomic replacement half a second into the read leaves the
+/// read undisturbed — and would mint a `ResolvedCodex` whose digest is a perfectly
+/// truthful statement about a file that this pathname no longer reaches, which every
+/// later verify would then dutifully confirm was "unchanged" only because the
+/// replacement had settled before any of them looked.
+///
+/// So the handle is still open when
+/// [`protocol::hash::refuse_unless_path_still_names`] compares it against the name —
+/// the same single rule the verification sites apply through
+/// [`protocol::hash::sha256_file`], written once and used at both kinds of site so
+/// resolution and verification cannot come to disagree about what identity means.
+fn inspect_candidate(path: &Path) -> CandidateIdentity {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => return CandidateIdentity::Unusable(format!("it could not be opened ({err})")),
     };
     let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
+    let (sha256, magic_len) = match protocol::hash::sha256_stream_head(&mut file, &mut magic) {
+        Ok(read) => read,
+        Err(err) => {
+            return CandidateIdentity::Unusable(format!("it could not be read in full ({err})"))
+        }
+    };
+    // Before anything is concluded from those bytes: is this pathname still the file
+    // they came from? `file` is deliberately still open — that is what makes the
+    // comparison an identity rather than a coincidence of inode numbers.
+    if let Err(err) = protocol::hash::refuse_unless_path_still_names(path, &file) {
+        return CandidateIdentity::Unusable(format!("{err}"));
     }
+    // A file shorter than the magic is not native, and the count is what says so.
+    // `sha256_stream_head` does not zero the tail of `head` — it leaves whatever was
+    // there — so judging the magic without checking `magic_len` first would be
+    // reading this stack buffer's own initialiser and calling it file content.
+    if magic_len < magic.len() || !is_native_magic(magic) {
+        return CandidateIdentity::Wrapper;
+    }
+    CandidateIdentity::Native { sha256 }
+}
+
+/// Whether four leading bytes are a Mach-O / universal-binary magic number.
+///
+/// Pure, over bytes rather than a path, so the magic table is testable on its own
+/// and cannot drift from the single read that produces those bytes.
+///
+/// # UNGATE BLOCKER: a compiled dispatcher is pinned, and what it dispatches to is not
+///
+/// A magic number says "a native executable"; it does not say "standalone Codex". A
+/// *compiled native dispatcher* — a small Mach-O binary that picks a real codex at
+/// runtime and spawns it — passes this check, and passes the version pin too if it
+/// forwards `--version`.
+///
+/// Stated exactly, because a residual that is not exact is not a residual, it is a
+/// hope. A launch execs the resolved `--codex` three times:
+///
+///   1. `codex --version`, in the launcher ([`read_codex_version`]);
+///   2. `codex app-server --listen unix://…`, in the host;
+///   3. the interactive TUI, `codex --remote …`, in the host.
+///
+/// **Pinned:** the bytes of the file at the resolved path. All three execs open that
+/// one canonical pathname, and each is bracketed by [`verify_codex_identity`] — with
+/// the vnode arm, so the digest is attributable to the name and not merely to a vnode
+/// (see [`ResolvedCodex`]). If `--codex` is a dispatcher, that is the *dispatcher*
+/// that is pinned, faithfully and completely: the same dispatcher bytes run all three
+/// times and a mid-launch swap of it is refused.
+///
+/// **Not pinned:** everything on the other side of it. Whatever binary the dispatcher
+/// selects and spawns for `--version`, for `app-server` and for the TUI — three more
+/// execs CodeConnect never sees — is not inspected, not magic-checked, not
+/// version-pinned and not hashed, and nothing requires the three to be the same
+/// binary as each other. So a dispatcher can answer `--version` from a pinned build
+/// and then run something else entirely under the app-server and the TUI, which are
+/// the two execs the whole command gate exists to contain: the app-server is what
+/// executes the model's tool calls and the TUI is what the operator types into.
+///
+/// The identity chain is therefore closed up to the file we exec and **open past any
+/// process that re-dispatches**. The plan (A7, same paragraph as the hash-pin) calls
+/// this out as needing "its own pre-ungate enforcement (e.g. verifying the standalone
+/// package layout)". This is not the hash-pin's residual and it is not narrowed by
+/// it; it is a separate hole, and the only reason it is not gaping today is that the
+/// dispatcher shape anyone actually ships — the npm `codex.js` shebang shim — is
+/// caught here as a [`CandidateIdentity::Wrapper`], while a *compiled* one is caught
+/// nowhere.
+///
+/// **This is an explicit ungate blocker awaiting an owner decision.** No layout
+/// verifier is invented here: "e.g." in the plan is an example rather than a
+/// specification, and picking one unilaterally would silently narrow which installs
+/// CodeConnect supports — a scoping decision, not an implementation detail. Codex
+/// must not be ungated until the owner rules on what a supported install is and how
+/// it is verified.
+fn is_native_magic(magic: [u8; 4]) -> bool {
     matches!(
         u32::from_be_bytes(magic),
         // Mach-O 32/64-bit, big- and little-endian (arm64 native is 0xCFFAEDFE).
@@ -237,6 +435,139 @@ fn is_native_executable(path: &Path) -> bool {
         // Universal ("fat") binaries, 32- and 64-bit.
         | 0xCAFE_BABE | 0xBEBA_FECA | 0xCAFE_BABF | 0xBFBA_FECA
     )
+}
+
+// ------------------------------------------------------- executable identity (A7.1)
+
+/// The wire width of a pinned digest: SHA-256 as lowercase hex.
+const CODEX_SHA256_HEX_LEN: usize = 64;
+
+/// Parse the `--codex-sha256` wire form: exactly 64 **lowercase** hex characters.
+///
+/// One grammar, in the module that owns the concept, used by everything that reads
+/// the digest off an argv — the coordinator's charter and the host's charter alike
+/// (the same reason both already share [`validate_codex_argv`]). A coordinator that
+/// accepted a spelling the host rejected would be a disagreement about an identity
+/// check discovered at the pane.
+///
+/// Uppercase is refused rather than folded. [`protocol::hash::sha256_hex`] emits
+/// one spelling, and a digest with two valid spellings is a digest whose equality
+/// test can answer "different" about identical bytes — the failure mode this whole
+/// mechanism exists to avoid, arriving through the front door.
+pub(crate) fn parse_codex_sha256(raw: &str) -> Result<String> {
+    let ok = raw.len() == CODEX_SHA256_HEX_LEN
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !ok {
+        bail!(
+            "a codex digest must be exactly {CODEX_SHA256_HEX_LEN} lowercase hex characters \
+             (a sha256), got {raw:?}"
+        );
+    }
+    Ok(raw.to_string())
+}
+
+/// Refuse a `--codex` that is not an **absolute** path.
+///
+/// **Two different resolvers read that one string.** A7.1's guard opens it
+/// ([`verify_codex_identity`] → `File::open`) and the spawns execute it
+/// (`Command::new`), and those two disagree on exactly one class of input: a value
+/// containing no `/`. `File::open("codex")` opens `./codex`; `Command::new("codex")`
+/// searches `PATH`. A charter naming a bare `codex` would hash one file and execute
+/// another, and the verify would pass — honestly, and about the wrong bytes. That is
+/// the whole gate defeated by a spelling, so the spelling is refused.
+///
+/// A merely *relative* path (`./codex`) does not diverge that way, but it makes both
+/// answers depend on the process's cwd, which is a second route to one string meaning
+/// two files. Requiring absolute closes both and costs nothing real: the launcher
+/// resolves to a canonical path, which is always absolute.
+///
+/// **It lives here, in the module that owns the identity policy, for the same reason
+/// [`parse_codex_sha256`] does.** Two processes parse a charter carrying `--codex` —
+/// the coordinator, which writes the host's charter and opens a pane, and the host,
+/// which reads it back — and the rule has to be the same rule in both. It was not:
+/// the host refused a relative path while the coordinator accepted one, so a bad
+/// spelling got a session directory, a tmux pane and a launched host before the
+/// fail-closed error arrived, and the error arrived where nobody is looking. Both
+/// parsers now call this. Both, not one: the coordinator's call moves the refusal to
+/// the process a human is watching, and the host keeps its own because a host must
+/// never assume its parent checked anything.
+pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        bail!(
+            "--codex must be an absolute path, got {}; a relative or bare name is \
+             resolved one way by the identity check (which opens it) and another by \
+             the spawn (which searches PATH), so the bytes verified need not be the \
+             bytes executed",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Re-read the file at `path` and refuse unless it still hashes to `expected`.
+///
+/// **This is the A7.1 guard.** It stands immediately before each point where these
+/// bytes are about to become a running process, so that what runs is what was
+/// inspected and version-pinned rather than merely whatever was reachable through
+/// the same name. Three sites — [`read_codex_version`]'s `--version` exec and the
+/// host's two spawns (`codex_host::run_session` and `codex_host::drive`) — all now
+/// the same flavour: **prevention with the freeze held across the exec.** A mismatch
+/// means nothing runs.
+///
+/// **It returns a held freeze, and that is the point.** The digest is taken through
+/// a handle whose bytes are pinned immutable *before* the read and kept immutable in
+/// the returned [`protocol::hash::FrozenExecutable`]; the caller keeps that guard
+/// across its `execve` and drops it once the child is past exec. Against the vector
+/// this gate exists for — an install or update landing mid-launch — that makes the
+/// bytes verified here and the bytes the kernel loads the same frozen vnode, closing
+/// both holes a bare `(dev, ino)` comparison cannot: a same-inode content overwrite
+/// behind the reader, and a rename over the name after the check. It is deliberately
+/// **not** claimed against a hostile same-uid process, which can revoke the flag and
+/// is out of scope by construction. See [`protocol::hash::FrozenExecutable`] for the
+/// measurements behind all of that, the fallback when the freeze cannot be set, and
+/// the demand-paging residual after it is cleared.
+///
+/// `when` names the moment, so a refusal tells an operator *where* in the launch the
+/// file moved rather than only that it did.
+///
+/// A failure to re-read is a refusal, not a pass: "I could not check" and "it is
+/// unchanged" are different answers, and only one of them licenses an `execve`.
+///
+/// **The caller owes one thing: a path that resolves the same way here as at the
+/// exec.** This opens `path` directly; `Command::new` PATH-searches a value with no
+/// `/` in it. Handing this a bare name would produce a truthful verification of a
+/// file that is not the one that runs, which is the whole gate lost to a spelling.
+/// The host enforces it (`codex_host::require_absolute_codex`) and resolution
+/// produces only canonical absolute paths.
+pub(crate) fn verify_codex_identity(
+    path: &Path,
+    expected: &str,
+    when: &str,
+) -> Result<protocol::hash::FrozenExecutable> {
+    let (actual, frozen) = protocol::hash::freeze_and_hash(path).with_context(|| {
+        format!(
+            "re-reading the codex binary at {} to verify its identity {when}",
+            path.display()
+        )
+    })?;
+    if actual != expected {
+        // `frozen` drops here, clearing the freeze: nothing was spawned, and the
+        // file this launch will not touch is left exactly as it was found.
+        bail!(
+            "the codex binary at {} is not the one this launch pinned: it hashed {expected} \
+             when it was resolved and inspected, and hashes {actual} {when}. Refusing to run \
+             it — the bytes that were checked are not the bytes that would execute. \
+             (A codex install or update running alongside a launch produces exactly this; \
+             let it finish, then launch again.)",
+            path.display()
+        );
+    }
+    // The freeze is HELD in the returned guard: the caller keeps it across its
+    // `execve` and drops it once the child is past exec, so the bytes hashed here are
+    // the bytes that run. See [`protocol::hash::FrozenExecutable`].
+    Ok(frozen)
 }
 
 /// The ordered candidate list, factored out so the precedence is unit-tested
@@ -270,12 +601,57 @@ fn codex_candidates(
 
 // -------------------------------------------------------------- version pinning
 
-/// Run `codex --version` and return the parsed version string.
-fn read_codex_version(bin: &Path) -> Result<String> {
+/// Run `codex --version` and return the parsed version string — with the exec
+/// **bracketed by the resolved binary's identity** (A7.1).
+///
+/// It takes the whole [`ResolvedCodex`], not a bare path, because the exec it
+/// performs is itself one of the opens A7 names: `Command::new(path)` makes the
+/// kernel open that pathname afresh, and whatever it finds there is what reports a
+/// version. Resolution already hashed the file; this freezes and re-verifies the
+/// digest *before* the exec and holds the freeze across it, so the version that gets
+/// pinned is a statement about the exact bytes this launch will carry rather than
+/// about whatever answered `--version`.
+///
+/// **This one is prevention now, like the host's spawns — the asymmetry is gone.**
+/// It used to be detection-only: the exec ran pre-gate with only the resolution hash
+/// behind it, so a replacement landing in front of it *ran* as `codex --version` and
+/// the launch was merely refused afterwards. The freeze removes that: the bytes are
+/// pinned immutable and verified before the exec, and an installer or update cannot
+/// change them while the child runs, so the version reported here is the pinned
+/// build's. A swap that landed before the freeze is caught by the freeze's own vnode
+/// check (the name no longer reaches the frozen handle) and refuses with nothing run.
+/// What the freeze does not exclude is a hostile same-uid peer — out of scope, and
+/// unreachable by any macOS mechanism; see [`protocol::hash::FrozenExecutable`].
+///
+/// That accounting also rests on resolution no longer being a half-second opening: a
+/// rename landing inside [`inspect_candidate`]'s read once minted a pin over a file
+/// the pathname had already stopped naming. The vnode arm on that read makes the pin
+/// a statement about this file rather than whichever the name reached first (see
+/// [`ResolvedCodex`]).
+///
+/// The freeze is cleared only after the child has exited, and the output is
+/// interpreted after that — a swapped binary cannot have run, so any failure to read
+/// a version is a real one and not a swap misreported as a parse error.
+///
+/// What remains uncatchable: a replacement *reverted* before the check, which no
+/// verify-by-content scheme can see, and the post-clear demand-paging residual — both
+/// stated on [`ResolvedCodex`] and [`protocol::hash::FrozenExecutable`].
+fn read_codex_version(resolved: &ResolvedCodex) -> Result<String> {
+    let bin = resolved.path.as_path();
+    // Freeze + verify BEFORE the exec, and hold the freeze across it. This exec used
+    // to be the one A7.1 site that could only *detect* a swap after the fact — it ran
+    // pre-gate, so a replacement landing in front of it ran as `codex --version`
+    // before anything checked. Now the bytes are pinned immutable and verified first,
+    // and stay frozen while the child runs, so the version pinned below is reported
+    // by the pinned bytes and no unverified binary is reachable here at all.
+    let frozen = verify_codex_identity(bin, &resolved.sha256, "before `codex --version`")?;
     let output = Command::new(bin)
         .arg("--version")
         .output()
         .with_context(|| format!("running {} --version", bin.display()))?;
+    // The child has exited (`output` waited for it); the frozen bytes are the bytes
+    // that ran, so the freeze can be cleared before the output is interpreted.
+    drop(frozen);
     if !output.status.success() {
         bail!("{} --version exited with {}", bin.display(), output.status);
     }
@@ -1295,7 +1671,7 @@ mod tests {
         );
         // The resolved standalone binary is a real native executable.
         assert!(
-            is_native_executable(&resolved.path),
+            is_native(&resolved.path),
             "the standalone binary must be native: {}",
             resolved.path.display()
         );
@@ -1309,13 +1685,13 @@ mod tests {
         let wrapper = root.join("codex.js");
         std::fs::write(&wrapper, b"#!/usr/bin/env node\nconsole.log('x');\n").unwrap();
         make_executable(&wrapper);
-        assert!(!is_native_executable(&wrapper));
+        assert!(!is_native(&wrapper));
 
         // A file carrying Mach-O 64-bit little-endian magic is treated as native.
         let native = root.join("codex-native");
         std::fs::write(&native, [0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0]).unwrap();
         make_executable(&native);
-        assert!(is_native_executable(&native));
+        assert!(is_native(&native));
 
         // Pointing `codex_bin` at the wrapper never yields the wrapper: either a
         // native candidate later in the list wins, or resolution refuses naming
@@ -1327,7 +1703,7 @@ mod tests {
         match resolve_codex_bin(&cfg_wrapper) {
             Ok(resolved) => {
                 assert_ne!(resolved.path, wrapper.canonicalize().unwrap());
-                assert!(is_native_executable(&resolved.path));
+                assert!(is_native(&resolved.path));
             }
             Err(e) => assert!(
                 e.to_string().contains("wrapper"),
@@ -1342,6 +1718,360 @@ mod tests {
         };
         let resolved = resolve_codex_bin(&cfg_native).expect("native binary must be accepted");
         assert_eq!(resolved.path, native.canonicalize().unwrap());
+
+        cleanup(&root);
+    }
+
+    // ------------------------------------------------ executable identity (A7.1)
+
+    #[test]
+    fn resolution_pins_the_bytes_it_inspected_not_just_the_name() {
+        let root = tempdir();
+        let bin = root.join("codex");
+        let bytes = [0xCFu8, 0xFA, 0xED, 0xFE, 1, 2, 3, 4];
+        std::fs::write(&bin, bytes).unwrap();
+        make_executable(&bin);
+
+        let config = Config {
+            codex_bin: Some(bin.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
+        // The digest is of the file, computed independently of the code under test.
+        assert_eq!(resolved.sha256, protocol::hash::sha256_hex(&bytes));
+        // And it is the wire form the two charters will accept.
+        assert_eq!(
+            parse_codex_sha256(&resolved.sha256).unwrap(),
+            resolved.sha256
+        );
+
+        cleanup(&root);
+    }
+
+    /// **The gate's own scenario, staged.** Resolve the binary, then replace the
+    /// bytes at that exact resolved path — the `standalone/current` flip, the npm
+    /// overwrite, the install landing mid-launch — and prove the verify that stands
+    /// in front of every exec refuses.
+    #[test]
+    fn a_binary_swapped_after_resolution_is_caught_before_it_can_be_exec_d() {
+        let root = tempdir();
+        let bin = root.join("codex");
+        std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE, b'o', b'l', b'd']).unwrap();
+        make_executable(&bin);
+
+        let config = Config {
+            codex_bin: Some(bin.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
+
+        // Unchanged: every exec site is free to proceed.
+        verify_codex_identity(&resolved.path, &resolved.sha256, "in the unchanged case")
+            .expect("an untouched binary must verify");
+
+        // The swap. Same path, same canonical name, different bytes — and still a
+        // perfectly valid native Mach-O, so the magic check alone would wave it
+        // through. Only the digest sees it.
+        std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE, b'n', b'e', b'w']).unwrap();
+        let err = verify_codex_identity(
+            &resolved.path,
+            &resolved.sha256,
+            "immediately before the app-server spawn",
+        )
+        .expect_err("a replaced binary must be refused");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&resolved.sha256),
+            "names what was pinned: {text}"
+        );
+        assert!(
+            text.contains(&protocol::hash::sha256_hex(&[
+                0xCFu8, 0xFA, 0xED, 0xFE, b'n', b'e', b'w'
+            ])),
+            "names what is there now: {text}"
+        );
+        assert!(
+            text.contains("immediately before the app-server spawn"),
+            "names WHERE in the launch it moved: {text}"
+        );
+        assert!(
+            text.contains("Refusing to run it"),
+            "says plainly that nothing was executed: {text}"
+        );
+
+        // A truncation is a swap too — the digest covers the whole file, not a
+        // prefix, so a binary that keeps its magic and loses its tail is refused.
+        std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE]).unwrap();
+        assert!(
+            verify_codex_identity(&resolved.path, &resolved.sha256, "after truncation").is_err()
+        );
+
+        // And a file that is gone is a refusal, never a pass: "I could not check"
+        // and "it is unchanged" must not share an answer.
+        std::fs::remove_file(&bin).unwrap();
+        let err = verify_codex_identity(&resolved.path, &resolved.sha256, "after deletion")
+            .expect_err("an unreadable binary must be refused");
+        assert!(
+            format!("{err:#}").contains("re-reading"),
+            "the refusal must say the check itself failed: {err:#}"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn the_magic_verdict_and_the_digest_come_from_one_read() {
+        let root = tempdir();
+
+        // A shebang script is a Wrapper and carries no digest to pin.
+        let wrapper = root.join("codex.js");
+        std::fs::write(&wrapper, b"#!/usr/bin/env node\n").unwrap();
+        assert!(matches!(
+            inspect_candidate(&wrapper),
+            CandidateIdentity::Wrapper
+        ));
+
+        // A file too short to hold a magic number is a Wrapper, not a Native whose
+        // magic was read out of zero padding.
+        let stub = root.join("stub");
+        std::fs::write(&stub, [0xCFu8, 0xFA]).unwrap();
+        assert!(matches!(
+            inspect_candidate(&stub),
+            CandidateIdentity::Wrapper
+        ));
+
+        // A native file yields the digest of the WHOLE file — the four magic bytes
+        // included — which is what makes the verdict and the pin one statement.
+        let native = root.join("codex");
+        let bytes: Vec<u8> = [0xCAu8, 0xFE, 0xBA, 0xBE]
+            .iter()
+            .copied()
+            .chain((0u8..=255).cycle().take(5000))
+            .collect();
+        std::fs::write(&native, &bytes).unwrap();
+        match inspect_candidate(&native) {
+            CandidateIdentity::Native { sha256 } => {
+                assert_eq!(sha256, protocol::hash::sha256_hex(&bytes))
+            }
+            _ => panic!("universal-binary magic must be accepted as native"),
+        }
+
+        // A path that is not there is Unusable — distinct from Wrapper, because
+        // "we could not look" is not "we looked and it was a script".
+        assert!(matches!(
+            inspect_candidate(&root.join("absent")),
+            CandidateIdentity::Unusable(_)
+        ));
+
+        cleanup(&root);
+    }
+
+    /// **Finding 1 at the resolution site.** The verification sites are not the only
+    /// place a 220 MB read happens: resolution takes one too, and the digest it mints
+    /// is the pin everything downstream compares against. A rename landing inside
+    /// *that* read produces a `ResolvedCodex` whose digest describes bytes the
+    /// pathname no longer reaches — and because the replacement has settled by the
+    /// time any verify runs, every later check confirms it as "unchanged". The whole
+    /// chain would be internally consistent and about the wrong file.
+    ///
+    /// Staged as the real shape (an atomic `rename` over the name), synchronised on
+    /// an observable fact rather than a sleep: a descriptor in this process standing
+    /// open on the target's inode is proof `inspect_candidate` has opened it. The
+    /// file is large enough that the swap lands hundreds of milliseconds short of
+    /// EOF, so the ordering holds by construction.
+    #[test]
+    fn a_binary_renamed_over_mid_inspection_is_never_resolved() {
+        let root = tempdir();
+        let target = root.join("codex");
+        let replacement = root.join("codex.new");
+
+        // 32 MiB of native-looking bytes: the magic and the digest would both be
+        // perfectly valid, so nothing but the vnode comparison can refuse this.
+        let mut original = Vec::with_capacity(32 * 1024 * 1024);
+        original.extend_from_slice(&[0xCFu8, 0xFA, 0xED, 0xFE]);
+        original.extend((0u8..=255).cycle().take(32 * 1024 * 1024 - 4));
+        std::fs::write(&target, &original).unwrap();
+        std::fs::write(&replacement, [0xCFu8, 0xFA, 0xED, 0xFE, b'n', b'e', b'w']).unwrap();
+        make_executable(&target);
+        make_executable(&replacement);
+        let (ino, size) = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            (meta.ino(), meta.len())
+        };
+
+        let inspected = target.clone();
+        let inspector = std::thread::spawn(move || match inspect_candidate(&inspected) {
+            CandidateIdentity::Native { sha256 } => Err(sha256),
+            CandidateIdentity::Wrapper => Ok("wrapper".to_string()),
+            CandidateIdentity::Unusable(why) => Ok(why),
+        });
+
+        // Wait for the read to have started, then swap. `/dev/fd` is this process's
+        // own descriptor table; an entry reporting the target's inode is the proof.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            use std::os::unix::fs::MetadataExt;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inspect_candidate never opened the target: the race was not staged"
+            );
+            let open = std::fs::read_dir("/dev/fd").into_iter().flatten().any(|e| {
+                e.ok()
+                    .and_then(|e| std::fs::metadata(e.path()).ok())
+                    .is_some_and(|m| m.ino() == ino && m.len() == size)
+            });
+            if open {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        std::fs::rename(&replacement, &target).expect("the atomic replacement");
+
+        match inspector
+            .join()
+            .expect("the inspecting thread must not panic")
+        {
+            Ok(why) => assert!(
+                why.contains("replaced while it was being read"),
+                "the rejection must say the file moved under the read: {why}"
+            ),
+            // Native is the dangerous answer: a pin minted over a name that has
+            // already moved on to somebody else's bytes.
+            Err(sha256) => panic!(
+                "the mid-inspection swap was not caught; resolution minted the pin {sha256} \
+                 (the original hashes {})",
+                protocol::hash::sha256_hex(&original)
+            ),
+        }
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn every_mach_o_magic_is_recognised_and_nothing_else_is() {
+        for magic in [
+            0xFEED_FACEu32,
+            0xFEED_FACF,
+            0xCEFA_EDFE,
+            0xCFFA_EDFE,
+            0xCAFE_BABE,
+            0xBEBA_FECA,
+            0xCAFE_BABF,
+            0xBFBA_FECA,
+        ] {
+            assert!(is_native_magic(magic.to_be_bytes()), "{magic:#x}");
+        }
+        // `#!/` and ELF are the two shapes that actually turn up here.
+        assert!(!is_native_magic(*b"#!/u"));
+        assert!(!is_native_magic([0x7F, b'E', b'L', b'F']));
+        assert!(!is_native_magic([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn a_digest_on_the_wire_has_exactly_one_valid_spelling() {
+        let good = protocol::hash::sha256_hex(b"codex");
+        assert_eq!(parse_codex_sha256(&good).unwrap(), good);
+
+        // Uppercase is refused rather than folded: one digest, one spelling, so a
+        // string comparison can never call identical bytes different.
+        assert!(parse_codex_sha256(&good.to_uppercase()).is_err());
+        // Wrong width in both directions, and non-hex characters.
+        assert!(parse_codex_sha256(&good[..63]).is_err());
+        assert!(parse_codex_sha256(&format!("{good}0")).is_err());
+        assert!(parse_codex_sha256(&"g".repeat(64)).is_err());
+        assert!(parse_codex_sha256("").is_err());
+        // The refusal says what was expected, so a caller can fix it.
+        let err = parse_codex_sha256("nope").unwrap_err().to_string();
+        assert!(err.contains("64"), "names the width: {err}");
+        assert!(err.contains("lowercase"), "names the case: {err}");
+    }
+
+    /// `codex --version` is itself one of the opens A7 names, so a version that
+    /// parsed is not on its own a version that describes the bytes this launch will
+    /// carry. Against the **real** installed codex: the launch is refused because the
+    /// file does not match what was pinned.
+    ///
+    /// Round 2: the refusal now lands **before** the exec rather than after it. The
+    /// bytes are frozen and verified first, so a binary that does not match the pin
+    /// never runs as `codex --version` at all — the pre-gate exec of unpinned bytes
+    /// that finding 1 named is gone. The `when` assertion below is what pins that
+    /// ordering.
+    ///
+    /// A digest that never matched stands in for a swap that happened before the
+    /// check — which `read_codex_version` cannot tell apart from any other mismatch,
+    /// and does not need to: it asks only "are these still the pinned bytes?".
+    #[test]
+    fn a_parsed_version_alone_does_not_let_a_launch_through() {
+        if !on_path("codex") {
+            eprintln!("skipped: no `codex` on PATH — nothing to version-check");
+            return;
+        }
+        let real = resolve_codex_bin(&Config::default()).unwrap();
+        // Sanity: this same call succeeds when the pin holds — covered by
+        // `the_live_binary_reports_a_pinned_version`, which resolves and reads for
+        // real. Here only the mismatch arm is staged, so the suite pays for one
+        // hash of a 220 MB binary rather than two.
+        let swapped = ResolvedCodex {
+            path: real.path.clone(),
+            sha256: protocol::hash::sha256_hex(b"some other codex"),
+        };
+        let err = read_codex_version(&swapped)
+            .expect_err("a version check whose binary does not match the pin must refuse");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("not the one this launch pinned"),
+            "the refusal must be the identity check, not a parse failure: {text}"
+        );
+        assert!(
+            text.contains("before `codex --version`"),
+            "it must name the moment, so an operator can see the exec is guarded — and the \
+             moment is now BEFORE the exec, not after it: the bytes are frozen and verified \
+             first, so a mismatched pin never becomes a running `--version` at all: {text}"
+        );
+    }
+
+    /// The identity check runs BEFORE the version output is interpreted, so a
+    /// binary that moved is always reported as a binary that moved.
+    ///
+    /// Staged with a script whose `--version` is deliberately unparseable: with the
+    /// checks in the other order this reports "could not read a version", which is
+    /// true and sends the operator after the wrong problem — a malformed codex
+    /// rather than a swapped one. No native binary is needed, because
+    /// `read_codex_version` only execs the path it is given.
+    #[test]
+    fn a_swapped_binary_is_reported_as_swapped_and_not_as_malformed() {
+        let root = tempdir();
+        let script = root.join("codex");
+        std::fs::write(&script, b"#!/bin/sh\necho 'not a version at all'\n").unwrap();
+        make_executable(&script);
+
+        let swapped = ResolvedCodex {
+            path: script.clone(),
+            sha256: protocol::hash::sha256_hex(b"what was actually pinned"),
+        };
+        let err = read_codex_version(&swapped).expect_err("a moved binary must be refused");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("not the one this launch pinned"),
+            "the operator must be told the binary MOVED, not that it is malformed: {text}"
+        );
+        assert!(
+            !text.contains("could not read a version"),
+            "the parse failure must not be what surfaces: {text}"
+        );
+
+        // With the right digest, the same script reaches the parse and fails there —
+        // proving the identity check is not simply swallowing every error.
+        let honest = ResolvedCodex {
+            path: script.clone(),
+            sha256: protocol::hash::sha256_file(&script).unwrap(),
+        };
+        let err = read_codex_version(&honest).expect_err("an unparseable version must be refused");
+        assert!(
+            format!("{err:#}").contains("could not read a version"),
+            "an unmoved binary's real problem must still surface: {err:#}"
+        );
 
         cleanup(&root);
     }
@@ -1393,7 +2123,7 @@ mod tests {
             return;
         }
         let resolved = resolve_codex_bin(&Config::default()).unwrap();
-        let version = read_codex_version(&resolved.path).expect("codex --version must run");
+        let version = read_codex_version(&resolved).expect("codex --version must run");
         ensure_pinned_version(&version)
             .unwrap_or_else(|e| panic!("installed codex {version} is unpinned: {e}"));
     }
@@ -2004,5 +2734,11 @@ mod tests {
 
     fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) {
         std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// "Is this a native executable?" as the old boolean helper answered it, now
+    /// read off the one-pass inspection so the tests exercise the real path.
+    fn is_native(path: &Path) -> bool {
+        matches!(inspect_candidate(path), CandidateIdentity::Native { .. })
     }
 }

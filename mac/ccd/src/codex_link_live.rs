@@ -1104,6 +1104,14 @@ impl LiveSandbox {
             // down mid-run by the very machinery that is working correctly.
             .args(["--deadline-ms", "900000"])
             .args(["--codex", codex.to_str().expect("codex path is utf-8")])
+            // A7.1 executable hash-pin: the coordinator carries the identity of the
+            // codex binary beside its path, and the host re-verifies it immediately
+            // before each of its two execs. Required — a missing digest is refused,
+            // never defaulted to trusting the pathname.
+            .args([
+                "--codex-sha256",
+                &protocol::hash::sha256_file(codex).expect("hash the codex binary under test"),
+            ])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
             // `on-request`, not `untrusted`, and that is a **measured** choice: a
             // real 0.147 TUI's `thread/start` carries `approvalPolicy:"on-request"`,
@@ -2565,10 +2573,21 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         post_turn_resume["result"]["cwd"],
         expected_cwd.display()
     );
-    // The roots are checked by TYPE, not by value: what a live run's workspace roots
+    // **And the roots are checked by VALUE now, for the same reason the cwd is.**
+    //
+    // This used to be a type check, justified by "what a live run's workspace roots
     // resolve to is not something this gate launched, so pinning them would pin an
-    // accident. What must hold is that the field is the nonempty array of nonempty
-    // paths a recovered session's workspace is read from.
+    // accident". That reasoning was MEASURED FALSE in 2e-7c. Proxying a real
+    // `codex --remote` TUI against a real app-server — from a git repository root,
+    // from a deep subdirectory of one, and from a directory in no repository at all —
+    // the TUI sent `runtimeWorkspaceRoots: [<its own cwd, canonicalized>]` in every
+    // case, and the app-server echoed it back verbatim. It is not the git root and it
+    // does not vary with repo-ness: it is exactly the launch directory, which IS
+    // something this gate launched.
+    //
+    // So the broker now anchors it (A10 follow-on) exactly as it anchors `cwd`, and
+    // this assertion is the live end of that anchor: a real session, resumed after a
+    // real turn, still reporting the one workspace root the launch asked for.
     let roots = post_turn_resume["result"]["runtimeWorkspaceRoots"]
         .as_array()
         .unwrap_or_else(|| {
@@ -2577,14 +2596,27 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
                  a recovered session's workspace is read from: {post_turn_resume}"
             )
         });
-    assert!(
-        !roots.is_empty()
-            && roots
-                .iter()
-                .all(|r| r.as_str().is_some_and(|s| !s.is_empty())),
-        "result.runtimeWorkspaceRoots must be a nonempty array of nonempty strings; a \
-         session with no workspace root, or a root that is not a path, is not \
-         something a reconciliation can anchor to: {roots:?}"
+    // **Compared as the array the wire sent, element for element** — not as a
+    // projection of it. This read `filter_map(Value::as_str)`, which is a filter
+    // and not a decode: every element that is not a string was silently dropped
+    // before the comparison, so `[<the launch cwd>, 7]` collapsed to the expected
+    // one-element vector and PASSED an assertion whose message claims the roots
+    // are exactly what the launch anchored. A non-string root is precisely the
+    // shape a widened or malformed scope would arrive in, so the one class of
+    // answer worth catching was the one the filter removed. Comparing the
+    // `Vec<Value>` against a `serde_json` array makes length, order and type all
+    // load-bearing, and there is nothing left for an element to hide behind.
+    let expected_roots =
+        serde_json::json!([expected_cwd.to_str().expect("the launch cwd is utf-8")]);
+    assert_eq!(
+        Value::Array(roots.clone()),
+        expected_roots,
+        "the resumed thread reports workspace roots {roots:?}, but this gate launched \
+         the coordinator with `--cwd /tmp` ({}). The roots are the writable scope the \
+         session runs against, so anything else — another path, an extra element, or an \
+         element that is not a path at all — means the recovered session's workspace is \
+         wider, or simply other, than the one the launch anchored: {post_turn_resume}",
+        expected_cwd.display()
     );
     // **The launch fingerprint governed the turn that actually ran.** This is the
     // assertion that closes the loop opened by claim 4: the coordinator launched with

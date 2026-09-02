@@ -67,21 +67,37 @@
 //!    exhaustive top-level param allowlist (round-2 P5) — [`crate::fingerprint`];
 //! 2. the launch fingerprint over the remaining ownership dimensions;
 //! 3. it names the session's ONE verified thread ([`check_turn_head`]);
-//! 4. it carries exactly the `cwd`/`runtimeWorkspaceRoots` bound at that thread's creation
-//!    ([`check_turn_workspace`]) — values that were themselves anchored to the
-//!    coordinator-owned launch cwd before the binding was installed.
+//! 4. it carries exactly the `cwd`/`runtimeWorkspaceRoots` bound at that thread's creation.
+//!    That equality is enforced inside [`crate::session::ThreadBinding::try_admit_turn`] —
+//!    in the SAME atomic section as the head-check, not in a separate `check_*` here — and
+//!    BOTH bound values were themselves anchored to the coordinator-owned launch cwd before
+//!    the binding was installed: `cwd` by exact equality with it, `runtimeWorkspaceRoots` by
+//!    exact equality with the single-element array `[launch cwd]` (A10 follow-on, 2e-7c).
+//!    The turn side needs no third anchor of its own, and deliberately has none: equality
+//!    against a binding that is anchored IS an anchor, transitively, and a second launch-cwd
+//!    comparison here could only ever disagree with the one that installed the binding.
 //!
 //! Only then is the measured `sandboxPolicy: null` deferral discharged.
 //!
-//! The creation side has its own workspace rule ([`check_start_workspace`], round-2 P4): a
-//! `thread/start` whose request names a cwd OTHER than the launch cwd is refused before it
-//! can claim the creation slot. Each of these three refusals — head, turn workspace, start
-//! workspace — carries its OWN cause; none reuses another's text.
+//! The creation side has its own workspace rules — [`check_workspace_cwd`] (round-2 P4) for
+//! `cwd` and [`check_workspace_roots`] (2e-7c) for `runtimeWorkspaceRoots`: a
+//! `thread/start` whose request names a workspace OTHER than the launch workspace, through
+//! EITHER channel, is refused before it can claim the creation slot. Each of these refusals —
+//! head, turn workspace, start workspace — carries its OWN cause; none reuses another's text.
+//!
+//! Round-5 finding 6 runs BOTH of those guards on `thread/resume` as well, because the real
+//! 0.147 schema gives resume the same two params and documents its `runtimeWorkspaceRoots` as
+//! REPLACING the thread's — so a creation-only anchor secured a thread's birth and nothing
+//! after it. `thread/resume`'s remaining bypasses (`path`, `history`, and every param outside
+//! the captured set) are pinned in [`crate::fingerprint`], beside the turn's captured
+//! boundary and for the same refuse-by-default-on-params reason.
 
 use serde_json::json;
 
 use crate::allowlist::{disposition, Disposition, JsonRpcKind, RefuseReason, Role};
-use crate::fingerprint::{assert_fingerprint, FpVerdict, LaunchFingerprint};
+use crate::fingerprint::{
+    assert_fingerprint, is_launch_workspace_roots, FpVerdict, LaunchFingerprint,
+};
 use crate::message::{classify_shape, RequestId, Shape, WsPayload};
 use crate::redact;
 use crate::response_capability::ResponseCapabilityRegistry;
@@ -400,26 +416,59 @@ fn classify_request_disposition(
             }
             match assert_fingerprint(env.fingerprint, method, params) {
                 Ok(FpVerdict::Proven) => {
-                    if method == "thread/start" {
+                    // **THE WORKSPACE CHANNELS ARE NOT CREATION-ONLY** (round-5 finding 6).
+                    //
+                    // Both guards were `thread/start`-only, and that was the narrower half of
+                    // a rule the wire does not scope that way: the real 0.147
+                    // `ThreadResumeParams` carries the SAME two keys, and its
+                    // `runtimeWorkspaceRoots` is documented "Replace the thread's runtime
+                    // workspace roots" — MEASURED doing exactly that on the live wire, where a
+                    // resume carrying `["/"]` came back with `result.runtimeWorkspaceRoots =
+                    // ["/"]`. `check_resume_binding` proves a resume NAMES a session thread; it
+                    // proves nothing about where that thread runs afterwards.
+                    //
+                    // Both keep passing on absent-or-null, which is what the two measured
+                    // resume clients send: the ccd's frame is `{"threadId": <id>}` and carries
+                    // neither key, and the captured TUI `/resume` sends `cwd: null` beside
+                    // `runtimeWorkspaceRoots: [its own cwd]` — the anchored form in production.
+                    if matches!(method, "thread/start" | "thread/resume") {
                         // P4 (round 2) — a creation may not name a workspace OTHER than the
                         // one the coordinator launched this session in. Checked BEFORE the
                         // slot is claimed, so a refused creation never consumes it, and with
                         // its own message: this is not the head-check's failure.
-                        if let Err(detail) = check_start_workspace(env, params) {
+                        if let Err(detail) = check_workspace_cwd(env, method, params) {
                             return refuse_request(
                                 id,
                                 E_POLICY_REFUSED,
-                                "thread/start refused: it names a workspace other than the \
+                                "request refused: it names a workspace other than the \
                                  session's launch workspace",
                                 detail,
                             );
                         }
-                        // P3 — the creation slot itself is claimed by the id ledger in
-                        // `classify_request`, atomically with recording `(connection,
-                        // request id)` as the pending creation (round-3 P1 folded the
-                        // round-2 `try_open_creation` into `try_admit_request`, so one
-                        // atomic step covers both the slot and the outstanding entry). A
-                        // refused request never reaches that step, so it can never bind.
+                        // A10 follow-on (2e-7c) — the SECOND workspace channel on the same
+                        // frame, and the one the real TUI actually populates. Same anchor,
+                        // same launch-owned value, same point in the sequence: before the
+                        // slot is claimed. It shares the creation-response verifier's one
+                        // definition of the launch workspace
+                        // (`fingerprint::is_launch_workspace_roots`), so the request-side and
+                        // response-side rules cannot drift apart.
+                        if let Err(detail) = check_workspace_roots(env, method, params) {
+                            return refuse_request(
+                                id,
+                                E_POLICY_REFUSED,
+                                "request refused: it names a workspace other than the \
+                                 session's launch workspace",
+                                detail,
+                            );
+                        }
+                        // P3 — on the `thread/start` half, the creation slot itself is
+                        // claimed by the id ledger in `classify_request`, atomically with
+                        // recording `(connection, request id)` as the pending creation
+                        // (round-3 P1 folded the round-2 `try_open_creation` into
+                        // `try_admit_request`, so one atomic step covers both the slot and
+                        // the outstanding entry). A refused request never reaches that step,
+                        // so it can never bind — which is why both guards above run here,
+                        // ahead of it, rather than anywhere later.
                     }
                     RelayAction::Forward {
                         note: "ownership request: fingerprint asserted",
@@ -742,29 +791,94 @@ fn check_resume_binding(env: &Env, params: &serde_json::Value) -> Result<(), Str
 }
 
 /// P4 (round 2) — a `thread/start` REQUEST may not name a workspace other than the one the
-/// COORDINATOR launched this session in.
+/// COORDINATOR launched this session in. Round-5 finding 6 widens it to `thread/resume`,
+/// which the real 0.147 schema gives the very same `cwd` param.
 ///
-/// The measured real TUI sends `"cwd": null` on `thread/start` (it lets the server resolve
-/// the app-server's own cwd), and an absent key is the same "I am naming nothing" claim —
-/// both keep passing. What is refused is a request that names a DIFFERENT workspace, which
-/// is the only way a client could steer the creation away from the launch workspace before
-/// the response-side anchor (`crate::session`) ever sees it.
+/// The measured real TUI sends `"cwd": null` on BOTH methods (it lets the server resolve
+/// the app-server's own cwd), the ccd's resume omits the key entirely, and an absent key is
+/// the same "I am naming nothing" claim — all keep passing. What is refused is a request that
+/// names a DIFFERENT workspace, which is the only way a client could steer a creation away
+/// from the launch workspace before the response-side anchor (`crate::session`) ever sees it,
+/// or steer a bound thread away from it afterwards.
 ///
 /// Type-checked: a present, non-null `cwd` must be a NON-EMPTY STRING equal to the launch
 /// cwd. Comparison is exact — the canonicalization happened once, at the coordinator
 /// (see [`LaunchFingerprint::launch_cwd`]).
-fn check_start_workspace(env: &Env, params: &serde_json::Value) -> Result<(), String> {
+fn check_workspace_cwd(env: &Env, method: &str, params: &serde_json::Value) -> Result<(), String> {
     match params.get("cwd") {
         None | Some(serde_json::Value::Null) => Ok(()),
         Some(v) => match v.as_str() {
             Some(s) if !s.is_empty() && s == env.fingerprint.launch_cwd => Ok(()),
             _ => Err(format!(
-                "thread/start: params.cwd names a workspace other than this session's launch \
+                "{}: params.cwd names a workspace other than this session's launch \
                  cwd (request cwd: {}; launch cwd len={})",
+                redact::method(method),
                 redact::value_shape(Some(v)),
                 env.fingerprint.launch_cwd.len()
             )),
         },
+    }
+}
+
+/// P4 follow-on (2e-7c, gate A10) — a `thread/start` REQUEST may not name workspace ROOTS
+/// other than the single workspace the COORDINATOR launched this session in. Round-5
+/// finding 6 widens it to `thread/resume`.
+///
+/// ## Why `thread/resume` was the bigger hole (round-5 finding 6)
+///
+/// The real 0.147 `ThreadResumeParams.runtimeWorkspaceRoots` is documented **"Replace the
+/// thread's runtime workspace roots"** — a creation-only guard therefore secured the moment a
+/// thread was born and left every later re-point unguarded. MEASURED on a live 0.147
+/// app-server: a `thread/resume` carrying `runtimeWorkspaceRoots: ["/"]` came back with
+/// `result.runtimeWorkspaceRoots = ["/"]`, i.e. the whole filesystem bound as that thread's
+/// runtime workspace root. The session thread-binding check that used to be the resume's only
+/// gate proves the request names a thread this session owns; it says nothing about where that
+/// thread will run next. Same anchor, same one definition, now on both frames.
+///
+/// The exact sibling of [`check_workspace_cwd`], anchored to the same coordinator-owned
+/// [`LaunchFingerprint::launch_cwd`], because `runtimeWorkspaceRoots` is the SECOND workspace
+/// channel on the same frame and — unlike `cwd` — it is the one the real TUI actually
+/// populates.
+///
+/// **MEASURED** (real codex 0.147 TUI proxied against a real app-server; the full capture and
+/// its three consequences live on [`is_launch_workspace_roots`]): a `thread/start` request
+/// carries `cwd: null` and `runtimeWorkspaceRoots: ["<the TUI's canonicalized cwd>"]`, and the
+/// server echoes that array back VERBATIM in the creation result. It is client-supplied, not
+/// server-derived — so without this guard a client could name any directory on the machine
+/// and have the session's workspace binding follow it. In production the TUI's cwd IS the
+/// launch cwd (the coordinator's `tmux new-session -c` pane, inherited by host and TUI alike),
+/// so the legitimate value is exactly `[launch_cwd]`.
+///
+/// **Absent / null keeps passing**, exactly as it does for `cwd` — and for a stronger reason
+/// than symmetry. Naming nothing is not a widening channel: there is no client-chosen value
+/// for the server to echo, so whatever the server resolves on its own still has to survive
+/// the creation-RESPONSE anchor in [`crate::session`] before anything is bound. What is
+/// refused here is a request that NAMES a workspace this session was not launched in, caught
+/// before the creation slot is claimed.
+///
+/// Anything else refuses, loudly and closed: a different root, `[launch_cwd, <extra>]`, an
+/// empty array, a bare string, an object. See [`is_launch_workspace_roots`] for why
+/// single-element strictness is the right bar (the launcher refuses `--add-dir`, `--sandbox`
+/// and `sandbox_workspace_write.*`, so no supported invocation can widen it) and for the
+/// consequence when a future codex legitimately sends a second root.
+///
+/// Audit-log safe: the detail carries only the value's SHAPE (`array(len=N)` — an operator
+/// needs the count) and the launch cwd's LENGTH. Never a path, from either side.
+fn check_workspace_roots(
+    env: &Env,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    match params.get("runtimeWorkspaceRoots") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(v) if is_launch_workspace_roots(&env.fingerprint.launch_cwd, v) => Ok(()),
+        Some(v) => Err(format!(
+            "{}: params.runtimeWorkspaceRoots is not exactly this session's one \
+             launch workspace (request roots: {}; launch cwd len={})",
+            redact::method(method),
+            redact::value_shape(Some(v)),
+            env.fingerprint.launch_cwd.len()
+        )),
     }
 }
 
@@ -928,7 +1042,19 @@ mod tests {
     }
 
     const BOUND_CWD: &str = "/work/proj";
-    const BOUND_ROOT: &str = "/work";
+    /// The session's one workspace root, as `runtimeWorkspaceRoots` carries it.
+    ///
+    /// **It is the launch cwd itself, not a parent of it** (A10 follow-on, 2e-7c). This
+    /// constant used to be `"/work"`, which made every fixture in this module a shape the
+    /// anchored rule now refuses — and that was the point of the anchor: a root wider than
+    /// the launch workspace bound successfully before 2e-7c.
+    ///
+    /// MEASURED against a real codex 0.147 TUI (see
+    /// [`crate::fingerprint::is_launch_workspace_roots`]): the TUI sends
+    /// `runtimeWorkspaceRoots: [canonicalize(its own cwd)]`, and in production its cwd IS the
+    /// launch cwd. So a production-shaped frame carries `[BOUND_CWD]`, and this alias exists
+    /// only to keep the *name* at each call site saying which field is meant.
+    const BOUND_ROOT: &str = BOUND_CWD;
 
     /// A [`SessionThreads`] whose one thread was bound the ONLY way it can be: the
     /// classifier admitted a `thread/start` (claiming the creation slot), and the
@@ -1441,6 +1567,206 @@ mod tests {
         }
     }
 
+    // A10 FOLLOW-ON (2e-7c) — a `thread/start` REQUEST naming workspace ROOTS other than the
+    // session's one launch workspace is refused, before it can claim the creation slot.
+    //
+    // This is the request half of the gate. Until 2e-7c there was NO request-side check on
+    // `runtimeWorkspaceRoots` at all, and — because the app-server echoes the field back
+    // verbatim (MEASURED) — a client naming any directory here had that directory bound.
+    #[test]
+    fn thread_start_naming_foreign_workspace_roots_is_refused() {
+        for roots in [
+            // A different workspace entirely — the whole point of the anchor.
+            json!(["/somewhere/else"]),
+            // The launch workspace PLUS an extra root: the widening shape. Refused rather
+            // than trimmed — this broker never measured a multi-root creation, so it cannot
+            // prove what a second root authorizes.
+            json!([BOUND_ROOT, "/somewhere/else"]),
+            // …and widening is refused whichever side the extra root sits on.
+            json!(["/somewhere/else", BOUND_ROOT]),
+            // A strict ANCESTOR of the launch workspace is still a different workspace. No
+            // containment or prefix reasoning: `/work` authorizes more than `/work/proj`.
+            json!(["/work"]),
+            // A strict DESCENDANT is also a different workspace, and is refused too — the
+            // policy was proven over the launch workspace, not a narrowing of it.
+            json!([format!("{BOUND_ROOT}/sub")]),
+            // The right path, duplicated: still not a one-element array.
+            json!([BOUND_ROOT, BOUND_ROOT]),
+            // Degenerate shapes.
+            json!([]),
+            json!([""]),
+            json!(BOUND_ROOT),
+            json!({"0": BOUND_ROOT}),
+            json!(0),
+        ] {
+            let threads = SessionThreads::new(BOUND_CWD);
+            let mut frame: serde_json::Value = serde_json::from_str(OK_START).unwrap();
+            frame["params"]["runtimeWorkspaceRoots"] = roots.clone();
+            let a = go_env(Role::Tui, &threads, &frame.to_string());
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "roots {roots}");
+            assert!(
+                refused_note(&a).contains("params.runtimeWorkspaceRoots"),
+                "the refusal must name its OWN cause, got {}",
+                refused_note(&a)
+            );
+            // …and it never claimed the creation slot, so a legitimate creation still works.
+            assert!(
+                matches!(
+                    go_env(Role::Tui, &threads, OK_START),
+                    RelayAction::Forward { .. }
+                ),
+                "a refused creation must not consume the slot: roots {roots}"
+            );
+        }
+    }
+
+    // A10 FOLLOW-ON — the shapes that must keep passing on the creation REQUEST.
+    //
+    // MEASURED: the real TUI sends `runtimeWorkspaceRoots: [<its own canonicalized cwd>]`,
+    // which in production IS the launch cwd. Absent and null keep passing for the same reason
+    // they do for `cwd`: naming nothing is not a widening channel, and whatever the server
+    // resolves on its own must still survive the creation-RESPONSE anchor before it binds.
+    #[test]
+    fn thread_start_with_the_launch_workspace_roots_still_forwards() {
+        for roots in [Some(json!([BOUND_ROOT])), Some(json!(null)), None] {
+            let threads = SessionThreads::new(BOUND_CWD);
+            let mut frame: serde_json::Value = serde_json::from_str(OK_START).unwrap();
+            if let Some(v) = &roots {
+                frame["params"]["runtimeWorkspaceRoots"] = v.clone();
+            }
+            assert!(
+                matches!(
+                    go_env(Role::Tui, &threads, &frame.to_string()),
+                    RelayAction::Forward { .. }
+                ),
+                "roots {roots:?} must forward"
+            );
+        }
+    }
+
+    // ROUND-5 FINDING 6 — the workspace guards are no longer creation-only.
+    //
+    // A `thread/resume` naming a thread this session OWNS still gets to re-point that
+    // thread's runtime workspace, because the real 0.147 `ThreadResumeParams` documents
+    // `runtimeWorkspaceRoots` as REPLACING them — and a live app-server was measured doing
+    // exactly that (`result.runtimeWorkspaceRoots` came back `["/"]`). The binding check
+    // cannot see it: the thread named here IS the bound head in every case below.
+    #[test]
+    fn a_resume_of_the_bound_thread_may_not_re_point_its_workspace() {
+        for (key, value) in [
+            ("runtimeWorkspaceRoots", json!(["/"])),
+            ("runtimeWorkspaceRoots", json!([BOUND_ROOT, "/"])),
+            ("runtimeWorkspaceRoots", json!(["/somewhere/else"])),
+            ("cwd", json!("/somewhere/else")),
+        ] {
+            let threads = bound_session("01a0-head");
+            let mut frame = json!({
+                "method": "thread/resume", "id": "r1",
+                "params": {"threadId": "01a0-head"}
+            });
+            frame["params"][key] = value.clone();
+            let a = go_env(Role::Tui, &threads, &frame.to_string());
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{key} = {value}");
+            assert!(
+                refused_note(&a).contains(&format!("params.{key}")),
+                "the refusal must name its OWN cause (not the binding check's), got {}",
+                refused_note(&a)
+            );
+        }
+    }
+
+    // FINDING 6, the half that is NOT optional: a guard that breaks the real resume is a
+    // worse bug than the one it fixes.
+    //
+    // Both MEASURED resume clients must still forward against a bound head: the ccd's own
+    // frame (`{"threadId": <id>}` — what `mac/ccd/src/codex_link.rs` constructs), and the
+    // TUI's `/resume`, whose seventeen keys include `cwd: null` and
+    // `runtimeWorkspaceRoots: [its own cwd]` — the anchored form in production.
+    #[test]
+    fn both_measured_resume_clients_still_forward_against_a_bound_head() {
+        let ccd_shape = json!({
+            "method": "thread/resume", "id": "r-ccd",
+            "params": {"threadId": "01a0-head"}
+        });
+        let tui_shape = json!({
+            "method": "thread/resume", "id": "r-tui",
+            "params": {
+                "threadId": "01a0-head",
+                "approvalPolicy": "untrusted", "approvalsReviewer": "user",
+                "baseInstructions": null,
+                "config": {"personality": "pragmatic", "web_search": "cached"},
+                "cwd": null, "developerInstructions": null, "excludeTurns": true,
+                "history": null, "initialTurnsPage": null, "model": null,
+                "modelProvider": null, "path": null, "permissions": null,
+                "personality": null, "runtimeWorkspaceRoots": [BOUND_ROOT],
+                "sandbox": "read-only"
+            }
+        });
+        for frame in [ccd_shape, tui_shape] {
+            let threads = bound_session("01a0-head");
+            let a = go_env(Role::Tui, &threads, &frame.to_string());
+            assert!(
+                matches!(a, RelayAction::Forward { .. }),
+                "a measured legitimate resume must forward: {a:?}"
+            );
+        }
+    }
+
+    // FINDING 6 — `path` and `history` each defeat the binding check on their own, so each
+    // is refused on its own, with its own cause. MEASURED live: with `path` set the server
+    // resolves the PATH's rollout and never consults the requested id; with `history` set the
+    // same request that otherwise errors instead answers with a BRAND NEW thread id.
+    #[test]
+    fn each_resume_binding_bypass_is_refused_independently() {
+        for (key, value) in [
+            (
+                "path",
+                json!("/work/codexhome/sessions/rollout-other.jsonl"),
+            ),
+            (
+                "history",
+                json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "INJECTED"}]}]),
+            ),
+        ] {
+            let threads = bound_session("01a0-head");
+            let mut frame = json!({
+                "method": "thread/resume", "id": "r2",
+                "params": {"threadId": "01a0-head"}
+            });
+            frame["params"][key] = value;
+            let a = go_env(Role::Tui, &threads, &frame.to_string());
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{key}");
+            assert!(
+                refused_note(&a).contains(&format!("params.{key}")),
+                "{key}: {}",
+                refused_note(&a)
+            );
+        }
+    }
+
+    // A10 FOLLOW-ON — the request-side refusal is audit-log safe: it discloses the COUNT of
+    // roots (an operator needs it) and the launch cwd's LENGTH, and no path from either side.
+    #[test]
+    fn the_creation_roots_refusal_logs_a_count_and_no_paths() {
+        const SECRET: &str = "/tmp/exfiltrated-secret-path";
+        let mut start: serde_json::Value = serde_json::from_str(OK_START).unwrap();
+        start["params"]["runtimeWorkspaceRoots"] = json!([BOUND_ROOT, SECRET]);
+        let a = go_env(
+            Role::Tui,
+            &SessionThreads::new(BOUND_CWD),
+            &start.to_string(),
+        );
+        let note = refused_note(&a);
+        assert!(!note.contains(SECRET), "requested root leaked: {note}");
+        assert!(!note.contains(BOUND_CWD), "launch cwd leaked: {note}");
+        assert!(note.contains("params.runtimeWorkspaceRoots"), "{note}");
+        assert!(
+            note.contains("array(len=2)"),
+            "the operator needs the root COUNT: {note}"
+        );
+    }
+
     // P7 — a workspace refusal names the FIELD and the shape, never the path. The audit log
     // is durable and the requested path is attacker-supplied.
     #[test]
@@ -1583,11 +1909,16 @@ mod tests {
     #[test]
     fn turn_start_with_diverging_workspace_roots_is_refused() {
         let threads = bound_session("01a0-head");
+        // Every value here must DIVERGE from the bound `[BOUND_ROOT]`. This list used to
+        // carry `["/work/proj"]` as a divergence, which was only true while `BOUND_ROOT` was
+        // the launch cwd's PARENT; under the A10 anchor `["/work/proj"]` IS the bound value,
+        // so keeping it here would have silently asserted that a legitimate turn is refused.
         for roots in [
-            json!(["/work", "/elsewhere"]),
-            json!(["/work/proj"]),
+            json!([BOUND_ROOT, "/elsewhere"]),
+            json!(["/elsewhere"]),
+            json!(["/work"]),
             json!([]),
-            json!("/work"),
+            json!(BOUND_ROOT),
         ] {
             let a = go_env(
                 Role::Tui,
@@ -1673,37 +2004,37 @@ mod tests {
         assert_eq!(refused_code(&b), E_POLICY_REFUSED, "top-level sandbox key");
     }
 
-    // ANCHOR — the VERBATIM captured `turn/start` frame, against a binding installed from
-    // a creation response carrying that fixture's own cwd/roots, must FORWARD. This is the
-    // one end-to-end proof that the whole gate does not refuse real traffic.
-    #[test]
-    fn the_captured_turn_start_frame_forwards_on_its_verified_thread() {
-        const CAPTURED: &str = include_str!("../../../fixtures/codex/turn-start-request.json");
-        let params: serde_json::Value = serde_json::from_str::<serde_json::Value>(CAPTURED)
-            .expect("the captured turn/start fixture parses")["params"]
+    /// Drive one captured `turn/start` frame all the way through the gate: admit the creation
+    /// it implies, install the binding from a correlated creation RESPONSE carrying the
+    /// frame's own workspace, then classify the frame itself.
+    ///
+    /// The launch fingerprint is reconstructed from the frame — including
+    /// `launch_cwd` from `params.cwd` — so the harness asserts against the session the
+    /// capture actually came from rather than against this module's synthetic constants.
+    fn captured_turn_action(frame_text: &str) -> RelayAction {
+        let params = serde_json::from_str::<serde_json::Value>(frame_text)
+            .expect("the captured turn/start frame parses")["params"]
             .clone();
-
-        let threads = SessionThreads::new(BOUND_CWD);
-        // The creation the broker admitted…
-        let start = json!({
-            "method": "thread/start",
-            "id": "startup-thread-start-9747f04e",
-            "params": {
-                "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
-                "sandbox": "read-only"
-            }
-        });
-        // …under the fingerprint the captured session actually launched with.
+        let launch_cwd = params["cwd"]
+            .as_str()
+            .expect("the captured frame names a cwd")
+            .to_string();
         let captured_fp = LaunchFingerprint {
-            approval_policy: "on-request".into(),
-            approvals_reviewer: "user".into(),
+            approval_policy: params["approvalPolicy"]
+                .as_str()
+                .expect("captured approvalPolicy")
+                .to_string(),
+            approvals_reviewer: params["approvalsReviewer"]
+                .as_str()
+                .expect("captured approvalsReviewer")
+                .to_string(),
             sandbox: "read-only".into(),
             hooks_enabled: true,
-            // …in the workspace the captured session was launched in (P4): the fixture's
-            // own `cwd`, which the coordinator would have canonicalized before launch.
-            launch_cwd: params["cwd"].as_str().expect("fixture cwd").to_string(),
+            // The workspace the captured session was launched in (P4 / A10 follow-on): the
+            // frame's own `cwd`, which the coordinator would have canonicalized before launch.
+            launch_cwd: launch_cwd.clone(),
         };
+        let threads = SessionThreads::new(&launch_cwd);
         let go_captured = |threads: &dyn ThreadBinding, text: &str| {
             let env = Env {
                 fingerprint: &captured_fp,
@@ -1713,13 +2044,26 @@ mod tests {
             };
             classify(Role::Tui, &env, &WsPayload::Text(text.to_string()))
         };
-        assert!(matches!(
-            go_captured(&threads, &start.to_string()),
-            RelayAction::Forward { .. }
-        ));
-        // …answered by the correlated creation RESPONSE carrying the fixture's OWN
-        // cwd/roots (the server-resolved values — see session.rs for the measured reason
-        // the request's `cwd: null` cannot be the source).
+        // The creation the broker admitted, under that same fingerprint…
+        let start = json!({
+            "method": "thread/start",
+            "id": "startup-thread-start-9747f04e",
+            "params": {
+                "approvalPolicy": captured_fp.approval_policy,
+                "approvalsReviewer": captured_fp.approvals_reviewer,
+                "sandbox": "read-only"
+            }
+        });
+        assert!(
+            matches!(
+                go_captured(&threads, &start.to_string()),
+                RelayAction::Forward { .. }
+            ),
+            "the creation must be admitted for its response to be correlatable"
+        );
+        // …answered by the correlated creation RESPONSE carrying the frame's OWN cwd/roots
+        // (the server-resolved values — see session.rs for the measured reason the request's
+        // `cwd: null` cannot be the source).
         threads.observe_server_frame(
             CONN_A,
             &json!({
@@ -1732,10 +2076,95 @@ mod tests {
             })
             .to_string(),
         );
+        go_captured(&threads, frame_text)
+    }
 
-        match go_captured(&threads, CAPTURED) {
+    // ANCHOR — the STRONGEST form of the "does not refuse real traffic" proof: five
+    // BYTE-VERBATIM captured `turn/start` frames, unmodified in any field, each forwarding on
+    // its verified thread.
+    //
+    // These come from `thread-switch.jsonl`, the fixture family whose workspace fields are
+    // already in the production shape — `cwd == runtimeWorkspaceRoots[0] == "/work/proj"`,
+    // uniformly across all 23 occurrences. That is exactly what
+    // [`crate::fingerprint::is_launch_workspace_roots`] anchors to, so these frames need no
+    // adjustment whatsoever to pass the A10 anchor: the anchor was written from the same
+    // measurement the capture records.
+    #[test]
+    fn the_captured_turn_start_frames_forward_verbatim_on_their_verified_thread() {
+        const SWITCH: &str = include_str!("../../../fixtures/codex/thread-switch.jsonl");
+        let turns: Vec<String> = SWITCH
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("frame").cloned())
+            .filter(|f| f.get("method").and_then(|m| m.as_str()) == Some("turn/start"))
+            .map(|f| f.to_string())
+            .collect();
+        assert_eq!(
+            turns.len(),
+            5,
+            "the captured switch carries five turn/start frames; a change in that count means \
+             the fixture moved and this proof must be re-grounded"
+        );
+        for frame in &turns {
+            match captured_turn_action(frame) {
+                RelayAction::Forward { note } => {
+                    assert!(note.starts_with("turn/start"), "{note:?}")
+                }
+                other => panic!("a verbatim captured turn must forward, got {other:?}"),
+            }
+        }
+    }
+
+    // ANCHOR — the same proof over `turn-start-request.json`, which needs ONE field collapsed
+    // first. Kept alongside the verbatim proof above rather than deleted, because it is a
+    // separate capture and exercises a separate frame.
+    //
+    // **Why one field is rewritten, and why that is not weakening the test.** This fixture
+    // carries `cwd: "/work/proj"` beside `runtimeWorkspaceRoots: ["/work"]` — two DIFFERENT
+    // directories. MEASURED (see [`crate::fingerprint::is_launch_workspace_roots`]): `cwd` on
+    // the wire is the APP-SERVER process's cwd and `runtimeWorkspaceRoots` is the TUI's cwd,
+    // and the capture rig happened to start those two processes in different directories. In
+    // production a single `tmux new-session -c <launch cwd>` pane holds both, so they are the
+    // same directory and no real session can produce this pair. The two sanitized
+    // placeholders are therefore irreconcilable with ANY single launch workspace — not just
+    // under the A10 anchor: there is no `launch_cwd` that equals both `"/work/proj"` and
+    // `"/work"`. Collapsing them to the one directory a real launch has is what makes the
+    // frame representable at all; everything else stays byte-identical.
+    #[test]
+    fn the_captured_turn_start_request_fixture_forwards_once_its_rig_skew_is_collapsed() {
+        const CAPTURED: &str = include_str!("../../../fixtures/codex/turn-start-request.json");
+        let mut frame: serde_json::Value =
+            serde_json::from_str(CAPTURED).expect("the captured turn/start fixture parses");
+
+        let before = frame.clone();
+        let cwd = frame["params"]["cwd"].clone();
+        assert_ne!(
+            frame["params"]["runtimeWorkspaceRoots"],
+            json!([cwd.clone()]),
+            "this fixture is expected to carry the rig skew; if it no longer does, drop the \
+             collapse below and assert it verbatim"
+        );
+        frame["params"]["runtimeWorkspaceRoots"] = json!([cwd]);
+
+        // Exactly ONE field differs from the fixture on disk. Asserted, so a future edit here
+        // cannot quietly normalize anything else into passing.
+        let changed: Vec<&String> = before["params"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, v)| frame["params"].get(*k) != Some(*v))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            changed,
+            ["runtimeWorkspaceRoots"],
+            "only the rig skew is collapsed"
+        );
+
+        match captured_turn_action(&frame.to_string()) {
             RelayAction::Forward { note } => assert!(note.starts_with("turn/start"), "{note:?}"),
-            other => panic!("the verbatim captured turn must forward, got {other:?}"),
+            other => panic!("the captured turn must forward, got {other:?}"),
         }
     }
 

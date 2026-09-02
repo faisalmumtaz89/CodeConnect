@@ -1609,6 +1609,7 @@ pub(crate) mod tests {
             run_dir: None,
             host_reached_gate: false,
             host_identity: None,
+            host_claimed_run_dir: false,
             session_observed: false,
             // A11.3: the ordinary case — the coordinator got past `new-session` and
             // asserted the option, so the premise the no-A escape rests on holds.
@@ -2153,6 +2154,176 @@ pub(crate) mod tests {
             }
             other => panic!("expected cleanup-only refusal, got {other:?}"),
         }
+    }
+
+    /// **An arrival write that FAILS parks; it does not fall through to a verdict
+    /// that destroys** (A11.8, the arrival-write-failure-mid-admission boundary).
+    ///
+    /// `late_host_admission` calls the arrival write first on every path, because
+    /// "ARRIVAL IS THE FIRST DURABLE ACT ON ANY PATH THAT MAY DESTROY" — every
+    /// refusal below it ends in `destroy_owned_session`. So the `Err` arm of
+    /// [`codex_launch::note_host_reached_gate`] is load-bearing in a way the
+    /// `NonceMismatch` arm beside it is not: the sibling test
+    /// `late_host_is_admitted_when_valid_and_refused_after_failure` stages a
+    /// caller-supplied nonce that makes the writer decline to write, which is a
+    /// deliberate NON-write. This stages a write that was ATTEMPTED and FAILED.
+    ///
+    /// **Faulted at the right end of `store_atomic`.** The knob this uses is
+    /// [`codex_launch::fail_next_record_publish`], not the older
+    /// `fail_next_dir_fsync` — the latter fails the directory fsync *after* the
+    /// rename has already published, so the arrival flag DID land and a test built
+    /// on it would pass while proving the opposite of the thing named here. The
+    /// fault is proven to be the one that fired, and to have fired on THIS call, by
+    /// reading its text back out of the park reason.
+    ///
+    /// **The consequence is staged as a counterfactual, not asserted as a type.**
+    /// A second record of identical shape, run without the fault, reaches
+    /// `CleanupOnly` — a verdict whose path tears the uid's session down. Same
+    /// record, same gate, same host; the failed write is the only difference, and it
+    /// is what turns a destroying verdict into a park. Without that contrast the
+    /// test would only be observing that `ParkInert` is returned, which the arm's
+    /// own `return` makes trivially true.
+    #[test]
+    fn an_arrival_write_that_fails_parks_rather_than_destroying() {
+        use crate::codex_launch::{self, LaunchState, SweepAction};
+        use protocol::proc_identity::{boot_identity, monotonic_now_nanos};
+
+        // Both guardians are proven GONE — pids that cannot be alive with these
+        // birth stamps, so `liveness` proves Gone rather than merely Unknown. That
+        // is not incidental: it is what makes the un-faulted gate refuse (and
+        // therefore destroy), and what lets the recovery sweep below prove the
+        // parked record is still ownable.
+        let gone = |pid: i32| ProcessIdentity {
+            pid,
+            birth: protocol::proc_identity::BirthIdentity {
+                start_sec: 7,
+                start_usec: 7,
+            },
+        };
+        let dead_coordinator = gone(0x3FFF_FFF3);
+        let dead_custodian = gone(0x3FFF_FFF4);
+        let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
+        let arm = |uid: &str| {
+            let lock = codex_launch::LaunchLock::acquire(uid).unwrap();
+            codex_launch::create_pending(
+                &lock,
+                codex_launch::NewLaunch {
+                    launch_nonce: "arrivalnonce".into(),
+                    uid: uid.into(),
+                    session_name: "cc-arrival".into(),
+                    coordinator: dead_coordinator,
+                    boot: boot_identity().unwrap(),
+                    deadline_monotonic_nanos: far,
+                    created_ms: 1,
+                },
+            )
+            .unwrap();
+            codex_launch::cas_custodian_with_child(
+                &lock,
+                uid,
+                dead_custodian,
+                dead_custodian.pid,
+                "cn",
+                "ch",
+            )
+            .unwrap();
+            // Released so the gate can take it itself, exactly as a real host's does.
+            drop(lock);
+        };
+
+        let uid = "arrival-write-fault";
+        arm(uid);
+        let bogus_socket = "/tmp/cc-nonexistent-arrival-fault.sock";
+        // The pre-image, captured whole: the strongest statement of "nothing was
+        // published" is that the record is the SAME record, not merely that two
+        // fields still read false.
+        let before = codex_launch::load(uid).unwrap();
+        assert!(!before.host_reached_gate);
+
+        codex_launch::fail_next_record_publish();
+        let verdict = late_host_admission(uid, "arrivalnonce", bogus_socket).unwrap();
+        let HostAdmission::ParkInert { reason } = &verdict else {
+            panic!("a failed arrival write must PARK, not {verdict:?}");
+        };
+        assert!(
+            reason.contains("could not record this host's arrival"),
+            "the park must be attributed to the ARRIVAL WRITE, not to some earlier \
+             pre-arrival failure that would park for a different reason: {reason}"
+        );
+        assert!(
+            reason.contains("BEFORE the rename"),
+            "and the fault that fired must be the pre-publish one — a post-rename \
+             fsync fault would mean the flag landed after all: {reason}"
+        );
+
+        // NOTHING WAS PUBLISHED. The record a later reader sees is the pre-image.
+        let after = codex_launch::load(uid).unwrap();
+        assert_eq!(
+            after, before,
+            "a failed arrival write must leave the record byte-identical"
+        );
+        assert!(
+            !after.host_reached_gate && after.host_identity.is_none(),
+            "and specifically must not have recorded the arrival it failed to write"
+        );
+        assert_eq!(
+            after.state,
+            LaunchState::Pending,
+            "the parked host must not have advanced the launch's state"
+        );
+
+        // THE COUNTERFACTUAL. The same record, the same gate, the same host — and no
+        // fault. It refuses, and the refusal path destroys this uid's session. That
+        // is the verdict the failed write suppressed.
+        let twin = "arrival-write-fault-twin";
+        arm(twin);
+        match late_host_admission(twin, "arrivalnonce", bogus_socket).unwrap() {
+            HostAdmission::CleanupOnly { cleanup, .. } => {
+                // The bogus socket has no server, and round-4 forbids inferring
+                // absence from a socket error, so the destroy reports `Unavailable`.
+                // What matters here is that the destroy was REACHED at all.
+                assert!(matches!(cleanup, CleanupOutcome::Unavailable(_)));
+            }
+            other => panic!(
+                "without the fault this record must reach the DESTROYING verdict, \
+                 or the parked run proves nothing: got {other:?}"
+            ),
+        }
+        assert!(
+            codex_launch::load(twin).unwrap().host_reached_gate,
+            "and the twin's arrival must have landed, which is what let it proceed"
+        );
+
+        // AND THE PARKED RECORD IS STILL OWNABLE. The park released the lock and left
+        // a readable `pending` record whose guardians are both gone, so the backstop
+        // sweep can still fail it and call for a replacement custodian. This is the
+        // half that would be lost if the host had destroyed the session and exited:
+        // the record would be an arrival-less absence no sweep could explain.
+        let actions = codex_launch::recovery_sweep();
+        let mine: Vec<_> = actions
+            .iter()
+            .filter(|a| match a {
+                SweepAction::FailedStalePending { uid: u }
+                | SweepAction::NeedsReplacementCustodian { uid: u }
+                | SweepAction::Skipped { uid: u, .. } => u == uid,
+            })
+            .collect();
+        assert!(
+            mine.iter()
+                .any(|a| matches!(a, SweepAction::FailedStalePending { .. })),
+            "the sweep must still be able to take the parked record: {mine:?}"
+        );
+        assert!(
+            mine.iter()
+                .any(|a| matches!(a, SweepAction::NeedsReplacementCustodian { .. })),
+            "and to call for the custodian that will clean it up: {mine:?}"
+        );
+        assert!(
+            !mine
+                .iter()
+                .any(|a| matches!(a, SweepAction::Skipped { .. })),
+            "and must not find it unreadable or its lock stuck: {mine:?}"
+        );
     }
 
     #[test]

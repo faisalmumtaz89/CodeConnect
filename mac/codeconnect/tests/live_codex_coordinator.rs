@@ -68,6 +68,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// The A7.1 digest of the codex binary under test: the identity a launcher would
+/// have pinned at resolution, which the host re-verifies immediately before each of
+/// its two execs. Computed here rather than written down because these harnesses
+/// build (or copy) their codex at run time.
+fn codex_sha256(path: &Path) -> String {
+    protocol::hash::sha256_file(path).expect("hash the codex binary under test")
+}
+
 /// Per-sandbox sequence, so two live sandboxes can never derive the same run dir.
 /// A counter rather than a timestamp: `SystemTime` is not unique across parallel
 /// threads here — the collision class already fixed in the lifecycle harness.
@@ -390,8 +398,178 @@ fn assert_private_dir(path: &Path) {
     );
 }
 
+/// A fresh `(uid, launch_nonce)` for one sandbox — unique per run, and shaped so
+/// that no two sandboxes can derive the same run dir.
+///
+/// Split out of `LiveSandbox::new` so the collision gate can hand in an identity
+/// instead of taking this one: the two constructors then differ in exactly the
+/// dimension under test and in nothing else.
+fn fresh_identity(seq: u32) -> (String, String) {
+    // A ULID-shaped uid, unique per run.
+    // Exactly 26 Crockford Base32 symbols — a WELL-FORMED ULID.
+    //
+    // Not cosmetic: `resolve_owned_session` validates the uid stamp's shape, so
+    // a 30-character uid makes the coordinator's post-`new-session` resolve
+    // refuse, which surfaces as an *indeterminate* new-session and a failed
+    // launch. (Measured, after an earlier version of this line grew the uid by
+    // four characters.) Hex digits are a subset of Crockford Base32, so the
+    // low 48 bits of the clock plus the sequence keep it both valid and unique.
+    let uid = format!(
+        "01JQXV9K7B{:012X}{seq:04X}",
+        (nanos() as u64) & 0xFFFF_FFFF_FFFF
+    );
+    // Only the nonce's FIRST sixteen characters reach the run-dir name, so the
+    // varying part must lead — and it must include a process-local SEQUENCE, not
+    // just a timestamp. `SystemTime` is not unique across parallel threads on
+    // this platform: the lifecycle harness had two sandboxes derive identical
+    // values and collide on one tmux server. A counter cannot.
+    let nonce = format!(
+        "{seq:04x}{:08x}{:04x}{:016x}",
+        nanos() as u32,
+        std::process::id() as u16,
+        nanos() as u64
+    );
+    (uid, nonce)
+}
+
+/// An identity that is **different** from `(uid, nonce)` — and from every other
+/// `salt` — yet derives the **same** run dir. The many-to-one derivation, used on
+/// purpose.
+///
+/// `choose_run_dir` names `/tmp/cch.<uid's LAST TEN alphanumerics>.<nonce's FIRST
+/// SIXTEEN alphanumerics>`, and it says outright that this mapping is many-to-one.
+/// So a colliding identity needs only to vary the characters the derivation throws
+/// away:
+///
+///   * the uid is 26 alphanumerics and the name keeps indices 16..26, so 14 and 15
+///     are free. They sit in the random half of the ULID, and hex digits are a
+///     subset of Crockford Base32, so writing hex there keeps every property the
+///     uid is checked for;
+///   * the nonce is 32 hex characters and the name keeps the first sixteen, so the
+///     last two are free.
+///
+/// Each pair gets one character that is unconditionally **different from the
+/// original's** — so a contender can never accidentally reproduce the launch it is
+/// colliding with — and one that carries `salt`, which is what keeps two
+/// contenders on the same directory distinct from each other.
+///
+/// None of that is trusted on the reasoning: `colliding_with` asserts the derived
+/// paths are equal and the identities are not, so a change to either derivation
+/// fails the premise rather than quietly producing launches that never contend.
+fn collide_on_the_run_dir(uid: &str, nonce: &str, salt: u8) -> (String, String) {
+    assert!(
+        salt < 16,
+        "the salt is written as one hex digit, got {salt}"
+    );
+    let hex = std::char::from_digit(salt as u32, 16).expect("salt < 16 is a hex digit");
+    /// A character guaranteed to differ from `c`, in the same (hex, and therefore
+    /// Crockford) alphabet.
+    fn other_than(c: char) -> char {
+        if c == 'A' {
+            'B'
+        } else {
+            'A'
+        }
+    }
+    let mut u: Vec<char> = uid.chars().collect();
+    assert_eq!(
+        u.len(),
+        protocol::uid::UID_LEN,
+        "a colliding uid can only be derived from a well-formed ULID"
+    );
+    u[14] = other_than(u[14]);
+    u[15] = hex.to_ascii_uppercase();
+    let mut n: Vec<char> = nonce.chars().collect();
+    assert!(
+        n.len() >= 18,
+        "a colliding nonce needs two characters past the sixteen the name keeps, got {}",
+        n.len()
+    );
+    let last = n.len() - 1;
+    n[last - 1] = other_than(n[last - 1].to_ascii_uppercase()).to_ascii_lowercase();
+    n[last] = hex;
+    (u.into_iter().collect(), n.into_iter().collect())
+}
+
+/// The owner marker a run dir carries: `(uid, launch_nonce)`, one per line.
+///
+/// `None` while the directory or its marker is not there — which for a published
+/// run dir is only the window before the host's atomic publish, since A11.4 puts
+/// the marker inside the directory *before* the `rename` that names it.
+fn marker_owner(run_dir: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(run_dir.join("owner")).ok()?;
+    let mut lines = text.lines();
+    let uid = lines.next()?.to_string();
+    let nonce = lines.next()?.to_string();
+    Some((uid, nonce))
+}
+
+/// `(device, inode)` — a directory's IDENTITY, which its name is not.
+///
+/// The whole point of the collision gate is that one name can be derived by two
+/// launches, so "the directory is still there" proves nothing on its own: a loser
+/// that removed the winner's directory and published its own would leave a
+/// perfectly good directory at that path. Only the inode says it is the *same*
+/// one.
+fn dir_identity(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
+    (meta.dev(), meta.ino())
+}
+
 impl LiveSandbox {
     fn new(tag: &str) -> LiveSandbox {
+        LiveSandbox::with_identity(tag, None)
+    }
+
+    /// A fully isolated sandbox that derives the **same run dir** as `other` — the
+    /// one contended resource, and nothing else.
+    ///
+    /// Its `CODECONNECT_HOME`, `CODEX_HOME`, `TMUX_TMPDIR` and base directory are
+    /// its own, exactly as any other sandbox's are, so the two launches share no
+    /// launch record, no tmux server and no credential. What they share is one
+    /// derived path, which is precisely what A11.7 asks two real hosts to race
+    /// for.
+    ///
+    /// `salt` distinguishes CONTENDERS: a name can be derived by any number of
+    /// launches, and this gate uses two of them against one directory, so the
+    /// second contender must not be the first one over again.
+    fn colliding_with(tag: &str, other: &LiveSandbox, salt: u8) -> LiveSandbox {
+        let sb = LiveSandbox::with_identity(
+            tag,
+            Some(collide_on_the_run_dir(&other.uid, &other.nonce, salt)),
+        );
+        // The premise, CHECKED rather than assumed — see `collide_on_the_run_dir`.
+        assert_ne!(
+            sb.uid, other.uid,
+            "two colliding launches must still be two DIFFERENT launches"
+        );
+        assert_ne!(
+            sb.nonce, other.nonce,
+            "two colliding launches must still be two DIFFERENT launches"
+        );
+        assert_eq!(
+            sb.run_dir,
+            other.run_dir,
+            "the whole gate rests on both launches deriving ONE run-dir name; they \
+             derived {} and {}",
+            sb.run_dir.display(),
+            other.run_dir.display()
+        );
+        assert_ne!(sb.home, other.home, "the two homes must be separate");
+        assert_ne!(
+            sb.tmux_tmpdir, other.tmux_tmpdir,
+            "the two tmux servers must be separate, or the race is about a session \
+             name as well as a directory"
+        );
+        assert_ne!(
+            sb.codex_home, other.codex_home,
+            "the two CODEX_HOMEs must be separate"
+        );
+        sb
+    }
+
+    fn with_identity(tag: &str, identity: Option<(String, String)>) -> LiveSandbox {
         // **A unique, unguessable, atomically created private base.** The old
         // `/tmp/ccli.<pid>.<tag>.<seq>` was fully predictable from a running
         // process's pid, and `create_dir_all` would have happily adopted a
@@ -466,31 +644,8 @@ impl LiveSandbox {
             f.write_all(&credential).expect("write the credential");
         }
 
-        // A ULID-shaped uid, unique per run.
-        // Exactly 26 Crockford Base32 symbols — a WELL-FORMED ULID.
-        //
-        // Not cosmetic: `resolve_owned_session` validates the uid stamp's shape, so
-        // a 30-character uid makes the coordinator's post-`new-session` resolve
-        // refuse, which surfaces as an *indeterminate* new-session and a failed
-        // launch. (Measured, after an earlier version of this line grew the uid by
-        // four characters.) Hex digits are a subset of Crockford Base32, so the
-        // low 48 bits of the clock plus the sequence keep it both valid and unique.
-        let uid = format!(
-            "01JQXV9K7B{:012X}{seq:04X}",
-            (nanos() as u64) & 0xFFFF_FFFF_FFFF
-        );
+        let (uid, nonce) = identity.unwrap_or_else(|| fresh_identity(seq));
         assert_eq!(uid.len(), protocol::uid::UID_LEN, "the uid must be a ULID");
-        // Only the nonce's FIRST sixteen characters reach the run-dir name, so the
-        // varying part must lead — and it must include a process-local SEQUENCE, not
-        // just a timestamp. `SystemTime` is not unique across parallel threads on
-        // this platform: the lifecycle harness had two sandboxes derive identical
-        // values and collide on one tmux server. A counter cannot.
-        let nonce = format!(
-            "{seq:04x}{:08x}{:04x}{:016x}",
-            nanos() as u32,
-            std::process::id() as u16,
-            nanos() as u64
-        );
         // The path `codex_coordinator::choose_run_dir` will derive: the uid's LAST
         // ten alphanumerics (a ULID's random half) and the nonce's first sixteen.
         // Restated here rather than imported (an integration test links the binary,
@@ -546,6 +701,10 @@ impl LiveSandbox {
             .args(["--tmux-socket", protocol::TMUX_SOCKET_NAME])
             .args(["--deadline-ms", "60000"])
             .args(["--codex", codex.to_str().expect("codex path is utf-8")])
+            // A7.1: the identity the launcher pins at resolution and the host
+            // re-verifies before each exec. Required — a coordinator with no
+            // digest refuses rather than handing the host a bare pathname.
+            .args(["--codex-sha256", &codex_sha256(codex)])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
             // The host applies no policy default; the coordinator carries these
             // four dimensions verbatim into the pane command.
@@ -579,6 +738,46 @@ impl LiveSandbox {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn the real coordinator")
+    }
+
+    /// Hold this sandbox's tmux server open with a session no launch owns.
+    ///
+    /// **A fidelity fix, not a convenience.** A tmux server exits when its last
+    /// session goes, and each sandbox here runs a server of its own — so a launch
+    /// whose pane command exits immediately takes the whole server with it, and its
+    /// coordinator's post-`new-session` bookkeeping then fails with "the tmux
+    /// server … is gone or replaced" (measured, on the first run of the collision
+    /// gate below). Production cannot produce that: there is ONE `codeconnect`
+    /// server per user and a collision means two launches at once, so the loser's
+    /// server always still holds at least the winner's session.
+    ///
+    /// This session restores that property without restoring what the split was
+    /// for — the two servers stay separate, so the shared `cc-live` session name
+    /// contends for nothing. It carries no uid stamp, so no census, resolve or
+    /// `codeconnect ls` can mistake it for a launch.
+    ///
+    /// No `-f /dev/null`: the server this starts must be the one a coordinator
+    /// would have started, user config and all.
+    fn hold_the_server_open(&self) {
+        let status = self
+            .tmux_cmd()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "cc-keepalive",
+                "--",
+                "/bin/sleep",
+                "86400",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run tmux new-session for the keepalive");
+        assert!(
+            status.success(),
+            "could not hold this sandbox's tmux server open ({status})"
+        );
     }
 
     fn record_text(&self) -> Option<String> {
@@ -632,6 +831,52 @@ impl LiveSandbox {
 }
 
 impl LiveSandbox {
+    /// The launch record as JSON, or `None` while it does not exist / does not parse.
+    fn record_json(&self) -> Option<serde_json::Value> {
+        serde_json::from_str(&self.record_text()?).ok()
+    }
+
+    /// The sanitized reason a **terminally failed** launch carries. `None` for
+    /// every other state, so a caller cannot mistake "still pending" for "failed
+    /// with no reason".
+    fn failure_reason(&self) -> Option<String> {
+        self.record_json()?
+            .get("state")?
+            .get("Failed")?
+            .get("reason")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// `NotRequired` / `Pending` / `Complete` — whether disposable-runtime cleanup
+    /// is still owed on this launch.
+    fn cleanup_state(&self) -> Option<String> {
+        self.record_json()?
+            .get("cleanup")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Whether a real `internal-codex-host` reached this launch's D7 gate, and
+    /// which process it was.
+    ///
+    /// **Not the lease.** `host_lease` answers "who holds this launch right now"
+    /// and `to_failed` drops it, so a failed launch's lease is always `null`
+    /// (measured, on the first run of the collision gate). `host_reached_gate` and
+    /// `host_identity` are written on ARRIVAL, before the gate renders a verdict,
+    /// and are deliberately never cleared — they are the durable record that a
+    /// pane really ran a host, which is the difference between a launch that
+    /// contended and a pane that never started.
+    fn host_arrived(&self) -> Option<i32> {
+        let record = self.record_json()?;
+        record
+            .get("host_reached_gate")?
+            .as_bool()?
+            .then(|| record.get("host_identity")?.get("pid")?.as_i64())
+            .flatten()
+            .map(|pid| pid as i32)
+    }
+
     /// A recorded `(pid, birth)` identity from the launch record.
     fn recorded_identity(&self, field: &str) -> Option<(i32, i64, i64)> {
         let v: serde_json::Value = serde_json::from_str(&self.record_text()?).ok()?;
@@ -1610,4 +1855,545 @@ fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
     let _ = coord.wait();
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+// ============================= THE COLLISION GATE =============================
+//
+// A11.7: "Marker tests build fixtures by hand rather than two real hosts racing
+// for one derived name. Closes when: a live two-launch collision harness exists."
+//
+// Every marker-isolation test before this one staged its competitor inside a
+// single process — `codex_host.rs`'s teardown test calls `write_owner_marker`
+// with a literal foreign uid; `codex_coordinator.rs`'s
+// `only_a_private_directory_this_launch_claimed_counts_as_a_run_dir` hand-writes
+// a `good` and a `foreign` marker; `bringup_itself_refuses_a_run_dir_another_
+// launch_claimed` gets closest and still hand-writes the foreign marker and
+// drives a scripted `CoordinatorDeps`. Nothing anywhere ran two hosts.
+//
+// This harness had in fact spent its whole life ENGINEERING THE COLLISION AWAY:
+// `SANDBOX_SEQ` exists "so two live sandboxes can never derive the same run dir",
+// and `codex_lifecycle_integration.rs` records the incident that put it there.
+// The gate below turns that around and derives the collision on purpose.
+
+/// Everything a launch that lost a derived run dir must show, from the moment it
+/// terminalizes until its last guardian is gone. Returns the recorded reason.
+///
+/// Shared by the two contenders in the gate below — the one that raced the winner
+/// simultaneously and the one that arrived after it was serving — because the
+/// property is the same for both: a launch refused a directory it did not create
+/// dies without a session, without a supervisor, and without leaving cleanup owed.
+///
+/// **Two failure sentences, because there are genuinely two orderings.** A refused
+/// host dies within milliseconds of its pane's `execve`, and its session dies with
+/// it, while its coordinator is still finishing the bookkeeping that follows
+/// `new-session` (resolve the session, clear `remain-on-exit`, record that it
+/// held). Whether the coordinator notices the loss during that bookkeeping or
+/// later in the bring-up wait is a race between two processes on one machine, and
+/// the answer is a property of the machine rather than of the code under test.
+///
+/// **Both were measured.** The simultaneous loser came out as the first shape in
+/// every run whose reason was captured — its coordinator is doing the same
+/// bookkeeping at the same moment as the winner's, so the refusal lands squarely
+/// inside that window. The late contender, whose coordinator has nobody to keep
+/// pace with, has been seen both ways, including the second shape:
+///
+/// ```text
+/// wrapper bring-up failed: the pane's tmux session is gone and the wrapper never
+/// bound its broker sockets (run dir created but empty) — the host died before it
+/// was up
+/// ```
+///
+/// What is invariant either way is the class: a launch whose own pane died before
+/// it could be proven up. Enumerated rather than waved at, so a THIRD shape — a
+/// codex that would not start, a charter the host rejected — fails this gate
+/// loudly instead of passing as "well, it failed".
+fn assert_refused_without_adopting(sb: &LiveSandbox, who: &str, coord: &mut Child) -> String {
+    const REFUSAL_SHAPES: [&str; 2] = [
+        // The post-`new-session` bookkeeping found the session already gone —
+        // every captured run of the simultaneous pair.
+        "the created tmux session could not be made safe",
+        // The bring-up wait saw the pane gone — observed on the late contender.
+        "the host died before it was up",
+    ];
+    let run_dir = sb.run_dir.clone();
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.failure_reason().is_some()),
+        "{who} never terminalized. record: {:?}",
+        sb.record_text()
+    );
+    let reason = sb.failure_reason().expect("the reason just observed");
+    let host_pid = sb.host_arrived().unwrap_or_else(|| {
+        panic!(
+            "no host ever reached {who}'s gate, so it never actually contended for {}. \
+             record: {:?}",
+            run_dir.display(),
+            sb.record_text()
+        )
+    });
+    assert!(
+        REFUSAL_SHAPES.iter().any(|shape| reason.contains(shape)),
+        "{who} failed in a shape this gate does not recognise, so it is not evidence \
+         that its host was refused the directory: {reason:?}"
+    );
+    // ---- the STAGE, not merely a death before readiness ---------------------
+    //
+    // The assertions around this one all pass under the reviewer's counterexample
+    // (finding 11): a host that treats `EEXIST` as SUCCESS, ADOPTS the winner's
+    // directory, and then dies on an already-existing log satisfies the shape
+    // check, the inode check, the marker check, the no-`Ready` check and the
+    // cleanup check — every one of them, measured. What it CANNOT do is get past
+    // the run-dir claim without recording that it did. This bit is written by the
+    // host in `orchestrate`, on the one line after
+    // `create_run_dir_atomically` returns Ok, so a loser whose record says the
+    // claim was made was NOT refused at the fence — it adopted, and this gate would
+    // otherwise be green for exactly the wrong reason.
+    //
+    // Fence-agnostic on purpose. The bit says "past the claim", not "refused by the
+    // staging `mkdir`" or "refused by the `RENAME_EXCL` publish", so it holds the
+    // same for the simultaneous loser (which meets either fence — see the phase-6
+    // note) and the late contender (which always meets the publish). A message
+    // match would have to enumerate both sentences and would still say nothing about
+    // the adoption case, whose sentence is a LATER stage's, not the claim's.
+    let claimed = sb
+        .record_json()
+        .and_then(|r| r.get("host_claimed_run_dir").and_then(|b| b.as_bool()));
+    assert_eq!(
+        claimed,
+        Some(false),
+        "{who}'s host got PAST the run-dir claim ({}), so whatever killed it was a \
+         later stage and this gate is green for the wrong reason. record: {:?}",
+        run_dir.display(),
+        sb.record_text()
+    );
+    assert!(
+        processes_referencing(&format!("--run-dir {}", run_dir.display()))
+            .iter()
+            .all(|(pid, _)| *pid != host_pid),
+        "{who}'s host (pid {host_pid}) is still running against {}",
+        run_dir.display()
+    );
+    // Not "is not Ready now" — the record holds one state, and `Ready` is durable
+    // once committed, so its absence from the whole document is the strong form.
+    let record = sb.record_text().unwrap_or_default();
+    assert!(
+        !record.contains("\"Ready\""),
+        "{who} committed ready — two launches cannot both own {}: {record}",
+        run_dir.display()
+    );
+    assert!(
+        !sb.has_session(),
+        "{who} left a session behind on its own tmux server"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || matches!(
+            coord.try_wait(),
+            Ok(Some(_))
+        )),
+        "{who}'s coordinator is still running; a failed launch has no supervisor to \
+         become"
+    );
+    let _ = coord.wait();
+
+    // The half of "no contamination" that needs this launch's whole life to be
+    // over: its custodian is armed with its uid and the run-dir name its own record
+    // wrote down, and that name resolves to somebody else's directory. It must
+    // settle without deleting it.
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.cleanup_state().as_deref()
+            == Some("Complete")),
+        "{who}'s cleanup never settled, so this gate cannot say what its custodian did \
+         with {}. record: {:?}",
+        run_dir.display(),
+        sb.record_text()
+    );
+    let custodian_gone = wait_until(Duration::from_secs(30), || {
+        match sb.recorded_identity("custodian") {
+            None => true,
+            Some((pid, sec, usec)) => {
+                let id = protocol::proc_identity::ProcessIdentity {
+                    pid,
+                    birth: protocol::proc_identity::BirthIdentity {
+                        start_sec: sec,
+                        start_usec: usec,
+                    },
+                };
+                protocol::proc_identity::liveness(&id) != protocol::proc_identity::Liveness::Alive
+            }
+        }
+    });
+    assert!(
+        custodian_gone,
+        "{who}'s custodian is still alive after its cleanup reported complete, so any \
+         no-contamination assertion would be premature"
+    );
+    reason
+}
+
+/// The winning launch's directory, unchanged in every dimension a contender could
+/// have disturbed it in.
+fn assert_run_dir_untouched(winner: &LiveSandbox, identity: (u64, u64), marker: &[u8]) {
+    let run_dir = &winner.run_dir;
+    let staging = PathBuf::from(format!("{}.tmp", run_dir.display()));
+    assert_eq!(
+        dir_identity(run_dir),
+        identity,
+        "{} is a DIFFERENT directory than the one the winner published — a contender \
+         replaced it rather than being refused it",
+        run_dir.display()
+    );
+    assert_eq!(
+        std::fs::read(run_dir.join("owner")).expect("re-read the owner marker"),
+        marker,
+        "the winner's owner marker was rewritten while a contender was being refused"
+    );
+    assert_private_dir(run_dir);
+    assert!(
+        !staging.exists(),
+        "a refused launch left its staging directory behind: {}",
+        staging.display()
+    );
+    assert!(
+        winner.broker_legs_bound(),
+        "the winner's broker legs are gone from {}",
+        run_dir.display()
+    );
+    assert!(
+        winner.has_session(),
+        "the winner's session did not survive a contender"
+    );
+    assert_eq!(
+        winner.record_field("state").as_deref(),
+        Some("Ready"),
+        "the winner's record no longer says ready: {:?}",
+        winner.record_text()
+    );
+}
+
+/// **A11.7: two real launches race for ONE derived run dir; exactly one wins,
+/// and the loser cannot touch what it lost.**
+///
+/// # Why a collision is possible at all
+///
+/// `codex_coordinator::choose_run_dir` names `/tmp/cch.<uid's LAST TEN
+/// alphanumerics>.<nonce's FIRST SIXTEEN>`, and its doc comment says outright
+/// that the mapping is **many-to-one**: "Uniqueness is therefore NOT a property
+/// of this function, and no caller may treat the name as an identity." That is
+/// the whole reason the owner marker exists, and it is the "one derived name"
+/// A11.7 means. So this test does not simulate a collision — it *derives* one,
+/// with [`collide_on_the_run_dir`], and then asserts the two paths are equal so
+/// the premise is checked rather than assumed.
+///
+/// # What is contended, and what deliberately is not
+///
+/// **Only the run dir.** Every sandbox here — the two that race, and the third
+/// that arrives late — has its own `CODECONNECT_HOME` (so its own launch record),
+/// its own `CODEX_HOME`, and its own `TMUX_TMPDIR` (so its own tmux server, which
+/// is why the shared `cc-live` session name contends for nothing). Piling
+/// collisions together would prove that *something* went wrong; isolating the
+/// variable is what makes the failure attributable to the directory.
+///
+/// # What is asserted, symmetrically
+///
+/// The race is genuinely non-deterministic, so nothing here names a winner in
+/// advance: the marker at the shared path is READ, and whichever launch it names
+/// is then held to the full property set. Both degenerate outcomes are loud
+/// failures — "both won" fails at the loser's record never reaching `Ready`, and
+/// "both lost" fails at the winner's. Measured over 20 clean runs with no
+/// failures; of the 19 that recorded which side won it was A eleven times and B
+/// eight, so the barrier really is releasing two symmetric launches and this gate
+/// really cannot be written around a fixed winner.
+///
+///   1. **Exactly one claim.** A marker exists at the shared name, it names one
+///      of the two launches, and its `(uid, nonce)` pair is internally consistent
+///      with that launch — not one launch's uid beside the other's nonce.
+///   2. **The winner really launched.** Both broker legs bound under the shared
+///      directory and the record committed `Ready`.
+///   3. **The loser really contended, and was refused.** Its record says
+///      `host_reached_gate`, and names the host process that arrived — the
+///      difference between a launch that contended and a pane that never started.
+///      It terminalized `Failed`, never `Ready`, with no session and no host left.
+///   4. **No cross-contamination, across the loser's whole life including its
+///      teardown.** The winner's directory keeps its **inode** (a name is not an
+///      identity: a loser that removed the winner's dir and published its own
+///      would leave a perfectly good directory at that path), its marker bytes,
+///      its 0700 mode, its bound legs and its live session — and the loser's
+///      custodian, which is armed with the loser's uid and the *recorded* run-dir
+///      name, settles its cleanup without deleting a directory whose marker names
+///      somebody else. That last clause is the A11.5 fd-bound-delete property
+///      observed under a real race instead of a hand-written marker.
+///   5. **And again, against a launch that arrives LATE.** See the third
+///      contender in phase 6 and the note on the two fences beside it: the
+///      simultaneous pair meets the staging `mkdir`, a later launch meets the
+///      `RENAME_EXCL` publish, and both are the same derived name.
+///
+/// # What this gate cannot observe, stated plainly
+///
+/// **The losing host's own refusal sentence.** It goes to stderr, which in
+/// production is the pane's pty, and the pane dies with the command that refused
+/// (the coordinator asserts `remain-on-exit off` and records that it held). There
+/// is no file to read it back from and no window in which to capture it.
+///
+/// It was read once, with a temporary trace added to `run_host`, and it is quoted
+/// here because it is the fact this gate is otherwise arguing for by signature:
+///
+/// ```text
+/// creating the staging run dir /tmp/cch.D042400000.000043d04a106be9.tmp
+/// exclusively — it must NOT already exist: File exists (os error 17)
+/// ```
+///
+/// The same sentence is asserted against a real host process in
+/// `codex_host_fatal.rs::an_existing_run_dir_is_refused`, which is a hand-built
+/// fixture and openly is one. What A11.7 asked for and what this adds is that the
+/// *collision* is real; what stands in for the text here is the refusal's complete
+/// filesystem signature — the contender published nothing, left no
+/// `<run_dir>.tmp` residue, and the winner's inode never changed.
+///
+/// **Which line of the coordinator notices.** The refusal lands within
+/// milliseconds of the pane's `execve`, inside the window in which that
+/// coordinator is still resolving its own session and clearing `remain-on-exit`.
+/// Both orderings occur and both were measured; they are enumerated in
+/// `assert_refused_without_adopting`, and a third shape fails the gate.
+///
+/// **The coordinator's own marker check.** `codex_coordinator::run_dir_is_ours`
+/// refuses to count a foreign directory's sockets as this launch's readiness, and
+/// a live collision does NOT reach it: measured by deleting the marker clause
+/// outright, this gate stayed green, because a refused host takes its pane and its
+/// session with it and the launch terminalizes on that loss long before the
+/// bring-up loop could misread anything. Reaching it needs a host that dies
+/// WITHOUT taking the session down, which is a staged interleaving, not a race —
+/// so `bringup_itself_refuses_a_run_dir_another_launch_claimed` stays the cover
+/// for that half, and this gate covers the half it cannot.
+///
+/// Measured while writing this, and left as observations rather than changes:
+///
+///   * the loser's bring-up reason renders the shared directory as "run dir
+///     created but empty", because `BringupObservation::run_dir_present` is a
+///     bool and the coordinator's marker verdict is not carried into the
+///     sentence. It is misleading in exactly this case — the directory is neither
+///     this launch's nor empty — so the assertions below pin only the parts that
+///     are true of this run;
+///   * a terminalized record's `host_lease` is always `null`, because `to_failed`
+///     drops it. Arrival evidence has to come from `host_reached_gate` /
+///     `host_identity`, which are written before the verdict and never cleared;
+///   * `renamex_np` with `RENAME_EXCL` and a plain `rename(2)` are
+///     indistinguishable here, because A11.4 puts the marker INSIDE the directory
+///     before publishing it, so the target is never empty and a plain rename gets
+///     `ENOTEMPTY` (measured directly: onto an empty directory it succeeds and
+///     replaces, onto a non-empty one it fails). `RENAME_EXCL`'s distinguishing
+///     power is against an empty squatted name, which a collision cannot produce.
+///     What this gate does bind is the publish's EXCLUSIVITY: made non-exclusive
+///     (remove-then-rename), the late contender adopted the winner's live
+///     directory and committed `Ready` on it, and phase 6 went red.
+#[test]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+fn two_real_launches_racing_for_one_derived_run_dir_leave_exactly_one_winner() {
+    let Some(codex) = live_gate() else { return };
+    let a = LiveSandbox::new("racea");
+    let b = LiveSandbox::colliding_with("raceb", &a, 1);
+    let run_dir = a.run_dir.clone();
+    let staging = PathBuf::from(format!("{}.tmp", run_dir.display()));
+    let tag = a.tag().to_string();
+    println!(
+        "COLLISION PREMISE — launch A (uid {}, nonce {}) and launch B (uid {}, nonce {}) \
+         both derive {}",
+        a.uid,
+        a.nonce,
+        b.uid,
+        b.nonce,
+        run_dir.display()
+    );
+    assert!(
+        !run_dir.exists() && !staging.exists(),
+        "the derived name must be unclaimed before either launch starts: {}",
+        run_dir.display()
+    );
+
+    // Both servers up and held open BEFORE either launch — see
+    // `hold_the_server_open` for why a per-sandbox server that dies with its only
+    // session is a harness artifact production cannot produce.
+    a.hold_the_server_open();
+    b.hold_the_server_open();
+
+    // **Spawned simultaneously, not one-then-the-other.** A barrier releases both
+    // `Command::spawn` calls at once, so the only thing deciding the winner is the
+    // work each launch does afterwards — its own record writes, its own pane.
+    // Which one gets there first is genuinely indeterminate, and nothing below
+    // depends on the answer.
+    let gun = std::sync::Barrier::new(2);
+    let (coord_a, coord_b) = std::thread::scope(|s| {
+        let left = s.spawn(|| {
+            gun.wait();
+            a.spawn_coordinator(&codex)
+        });
+        let right = s.spawn(|| {
+            gun.wait();
+            b.spawn_coordinator(&codex)
+        });
+        (
+            left.join().expect("spawn launch A"),
+            right.join().expect("spawn launch B"),
+        )
+    });
+
+    // --- 1. The name is claimed exactly once, and the marker says by whom -----
+    //
+    // The marker is inside the directory before the `rename` that publishes it
+    // (A11.4), so a directory observed at the final name always has one — which is
+    // why "the dir exists" and "who owns it" are one observation here, not two.
+    let claimed = wait_until(Duration::from_secs(90), || marker_owner(&run_dir).is_some());
+    assert!(
+        claimed,
+        "neither launch published a run dir at {} — a collision gate in which nobody \
+         wins is a failure, not a pass.\nA record: {:?}\nB record: {:?}",
+        run_dir.display(),
+        a.record_text(),
+        b.record_text()
+    );
+    let (owner_uid, owner_nonce) = marker_owner(&run_dir).expect("the marker just observed");
+    let (winner, loser, winner_coord, mut loser_coord) = if owner_uid == a.uid {
+        (&a, &b, coord_a, coord_b)
+    } else if owner_uid == b.uid {
+        (&b, &a, coord_b, coord_a)
+    } else {
+        panic!(
+            "{} is owned by uid {owner_uid:?}, which is neither launch ({} / {})",
+            run_dir.display(),
+            a.uid,
+            b.uid
+        )
+    };
+    assert_eq!(
+        owner_nonce, winner.nonce,
+        "the marker pairs uid {owner_uid} with nonce {owner_nonce}, which is not that \
+         launch's nonce — a marker that mixes two launches identifies neither"
+    );
+    let claimed_identity = dir_identity(&run_dir);
+    let claimed_marker =
+        std::fs::read(run_dir.join("owner")).expect("read the marker that was just observed");
+    // Which SIDE won is printed, not asserted: the gate must never depend on it,
+    // and a run of these that always names the same side is worth seeing.
+    println!(
+        "CLAIMED — launch {} (uid {}) won {} (inode {:?}); launch {} (uid {}) must now \
+         be refused",
+        if owner_uid == a.uid { "A" } else { "B" },
+        winner.uid,
+        run_dir.display(),
+        claimed_identity,
+        if owner_uid == a.uid { "B" } else { "A" },
+        loser.uid
+    );
+
+    // --- 2. The winner really launched ---------------------------------------
+    assert!(
+        wait_until(Duration::from_secs(60), || winner.broker_legs_bound()),
+        "the winning launch never bound its broker legs under {}. record: {:?}\n\
+         broker.log:\n{}",
+        run_dir.display(),
+        winner.record_text(),
+        read_file(&run_dir.join("broker.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || winner
+            .record_field("state")
+            .as_deref()
+            == Some("Ready")),
+        "the winning launch never committed ready. record: {:?}",
+        winner.record_text()
+    );
+    println!("WINNER READY — uid {} holds a live session", winner.uid);
+
+    // --- 3+4. The loser really contended, was refused, and settled ----------
+    let reason = assert_refused_without_adopting(loser, "the losing launch", &mut loser_coord);
+    println!("LOSER REFUSED — uid {} failed: {reason}", loser.uid);
+
+    // --- 5. No cross-contamination -------------------------------------------
+    assert_run_dir_untouched(winner, claimed_identity, &claimed_marker);
+    let live = processes_referencing(&tag);
+    assert!(
+        !live.is_empty(),
+        "nothing references {} any more, so the 'winner survived' assertions above \
+         are about a session that is gone",
+        run_dir.display()
+    );
+    println!(
+        "NO CONTAMINATION — {} is still inode {:?}, marker unchanged, legs bound, \
+         session live with {} process(es) attached",
+        run_dir.display(),
+        claimed_identity,
+        live.len()
+    );
+
+    // --- 6. A LATE contender, against the OTHER fence -------------------------
+    //
+    // **Why a third launch, when two already raced.** Measured (with a temporary
+    // trace in `run_host`, since the pane's stderr is unreadable): the simultaneous
+    // loser MOSTLY meets `create_run_dir_atomically`'s FIRST fence — the exclusive
+    // `mkdir` of `<run_dir>.tmp`, "creating the staging run dir … exclusively — it
+    // must NOT already exist: File exists (os error 17)" — because two barrier-
+    // released coordinators usually stay close enough that neither has published
+    // when the loser stages. But NOT always: over 20 clean races the loser hit the
+    // staging fence 15 times and the publish `renamex_np(RENAME_EXCL)` the other 5
+    // — the winner had published in the interval, so the loser's staging name was
+    // free and it met the publish instead. An earlier version of this note claimed
+    // the simultaneous loser is refused at the staging fence in "every" run; that
+    // was over-stated, and the correction is why the stage assertion below keys on
+    // a record bit rather than on which sentence the host printed.
+    //
+    // A third launch is still worth having because it pins the publish fence
+    // DETERMINISTICALLY. Two launches SECONDS apart can derive the same name just
+    // as easily as two at once, and that one always arrives at a directory already
+    // published and serving: its staging name is free, so it stages, writes its
+    // marker, and meets the publish fence — 20/20 in the same measurement. Both
+    // fences belong to A11.7's "one derived name", and a gate that leaned on the
+    // simultaneous pair alone would leave the exclusivity of the publish — the
+    // thing `RENAME_EXCL` is there for — exercised only by chance, not on every run.
+    //
+    // The `host_claimed_run_dir` assertion in `assert_refused_without_adopting` is
+    // FENCE-AGNOSTIC across all of this: it asserts the host did not get past the
+    // claim, which is equally true whether the staging `mkdir` or the publish
+    // `renamex_np` did the refusing, so both contenders are held to it without the
+    // gate having to know or predict which fence each met.
+    let late = LiveSandbox::colliding_with("racec", &a, 2);
+    assert_ne!(
+        late.uid, loser.uid,
+        "the late contender must be a third launch, not the loser again"
+    );
+    assert_ne!(late.uid, winner.uid, "and not the winner again");
+    assert_eq!(
+        late.run_dir, run_dir,
+        "the late contender must derive the SAME name"
+    );
+    late.hold_the_server_open();
+    let mut late_coord = late.spawn_coordinator(&codex);
+    let late_reason = assert_refused_without_adopting(&late, "the late contender", &mut late_coord);
+    println!(
+        "LATE CONTENDER REFUSED — uid {} failed: {late_reason}",
+        late.uid
+    );
+    assert_run_dir_untouched(winner, claimed_identity, &claimed_marker);
+    assert!(
+        !processes_referencing(&tag).is_empty(),
+        "the winner's session is gone after the late contender ran"
+    );
+    println!(
+        "STILL NO CONTAMINATION — {} survived a second contender intact",
+        run_dir.display()
+    );
+
+    // --- 6. And the winner tears down normally afterwards ---------------------
+    let mut winner_coord = winner_coord;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &winner_coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = winner_coord.wait();
+    assert_torn_down_clean(winner, &tag);
+    println!(
+        "A11.7 PASS — two real launches raced for {}; uid {} won it and uid {} was \
+         refused without adopting, mutating or deleting it",
+        run_dir.display(),
+        winner.uid,
+        loser.uid
+    );
 }

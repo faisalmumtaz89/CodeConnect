@@ -190,11 +190,64 @@ const ATTACH_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// takes ~0.9 s and can take longer, and borrowing it here would make a switch that will
 /// never be adopted take a minute to say so.
 ///
-/// Five tries at 250 ms is ~1.25 s — three orders of magnitude over the round trip it is
-/// waiting for, and short enough that a switch which is never adopted is reported while the
-/// operator is still looking at the screen.
+/// Five *retries* at 250 ms is ~1.25 s of waiting — the constant counts the asks that follow
+/// the initial `thread/resume`, not the asks in total, so adoption spends up to six requests
+/// across five delays. That is three orders of magnitude over the round trip it is waiting
+/// for, and short enough that a switch which is never adopted is reported while the operator
+/// is still looking at the screen.
 const ADOPTION_RETRY_DELAY: Duration = Duration::from_millis(250);
 const ADOPTION_RETRIES: u32 = 5;
+
+/// **How many unpaid pre-subscription recoveries a link carries at once** (A16.3c).
+///
+/// # What produces one, and why the count is not always one
+///
+/// Exactly one thing does: [`apply_held_candidate`] retiring a thread that still owes a
+/// turn debt — a `/new` switch away from a thread this link attached to MID-TURN before
+/// its follow-up resume could land. So the number owed is the number of such switches
+/// that have happened without an intervening payment, and payments are made one per pass
+/// through `Attach::Attached`.
+///
+/// One switch is therefore not the ceiling, and the case that proves it is the one this
+/// bound exists for: the link owes a recovery on A, adopts B mid-turn, and the operator's
+/// next `/new` is applied on the very pass that adopted B — before the loop has reached
+/// `Attached` even once, so before anything could have been paid. Two debts, both real,
+/// both reachable from nowhere else. A single slot carries the newer and drops the older.
+///
+/// # Why there is a cap at all
+///
+/// Each carried debt costs the next connection one `thread/resume` about a thread nobody
+/// is on, and the carry survives reconnects — so an uncapped queue would let a session
+/// that switches faster than it recovers accumulate asks a later connection has to work
+/// through before it does anything for the thread the user IS on.
+///
+/// # Why THIS number
+///
+/// Parity with [`ADOPTION_RETRIES`], and the parity is the argument rather than the
+/// arithmetic: that constant is already this file's answer to "how many *further* resumes
+/// may be spent on a thread that is not yet readable", spent chasing the thread the user is
+/// actually on. Recovering threads the session has LEFT must not outrank that, so the two
+/// budgets are the same size and neither has to be justified twice.
+///
+/// The two budgets are the same NUMBER, not the same total spend, and the difference is
+/// worth stating because it used to be stated wrongly here. `ADOPTION_RETRIES` is a retry
+/// count: the initial `thread/resume` is not one of the five, so adoption spends up to six
+/// resumes on one thread (`unadopted_retries` starts at 0 and the branch fires while it is
+/// `< ADOPTION_RETRIES`). This queue's depth is a count of *debts*, each of which costs the
+/// next connection exactly one resume, so five here is five resumes. Sharing the constant is
+/// still the right call — the ceiling is what is being borrowed, not an equality of totals —
+/// and no value changes.
+///
+/// # Which end is evicted, and why that is the safe direction
+///
+/// The oldest. Keeping the newest is what the single slot already did — "latest wins",
+/// the policy [`Connection::note_switch_candidate`] documents for the candidate slot —
+/// so at a depth of one this queue *is* the old slot and the change cannot regress
+/// anything. It is also the safer half on its own terms: the newest debt names the thread
+/// the operator just left, which is the likeliest to still matter and the likeliest to
+/// still be answerable, while evicting the oldest is what stops one stale name riding
+/// every future connection and buying a resume nobody will reply to.
+const OWED_RECOVERY_DEPTH: usize = ADOPTION_RETRIES as usize;
 
 /// Byte-based WebSocket bounds. D8: a single notification reaches multi-MB
 /// (`plugin/list` at 5.76 MB is the worst case measured), so the ceiling is on
@@ -229,6 +282,33 @@ pub struct ControlLink {
     pub thread_id: Option<String>,
 }
 
+/// **Is this thread id real?** — the one spelling of that question.
+///
+/// A thread id is opaque and is never parsed, so there is exactly one thing that
+/// can be said about the string: it either names something or it does not. Blank
+/// and whitespace-only name nothing. A `"   "` is what a supervisor sends when it
+/// has a field to fill and nothing to fill it with, and it is the same non-answer
+/// as an omitted field — the reading [`ControlLink::from_registration`] has always
+/// taken of the socket beside it.
+///
+/// **One spelling because two spellings poisoned a generation.** This test lived
+/// inside `from_registration` alone, so the link treated a blank as absent while
+/// the row it was written to kept it verbatim — and the adoption guard
+/// (`Daemon::register_supervisor`, plan A5.1) reads that row as the generation's
+/// *binding*. A launch that sent `"   "` therefore bound its visit to a thread
+/// nothing is on, and the first real `thread/started` for that same visit was
+/// refused as a second thread under one generation. The blank has to be absent
+/// where it is *stored*, not only where it is dialled, and a helper both callers
+/// share is what stops the two answers drifting apart again.
+///
+/// **Filtered, never trimmed.** The id is compared for equality against ids the
+/// broker mints and echoes; returning a trimmed copy would make this daemon and
+/// the app-server disagree about the same thread. So a string with any content is
+/// carried through byte for byte.
+pub fn real_thread_id(claimed: Option<&str>) -> Option<&str> {
+    claimed.filter(|id| !id.trim().is_empty())
+}
+
 impl ControlLink {
     /// Read the control-link fact off a registration, failing closed.
     ///
@@ -258,14 +338,52 @@ impl ControlLink {
                 info.session_id
             )
         };
+        // **A generation the ledger cannot hold is refused here, loudly, rather
+        // than quietly bent into one it can.**
+        //
+        // `codex_generation` is an `Option<u64>` on a JSON frame read off the IPC
+        // socket, so the wire can carry anything up to `u64::MAX`; SQLite's
+        // integers are `i64`, and `Store::upsert_session_at_generation` used to
+        // saturate the difference away. That saturation was not a rounding: the
+        // durable half then read back `i64::MAX` while the in-memory half kept the
+        // real number, so `durable == Some(incoming)` was false and the
+        // thread-immutability check below it was skipped outright — and a restart
+        // reloaded a high-water that had gone *backwards* by the whole width of
+        // the range, re-admitting every frame in it.
+        //
+        // **Nothing legitimate can produce one, measured rather than assumed.**
+        // The fleet has exactly one producer of this field — `CodexSeat`, built by
+        // `codex_coordinator`'s `supervise_ready_session` with the literal `1` —
+        // and `registration_frame` copies it verbatim into a frame the supervisor
+        // builds once and holds for its life, replaying that same frame byte for
+        // byte on exit. There is no counter, no arithmetic and no flag anywhere
+        // that can mint a second value, let alone a 63-bit one. So a generation
+        // this large is not an honest supervisor being ambitious; it is a frame no
+        // producer in this fleet wrote, which is precisely the class the
+        // generation guard exists for. Refusing is smaller than widening the
+        // column to TEXT and is the only answer that does not silently rewrite
+        // what the frame said.
+        //
+        // Refused **here** and not at the store, because this is the fail-closed
+        // gate the whole registration runs through before it takes the acceptance
+        // gate, stakes an epoch or writes a row (`Daemon::register_supervisor`):
+        // D4's clause is that a refused frame mutates nothing, and only a refusal
+        // above all of that keeps it. The store refuses too — see
+        // [`crate::store::Store::upsert_session_at_generation`] — so the lie
+        // cannot be told by a caller that has not come through here either.
+        if i64::try_from(generation).is_err() {
+            bail!(
+                "refusing to register {}: generation {generation} is larger than the ledger can \
+                 record ({}), so it could only be stored as a different number than the one the \
+                 frame claimed — and no launcher in this fleet mints a generation above 1",
+                info.session_id,
+                i64::MAX
+            )
+        }
         Ok(Some(ControlLink {
             socket,
             generation,
-            thread_id: info
-                .codex_thread_id
-                .as_deref()
-                .filter(|id| !id.trim().is_empty())
-                .map(str::to_string),
+            thread_id: real_thread_id(info.codex_thread_id.as_deref()).map(str::to_string),
         }))
     }
 }
@@ -913,26 +1031,28 @@ fn leaving_recovery(
     attach
 }
 
-/// **Discharge the carried recovery debt — the one place it is cleared** (round-8 F2).
+/// **Discharge one carried recovery debt — the one place a debt is cleared**
+/// (round-8 F2).
 ///
-/// Named rather than owed: the slot holds at most one thread, and a switch applied
-/// while a recovery was outstanding writes the NEXT thread's debt into it. Clearing it
-/// blind at the end of an ask about A would then throw away the obligation just
-/// recorded on B, which nothing else names either.
+/// Named rather than owed, and that has always been the property that makes this safe:
+/// an ask about A discharges A's obligation and nothing else's. Clearing blind at the end
+/// of an ask would throw away a debt recorded on some other thread while that ask was in
+/// flight — which nothing else names either.
 ///
-/// **The slot's single occupancy is unchanged, and is stated rather than fixed.** One
-/// compound case ends with an unsettled debt overwritten: A's recovery answer fails to
-/// write, and the same exit applies a candidate retiring a thread that also owes, whose
-/// debt takes the slot. That is strictly better than what it replaces — the previous
-/// rule emptied the slot at the send, losing A's debt on every path rather than on this
-/// one — and it is the same "latest wins" the candidate slot already documents: the link
-/// carries the obligation of the thread it left most recently, and an older one costs
-/// the pre-subscription items of a thread two switches back.
+/// **The single slot this used to clear is now a bounded queue** (A16.3c), and the
+/// naming is what carried over unchanged: `retain` removes the one entry the ask was
+/// about and leaves every other debt exactly where it was. The compound case that used
+/// to end with an obligation overwritten — A's recovery answer failing to write while the
+/// same exit applies a candidate retiring a thread that also owes — now ends with both
+/// debts held, which is the whole of the fix. What the queue still cannot hold is more
+/// than [`OWED_RECOVERY_DEPTH`] of them at once; past that the oldest is dropped, with
+/// the reasoning and the cost written down on that constant.
 fn discharge_recovery(carried: &Arc<Mutex<Carried>>, thread: &str) {
-    let mut c = carried.lock().expect("the carried link state");
-    if c.owed_recovery.as_deref() == Some(thread) {
-        c.owed_recovery = None;
-    }
+    carried
+        .lock()
+        .expect("the carried link state")
+        .owed_recovery
+        .retain(|owed| owed != thread);
 }
 
 /// **Follow a switch this connection has been holding** — the one place a candidate
@@ -991,8 +1111,30 @@ fn apply_held_candidate(
         // pre-subscription recovery — this link attached to it MID-TURN and its
         // follow-up never landed — that obligation must outlive the switch and
         // the connection. Nothing else will ever ask about that thread again.
+        //
+        // **The one site that records one** (A16.3c) — the same shape
+        // [`Connection::note_switch_candidate`] is for the candidate slot's
+        // latest-wins rule: one writer, so the policy has one home. Two debts at
+        // once is not a contrived case: a `/new` applied on the very pass that
+        // adopted B lands here with A's debt still unpaid, because the loop has not
+        // reached `Attach::Attached` since, and that is the only state a payment
+        // fires from.
         if conn.owes_recovery_on(&retired) {
-            c.owed_recovery = Some(retired.clone());
+            // The queue's whole policy — uniqueness, the bound, and which end is
+            // evicted — lives in [`Carried::owe_recovery`], so it can be exercised
+            // without standing a connection up. The WARN is here rather than there
+            // because a `Carried` does not know whose session it is, and because this
+            // is the one path on which the link knowingly gives up items nothing else
+            // can name.
+            if let Some(dropped) = c.owe_recovery(&retired) {
+                crate::log_warn!(
+                    "codex link for {}: {OWED_RECOVERY_DEPTH} pre-subscription \
+                     recoveries were already owed and {retired} makes another; dropping \
+                     the oldest ({dropped}) — its items stay unrecorded, and this \
+                     session has switched threads faster than it could recover them",
+                    conn.session.name
+                );
+            }
         }
     }
     *resume_target = Some(target);
@@ -1483,13 +1625,26 @@ pub struct Carried {
     /// too, so retaining it would carry nothing across. Wire evidence used to be mirrored
     /// in here as well, which quietly made the exclusion drop a fact only this link had.
     hint: Option<String>,
-    /// **An unrecovered pre-subscription debt** (round-3 P7): a thread this link attached
-    /// to MID-TURN and then switched away from before its follow-up resume could land. The
-    /// items that finished before the subscription existed are reachable from nowhere else
-    /// — no live frame carries them, and the link will never be asked about that thread
-    /// again — so the obligation outlives the connection and is paid once, on demand, after
-    /// the new thread is adopted.
-    owed_recovery: Option<String>,
+    /// **The unrecovered pre-subscription debts** (round-3 P7, A16.3c): threads this link
+    /// attached to MID-TURN and then switched away from before their follow-up resume
+    /// could land. The items that finished before the subscription existed are reachable
+    /// from nowhere else — no live frame carries them, and the link will never be asked
+    /// about those threads again — so the obligations outlive the connection and are paid
+    /// once each, on demand, after a new thread is adopted.
+    ///
+    /// **A bounded queue keyed by thread, not one slot.** One slot could hold one debt,
+    /// and the case that breaks it needs only two `/new` presses: the link owes a recovery
+    /// on A, adopts B mid-turn, and the second switch is applied on that same pass —
+    /// before the loop has been `Attach::Attached` once, so before A could have been paid.
+    /// The newer write took the slot and A's items became unreachable for the rest of the
+    /// session. Oldest-first in both directions: paid from the front, and evicted from the
+    /// front at [`OWED_RECOVERY_DEPTH`], which is where the bound is argued.
+    ///
+    /// A `VecDeque` rather than a set because ORDER is the policy — a `BTreeSet` would
+    /// sort by thread id, which says nothing about which debt is oldest — and thread
+    /// uniqueness is enforced at the single write site instead
+    /// ([`Carried::owe_recovery`]).
+    owed_recovery: std::collections::VecDeque<String>,
 }
 
 impl Carried {
@@ -1506,7 +1661,7 @@ impl Carried {
         self.adopted.is_some()
             || self.pending_candidate.is_some()
             || self.fallback.is_some()
-            || self.owed_recovery.is_some()
+            || !self.owed_recovery.is_empty()
     }
 
     /// **The thread this link ADOPTED**, for the daemon to seed a replacement's
@@ -1523,6 +1678,36 @@ impl Carried {
             .clone()
             .or_else(|| self.adopted.clone())
             .or_else(|| self.hint.clone())
+    }
+
+    /// **Record a pre-subscription recovery debt — the one place the queue grows**
+    /// (A16.3c). Returns the debt this one evicted, if it evicted any.
+    ///
+    /// A method on the carry rather than three statements at [`apply_held_candidate`],
+    /// for one reason: the policy it holds — uniqueness, the bound, and which end goes —
+    /// is the whole of what the A16.3(c) change decided, and here it can be shown with a
+    /// plain assertion instead of a scripted connection whose depth is limited by how
+    /// many switches a leg can plausibly stage.
+    ///
+    /// **Keyed by thread, so a thread retired twice owes one recovery.** One answer
+    /// describes one whole thread and pays every debt it holds, so a second entry would
+    /// buy a second identical ask. Re-recording also does not refresh a debt's position:
+    /// the queue's order is the order obligations were INCURRED, and moving an old one to
+    /// the back would let it outlive newer debts it is older than.
+    ///
+    /// **At [`OWED_RECOVERY_DEPTH`] the OLDEST goes**, which is where that constant
+    /// argues the direction. The caller logs it; a `Carried` has no session to name.
+    fn owe_recovery(&mut self, thread: &str) -> Option<String> {
+        if self.owed_recovery.iter().any(|owed| owed == thread) {
+            return None;
+        }
+        let evicted = if self.owed_recovery.len() >= OWED_RECOVERY_DEPTH {
+            self.owed_recovery.pop_front()
+        } else {
+            None
+        };
+        self.owed_recovery.push_back(thread.to_string());
+        evicted
     }
 }
 
@@ -1570,8 +1755,12 @@ async fn serve_connection(
     // A pending candidate carried in from a previous connection outranks the published
     // target: it is the thread the user moved to, and `thread/started` will not be
     // broadcast again for it (round-2 P6b).
-    // The round-3 P7 debt this connection must pay once the new thread is adopted.
-    let mut owed_recovery: Option<String> = None;
+    // The round-3 P7 debts this connection must pay once a new thread is adopted, in the
+    // order they were incurred. This connection's own WORK QUEUE and not the obligation
+    // itself: the obligation lives in [`Carried::owed_recovery`], which survives the
+    // connection, and this is re-armed from it at every adoption. Popping from here is
+    // what stops one connection asking the same question twice (A16.3c).
+    let mut owed_recovery: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let (mut resume_target, carried_adopted, carried_candidate) = {
         let c = carried.lock().expect("the carried link state");
         (
@@ -1658,34 +1847,40 @@ async fn serve_connection(
     loop {
         // The one place a request is issued. Reached only when no request is
         // outstanding, which is what keeps the resume unpipelined (A2).
-        // **PAY THE ROUND-3 P7 DEBT, ONCE.** The link has adopted the new thread and owes a
-        // pre-subscription recovery on one it left. Fired from `Attached` only — any other
-        // state has an attach in flight or scheduled, and this must never pipeline against
-        // it (A2: a resume is never pipelined).
+        // **PAY THE ROUND-3 P7 DEBTS, ONE PER PASS.** The link has adopted the new thread
+        // and owes pre-subscription recoveries on threads it left. Fired from `Attached`
+        // only — any other state has an attach in flight or scheduled, and this must never
+        // pipeline against it (A2: a resume is never pipelined).
+        //
+        // **Oldest first, and one at a time** (A16.3c). One per pass is not a rationing:
+        // the ask puts this connection into `Recovering`, and the only ways out of that
+        // state ([`leaving_recovery`]) land back on `Attached`, where the next pass pops
+        // the next debt. So a queue drains completely on one connection, at exactly the
+        // rate A2 allows.
         if matches!(attach, Attach::Attached) {
-            if let Some(thread) = owed_recovery.take() {
+            if let Some(thread) = owed_recovery.pop_front() {
                 let id = conn.send_resume(&mut ws, &thread).await?;
-                // **THE CARRIED SLOT IS NOT CLEARED HERE** (round-8 F2), and the reason
-                // is the one the local `take()` above already answers for.
+                // **THE CARRIED DEBT IS NOT CLEARED HERE** (round-8 F2), and the reason
+                // is the one the local `pop_front()` above already answers for.
                 //
                 // Round 7 moved the clear from where the debt was noticed to just after
                 // the write, because a debt discharged against a state that could not
                 // issue a request is a debt lost. That was half the rule. The other half
                 // is that a request on the wire is not a recovery: the answer still has to
                 // arrive, be readable, and be WRITTEN, and every one of those can fail
-                // while the request cannot be un-sent. What is in this slot is the only
+                // while the request cannot be un-sent. What is in the queue is the only
                 // surviving name for the thread — `fallback` is cleared by the very
                 // adoption that makes the debt payable — so clearing it here traded the
                 // one copy of A's pre-subscription items for the fact that a question had
                 // been asked.
                 //
-                // So the slot now survives the send and is discharged by
+                // So the entry now survives the send and is discharged by
                 // [`discharge_recovery`] at the two places the ask ENDS: an answer
                 // consumed to completion, and a budget that expired without one. The
-                // `take()` above still bounds this connection to one ask; a connection
-                // that dies mid-answer leaves the slot set, and its successor re-arms from
-                // it on adopting and asks again — free, because the log dedups every fact
-                // the second answer re-describes.
+                // `pop_front()` above still bounds this connection to one ask PER DEBT; a
+                // connection that dies mid-answer leaves the entry in the carry, and its
+                // successor re-arms from it on adopting and asks again — free, because the
+                // log dedups every fact the second answer re-describes.
                 crate::log_info!(
                     "codex link for {}: asking once more about {thread}, which this link \
                      attached to mid-turn and then switched away from — its \
@@ -1745,9 +1940,12 @@ async fn serve_connection(
                             // returns its whole history, which is exactly what the owed
                             // recovery would have asked for. Leaving the debt set would buy
                             // a second, redundant resume of the same thread moments later.
-                            if c.owed_recovery.as_deref() == Some(previous.as_str()) {
-                                c.owed_recovery = None;
-                            }
+                            //
+                            // NAMED, like every other discharge (A16.3c). This resume is
+                            // about `previous` and says nothing whatever about any other
+                            // thread the queue owes, so it pays that one entry and leaves
+                            // the rest to be asked on their own.
+                            c.owed_recovery.retain(|owed| owed != previous.as_str());
                         }
                     }
                 }
@@ -2099,9 +2297,17 @@ async fn serve_connection(
                 if conn.adopted_thread.as_deref() == Some(target.as_str()) {
                     // `attach_from_seed` already wrote `Carried::adopted` and cleared the
                     // chase (round-3 P8/P9). What is left for the loop is the LOCAL target,
-                    // and the round-3 P7 debt: if this link owes a pre-subscription
-                    // recovery on a thread it switched away from, adopting the new one is
-                    // the moment that debt becomes payable.
+                    // and the round-3 P7 debts: if this link owes pre-subscription
+                    // recoveries on threads it switched away from, adopting a new one is
+                    // the moment they become payable.
+                    //
+                    // **Re-armed from the carry WHOLE, not merged** (A16.3c). The carry is
+                    // the obligation and this queue is only the work list, so taking it
+                    // entire is what makes the two agree. A debt this connection has
+                    // already popped and asked about is still in the carry until its answer
+                    // is consumed, so it can come back here and be asked twice — which is
+                    // the same re-ask a reconnect makes, and free for the same reason: the
+                    // log dedups every fact a second answer re-describes.
                     owed_recovery = carried
                         .lock()
                         .expect("the carried link state")
@@ -3906,6 +4112,110 @@ mod tests {
         );
     }
 
+    /// **A generation the ledger cannot hold is refused, and the boundary is
+    /// exact** (round-C F3).
+    ///
+    /// The wire carries this as a JSON number into an `Option<u64>`; SQLite holds
+    /// `i64`. The store used to saturate the difference, which is worse than it
+    /// sounds: the durable half then reads `i64::MAX` while the caller's memory
+    /// holds the real number, so the adoption guard's `durable == Some(incoming)`
+    /// is false for a generation that WAS adopted and the thread-immutability
+    /// check under it never runs — and a restart reloads a high-water lower than
+    /// the one the daemon had.
+    ///
+    /// Refused here because this is the gate the registration passes before it
+    /// takes the acceptance gate, stakes an epoch or writes a row, which is what
+    /// D4's "a refused frame mutates nothing" requires.
+    ///
+    /// Both sides of the boundary, because a refusal that also caught `i64::MAX`
+    /// would be a different rule wearing the same message.
+    ///
+    /// **Mutation:** delete the `i64::try_from(generation).is_err()` bail and the
+    /// `u64::MAX` leg accepts, yielding a link at generation 18446744073709551615.
+    #[test]
+    fn a_generation_larger_than_the_ledger_can_hold_is_refused() {
+        let complete = RegisterSession {
+            codex_socket: Some("/tmp/cch.x/ccd.sock".into()),
+            codex_generation: Some(1),
+            ..registration(AgentKind::Codex)
+        };
+
+        let largest = RegisterSession {
+            codex_generation: Some(i64::MAX as u64),
+            ..complete.clone()
+        };
+        assert_eq!(
+            ControlLink::from_registration(&largest)
+                .unwrap()
+                .unwrap()
+                .generation,
+            i64::MAX as u64,
+            "the largest representable generation is still a generation"
+        );
+
+        for over in [i64::MAX as u64 + 1, u64::MAX] {
+            let frame = RegisterSession {
+                codex_generation: Some(over),
+                ..complete.clone()
+            };
+            let refusal = format!(
+                "{:#}",
+                ControlLink::from_registration(&frame)
+                    .expect_err("a generation the ledger cannot record must be refused")
+            );
+            assert!(
+                refusal.contains(&over.to_string()),
+                "the refusal must name the generation it refused: {refusal}"
+            );
+        }
+    }
+
+    /// **A thread id made of whitespace names no thread, and there is one
+    /// spelling of that** (round-C F4).
+    ///
+    /// The link has always read a blank socket as an absent socket; it read a
+    /// blank thread the same way and the row beside it did not, which is how a
+    /// `"   "` became a generation's durable binding and refused that visit's
+    /// first real thread. [`real_thread_id`] is the shared answer, and this is the
+    /// truth table it is shared for — asserted on the function itself, because
+    /// both callers now ask it rather than re-deriving it.
+    ///
+    /// The last leg is the reason this filters instead of trimming: the id is
+    /// compared for equality against ids the broker mints, so a trimmed copy would
+    /// make the two ends disagree about one thread.
+    ///
+    /// **Mutation:** change the body to `claimed` and the blank legs return
+    /// `Some("   ")`; change it to trim and the last leg returns `Some("th-a")`.
+    #[test]
+    fn a_whitespace_thread_id_is_no_thread_id() {
+        assert_eq!(real_thread_id(None), None);
+        assert_eq!(real_thread_id(Some("")), None);
+        assert_eq!(real_thread_id(Some("   ")), None);
+        assert_eq!(real_thread_id(Some("\t\n")), None);
+        assert_eq!(real_thread_id(Some("th-a")), Some("th-a"));
+        assert_eq!(
+            real_thread_id(Some(" th-a ")),
+            Some(" th-a "),
+            "an id with content is carried byte for byte: it is compared against \
+             ids the broker mints, and a trimmed copy would not match one"
+        );
+
+        // And the link reads the registration through it.
+        let blank = RegisterSession {
+            codex_socket: Some("/tmp/cch.x/ccd.sock".into()),
+            codex_generation: Some(1),
+            codex_thread_id: Some("   ".into()),
+            ..registration(AgentKind::Codex)
+        };
+        assert_eq!(
+            ControlLink::from_registration(&blank)
+                .unwrap()
+                .unwrap()
+                .thread_id,
+            None
+        );
+    }
+
     // ------------------------------------------------- ingress + retirement
 
     fn visit(thread: Option<&str>) -> Visit {
@@ -4669,6 +4979,26 @@ mod tests {
         /// announcement, so whether the link consumed it or threw it away is directly
         /// readable in the log.
         SwitchThenAThirdIsAnnouncedDuringTheRecovery,
+        /// **TWO THREADS LEFT MID-TURN, AND BOTH DEBTS ARE OWED AT ONCE** (A16.3c).
+        ///
+        /// The owed-B case, which one slot cannot hold. The arc opens as the round-3 P7
+        /// scripts do — A joined mid-turn, its follow-up refused, B announced — and then
+        /// diverges at the one moment that matters: **C is announced BEFORE B's resume is
+        /// answered**, so the candidate is already held when that answer arrives.
+        ///
+        /// The loop settles B's answer (adopting B, and seeding a turn that is still
+        /// RUNNING, so B owes a recovery of its own) and reaches the candidate block on
+        /// the *same pass*, which retires B with that debt unsettled. A's debt has not
+        /// been paid, and could not have been: every payment fires from
+        /// `Attach::Attached`, and the loop has not been in that state once since A's debt
+        /// was recorded. So two obligations exist simultaneously, on two threads nobody is
+        /// on, neither of them named by any live frame or by any other carried slot.
+        ///
+        /// C is then adopted and answers both asks with real ids. **The observable is the
+        /// two withheld `userMessage`s**, whose keys are thread-namespaced and therefore
+        /// distinguishable. A single slot keeps the newer write, so it is A's key —
+        /// `{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}` — that goes missing.
+        TwoSwitchesEachLeavingARecoveryOwed,
         /// **THE LEG VANISHES AFTER THE RECOVERY IS ASKED, BEFORE IT IS ANSWERED**
         /// (round-8 F2).
         ///
@@ -4801,6 +5131,73 @@ mod tests {
     /// left the not-ready branch behind the announcement unreachable.
     type AnnouncedOnce = Arc<std::sync::atomic::AtomicBool>;
 
+    /// **Close the first connection on its Nth request, whatever that request is** (A16.4).
+    ///
+    /// # The defect this exists for
+    ///
+    /// Every other way a scripted leg ends a connection is written inside a *named method*
+    /// arm — `matches!(answer, ResumeAnswer::X)` under `"thread/resume"`, gated on
+    /// ad-hoc local counters (`nth`, `resumes_answered`, `a_asks`, `b_asks`). That
+    /// couples the connection's LIFETIME to the resume script, and the coupling is what
+    /// makes several guards untestable: a guard is asserted through a conjunction, both
+    /// halves of which fire on the same `thread/resume`, so a mutation of one half is
+    /// covered by the other and the leg has no way to end the connection *between* them.
+    /// The [`ResumeAnswer`] enum's ~50 hand-written variants — one per staging — are the
+    /// visible symptom: a new conjunction meant a new variant, because there was no
+    /// general way to say "and now die, here".
+    ///
+    /// This is that general way, and it is deliberately **orthogonal to `ResumeAnswer`**:
+    /// it is passed alongside `answer` the way `announce_thread` and [`AnnouncedOnce`]
+    /// are, so any existing script can be cut short at any point without a variant of its
+    /// own.
+    ///
+    /// # What "at frame N" means, exactly
+    ///
+    /// The leg counts, from 1, every frame it **decodes into a request** — a `Message::Text`
+    /// that parses as JSON. Those are the frames `serve_scripted`'s loop reaches the counter
+    /// with: a non-`Text` message is `continue`d above it and a `Text` that will not parse
+    /// ends the connection at the `?` above it, so neither is counted and neither can be
+    /// dropped *at*. On the Nth counted frame the leg records it in `seen` and closes the
+    /// socket **without handling it**. So the contract a test relies on is: *requests
+    /// 1..N-1 were handled to completion, request N was received and answered by nothing.*
+    /// Because this leg is request/response, "die after fully answering request K" and "die
+    /// at frame K+1" are the same staging — which is why one index covers both intents and
+    /// no separate "after" mode is needed.
+    ///
+    /// **The narrower count is not a narrower guarantee, because of what the tests assert
+    /// alongside it.** An index is only ambiguous if some uncounted frame could arrive in
+    /// the middle and shift what "frame 8" names. Nothing in this file's link sends one: the
+    /// link's writer emits `Message::Text` carrying `serde_json` output exclusively, and
+    /// every test that names an index also asserts the exact request sequence in `seen` —
+    /// so "the connection died at frame 8" is read back as "the connection died on *this*
+    /// request", by name, and not on a positional guess. Widening the counter to literally
+    /// every WebSocket frame would change no index this file uses and would make the drop
+    /// point unnameable in the one case it could differ; the claim is corrected rather than
+    /// the code, because the code is what the tests are written against.
+    ///
+    /// # The FIRST connection only
+    ///
+    /// The successor is what almost every such split observes — what the carry held when
+    /// the connection died is only readable through what the next connection asks — and a
+    /// rule that killed every connection at the same index would stage a link that can
+    /// never get past frame N at all. `nth == 0` is therefore the scope, and it is a rule
+    /// rather than a parameter because no staging has wanted the other thing.
+    ///
+    /// # What this does NOT reach, measured
+    ///
+    /// Not every unsplit conjunction is a lifetime problem, and one of the three A16.4
+    /// named is not. `a_carried_candidate_names_the_adopted_thread_only_until_it_is_applied`
+    /// hand-builds a `Connection` because the state it asserts —
+    /// `CodexAddressee::Unbound { adopted: A }` on a reconnect that is carrying a
+    /// candidate — was never sampled when the same arc was driven through
+    /// `drive_watching_presence`: the observed sequence for
+    /// [`ResumeAnswer::CandidateAnnouncedThenTheLegDrops`] is `Offline{A}` then
+    /// `Bound{B}`, because the reconnect's first refusal settles inside the presence
+    /// poll's 5 ms. Making that window observable means WITHHOLDING an answer at a chosen
+    /// point, which widens a window — the opposite primitive to ending a connection at
+    /// one, and a thing this alias deliberately does not become.
+    type DropAtFrame = Option<usize>;
+
     /// **Which scripts stage an app-server that does not come back.**
     ///
     /// The path is unlinked before the connection is even served, so the dial the link
@@ -4828,7 +5225,19 @@ mod tests {
     }
 
     impl ScriptedLeg {
+        /// The ordinary leg: every connection served to the end of its script.
         fn start(answer: ResumeAnswer, announce_thread: bool) -> ScriptedLeg {
+            ScriptedLeg::start_dropping_at(answer, announce_thread, None)
+        }
+
+        /// The same leg, with the FIRST connection cut short at a named frame index —
+        /// see [`DropAtFrame`] for what the index means and why the lifetime is separated
+        /// from the resume script at all.
+        fn start_dropping_at(
+            answer: ResumeAnswer,
+            announce_thread: bool,
+            drop_at_frame: DropAtFrame,
+        ) -> ScriptedLeg {
             static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             // Short: a unix socket path is capped at SUN_LEN (103), and macOS's
             // temp dir is long enough to matter (A1/D7).
@@ -4871,6 +5280,7 @@ mod tests {
                                 announce_thread,
                                 seen,
                                 announced,
+                                drop_at_frame,
                             )
                             .await;
                         });
@@ -5168,6 +5578,17 @@ mod tests {
             .expect("installing the refusal");
     }
 
+    /// **The threads a carry still owes a pre-subscription recovery on, oldest first.**
+    ///
+    /// A borrowed view rather than a clone, so an assertion reads
+    /// `vec![A, B]` against thread constants instead of against owned `String`s. The queue
+    /// is ORDERED and the order is the policy — paid from the front, evicted from the
+    /// front — so a test that compared it as an unordered set would pass while the two
+    /// halves of [`OWED_RECOVERY_DEPTH`]'s eviction rule were swapped.
+    fn owes(carried: &Carried) -> Vec<&str> {
+        carried.owed_recovery.iter().map(String::as_str).collect()
+    }
+
     /// Is this the SECOND ask about the fallback thread? It counts as a side effect, which
     /// is why it is a named function rather than a block inside an `if` condition.
     fn is_second_fallback_ask(seen: &mut usize) -> bool {
@@ -5182,6 +5603,7 @@ mod tests {
         announce_thread: bool,
         seen: Arc<std::sync::Mutex<Vec<Value>>>,
         announced: AnnouncedOnce,
+        drop_at_frame: DropAtFrame,
     ) -> Result<()> {
         let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
         // Which scripts force a reconnect: only the one whose subject IS the reconnect
@@ -5203,6 +5625,13 @@ mod tests {
         // script has to answer B's first ask and B's follow-up differently, and the two
         // are interleaved with asks about A.
         let mut b_asks = 0usize;
+        // **Every frame this connection decodes into a request** (A16.4) — which is every
+        // frame the loop below reaches this counter with, non-text having been `continue`d
+        // and unparseable text having ended the connection above. Counted out here rather
+        // than inside a method arm because that is the whole point of [`DropAtFrame`]: the
+        // connection's lifetime must be expressible without naming what the link happened
+        // to ask.
+        let mut frames_seen = 0usize;
         while let Some(Ok(msg)) = ws.next().await {
             let Message::Text(text) = msg else { continue };
             let frame: Value = serde_json::from_str(&text)?;
@@ -5221,6 +5650,15 @@ mod tests {
                 .unwrap_or(LIFECYCLE_THREAD)
                 .to_string();
             seen.lock().unwrap().push(frame);
+            // **The frame-indexed drop** (A16.4). Recorded first and answered by nothing:
+            // a test reading `seen` can name the frame that killed the connection, and the
+            // link is left with exactly the state frames 1..N-1 put it in. First connection
+            // only — see [`DropAtFrame`].
+            frames_seen += 1;
+            if nth == 0 && drop_at_frame == Some(frames_seen) {
+                ws.close(None).await?;
+                return Ok(());
+            }
 
             match method.as_str() {
                 "initialize" => {
@@ -5739,6 +6177,108 @@ mod tests {
                                 _ => {
                                     ws.send(Message::Text(announce(THIRD_THREAD))).await?;
                                     tokio::time::sleep(Duration::from_millis(120)).await;
+                                    resumes_answered += 1;
+                                    let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    continue;
+                                }
+                            }
+                        }
+                        // The same arc twice over: A left owing, then B left owing too,
+                        // before either could be paid.
+                        ResumeAnswer::TwoSwitchesEachLeavingARecoveryOwed => {
+                            // **C, the thread the link ends on.** Answered with a FINISHED
+                            // turn, so it owes nothing itself — every debt in play is about
+                            // a thread the session has left, which is what the claim is
+                            // about.
+                            if asked_about == THIRD_THREAD {
+                                resumes_answered += 1;
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                continue;
+                            }
+                            // **The SUCCESSOR answers everything completely.** Reached
+                            // only when this leg is cutting the first connection short at
+                            // a frame index (A16.4): connection 2 is asking about a thread
+                            // whose debt it could only have learned from the CARRY, so its
+                            // answer is the observable and there is nothing left to stage.
+                            if nth > 0 {
+                                resumes_answered += 1;
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                continue;
+                            }
+                            if asked_about == SWITCHED_THREAD {
+                                b_asks += 1;
+                                resumes_answered += 1;
+                                if b_asks == 1 {
+                                    // **C IS ANNOUNCED FIRST, AND THAT ORDERING IS THE
+                                    // WHOLE CASE.** The broadcast lands while B's resume is
+                                    // still outstanding, so the loop HOLDS it as a
+                                    // candidate rather than applying it (round-8 F1). The
+                                    // answer below then adopts B and seeds a turn that is
+                                    // still RUNNING — B's own pre-subscription debt — and
+                                    // the candidate block, one statement further down the
+                                    // same pass, retires B with that debt unsettled.
+                                    //
+                                    // A's debt is still unpaid at that instant and could
+                                    // not be anything else: every payment fires from
+                                    // `Attach::Attached`, and the loop has not been in that
+                                    // state once since the first switch recorded it. Both
+                                    // obligations are therefore live at the same moment,
+                                    // which is the thing a single slot could not represent.
+                                    //
+                                    // No tail is replayed for B: a running turn's items
+                                    // reach the store from nowhere, so B's userMessage is
+                                    // withheld by construction and only an answer
+                                    // describing that turn FINISHED can name it.
+                                    ws.send(Message::Text(announce(THIRD_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    continue;
+                                }
+                                // **B's own on-demand recovery**, asked after C was adopted.
+                                // Reached only by a link that was still carrying B's debt
+                                // alongside A's.
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                continue;
+                            }
+                            a_asks += 1;
+                            match a_asks {
+                                // Attach to A MID-TURN: placeholder ids, tail only, then
+                                // the terminal that makes A's follow-up due.
+                                1 => {
+                                    let answer = lifecycle_answer_in_progress(id, &asked_about);
+                                    ws.send(Message::Text(answer.to_string())).await?;
+                                    resumes_answered += 1;
+                                    for line in capture_tail() {
+                                        ws.send(Message::Text(line)).await?;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    ws.send(Message::Text(turn_terminal(
+                                        &asked_about,
+                                        LIFECYCLE_TURN,
+                                    )))
+                                    .await?;
+                                    continue;
+                                }
+                                // A's follow-up: announce B, then refuse — so A's recovery
+                                // is owed across the switch, exactly as in
+                                // [`ResumeAnswer::SwitchWithACrossingRecoveryOwed`].
+                                2 => {
+                                    ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    resumes_answered += 1;
+                                    json!({"id": id, "error": {
+                                        "code": -32600,
+                                        "message":
+                                            format!("no rollout found for thread id {asked_about}")
+                                    }})
+                                }
+                                // **A's on-demand recovery**, with A's real ids.
+                                _ => {
                                     resumes_answered += 1;
                                     let answer = lifecycle_answer(id, &asked_about, |_| {});
                                     ws.send(Message::Text(answer.to_string())).await?;
@@ -6416,9 +6956,24 @@ mod tests {
         answer: ResumeAnswer,
         settle: Duration,
     ) -> (Vec<protocol::event::Event>, usize, Vec<String>, Carried) {
+        drive_holding_the_carry_dropping_at(answer, settle, None).await
+    }
+
+    /// The same drive, with the first connection cut short at a named frame index
+    /// (A16.4).
+    ///
+    /// Separated from the resume script on purpose — see [`DropAtFrame`]. This is the
+    /// driver the carry-side splits need, because what a connection left in the carry is
+    /// readable only through what its SUCCESSOR asks, and staging "the connection died
+    /// exactly here" is the whole of making the two halves of such a conjunction separable.
+    async fn drive_holding_the_carry_dropping_at(
+        answer: ResumeAnswer,
+        settle: Duration,
+        drop_at_frame: DropAtFrame,
+    ) -> (Vec<protocol::event::Event>, usize, Vec<String>, Carried) {
         // One scripted leg at a time, process-wide — see [`drive_watching_presence`].
         let _serialized = ONE_LEG_AT_A_TIME.lock().await;
-        let leg = ScriptedLeg::start(answer, true);
+        let leg = ScriptedLeg::start_dropping_at(answer, true, drop_at_frame);
         let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
         let (daemon, _db) = linked_daemon(&session);
         let uid = session.uid.clone();
@@ -6509,10 +7064,262 @@ mod tests {
         // **The claim.** The debt is still named, so the successor has something to ask
         // about. Cleared here, A would be unreachable for the rest of the session.
         assert_eq!(
-            carried.owed_recovery.as_deref(),
-            Some(LIFECYCLE_THREAD),
+            owes(&carried),
+            vec![LIFECYCLE_THREAD],
             "a recovery whose write FAILED recovered nothing, so the obligation is still \
-             owed — and this slot is the only surviving name for the thread it is owed on"
+             owed — and this queue is the only surviving name for the thread it is owed on"
+        );
+    }
+
+    /// **THE OWED-RECOVERY QUEUE IS BOUNDED, KEYED BY THREAD, AND EVICTS THE OLDEST**
+    /// (A16.3c).
+    ///
+    /// The scripted-leg test below proves the queue holds two debts where a slot held one.
+    /// This proves the other three things [`Carried::owe_recovery`] decides, and it is a
+    /// plain assertion rather than a leg for a reason worth stating: staging
+    /// `OWED_RECOVERY_DEPTH + 1` switches over a socket would spend seconds of wall clock
+    /// to demonstrate arithmetic, and the depth is a constant a leg cannot follow if it
+    /// changes.
+    ///
+    /// **Mutations:** `pop_back` instead of `pop_front` — the newest debt is dropped
+    /// rather than the oldest, and the order assertion fails. Delete the uniqueness guard
+    /// — a thread retired twice owes two identical asks, and the length assertion fails.
+    #[test]
+    fn the_owed_recovery_queue_is_bounded_and_evicts_the_oldest() {
+        let mut carried = Carried::default();
+        let threads: Vec<String> = (0..OWED_RECOVERY_DEPTH)
+            .map(|n| format!("th_{n}"))
+            .collect();
+        for thread in &threads {
+            assert_eq!(
+                carried.owe_recovery(thread),
+                None,
+                "nothing is evicted while the queue is under its bound"
+            );
+        }
+        assert_eq!(
+            owes(&carried),
+            threads.iter().map(String::as_str).collect::<Vec<_>>(),
+            "oldest first — the order debts were incurred is the order they are paid"
+        );
+
+        // **Keyed by thread.** One answer describes one whole thread and pays every debt
+        // it holds, so re-recording buys nothing and must not consume a place.
+        assert_eq!(carried.owe_recovery(&threads[1]), None);
+        assert_eq!(
+            owes(&carried),
+            threads.iter().map(String::as_str).collect::<Vec<_>>(),
+            "a thread already owed is not recorded twice, and does not move to the back: \
+             the queue's order is the order obligations were INCURRED"
+        );
+
+        // **The bound bites, and it bites the OLDEST.** The newest debt names the thread
+        // the operator just left; the oldest names one further back than this link will
+        // ever usefully ask about again.
+        assert_eq!(
+            carried.owe_recovery("th_new"),
+            Some(threads[0].clone()),
+            "at the bound the oldest debt is what gives way"
+        );
+        let expected: Vec<&str> = threads[1..]
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once("th_new"))
+            .collect();
+        assert_eq!(
+            owes(&carried),
+            expected,
+            "and the survivors keep their order, with the newcomer at the back"
+        );
+        assert_eq!(
+            owes(&carried).len(),
+            OWED_RECOVERY_DEPTH,
+            "the queue never exceeds its bound, however many switches a session makes"
+        );
+    }
+
+    /// **TWO RECOVERIES OWED AT ONCE, AND BOTH ARE PAID** (A16.3c — the owed-B case).
+    ///
+    /// [`Carried::owed_recovery`] was one slot, and the plan stated the cost rather than
+    /// fixing it: "if the link owes a recovery on A and is then switched away from B
+    /// before B's own follow-up lands, only one debt is carried". The second write took
+    /// the slot, and A's pre-subscription items — the ones that finished before this link
+    /// subscribed, which no live frame carries and which nothing will ever ask about again
+    /// — were unreachable for the rest of the session.
+    ///
+    /// **What makes the two debts simultaneous rather than sequential**, which is the only
+    /// version of this that stages anything: the second `/new` is announced while B's
+    /// resume is still OUTSTANDING, so it is held as a candidate and applied on the very
+    /// pass that adopts B. A debt is paid only from `Attach::Attached`, and the loop has
+    /// not been in that state since the first switch recorded A's — so at the instant B is
+    /// retired, both obligations are live. See
+    /// [`ResumeAnswer::TwoSwitchesEachLeavingARecoveryOwed`] for the frame ordering.
+    ///
+    /// The observable is both withheld `userMessage`s. Their keys are thread-namespaced,
+    /// so a single slot's loss is readable as one missing key rather than as a count.
+    ///
+    /// **Mutation:** restore the single slot — make the record site in
+    /// [`apply_held_candidate`] clear the queue before pushing — and A's key is absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_threads_left_mid_turn_are_both_recovered() {
+        let (events, connections, targets, carried) = drive_holding_the_carry(
+            ResumeAnswer::TwoSwitchesEachLeavingARecoveryOwed,
+            Duration::from_millis(3000),
+        )
+        .await;
+
+        // The premise: this all happened on ONE connection, so nothing here is a reconnect
+        // re-learning what a dead one knew.
+        assert_eq!(
+            connections, 1,
+            "the leg never drops, so both debts must have been carried and paid within a \
+             single connection: {targets:?}"
+        );
+        // And the arc got where it had to get to: the link ends on C, the thread the
+        // operator's second `/new` moved to.
+        assert_eq!(
+            carried.adopted.as_deref(),
+            Some(THIRD_THREAD),
+            "both switches must have been followed, or nothing here is about two debts: \
+             {targets:?}"
+        );
+
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        // **The claim, second half first.** B's debt is the one a single slot KEPT, so it
+        // landing proves only that the arc ran — it is the control, not the finding.
+        assert!(
+            ids.contains(&format!("{SWITCHED_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "B was joined mid-turn and left before its follow-up; its withheld \
+             userMessage is only ever named by the on-demand recovery: {ids:?}"
+        );
+        // **The finding.** A's debt is the one the single slot dropped when B's took its
+        // place, and no other frame or slot names A by then: `fallback` was cleared by the
+        // adoption of B, and `pending_candidate` by the adoption of C.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "the second switch overwrote the first debt instead of joining it, so A's \
+             pre-subscription items were never asked for: {ids:?}"
+        );
+        // Both asks really happened, and each named its own thread: the leg saw A three
+        // times (attach, follow-up, recovery), B twice (attach, recovery) and C once.
+        assert_eq!(
+            targets.iter().filter(|t| *t == LIFECYCLE_THREAD).count(),
+            3,
+            "A: attach, follow-up, recovery: {targets:?}"
+        );
+        assert_eq!(
+            targets.iter().filter(|t| *t == SWITCHED_THREAD).count(),
+            2,
+            "B: attach, recovery: {targets:?}"
+        );
+        // And the queue empties: a debt that was paid must not ride every future
+        // connection asking a question that has already been answered.
+        assert_eq!(
+            owes(&carried),
+            Vec::<&str>::new(),
+            "both recoveries were answered and written, which is what discharges them: \
+             {targets:?}"
+        );
+    }
+
+    /// **THE SECOND DEBT SURVIVES THE CONNECTION THAT COULD NOT ASK ABOUT IT**
+    /// (A16.4 — the frame-indexed split of A16.3c's discharge).
+    ///
+    /// # The conjunction, and why no named-method leg could split it
+    ///
+    /// `two_threads_left_mid_turn_are_both_recovered` proves both debts are paid, and it
+    /// proves it through a conjunction: B's item lands if **either** the carry still names
+    /// B **or** this connection's own work queue still holds it. The queue half is enough
+    /// on its own, so [`discharge_recovery`] can be mutated to clear the carry BLIND —
+    /// throwing away every debt whenever any one of them is answered — and that test stays
+    /// green. Measured directly, before this test existed.
+    ///
+    /// Splitting it means ending the connection **between the two recoveries**. Both are
+    /// `thread/resume`; both are answered by the same arm of the same script. A leg that
+    /// can only drop at a named method has to reach for yet another ad-hoc counter to say
+    /// which resume it means — which is the smell A16.4 names, and a fifty-first
+    /// [`ResumeAnswer`] variant is the shape it takes.
+    ///
+    /// # What the index buys
+    ///
+    /// [`DropAtFrame`] says it without naming a method at all. Connection one receives
+    /// eight frames: `initialize`, `initialized`, A's attach, A's follow-up, B's attach,
+    /// C's attach, A's recovery, B's recovery. Cut at **frame 8** and frames 1–7 are
+    /// handled to completion — so A's recovery is answered, written, and discharged — while
+    /// B's request is received and answered by nothing. The connection dies there, taking
+    /// its work queue with it.
+    ///
+    /// So the carry half stands alone: B is recovered on the successor, or not at all.
+    ///
+    /// **Mutation:** make [`discharge_recovery`] clear the whole queue instead of the
+    /// entry it names, and B's key is absent — where the un-split test passes untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_debt_survives_the_connection_that_could_not_ask_about_it() {
+        let (events, connections, targets, carried) = drive_holding_the_carry_dropping_at(
+            ResumeAnswer::TwoSwitchesEachLeavingARecoveryOwed,
+            Duration::from_millis(4000),
+            Some(8),
+        )
+        .await;
+
+        // The premise: the cut landed where it was aimed. Connection one asked about A
+        // three times (attach, follow-up, recovery), B twice (attach, and the recovery
+        // that killed it) and C once — and then there was a reconnect.
+        assert!(
+            connections >= 2,
+            "the frame-8 cut must end connection one, or nothing here is about the carry: \
+             {targets:?}"
+        );
+        assert_eq!(
+            targets,
+            vec![
+                // Connection one: A's attach, A's follow-up, B's attach, C's attach,
+                // A's recovery — and then B's recovery, which is the frame the cut
+                // lands on.
+                LIFECYCLE_THREAD.to_string(),
+                LIFECYCLE_THREAD.to_string(),
+                SWITCHED_THREAD.to_string(),
+                THIRD_THREAD.to_string(),
+                LIFECYCLE_THREAD.to_string(),
+                SWITCHED_THREAD.to_string(),
+                // The successor: back to the thread it adopted, and then the debt it
+                // inherited. That last entry is the claim, written as a sequence.
+                THIRD_THREAD.to_string(),
+                SWITCHED_THREAD.to_string(),
+            ],
+            "the cut must land on B's recovery — after A's was answered, before B's \
+             was: {targets:?}"
+        );
+
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.source_event_id.clone())
+            .collect();
+        // A was recovered BEFORE the cut, on the connection that owed it. That is the
+        // control: it says frames 1-7 really were handled to completion, so the state the
+        // claim is about is the state a discharge had already run against.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "A's recovery is frame 7 and must have been answered and written before the \
+             cut: {ids:?}"
+        );
+        // **The claim.** B's request went out and was never answered, so this connection's
+        // queue is gone with it. The successor asks about B only if the discharge of A
+        // left B's entry where it was.
+        assert!(
+            ids.contains(&format!("{SWITCHED_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "answering A's recovery discharged B's debt as well, so the successor adopted \
+             C, found nothing owed, and B's pre-subscription items are unreachable for the \
+             rest of the session: {ids:?}"
+        );
+        assert_eq!(
+            owes(&carried),
+            Vec::<&str>::new(),
+            "and the successor's answer discharges it, so nothing is owed at the end: \
+             {targets:?}"
         );
     }
 
@@ -6795,9 +7602,10 @@ mod tests {
         // And the debt is discharged once it is genuinely paid, so a third connection
         // would not ask a fourth time.
         assert_eq!(
-            carried.owed_recovery, None,
+            owes(&carried),
+            Vec::<&str>::new(),
             "the recovery was answered and written on the second connection, which is \
-             what discharges it — the slot must not stay set for ever"
+             what discharges it — the debt must not stay owed for ever"
         );
     }
 
@@ -6854,7 +7662,8 @@ mod tests {
              nothing: {targets:?}"
         );
         assert_eq!(
-            carried.owed_recovery, None,
+            owes(&carried),
+            Vec::<&str>::new(),
             "and an answer reporting the turn FINISHED does discharge it — the debt \
              survives what cannot pay it, not everything"
         );
@@ -9613,6 +10422,26 @@ mod tests {
     /// it, which is exactly what [`CodexAddressee::Bound`] means. An earlier note
     /// here claimed the carried chase published `Unbound { adopted: A }` throughout;
     /// it does not, and this pins the sequence rather than the claim.
+    ///
+    /// # Why this is still hand-built, measured (A16.4)
+    ///
+    /// A16.4 named this test's hand-constructed `Connection` as evidence that the scripted
+    /// legs could not drive it, and the frame-indexed drop that gate delivers
+    /// ([`DropAtFrame`]) does not change the answer. The arc itself drives fine —
+    /// [`ResumeAnswer::CandidateAnnouncedThenTheLegDrops`] through
+    /// `drive_watching_presence` produces two connections and the adoption of A. What is
+    /// not observable is the first assertion below: the published sequence goes
+    /// `Offline { Some(A) }` straight to `Bound { B }`, because the reconnect's first
+    /// resume is refused and the candidate applied faster than the 5 ms presence poll.
+    ///
+    /// So the gap is a window too narrow to sample, not a lifetime that cannot be ended,
+    /// and the primitive it wants is the opposite one — withholding an answer to widen
+    /// the window, as `PopulatedThenDeaf` does for
+    /// `a_reconnecting_link_never_publishes_less_than_it_knows`. Building that here would
+    /// be machinery for a staging no gate asked for. **The residual is bounded**: what
+    /// stays hand-built is a transition of [`Connection::addressee`], which is derived
+    /// from two fields and nothing else, and the end-to-end half of the same claim — that
+    /// a reconnect never publishes less than it knows — is driven by the test named above.
     #[test]
     fn a_carried_candidate_names_the_adopted_thread_only_until_it_is_applied() {
         let session = SessionKey {

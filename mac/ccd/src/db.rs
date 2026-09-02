@@ -111,6 +111,9 @@ db_ops! {
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
+    /// The durable Codex generation high-water for one uid (plan A5.1), or
+    /// `None` when nothing provable has been adopted under it.
+    fn codex_generation(session_uid: String) -> Option<u64>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
@@ -133,6 +136,22 @@ db_ops! {
 // value. Written out rather than bent into the macro, because a macro contorted
 // to fit every case is harder to read than the six functions it saves.
 impl Db {
+    /// Write a session row **and** the Codex generation its registration was
+    /// accepted at, in one statement (plan A5.1).
+    ///
+    /// Hand-written rather than a `db_ops!` entry because the macro passes every
+    /// argument to the store by reference, and the generation is a `Copy` scalar
+    /// the store takes by value — bending the macro to express one call's
+    /// argument kind is the contortion the note above declines.
+    pub async fn upsert_session_at_generation(
+        &self,
+        row: SessionRow,
+        codex_generation: Option<u64>,
+    ) -> Result<crate::store::SessionUpsert> {
+        self.run(move |store| store.upsert_session_at_generation(&row, codex_generation))
+            .await
+    }
+
     /// Append a transcript batch **and** advance its cursor, atomically.
     ///
     /// The batch is the reason this module exists: a cold backfill hands over

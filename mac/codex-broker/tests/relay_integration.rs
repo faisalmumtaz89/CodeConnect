@@ -359,7 +359,7 @@ fn turn_frame_in(thread: &str, cwd: &str) -> String {
             "approvalsReviewer": "user",
             "sandboxPolicy": null,
             "cwd": cwd,
-            "runtimeWorkspaceRoots": ["/work"],
+            "runtimeWorkspaceRoots": [LAUNCH_CWD],
             "permissions": null,
             "environments": null,
             "multiAgentMode": null,
@@ -390,7 +390,7 @@ fn creation_response_in(thread: &str, cwd: &str) -> Message {
             "result": {
                 "thread": {"id": thread, "path": "/x"},
                 "cwd": cwd,
-                "runtimeWorkspaceRoots": ["/work"]
+                "runtimeWorkspaceRoots": [LAUNCH_CWD]
             }
         })
         .to_string(),
@@ -539,7 +539,7 @@ async fn the_new_switch_flows_end_to_end_over_the_relay() {
                     "result": {
                         "thread": {"id": "01a0-b", "path": "/x"},
                         "cwd": LAUNCH_CWD,
-                        "runtimeWorkspaceRoots": ["/work"]
+                        "runtimeWorkspaceRoots": [LAUNCH_CWD]
                     }
                 })
                 .to_string(),
@@ -939,6 +939,90 @@ async fn thread_start_naming_a_foreign_cwd_is_refused_over_the_relay() {
 }
 
 #[tokio::test]
+async fn a_creation_response_with_foreign_workspace_roots_binds_nothing_over_the_relay() {
+    // A10 FOLLOW-ON (2e-7c), response side — the sibling of the launch-cwd test above.
+    //
+    // The response is perfectly shaped AND carries the correct launch `cwd`; only its
+    // `runtimeWorkspaceRoots` name a workspace the coordinator did not launch. That is the
+    // realistic attack, because the app-server echoes this field back VERBATIM from the
+    // request (MEASURED): the client chooses it, the server repeats it. Before the anchor
+    // this bound successfully and every later turn was then checked against the client's
+    // choice. Now nothing binds, so the turn it would have authorized is refused.
+    let h = start_broker();
+    h.push_replies(vec![(
+        "thread/start".into(),
+        Message::Text(
+            serde_json::json!({
+                "id": "start-1",
+                "result": {
+                    "thread": {"id": "01a0-wide", "path": "/x"},
+                    "cwd": LAUNCH_CWD,
+                    "runtimeWorkspaceRoots": ["/"]
+                }
+            })
+            .to_string(),
+        ),
+    )]);
+    let mut ws = connect(&h.tui_sock).await;
+    ws.send(Message::Text(CREATION_REQUEST.into()))
+        .await
+        .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(v["result"]["thread"]["id"], "01a0-wide");
+
+    // The turn names the SAME wide roots the response did, so the turn-vs-binding equality
+    // check cannot be what refuses: only the launch-workspace anchor can.
+    let mut turn: serde_json::Value = serde_json::from_str(&turn_frame("01a0-wide")).unwrap();
+    turn["params"]["runtimeWorkspaceRoots"] = serde_json::json!(["/"]);
+    ws.send(Message::Text(turn.to_string())).await.unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["error"]["code"], -32001,
+        "the workspace-roots anchor holds"
+    );
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().clone(),
+        vec![CREATION_REQUEST.to_string()],
+        "zero turn bytes",
+    );
+}
+
+#[tokio::test]
+async fn thread_start_naming_foreign_workspace_roots_is_refused_over_the_relay() {
+    // A10 FOLLOW-ON, request side: a creation may not name workspace ROOTS other than the
+    // session's one launch workspace, and the refusal costs ZERO upstream bytes. The measured
+    // real TUI sends `[<its own cwd>]` here — which in production is the launch cwd — and
+    // that must keep passing.
+    let h = start_broker();
+    let mut ws = connect(&h.tui_sock).await;
+    for roots in [
+        serde_json::json!(["/somewhere/else"]),
+        serde_json::json!([LAUNCH_CWD, "/somewhere/else"]),
+        serde_json::json!([]),
+    ] {
+        let mut start: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
+        start["params"]["runtimeWorkspaceRoots"] = roots.clone();
+        ws.send(Message::Text(start.to_string())).await.unwrap();
+        let v = next_frame(&mut ws).await;
+        assert_eq!(v["error"]["code"], -32001, "roots {roots}");
+        settle().await;
+        assert!(
+            h.state.recorded.lock().unwrap().is_empty(),
+            "zero bytes for roots {roots}"
+        );
+    }
+
+    // The measured shape still forwards (and none of the refusals burned the creation slot).
+    let mut ok: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
+    ok["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
+    let text = ok.to_string();
+    ws.send(Message::Text(text.clone())).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec, vec![text], "[launch cwd] is the measured shape");
+}
+
+#[tokio::test]
 async fn thread_fork_is_refused_over_the_relay() {
     // P2: no fork frame exists in the wire capture, so a fork's source-thread lineage is
     // unprovable — refused pre-2e-4c, zero upstream bytes.
@@ -988,6 +1072,138 @@ async fn ccd_resume_bound_to_session_thread() {
     let rec = recorded_after(&h.state, 2).await;
     assert_eq!(rec.len(), 2);
     assert!(rec[1].contains("01a0-ours"));
+}
+
+#[tokio::test]
+async fn a_resume_that_re_points_or_substitutes_the_bound_thread_costs_zero_upstream_bytes() {
+    // ROUND-5 FINDING 6, over the real relay. Every frame below names the session's OWN bound
+    // thread, so `check_resume_binding` — the only thing a resume used to be checked against —
+    // passes on all of them. What refuses is the SHAPE, and the refusal must be free: a
+    // client-side test cannot see upstream bytes, but the fake upstream here records every
+    // frame it is handed, so `recorded` staying at its pre-resume length IS the zero-byte
+    // proof.
+    let h = start_broker();
+    h.push_replies(vec![(
+        "thread/start".into(),
+        creation_response("01a0-ours"),
+    )]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-ours").await;
+    let after_creation = h.state.recorded.lock().unwrap().len();
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    for (id, extra) in [
+        // MEASURED live: `result.runtimeWorkspaceRoots` came back `["/"]` for this frame.
+        (1, serde_json::json!({"runtimeWorkspaceRoots": ["/"]})),
+        (2, serde_json::json!({"cwd": "/"})),
+        // MEASURED live: the same resume that errors WITHOUT history answers WITH it, naming
+        // a brand-new thread id whose preview is the injected text.
+        (
+            3,
+            serde_json::json!({"history": [{"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "INJECTED"}]}]}),
+        ),
+        // MEASURED live A/B: with `path` set the server resolves the PATH's rollout and the
+        // requested threadId appears nowhere in its own answer.
+        (4, serde_json::json!({"path": "/work/rollout-other.jsonl"})),
+        // Neither is a `ThreadResumeParams` property at all in the real 0.147 schema.
+        (
+            5,
+            serde_json::json!({"selectedCapabilityRoots": [{"id": "r",
+                "location": {"type": "environment", "environmentId": "e", "path": "/"}}]}),
+        ),
+        (
+            6,
+            serde_json::json!({"environments": [{"environmentId": "e", "cwd": "/"}]}),
+        ),
+    ] {
+        let mut frame = serde_json::json!({
+            "method": "thread/resume", "id": id,
+            "params": {"threadId": "01a0-ours"}
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            frame["params"][k] = v.clone();
+        }
+        ccd.send(Message::Text(frame.to_string())).await.unwrap();
+        let v = next_frame(&mut ccd).await;
+        assert_eq!(v["id"], id, "{frame}");
+        assert_eq!(v["error"]["code"], -32001, "{frame}");
+        settle().await;
+        assert_eq!(
+            h.state.recorded.lock().unwrap().len(),
+            after_creation,
+            "zero upstream bytes for {frame}"
+        );
+    }
+
+    // And the ccd's own legitimate resume — the exact frame `mac/ccd/src/codex_link.rs`
+    // builds — still forwards on the same leg, unchanged.
+    let ok = r#"{"method":"thread/resume","id":9,"params":{"threadId":"01a0-ours"}}"#;
+    ccd.send(Message::Text(ok.into())).await.unwrap();
+    let rec = recorded_after(&h.state, after_creation + 1).await;
+    assert_eq!(
+        rec.last().map(String::as_str),
+        Some(ok),
+        "the real ccd resume must forward BYTE-EXACT after all those refusals"
+    );
+}
+
+#[tokio::test]
+async fn a_creation_carrying_a_capability_channel_costs_zero_upstream_bytes() {
+    // ROUND-5 FINDING 5, over the real relay. Each frame satisfies the 2e-7c workspace anchor
+    // (`runtimeWorkspaceRoots: [LAUNCH_CWD]`) and the full launch fingerprint — the only thing
+    // wrong with it is a populated capability channel. Two of these three were MEASURED being
+    // ACCEPTED by a live codex 0.147 app-server, which created a real thread.
+    let h = start_broker();
+    let mut ws = connect(&h.tui_sock).await;
+    for (id, key, value) in [
+        (
+            1,
+            "selectedCapabilityRoots",
+            serde_json::json!([{"id": "probe-root",
+                "location": {"type": "environment", "environmentId": "e", "path": "/"}}]),
+        ),
+        (
+            2,
+            "dynamicTools",
+            serde_json::json!([{"type": "function", "name": "probe_tool",
+                "description": "probe", "inputSchema": {"type": "object"}}]),
+        ),
+        (
+            3,
+            "environments",
+            serde_json::json!([{"environmentId": "e", "cwd": "/",
+                "runtimeWorkspaceRoots": ["/"]}]),
+        ),
+    ] {
+        let mut start: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
+        start["id"] = serde_json::json!(id);
+        start["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
+        start["params"][key] = value;
+        ws.send(Message::Text(start.to_string())).await.unwrap();
+        let v = next_frame(&mut ws).await;
+        assert_eq!(v["error"]["code"], -32001, "{key}");
+        settle().await;
+        assert!(
+            h.state.recorded.lock().unwrap().is_empty(),
+            "zero upstream bytes for a populated {key}"
+        );
+    }
+
+    // …and none of them burned the single creation slot, so the measured shape still forwards.
+    let mut ok: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
+    ok["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
+    ok["params"]["environments"] = serde_json::Value::Null;
+    ok["params"]["selectedCapabilityRoots"] = serde_json::Value::Null;
+    ok["params"]["dynamicTools"] = serde_json::Value::Null;
+    let text = ok.to_string();
+    ws.send(Message::Text(text.clone())).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(
+        rec,
+        vec![text],
+        "the measured null shape is what the real TUI sends, and it must forward"
+    );
 }
 
 #[tokio::test]
@@ -2218,7 +2434,7 @@ fn switch_response(thread: &str) -> Message {
             "result": {
                 "thread": {"id": thread, "path": "/x"},
                 "cwd": LAUNCH_CWD,
-                "runtimeWorkspaceRoots": ["/work"]
+                "runtimeWorkspaceRoots": [LAUNCH_CWD]
             }
         })
         .to_string(),

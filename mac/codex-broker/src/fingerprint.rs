@@ -79,7 +79,10 @@
 //! 5. The turn must name that thread AND carry exactly the `cwd`/`runtimeWorkspaceRoots`
 //!    recorded from its creation response, so the deferral cannot be discharged for a turn
 //!    aimed at a different workspace than the one the thread's policy was proven over
-//!    ([`crate::refusal`], P5).
+//!    ([`crate::refusal`], P5). Both recorded values are anchored to the coordinator-owned
+//!    launch cwd at creation time — `cwd` equal to it, `runtimeWorkspaceRoots` equal to
+//!    `[it]` ([`is_launch_workspace_roots`], A10 follow-on) — so clause 5 inherits an anchor
+//!    rather than merely pinning the thread to its own first frame.
 //!
 //! Hence the inherited policy is the fingerprint's **iff the turn names the session's
 //! verified thread** — a fact this module cannot see. So a null sandbox on `turn/start`
@@ -139,7 +142,128 @@
 //! answers and how it talks, not what it is permitted to do; `input` and `threadId` are the
 //! turn's payload and routing; and `cwd`/`runtimeWorkspaceRoots` are governed instead by
 //! P5's exact equality against the values bound at thread creation ([`crate::refusal`]),
-//! which is a stronger rule than a shape class.
+//! which is a stronger rule than a shape class — and since 2e-7c (gate A10 follow-on) BOTH of
+//! those bound values are themselves anchored to the coordinator-owned launch cwd at creation
+//! time, so the turn-side equality is a transitive anchor rather than mere self-consistency.
+//! See [`is_launch_workspace_roots`], which is that anchor's one definition.
+//!
+//! ## The `thread/start` capability boundary (round-5 finding 5)
+//!
+//! The 2e-7c anchor closed `cwd` and `runtimeWorkspaceRoots` on a creation and stopped
+//! there, so the rest of the creation frame was still forwarded on a shape nobody had
+//! enumerated. A census of the one captured TUI `thread/start`
+//! (`fixtures/codex/thread-switch.jsonl` line 30, 22 keys) against the REAL 0.147
+//! `ThreadStartParams` (generated from the installed binary with
+//! `codex app-server generate-json-schema --experimental`, 25 properties) found three
+//! measured-null params that are **capability channels**, not knobs
+//! ([`THREAD_START_CAPTURED_NULL_PARAMS`]):
+//!
+//! * **`environments`** — `[TurnEnvironmentParams]`, and `TurnEnvironmentParams` carries its
+//!   OWN `cwd` and its OWN `runtimeWorkspaceRoots`. It is therefore a **THIRD workspace
+//!   channel on the creation frame**, and [`is_launch_workspace_roots`] does not see it: a
+//!   frame can satisfy the 2e-7c anchor with `runtimeWorkspaceRoots: [launch_cwd]` and still
+//!   carry `environments: [{environmentId, cwd: "/", runtimeWorkspaceRoots: ["/"]}]`.
+//! * **`selectedCapabilityRoots`** — `[SelectedCapabilityRoot]`, schema description "A
+//!   user-selected root that can expose one or more runtime capabilities", each carrying a
+//!   `location` of `{type: "environment", environmentId, path}` where `path` is documented as
+//!   an "Absolute path for the root in the selected environment". A fourth path channel.
+//! * **`dynamicTools`** — `[DynamicToolSpec]`: `function` specs (name + description +
+//!   `inputSchema`) and `namespace` bundles. Injecting tool definitions into a thread is a
+//!   capability grant in the same class, and it was measured null exactly like the other two.
+//!
+//! MEASURED against a live `codex app-server` 0.147.0 (stdio JSON-RPC, isolated `CODEX_HOME`,
+//! `initialize` declaring `experimentalApi`), with `runtimeWorkspaceRoots` left correctly
+//! anchored to the launch cwd in every probe:
+//!
+//! ```text
+//! selectedCapabilityRoots = [{id, location:{type:"environment", environmentId:"probe-env",
+//!                             path:"/"}}]        => ACCEPTED, real thread CREATED
+//! dynamicTools            = [{type:"function", name:"probe_tool", …}]
+//!                                                => ACCEPTED, real thread CREATED
+//! environments            = [{environmentId:"probe-env", cwd:"/",
+//!                             runtimeWorkspaceRoots:["/"]}]
+//!                                                => -32600 "unknown turn environment id"
+//! ```
+//!
+//! So two of the three are a LIVE escape today with no server-side defence at all. The third
+//! is defended only by server state this broker does not own: the app-server rejects an
+//! *unregistered* environment id, and the only method that registers one — `environment/add`,
+//! whose params are `{environmentId, execServerUrl}` — is `Refuse(NotAllowlisted)` on BOTH
+//! legs in the golden matrix. That is a real bound, and it is deliberately NOT the reason
+//! `environments` passes: a defence that lives in the upstream's lookup table is one this
+//! broker cannot assert, so the field is pinned here too.
+//!
+//! **Absent is accepted alongside null, and that is measured rather than assumed.** The
+//! schema makes all three optional (`ThreadStartParams` has no `required`), `dynamicTools`
+//! carries `"default": null`, and `environments`' own description says "Omitted selects the
+//! default environment" — the same state a null selects. Live: a `thread/start` OMITTING all
+//! three and a `thread/start` sending all three as null both created a thread with identical
+//! results. So absence is not a client this broker has failed to measure; it is the captured
+//! value written a second way. (This is the same call [`check_permission_profiles`] made, and
+//! the opposite of [`TURN_START_CAPTURED_NULL_PARAMS`], where the measured TUI sends every key
+//! on every turn and a missing one really is an unmeasured client.)
+//!
+//! **Deliberately NOT an exhaustive top-level `thread/start` allowlist**, unlike `turn/start`
+//! and unlike `thread/resume` below. The corpus holds exactly ONE captured creation frame; the
+//! real 0.147 `ThreadStartParams` carries three properties that frame never exercised in
+//! either direction (`serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents`), and
+//! pinning a 22-key set off a single sample would refuse a legitimate TUI build on no evidence.
+//! Closing that gap is a CAPTURE problem, not an argument — it needs a corpus of real
+//! creations the size of the eleven-frame `turn/start` one.
+//!
+//! ## The `thread/resume` captured boundary (round-5 finding 6)
+//!
+//! `thread/resume` is a BROADER binding bypass than the creation frame, and until now the
+//! only thing checked on it was that `params.threadId` names a session thread
+//! ([`crate::refusal::check_resume_binding`]). Per the real 0.147 `ThreadResumeParams`,
+//! three of its other seventeen properties each defeat that check outright:
+//!
+//! * **`runtimeWorkspaceRoots`** — "Replace the thread's runtime workspace roots." The
+//!   2e-7c anchor is creation-only, so a client holding one bound thread id could re-point
+//!   that thread's roots at anything.
+//! * **`history`** — "[UNSTABLE] FOR CODEX CLOUD - DO NOT USE. If specified, the thread will
+//!   be resumed with the provided history instead of loaded from disk."
+//! * **`path`** — "[UNSTABLE] Specify the rollout path to resume from. **If specified for a
+//!   non-running thread, the thread_id param will be ignored.**"
+//!
+//! MEASURED on live 0.147.0, and worse than the schema text alone reads:
+//!
+//! ```text
+//! D1  resume{threadId: NR}                        => -32600 "no rollout found for thread id NR"
+//! D2  resume{threadId: NR, history:[…"INJECTED"]} => RESULT, thread.id = a BRAND NEW id,
+//!                                                    thread.preview = "INJECTED HISTORY"
+//! D3  D2 + runtimeWorkspaceRoots:["/"]            => RESULT, result.runtimeWorkspaceRoots
+//!                                                    = ["/"]
+//! C1  resume{threadId: BOGUS}                     => error names BOGUS
+//! C2  resume{threadId: BOGUS, path: <NR rollout>} => error names the ROLLOUT FILE; the bogus
+//!                                                    id appears nowhere — `path` won
+//! ```
+//!
+//! D2 is the whole finding in one frame: the SAME request that fails without `history`
+//! SUCCEEDS with it, and what comes back is a thread this broker never bound, populated from
+//! client-supplied content — a thread CREATION through a method that never touches the
+//! creation slot, the launch-cwd guards, or the presence rule. D3 then binds `/` as that
+//! thread's runtime workspace root. C1/C2 are the A/B for `path`: the requested `threadId`
+//! is not merely overridden, it is not consulted.
+//!
+//! The rule is the CAPTURED shape, from two real client shapes rather than one:
+//! the ccd's own resume, which is literally `{"threadId": <id>}` and nothing else
+//! (`mac/ccd/src/codex_link.rs`, and three such frames in `thread-switch.jsonl` from the
+//! observer legs), and the TUI's `/resume`, which sends seventeen keys
+//! (`thread-switch.jsonl` line 96). [`THREAD_RESUME_CAPTURED_PARAMS`] is the TUI set, which
+//! contains the ccd's as a subset, so the exhaustive allowlist admits BOTH measured clients
+//! and refuses the schema's eighteenth property (`serviceTier`) because no client ever sent
+//! it. `path` and `history` are pinned absent-or-null
+//! ([`THREAD_RESUME_CAPTURED_NULL_PARAMS`]); `cwd` and `runtimeWorkspaceRoots` are anchored to
+//! the launch workspace by the same two guards the creation frame uses
+//! ([`crate::refusal`]), which is exactly what the captured TUI frame carries
+//! (`cwd: null`, `runtimeWorkspaceRoots: [the TUI's own cwd]`).
+//!
+//! `environments` and `selectedCapabilityRoots` are pinned on resume too — by the allowlist
+//! rather than by a null rule, because the real 0.147 `ThreadResumeParams` **has no such
+//! properties**. Live, the app-server silently IGNORES them (and any other unknown key) on a
+//! resume, which is precisely why the pin has to be the broker's: an upstream that discards a
+//! field today is not a promise about the build after next.
 //!
 //! ## Presence vs conflict (decoy hardening)
 //!
@@ -219,6 +343,93 @@ pub struct LaunchFingerprint {
     pub launch_cwd: String,
 }
 
+/// Is `v` EXACTLY this session's one launch workspace, rendered as a `runtimeWorkspaceRoots`
+/// value — the single-element array `[launch_cwd]`?
+///
+/// **This is the whole `runtimeWorkspaceRoots` anchor** (2e-7c, gate A10 follow-on), defined
+/// once and consulted from the two places `cwd` is already anchored: the creation-REQUEST
+/// guard (`crate::refusal`'s `check_start_workspace_roots`) and the creation-RESPONSE
+/// verifier (`crate::session`'s `verify_creation_result`). One definition, two call sites, so
+/// the request-side and response-side rules cannot drift into disagreeing about what the
+/// launch workspace is.
+///
+/// ## Why an anchor was needed at all
+///
+/// Until 2e-7c `runtimeWorkspaceRoots` was only ever SHAPE-checked ("a non-empty array of
+/// non-empty strings") on the creation response and then compared for self-consistency on
+/// every turn. That is not an anchor: whatever the FIRST frame chose became the binding, and
+/// every later turn was measured against that choice rather than against anything the
+/// coordinator owned. `cwd` never had that hole — it is checked against
+/// [`LaunchFingerprint::launch_cwd`] on both the request and the response.
+///
+/// ## MEASURED (real codex 0.147 `--remote` TUI under a pty, proxied against a real
+/// `codex app-server`, recorded in BOTH directions, in three launch directories: a git repo
+/// ROOT, a deep SUBDIRECTORY inside that repo, and a directory in NO repo)
+///
+/// ```text
+/// REQUEST  params.cwd                   = null
+/// REQUEST  params.runtimeWorkspaceRoots = ["<the TUI's own cwd, canonicalized>"]
+/// RESPONSE result.cwd                   = "<the app-server process's cwd>"
+/// RESPONSE result.runtimeWorkspaceRoots = ["<the TUI's cwd, echoed back verbatim>"]
+/// ```
+///
+/// Three facts follow, and all three are load-bearing for this rule:
+/// 1. The value is **client-supplied and echoed verbatim by the server** — it is NOT
+///    server-derived. A client naming any directory gets that directory bound. So the
+///    response side alone can never be trusted, and the request side must be guarded too.
+/// 2. It is exactly `[canonicalize(the TUI's cwd)]` — **a single-element array**. It is not
+///    the git root (the deep-subdirectory launch sent the subdirectory, not the repo root)
+///    and it does not vary with repo-ness.
+/// 3. In PRODUCTION that single element is the launch cwd. The coordinator creates the pane
+///    with `tmux new-session … -c <launch cwd>`; the `internal-codex-host` and the TUI both
+///    inherit that directory and neither calls `current_dir()`; and the coordinator's
+///    `canonical_launch_cwd` canonicalizes it exactly once before it enters the host argv.
+///    The TUI canonicalizes the same way. Hence `runtimeWorkspaceRoots == [launch_cwd]`,
+///    exactly, byte for byte.
+///
+/// ## Why the single-element strictness is safe, and what it costs
+///
+/// The launcher's argv/config gate (`codeconnect`'s `codex.rs`, the argv half of A10) REFUSES
+/// `--add-dir`, `--sandbox` and every `sandbox_workspace_write.*` config key, so no supported
+/// invocation can widen the workspace before the TUI starts. A second root therefore cannot
+/// arrive from any path this system launches — it can only arrive from a client asking for
+/// one, which is precisely the thing being refused.
+///
+/// The consequence, stated plainly rather than hidden: **the day a future codex legitimately
+/// sends a second root, this refuses rather than guesses.** A creation carrying
+/// `[launch_cwd, <anything>]` is a policy refusal, not a widened session. That is the
+/// intended direction — a broker that guessed which extra roots were benign would be
+/// asserting a policy it never measured. Re-grounding it requires a NEW capture of the real
+/// wire, not an argument.
+///
+/// ## Note on the committed fixtures (they are not a counterexample — and they corroborate)
+///
+/// The fixtures under `fixtures/codex/` split into two families, and the split is an artifact
+/// of sanitization, not of codex behaviour:
+///
+/// * `turn-start-request.json` and `resume-populated-answer.json` (2 occurrences) carry
+///   `cwd: "/work/proj"` alongside `runtimeWorkspaceRoots: ["/work"]`, which reads like a
+///   rule violation. It is not: those are two DIFFERENT real directories sanitized to two
+///   placeholders — the app-server's cwd and the TUI's cwd, which differed only because the
+///   capture rig spawned the two processes in different directories, exactly as the probe rig
+///   above did. Do not read a `cwd`-is-under-`roots` containment rule off those placeholders.
+/// * `thread-switch.jsonl` and `model-switch.json` (23 occurrences) carry
+///   `runtimeWorkspaceRoots: ["/work/proj"]` — **equal to `cwd`**, uniformly. That is this
+///   rule's shape, and it is the large majority of the captured corpus.
+///
+/// So the corpus does not contradict the measurement; it contains one rig-induced skew and
+/// twenty-three frames in the anchored shape. The live proxy above is what settles it.
+///
+/// Exact string equality, no filesystem access, no normalizer — for the same reason
+/// [`LaunchFingerprint::launch_cwd`] states: the canonicalization happened once, at the
+/// coordinator, and a second notion of path identity inside the broker would be both a
+/// syscall surface and a disagreement waiting to happen.
+pub fn is_launch_workspace_roots(launch_cwd: &str, v: &Value) -> bool {
+    v.as_array().is_some_and(|roots| {
+        roots.len() == 1 && roots[0].as_str() == Some(launch_cwd) && !launch_cwd.is_empty()
+    })
+}
+
 /// The verdict of a fingerprint assertion that did not refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FpVerdict {
@@ -291,6 +502,24 @@ pub fn assert_fingerprint(
         check_turn_start_captured_shape(params)?;
     }
 
+    // 0b) `thread/start` only: the capability boundary (round-5 finding 5). Three
+    //     measured-null creation params are capability channels — an execution-environment
+    //     selection that carries its own workspace roots, a set of capability roots that
+    //     carry absolute paths, and a set of injected tool definitions. Two of the three were
+    //     measured LIVE to be accepted by a real 0.147 app-server, which is why this is a
+    //     production fix and not a tidy-up.
+    if method == "thread/start" {
+        check_thread_start_captured_shape(params)?;
+    }
+
+    // 0c) `thread/resume` only: the two params that defeat the thread-binding check outright
+    //     — a `history` that substitutes the thread's content (and, measured live, MINTS A
+    //     NEW THREAD), and a `path` that makes `threadId` be ignored. Checked here, before
+    //     the exhaustive allowlist at the bottom, so each keeps its own refusal.
+    if method == "thread/resume" {
+        check_thread_resume_captured_shape(params)?;
+    }
+
     // 0) Categorically reject any dotted key anywhere under `params.config`. Legitimate TUI
     //    traffic sends nested objects, never dotted config keys; a dotted key can path-expand
     //    onto an owned dimension and cannot be proven either way. Fail closed for ALL
@@ -354,6 +583,14 @@ pub fn assert_fingerprint(
         check_turn_start_top_level_allowlist(params)?;
     }
 
+    // 5b) `thread/resume` only: the EXHAUSTIVE top-level allowlist (round-5 finding 6), for
+    //      the same reason and in the same position as the turn's — last, so `path`,
+    //      `history`, `notify`, `permissions` and every ownership dimension keep their own,
+    //      more specific refusal instead of collapsing into "unknown param".
+    if method == "thread/resume" {
+        check_thread_resume_top_level_allowlist(params)?;
+    }
+
     if sandbox_deferred {
         Ok(FpVerdict::SandboxDeferredToBoundThread)
     } else {
@@ -402,6 +639,155 @@ fn check_turn_start_captured_shape(params: &Value) -> Result<(), FingerprintRefu
         }
     }
     check_collaboration_mode(params)
+}
+
+/// The `thread/start` params that are **capability channels** rather than knobs, measured
+/// null on the one captured TUI creation and measured LIVE to be forwarded unverified. See
+/// the module header's `thread/start` capability boundary for the schema evidence behind each
+/// (`environments` carries its own `cwd`/`runtimeWorkspaceRoots`; `selectedCapabilityRoots`
+/// carries absolute paths "for the root in the selected environment"; `dynamicTools` injects
+/// tool definitions) and for the live probe results.
+const THREAD_START_CAPTURED_NULL_PARAMS: [&str; 3] =
+    ["environments", "selectedCapabilityRoots", "dynamicTools"];
+
+/// Enforce the captured `thread/start` capability boundary: each of
+/// [`THREAD_START_CAPTURED_NULL_PARAMS`] must be **absent or exactly JSON null**.
+///
+/// Absence is accepted here, unlike on a turn — measured, not inferred: the schema makes all
+/// three optional, `environments`' own description says an omitted value selects the same
+/// default a null does, and a live creation that omitted all three and one that sent all three
+/// as null produced identical results. See the module header.
+fn check_thread_start_captured_shape(params: &Value) -> Result<(), FingerprintRefusal> {
+    for key in THREAD_START_CAPTURED_NULL_PARAMS {
+        match params.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                return Err(refusal(
+                    FpRefuseKind::Unprovable,
+                    format!(
+                        "params.{key}: thread/start capability boundary — every measured \
+                         creation sent this key as JSON null (or omitted it, which selects the \
+                         same state); a {} is a capability grant whose effect was never \
+                         observed and cannot be proven. Widening requires a NEW capture, not \
+                         an argument.",
+                        shape_class(v)
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `thread/resume` params that DEFEAT the thread-binding check, pinned absent-or-null.
+///
+/// * `history` — "the thread will be resumed with the provided history instead of loaded from
+///   disk". Measured live: it also MINTS A NEW THREAD when the named one is not running, so
+///   the answer names an id this broker never bound.
+/// * `path` — "If specified for a non-running thread, the thread_id param will be ignored."
+///   Measured live by A/B: with `path` set, the requested id does not appear in the server's
+///   own error at all.
+///
+/// Both are `[UNSTABLE]` in the 0.147 schema and both were JSON null on the captured TUI
+/// resume; the ccd's resume omits them entirely.
+const THREAD_RESUME_CAPTURED_NULL_PARAMS: [&str; 2] = ["history", "path"];
+
+/// Enforce the two `thread/resume` params that would otherwise make
+/// [`crate::refusal::check_resume_binding`] decorative.
+fn check_thread_resume_captured_shape(params: &Value) -> Result<(), FingerprintRefusal> {
+    for key in THREAD_RESUME_CAPTURED_NULL_PARAMS {
+        match params.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                return Err(refusal(
+                    FpRefuseKind::Unprovable,
+                    format!(
+                        "params.{key}: thread/resume captured boundary — the measured TUI sends \
+                         this key as JSON null and the ccd omits it. A populated value makes \
+                         the resume name something other than the bound thread it asked for \
+                         (a substituted history, or a rollout path that causes threadId to be \
+                         IGNORED), so the session thread-binding proof would not be a proof \
+                         about what the server actually resumes. Refused as a {}.",
+                        shape_class(v)
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The FULL set of top-level `thread/resume` params measured on the wire, from the TWO real
+/// client shapes in the corpus:
+///
+/// * the ccd's own resume — literally `{"threadId": <id>}` and nothing else
+///   (`mac/ccd/src/codex_link.rs`; three such frames on the observer legs of
+///   `fixtures/codex/thread-switch.jsonl`), and
+/// * the TUI's `/resume` — these seventeen keys (`thread-switch.jsonl` line 96).
+///
+/// The ccd's set is a SUBSET of the TUI's, so this one list admits both measured clients. It
+/// is deliberately NOT the schema's set: the real 0.147 `ThreadResumeParams` carries an
+/// eighteenth property, `serviceTier`, that no captured client ever sent — refuse-by-default
+/// applies to params, and "the schema permits it" has never been this module's bar.
+///
+/// The two fields the 0.147 schema does NOT give resume — `environments` and
+/// `selectedCapabilityRoots` — are therefore refused here rather than by a null rule. Live,
+/// the app-server silently ignores them on a resume; an upstream that discards a field today
+/// is not a promise about the build after next, so the pin is the broker's.
+const THREAD_RESUME_CAPTURED_PARAMS: [&str; 17] = [
+    "threadId",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "baseInstructions",
+    "config",
+    "cwd",
+    "developerInstructions",
+    "excludeTurns",
+    "history",
+    "initialTurnsPage",
+    "model",
+    "modelProvider",
+    "path",
+    "permissions",
+    "personality",
+    "runtimeWorkspaceRoots",
+    "sandbox",
+];
+
+/// Refuse any top-level `thread/resume` param outside the captured set.
+///
+/// The exact sibling of [`check_turn_start_top_level_allowlist`], and audit-log-safe for the
+/// identical reason: the offending key is by definition one this broker has no vocabulary for,
+/// so the detail carries a COUNT and nothing else — a key like
+/// `"x\n2026-01-01 broker: forward (request allowlisted)"` would otherwise forge a line in the
+/// file the live gates grep.
+fn check_thread_resume_top_level_allowlist(params: &Value) -> Result<(), FingerprintRefusal> {
+    let Some(map) = params.as_object() else {
+        return Err(refusal(
+            FpRefuseKind::Unprovable,
+            format!(
+                "thread/resume params: the captured shape is an object, never a {}",
+                shape_class(params)
+            ),
+        ));
+    };
+    let unknown = map
+        .keys()
+        .filter(|k| !THREAD_RESUME_CAPTURED_PARAMS.contains(&k.as_str()))
+        .count();
+    if unknown > 0 {
+        return Err(refusal(
+            FpRefuseKind::Unprovable,
+            format!(
+                "thread/resume params: unknown top-level parameter ({unknown} of {}) — captured \
+                 boundary: a resume is the one ownership method whose fingerprint is \
+                 absence-exempt, so an unmeasured param on it is authorized by nothing at all. \
+                 Key names are withheld from the audit log.",
+                map.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The FULL set of top-level `turn/start` params measured on the wire, enumerated exactly
@@ -2563,5 +2949,379 @@ mod tests {
                 .kind,
             FpRefuseKind::Unprovable,
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // round-5 findings 5 and 6: the `thread/start` capability boundary and the
+    // `thread/resume` captured boundary, both driven off the VERBATIM captured frames
+    // rather than hand-written params, so the rules and their evidence cannot drift.
+    // ---------------------------------------------------------------------
+
+    /// Every client→server frame of the four-connection `/new` switch capture.
+    fn switch_capture_c2s(method: &str) -> Vec<Value> {
+        include_str!("../../../fixtures/codex/thread-switch.jsonl")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Value>(l).expect("a capture line parses"))
+            .filter(|v| v["dir"] == "c2s" && v["frame"]["method"].as_str() == Some(method))
+            .map(|v| v["frame"]["params"].clone())
+            .collect()
+    }
+
+    /// The one captured TUI `thread/start` (`thread-switch.jsonl` line 30).
+    fn captured_thread_start() -> Value {
+        let frames = switch_capture_c2s("thread/start");
+        assert_eq!(
+            frames.len(),
+            1,
+            "the corpus holds exactly ONE captured creation; a change here means the \
+             capture moved and every rule read off it must be re-grounded"
+        );
+        frames[0].clone()
+    }
+
+    /// The launch fingerprint the captured session actually ran under, read off the captured
+    /// creation itself so the two cannot disagree.
+    fn captured_start_fp() -> LaunchFingerprint {
+        let p = captured_thread_start();
+        LaunchFingerprint {
+            approval_policy: p["approvalPolicy"].as_str().unwrap().into(),
+            approvals_reviewer: p["approvalsReviewer"].as_str().unwrap().into(),
+            sandbox: p["sandbox"].as_str().unwrap().into(),
+            hooks_enabled: true,
+            launch_cwd: p["runtimeWorkspaceRoots"][0].as_str().unwrap().into(),
+        }
+    }
+
+    /// **The census pin.** The captured creation's key SET, verbatim. This is the list the
+    /// round-5 finding-5 census was taken over, and it is asserted rather than described so a
+    /// re-capture that adds, drops or renames a creation param fails HERE — the exact defect
+    /// finding 5 exists because of (a census that was incomplete and unfalsifiable).
+    ///
+    /// 22 of the real 0.147 `ThreadStartParams`' 25 properties. The three the TUI never sent
+    /// — `serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents` — are named here
+    /// so the gap is a recorded fact rather than an omission; see the module header for why
+    /// `thread/start` deliberately has no exhaustive top-level allowlist.
+    #[test]
+    fn the_captured_thread_start_census_is_pinned() {
+        let p = captured_thread_start();
+        let mut keys: Vec<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "approvalPolicy",
+                "approvalsReviewer",
+                "baseInstructions",
+                "config",
+                "cwd",
+                "developerInstructions",
+                "dynamicTools",
+                "environments",
+                "ephemeral",
+                "historyMode",
+                "mockExperimentalField",
+                "model",
+                "modelProvider",
+                "multiAgentMode",
+                "permissions",
+                "personality",
+                "runtimeWorkspaceRoots",
+                "sandbox",
+                "selectedCapabilityRoots",
+                "serviceName",
+                "sessionStartSource",
+                "threadSource",
+            ],
+            "the captured creation's key set moved; re-run the finding-5 census"
+        );
+        // And the three capability channels really were null in the capture — the premise of
+        // `check_thread_start_captured_shape`, asserted rather than asserted-about.
+        for key in THREAD_START_CAPTURED_NULL_PARAMS {
+            assert_eq!(p[key], Value::Null, "captured {key} must be JSON null");
+        }
+    }
+
+    #[test]
+    fn the_captured_creation_still_passes_unchanged() {
+        assert_eq!(
+            assert_fingerprint(
+                &captured_start_fp(),
+                "thread/start",
+                &captured_thread_start()
+            )
+            .unwrap(),
+            FpVerdict::Proven,
+            "the real TUI's own creation must not be refused by the capability boundary"
+        );
+    }
+
+    /// A populated value for each capability channel, in the shape the REAL 0.147 schema
+    /// gives it — and, for two of the three, the shape a live app-server was measured
+    /// ACCEPTING (see the module header's probe table).
+    fn populated_capability_channel(key: &str) -> Value {
+        match key {
+            "environments" => json!([{
+                "environmentId": "probe-env", "cwd": "/", "runtimeWorkspaceRoots": ["/"]
+            }]),
+            "selectedCapabilityRoots" => json!([{
+                "id": "probe-root",
+                "location": {"type": "environment", "environmentId": "probe-env", "path": "/"}
+            }]),
+            "dynamicTools" => json!([{
+                "type": "function", "name": "probe_tool", "description": "probe",
+                "inputSchema": {"type": "object"}
+            }]),
+            other => unreachable!("no populated shape recorded for {other}"),
+        }
+    }
+
+    #[test]
+    fn each_thread_start_capability_channel_refuses_when_populated() {
+        for key in THREAD_START_CAPTURED_NULL_PARAMS {
+            let mut p = captured_thread_start();
+            p[key] = populated_capability_channel(key);
+            let err = assert_fingerprint(&captured_start_fp(), "thread/start", &p)
+                .unwrap_err_or_panic(key);
+            assert_eq!(err.kind, FpRefuseKind::Unprovable, "{key}");
+            assert!(
+                err.detail.contains(&format!("params.{key}")),
+                "the refusal must name the channel it refused: {}",
+                err.detail
+            );
+        }
+    }
+
+    /// The `environments` escape stated precisely: the 2e-7c anchor is SATISFIED on the same
+    /// frame, because `TurnEnvironmentParams` carries its own workspace roots and
+    /// `is_launch_workspace_roots` never sees them. Without the capability boundary this
+    /// frame is indistinguishable from a legitimate creation.
+    #[test]
+    fn a_populated_environment_carries_its_own_roots_past_the_workspace_anchor() {
+        let mut p = captured_thread_start();
+        p["environments"] = populated_capability_channel("environments");
+        let fp = captured_start_fp();
+        assert!(
+            is_launch_workspace_roots(&fp.launch_cwd, &p["runtimeWorkspaceRoots"]),
+            "the 2e-7c anchor is satisfied by this frame — which is exactly the point"
+        );
+        assert_eq!(
+            assert_fingerprint(&fp, "thread/start", &p)
+                .unwrap_err()
+                .kind,
+            FpRefuseKind::Unprovable,
+        );
+    }
+
+    #[test]
+    fn an_omitted_capability_channel_still_passes() {
+        // MEASURED, not inferred: a live creation that OMITTED all three and one that sent
+        // all three as null produced identical results, and the schema documents an omitted
+        // `environments` as selecting the same default a null does.
+        let mut p = captured_thread_start();
+        for key in THREAD_START_CAPTURED_NULL_PARAMS {
+            p.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(
+            assert_fingerprint(&captured_start_fp(), "thread/start", &p).unwrap(),
+            FpVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn the_capability_boundary_is_thread_start_scoped() {
+        // A turn already pins `environments` through its own captured boundary; a RESUME has
+        // no such property in the 0.147 schema at all, so it is refused there by the
+        // exhaustive allowlist rather than by this rule. Neither is this rule's job, and
+        // scoping it says so.
+        let p = json!({
+            "threadId": "t",
+            "selectedCapabilityRoots": populated_capability_channel("selectedCapabilityRoots")
+        });
+        let err = assert_fingerprint(&fp(), "thread/resume", &p).unwrap_err();
+        assert_eq!(err.kind, FpRefuseKind::Unprovable);
+        assert!(
+            err.detail.contains("unknown top-level parameter"),
+            "on a resume this is an UNKNOWN param, not a null-pinned one: {}",
+            err.detail
+        );
+    }
+
+    // --- thread/resume ---------------------------------------------------
+
+    /// The captured `thread/resume` frames: three from the observer legs (the ccd's own
+    /// shape) and one from the TUI's `/resume`.
+    fn captured_resumes() -> Vec<Value> {
+        let frames = switch_capture_c2s("thread/resume");
+        assert_eq!(frames.len(), 4, "the capture holds four resumes");
+        frames
+    }
+
+    /// The ccd's own resume shape — literally `{"threadId": <id>}`. This is what
+    /// `mac/ccd/src/codex_link.rs` constructs, and it is the half of finding 6 that must NOT
+    /// break: a guard that refuses the real ccd resume is a worse bug than the one it fixes.
+    fn ccd_resume() -> Value {
+        let f = captured_resumes()
+            .into_iter()
+            .find(|p| p.as_object().unwrap().len() == 1)
+            .expect("the capture holds the ccd's one-key resume");
+        assert!(f["threadId"].is_string());
+        f
+    }
+
+    /// The TUI's `/resume` — the seventeen-key frame.
+    fn tui_resume() -> Value {
+        captured_resumes()
+            .into_iter()
+            .find(|p| p.as_object().unwrap().len() > 1)
+            .expect("the capture holds the TUI's full resume")
+    }
+
+    #[test]
+    fn the_captured_resume_census_is_pinned() {
+        // The allowlist is EXACTLY the TUI frame's key set, read off the capture rather than
+        // transcribed, and the ccd's frame is a strict subset of it — so one list admits both
+        // measured clients.
+        let tui = tui_resume();
+        let mut keys: Vec<&str> = tui
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut allowed = THREAD_RESUME_CAPTURED_PARAMS;
+        allowed.sort_unstable();
+        assert_eq!(
+            keys,
+            allowed.as_slice(),
+            "THREAD_RESUME_CAPTURED_PARAMS must be exactly the captured TUI resume's keys"
+        );
+        assert!(
+            ccd_resume()
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|k| allowed.contains(&k.as_str())),
+            "the ccd's resume must be a subset of the allowlist"
+        );
+        // The two binding-bypass params really were null on the captured TUI frame.
+        for key in THREAD_RESUME_CAPTURED_NULL_PARAMS {
+            assert_eq!(tui[key], Value::Null, "captured resume {key} must be null");
+        }
+    }
+
+    #[test]
+    fn both_measured_resume_clients_are_still_admitted() {
+        // THE NON-NEGOTIABLE HALF of finding 6.
+        let fp = captured_start_fp();
+        assert_eq!(
+            assert_fingerprint(&fp, "thread/resume", &ccd_resume()).unwrap(),
+            FpVerdict::Proven,
+            "the ccd's own legitimate resume must still pass"
+        );
+        assert_eq!(
+            assert_fingerprint(&fp, "thread/resume", &tui_resume()).unwrap(),
+            FpVerdict::Proven,
+            "the real TUI's /resume must still pass"
+        );
+    }
+
+    #[test]
+    fn a_populated_resume_path_is_refused() {
+        // MEASURED live: with `path` set, the app-server resolves the PATH's rollout and the
+        // requested threadId does not appear in its own error at all — so the session
+        // thread-binding check would be proving something about an id the server ignored.
+        let mut p = tui_resume();
+        p["path"] = json!("/work/codexhome/sessions/2026/08/25/rollout-other.jsonl");
+        let err = assert_fingerprint(&captured_start_fp(), "thread/resume", &p).unwrap_err();
+        assert_eq!(err.kind, FpRefuseKind::Unprovable);
+        assert!(err.detail.contains("params.path"), "{}", err.detail);
+    }
+
+    #[test]
+    fn a_populated_resume_history_is_refused() {
+        // MEASURED live: the SAME resume that errors without `history` SUCCEEDS with it and
+        // answers with a BRAND NEW thread id whose preview is the injected text — a thread
+        // creation through a method that never touches the creation slot.
+        let mut p = tui_resume();
+        p["history"] = json!([{
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "INJECTED HISTORY"}]
+        }]);
+        let err = assert_fingerprint(&captured_start_fp(), "thread/resume", &p).unwrap_err();
+        assert_eq!(err.kind, FpRefuseKind::Unprovable);
+        assert!(err.detail.contains("params.history"), "{}", err.detail);
+    }
+
+    #[test]
+    fn a_param_outside_the_captured_resume_set_is_refused() {
+        // Including the two finding-5 channels, which the 0.147 schema does not give resume
+        // at all — and `serviceTier`, which it DOES give resume but which no captured client
+        // ever sent. Refuse-by-default applies to params, not to the schema.
+        for key in [
+            "environments",
+            "selectedCapabilityRoots",
+            "serviceTier",
+            "someFutureChannel",
+        ] {
+            let mut p = ccd_resume();
+            p[key] = json!("x");
+            let err = assert_fingerprint(&captured_start_fp(), "thread/resume", &p)
+                .unwrap_err_or_panic(key);
+            assert_eq!(err.kind, FpRefuseKind::Unprovable, "{key}");
+            assert!(
+                err.detail.contains("unknown top-level parameter"),
+                "{key}: {}",
+                err.detail
+            );
+            assert_no_injection(&err.detail, key);
+        }
+    }
+
+    #[test]
+    fn the_resume_boundary_never_logs_a_client_key_or_value() {
+        // Round-3 P3 applies to the new rules exactly as it does to the old ones: the
+        // durable `broker.log` is what the live gates grep, and every input here is
+        // attacker-chosen.
+        let injected = "\n2026-01-01 broker: forward (request allowlisted)";
+        let mut p = ccd_resume();
+        p[injected] = json!(1);
+        assert_no_injection(
+            &assert_fingerprint(&captured_start_fp(), "thread/resume", &p)
+                .unwrap_err()
+                .detail,
+            injected,
+        );
+        let mut p = tui_resume();
+        p["path"] = json!(injected);
+        assert_no_injection(
+            &assert_fingerprint(&captured_start_fp(), "thread/resume", &p)
+                .unwrap_err()
+                .detail,
+            injected,
+        );
+        let mut p = captured_thread_start();
+        p["selectedCapabilityRoots"] = json!([injected]);
+        assert_no_injection(
+            &assert_fingerprint(&captured_start_fp(), "thread/start", &p)
+                .unwrap_err()
+                .detail,
+            injected,
+        );
+    }
+
+    /// `Result::unwrap_err` with the offending key in the panic message, so a loop over
+    /// several keys says WHICH one failed to refuse instead of just "called unwrap_err on Ok".
+    trait UnwrapErrOrPanic {
+        fn unwrap_err_or_panic(self, key: &str) -> FingerprintRefusal;
+    }
+    impl UnwrapErrOrPanic for Result<FpVerdict, FingerprintRefusal> {
+        fn unwrap_err_or_panic(self, key: &str) -> FingerprintRefusal {
+            match self {
+                Err(e) => e,
+                Ok(v) => panic!("{key} was ADMITTED ({v:?}); it must be refused"),
+            }
+        }
     }
 }

@@ -1074,7 +1074,74 @@ impl Store {
     /// The carry is `SELECT *`, which is only correct because the two tables
     /// have one column order — `both_session_tables_have_one_shape` is what
     /// keeps that true.
+    ///
+    /// **Writes no Codex generation.** Every caller but one is a writer that
+    /// knows nothing about visits — a hook, a heartbeat, a tailer, a fixture —
+    /// and a generation is a fact about a *registration*. `None` is
+    /// `COALESCE`d away by the statement below, so none of them can blank a
+    /// high-water they were never told about. The registration path uses
+    /// [`Store::upsert_session_at_generation`].
     pub fn upsert_session(&self, row: &SessionRow) -> Result<SessionUpsert> {
+        self.upsert_session_at_generation(row, None)
+    }
+
+    /// The same write, carrying the **Codex generation this registration was
+    /// accepted at** (plan A5.1, clause "durable high-water evidence").
+    ///
+    /// A second method rather than a fourteenth field on [`SessionRow`], and the
+    /// reason is what the column is *for*. `SessionRow` is the fleet projection
+    /// — the shape `all_sessions` returns, the shape every reader in the daemon
+    /// decodes, the shape twenty-one call sites construct. The generation is
+    /// none of those things: it is written by one caller, read by one guard, and
+    /// projected to nobody. Putting it on the row would have twenty-one writers
+    /// declaring a fact only one of them can know, and would put a
+    /// registration's high-water in reach of every heartbeat that builds a row
+    /// literal.
+    ///
+    /// It is nonetheless **one statement**, not a second write chased after the
+    /// first, because the ordering clause A5.1 turns on is that a refused frame
+    /// mutates nothing and an accepted one leaves the row and its generation
+    /// agreeing. Two statements would leave a crash window where the row names a
+    /// registration whose generation was never recorded — and the next daemon
+    /// would read a high-water older than the session it is looking at.
+    ///
+    /// `None` means "this write knows nothing about generations", and the
+    /// `COALESCE` below keeps whatever is there — the same rule the Codex
+    /// identity columns already follow, for the same reason: a later write with
+    /// no news must not blank a known value.
+    pub fn upsert_session_at_generation(
+        &self,
+        row: &SessionRow,
+        codex_generation: Option<u64>,
+    ) -> Result<SessionUpsert> {
+        // SQLite stores integers as `i64` and rusqlite binds them as such, so a
+        // `u64` above `i64::MAX` has no representation here. This used to
+        // *saturate* — pin to `i64::MAX` — on the argument that no run can reach
+        // that number anyway. The argument was sound and the fallback was not:
+        // saturating writes a high-water that disagrees with the one the caller
+        // holds in memory, which makes the durable/incoming equality the adoption
+        // guard turns on (plan A5.1) read false for a generation that was in fact
+        // adopted, and makes a restart reload a *lower* high-water than the daemon
+        // had. Silently storing a different number than the caller asked for is
+        // the failure mode, and the size of the number is not what makes it one.
+        //
+        // So the write refuses instead. Not the first line of defence — a
+        // registration is refused far earlier, before any mutation at all, by
+        // `ControlLink::from_registration`, which is where the argument about what
+        // a legitimate producer can mint is written out — but the last one, and
+        // the one that makes "what is in this column is what a caller passed" a
+        // property of the column rather than of its callers.
+        let codex_generation = codex_generation
+            .map(i64::try_from)
+            .transpose()
+            .with_context(|| {
+                format!(
+                    "refusing to record a Codex generation above {} for {}: SQLite would store a \
+                     different number than the registration claimed",
+                    i64::MAX,
+                    row.session_uid
+                )
+            })?;
         let (table, other) = session_tables_for(&row.agent);
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1116,8 +1183,8 @@ impl Store {
                 "INSERT INTO {table}(session_uid, session_id, tmux_session, tmux_socket, cwd,
                                      claude_session_id, transcript_path, lifecycle,
                                      created_at, updated_at,
-                                     agent, codex_thread_id, codex_socket)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                                     agent, codex_thread_id, codex_socket, codex_generation)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
                  WHERE NOT EXISTS (SELECT 1 FROM deleted_sessions WHERE session_uid = ?1)
                  ON CONFLICT(session_uid) DO UPDATE SET
                     session_id        = excluded.session_id,
@@ -1132,10 +1199,65 @@ impl Store {
                     updated_at        = excluded.updated_at,
                     -- The agent is set by whoever introduces the run and is the
                     -- authority; the Codex identity columns are COALESCE-preserved so
-                    -- a later heartbeat that does not carry them cannot blank them.
+                    -- a later heartbeat that does not carry them cannot blank them —
+                    -- with the one exception the thread's own note below argues for.
                     agent             = excluded.agent,
-                    codex_thread_id   = COALESCE(excluded.codex_thread_id, {table}.codex_thread_id),
-                    codex_socket      = COALESCE(excluded.codex_socket, {table}.codex_socket)"
+                    -- **The thread is a fact about the visit named beside it,
+                    -- so it does not outlive that visit.** `COALESCE` alone
+                    -- kept the previous visit's thread while the generation
+                    -- moved on, and the pair it left behind — a generation
+                    -- carrying a thread no registration at that generation ever
+                    -- named — is read as a BINDING by the adoption guard
+                    -- (`Daemon::register_supervisor`, plan A5.1). Traced:
+                    -- `(G1,A)` then `(G2,none)` then `(G2,B)` refused B, on the
+                    -- evidence of a `(G2,A)` that was never an acceptance. The
+                    -- same `COALESCE` also carried a pre-A5.1 row's thread into
+                    -- the first generation ever recorded for it.
+                    --
+                    -- So a write that ADVANCES the generation writes the thread
+                    -- it actually carries, absence included, and only a write at
+                    -- or below the standing generation `COALESCE`s. That makes
+                    -- true of the row the one thing the guard already assumes:
+                    -- **a non-NULL `codex_thread_id` was named by a
+                    -- registration at exactly this row's `codex_generation`.**
+                    -- No second column is needed to record when the thread was
+                    -- bound, because the generation beside it IS when — and a
+                    -- second column would have to be added to both tables, kept
+                    -- in the `INSERT … SELECT *` carry, kept out of
+                    -- `move_codex_sessions`' freshest-wins family and proven
+                    -- rollback-invisible, all to store a number this one already
+                    -- holds.
+                    --
+                    -- Every other writer is untouched, and structurally rather
+                    -- than by convention: a hook, a heartbeat or a tailer reaches
+                    -- this through [`Store::upsert_session`], whose `None` makes
+                    -- `excluded.codex_generation` NULL, fails the first test, and
+                    -- takes the ELSE arm — the `COALESCE` those writers have
+                    -- always had. `-1` is a sentinel below every generation a
+                    -- producer mints (the coordinator starts at 1) and is there
+                    -- only so a row predating the column compares as lower
+                    -- instead of as NULL.
+                    codex_thread_id   = CASE
+                                          WHEN excluded.codex_generation IS NOT NULL
+                                           AND excluded.codex_generation >
+                                               COALESCE({table}.codex_generation, -1)
+                                          THEN excluded.codex_thread_id
+                                          ELSE COALESCE(excluded.codex_thread_id,
+                                                        {table}.codex_thread_id)
+                                        END,
+                    codex_socket      = COALESCE(excluded.codex_socket, {table}.codex_socket),
+                    -- The high-water moves with the row that carries it, and is
+                    -- `COALESCE`d for the same reason the two columns above are:
+                    -- a heartbeat or a hook re-writing this row knows nothing
+                    -- about visits and must not blank the generation a
+                    -- registration recorded. Nothing here refuses a *lower*
+                    -- generation — that refusal belongs to registration
+                    -- adoption, which decides it before it ever calls this
+                    -- (`Daemon::register_supervisor`, plan A5.1) — and putting
+                    -- a MAX() here instead would be this layer inventing an
+                    -- adoption policy, which is the mistake the note above on
+                    -- agent changes already declines to make.
+                    codex_generation  = COALESCE(excluded.codex_generation, {table}.codex_generation)"
             ),
             params![
                 row.session_uid,
@@ -1151,6 +1273,7 @@ impl Store {
                 row.agent.as_str(),
                 row.codex_thread_id,
                 row.codex_socket,
+                codex_generation,
             ],
         )?;
         tx.commit()?;
@@ -1161,6 +1284,47 @@ impl Store {
         } else {
             SessionUpsert::Present
         })
+    }
+
+    /// The **durable Codex generation high-water** for one uid (plan A5.1).
+    ///
+    /// `None` for a uid with no row, for a Claude run, and for a Codex row
+    /// written before this column existed — all three mean the same thing to the
+    /// caller ("nothing has been adopted here that I can prove"), so they are
+    /// deliberately not distinguished.
+    ///
+    /// **Not projected through `all_sessions`, and asked of both physical tables
+    /// instead.** The view's shape is [`SessionRow`]'s shape — `session_row_from`
+    /// decodes it positionally — and widening it would mean recreating a view
+    /// that every database already has under `CREATE VIEW IF NOT EXISTS`. So this
+    /// asks the two tables directly. It is still a question about the *fleet*
+    /// rather than about a table, which is the rule
+    /// `every_existence_guard_asks_about_the_whole_fleet` states: a Codex run's
+    /// row lives in `codex_sessions` today, but a rollback can leave a uid with a
+    /// row in each, and answering out of one table would then answer about half
+    /// the evidence.
+    ///
+    /// `MAX` over the union is what makes that safe: two rows for one uid is the
+    /// transient `move_codex_sessions` repairs at open, and while it lasts the
+    /// **higher** generation is the one a stale-generation refusal must be made
+    /// against. `MAX` over an empty set is `NULL`, which is the same `None` as a
+    /// row with no generation — see above for why that conflation is intended.
+    pub fn codex_generation(&self, session_uid: &str) -> Result<Option<u64>> {
+        let conn = self.read();
+        let generation: Option<i64> = conn.query_row(
+            "SELECT MAX(g) FROM (
+                 SELECT codex_generation AS g FROM sessions       WHERE session_uid = ?1
+                 UNION ALL
+                 SELECT codex_generation AS g FROM codex_sessions WHERE session_uid = ?1
+             )",
+            params![session_uid],
+            |row| row.get(0),
+        )?;
+        // Only this build writes the column and it writes a non-negative
+        // `i64`, so a negative value is a corrupt or hand-edited database.
+        // Read as "no provable high-water" rather than cast into a colossal
+        // `u64` that would refuse every registration this session ever makes.
+        Ok(generation.and_then(|g| u64::try_from(g).ok()))
     }
 
     /// Whether this name was deliberately removed — see `deleted_names`.
@@ -3090,13 +3254,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- tables have one shape and a row can be moved between them by
             -- copying columns rather than by mapping them.
             codex_thread_id   TEXT,
-            codex_socket      TEXT
+            codex_socket      TEXT,
+            -- The **durable Codex generation high-water** (plan A5.1). NULL for
+            -- Claude and for every row predating it; carried on this table for
+            -- the same one-shape reason as the two columns above, and for no
+            -- other — no row that lives here can ever have a value, because
+            -- `upsert_session` routes a Codex run to `codex_sessions` and only a
+            -- Codex registration writes this column. See `codex_sessions` below
+            -- for what it means and why it is rollback-isolated in practice.
+            codex_generation  INTEGER
         );
 
         -- Resolving a legacy `cc-1` to the newest run under that name.
         CREATE INDEX IF NOT EXISTS sessions_name ON sessions(session_id);
 
-        -- Codex runs. The same thirteen columns in the same order as `sessions`
+        -- Codex runs. The same fourteen columns in the same order as `sessions`
         -- — see the note on `create_schema` for why this is a second table and
         -- not a `WHERE agent = 'codex'`. `both_session_tables_have_one_shape`
         -- reads both back off the schema, so a column added to one and not the
@@ -3121,7 +3293,35 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- to be the same.
             agent             TEXT NOT NULL DEFAULT 'claude',
             codex_thread_id   TEXT,
-            codex_socket      TEXT
+            codex_socket      TEXT,
+            -- **The durable Codex generation high-water** (plan A5.1, clause
+            -- "durable high-water evidence in rollback-isolated storage").
+            --
+            -- The generation of the last registration this daemon ACCEPTED for
+            -- this uid — the same quantity `SupervisorHandle::codex_generation`
+            -- holds in memory, and nothing else. Measured, not assumed: that
+            -- field has exactly one writer (`register_supervisor`, from
+            -- `info.codex_generation`), and the link's own `visit.generation`
+            -- bumps live on a connection-local `Visit` that is never written
+            -- back to the handle. So a column written by the same acceptance
+            -- restores the identical number after a restart, and the
+            -- stale-generation refusal cannot be walked around by killing ccd.
+            -- A durable value can never strand a live session, because the only
+            -- thing it refuses is a generation the daemon has already adopted.
+            --
+            -- **Rollback-isolated in the sense the clause means.** Only a Codex
+            -- registration ever writes a non-NULL value, and `upsert_session`
+            -- files a Codex run here — in the table a v0.6.0 daemon does not
+            -- know the name of, and cannot re-file into `sessions` because the
+            -- shadow trigger below refuses the write. The twin column on
+            -- `sessions` exists for column-order parity alone (`INSERT … SELECT *`
+            -- carries a row between the tables) and holds NULL on every row a
+            -- v0.6.0 daemon can reach.
+            --
+            -- `INTEGER`, nullable, and read back as `Option<u64>`: NULL is "no
+            -- generation has been adopted for this uid", which is what a Claude
+            -- row, a pre-A5.1 row and an unregistered uid all are.
+            codex_generation  INTEGER
         );
 
         -- The twin of `sessions_name`: without it, resolving a tmux name would
@@ -3594,11 +3794,15 @@ struct CodexSessionMove {
 /// old daemon learned while it was in charge — so keeping either and dropping
 /// the other loses something. They are **merged**, by one rule with two families:
 ///
-///   * **Identity never regresses.** `created_at`, `agent`, `codex_thread_id`
-///     and `codex_socket` are simply not in the `SET` list. v0.6.0 cannot write
-///     any of them — it names ten columns and the other three are not among
-///     them — so anything the shared copy holds for these is a default or a
-///     `NULL`, never news.
+///   * **Identity never regresses.** `created_at`, `agent`, `codex_thread_id`,
+///     `codex_socket` and `codex_generation` are simply not in the `SET` list.
+///     v0.6.0 cannot write any of them — it names ten columns and the other four
+///     are not among them — so anything the shared copy holds for these is a
+///     default or a `NULL`, never news. `codex_generation` belongs to this
+///     family and not to freshest-wins for a reason beyond "v0.6.0 cannot write
+///     it": it is the high-water a registration is refused against (plan A5.1),
+///     so letting a rollback-era copy decide it would let a daemon downgrade
+///     rather than only ever fail to advance.
 ///   * **Everything else is freshest-wins, decided together by `updated_at`.**
 ///     Census of v0.6.0's own writes to `sessions`: `upsert_session` sets
 ///     `session_id`, `tmux_session`, `tmux_socket`, `cwd`, `lifecycle`,
@@ -3716,10 +3920,11 @@ fn move_codex_sessions(tx: &Connection) -> Result<CodexSessionMove> {
             "INSERT INTO codex_sessions(session_uid, session_id, tmux_session, tmux_socket,
                                         cwd, claude_session_id, transcript_path, lifecycle,
                                         created_at, updated_at, agent, codex_thread_id,
-                                        codex_socket)
+                                        codex_socket, codex_generation)
              SELECT s.session_uid, s.session_id, s.tmux_session, s.tmux_socket, s.cwd,
                     s.claude_session_id, s.transcript_path, s.lifecycle, s.created_at,
-                    s.updated_at, s.agent, s.codex_thread_id, s.codex_socket
+                    s.updated_at, s.agent, s.codex_thread_id, s.codex_socket,
+                    s.codex_generation
                FROM sessions AS s
               WHERE ({MISFILED})
                 AND NOT EXISTS(SELECT 1 FROM codex_sessions AS c
@@ -3762,6 +3967,23 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("sessions", "agent", "TEXT NOT NULL DEFAULT 'claude'"),
     ("sessions", "codex_thread_id", "TEXT"),
     ("sessions", "codex_socket", "TEXT"),
+    // The durable Codex generation high-water (plan A5.1). **Both** tables are
+    // named, unlike the three entries above, and the asymmetry is not an
+    // oversight: those predate `codex_sessions`, so on every database that could
+    // be missing them the Codex table is created fresh at the current shape and
+    // `missing_columns` skips it. This column arrives *after* `codex_sessions`
+    // shipped, so a database written by the build before this one has the table
+    // at thirteen columns and needs the `ALTER` too. Naming only `sessions`
+    // would widen one half, leave the other, and fail
+    // `both_session_tables_have_one_shape` — which is exactly the drift that
+    // test exists to catch, and exactly what would break the `INSERT … SELECT *`
+    // carry in `upsert_session` at runtime.
+    //
+    // Appended last on both, which is where `ALTER TABLE … ADD COLUMN` puts it
+    // and where the `CREATE TABLE`s above declare it, so the two orders agree
+    // on a fresh database and on an upgraded one alike.
+    ("sessions", "codex_generation", "INTEGER"),
+    ("codex_sessions", "codex_generation", "INTEGER"),
     // Per-device feature set and the daemon-version epoch it was last confirmed
     // under. Both nullable, and in this phase both are `NULL` for every row:
     // **nothing writes them.** No shipping client can advertise a feature set —
@@ -5045,6 +5267,283 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM codex_sessions", [], |row| row.get(0))
             .unwrap();
         (claude, codex)
+    }
+
+    /// **The durable Codex generation high-water, at the layer that stores it**
+    /// (plan A5.1, clause "durable high-water evidence in rollback-isolated
+    /// storage").
+    ///
+    /// Four claims, and each of them is a different way the evidence could stop
+    /// being evidence:
+    ///
+    ///   * it is **written by the same statement as the row**, so there is no
+    ///     window in which a row exists at a generation nothing recorded;
+    ///   * it lands in `codex_sessions` and **not** in `sessions`, which is what
+    ///     "rollback-isolated" means here — asked of SQLite directly rather than
+    ///     through `get_session`, which reads both tables and so cannot tell a
+    ///     correctly filed value from a misfiled one;
+    ///   * an ordinary [`Store::upsert_session`] — every hook, heartbeat and
+    ///     tailer write in the daemon — **cannot blank it**, because it passes
+    ///     `None` into the `COALESCE`. A blanked high-water is a session a stale
+    ///     supervisor could re-adopt at any generation it liked;
+    ///   * it **survives the cross-table carry**, which is the one path that
+    ///     moves a row wholesale (`INSERT … SELECT *`) and would silently drop a
+    ///     column the two tables disagreed about.
+    ///
+    /// **Mutation:** drop `codex_generation` from the `ON CONFLICT DO UPDATE`
+    /// list and the second leg reads back `None` — a re-registration would then
+    /// erase the high-water it was supposed to advance.
+    #[test]
+    fn the_codex_generation_is_written_with_the_row_and_never_blanked_by_a_later_one() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        store
+            .upsert_session_at_generation(&codex_session_row(&codex), Some(7))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(7),
+            "the generation the registration was accepted at must be readable back"
+        );
+
+        // Where it is, asked of the tables and not of the fleet view.
+        let conn = store.read();
+        let stored = |table: &str| -> Option<i64> {
+            conn.query_row(
+                &format!("SELECT codex_generation FROM {table} WHERE session_uid = ?1"),
+                params![codex.uid],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten()
+        };
+        assert_eq!(
+            stored("codex_sessions"),
+            Some(7),
+            "the high-water lives in the table a rolled-back v0.6.0 daemon cannot name"
+        );
+        assert_eq!(
+            stored("sessions"),
+            None,
+            "and never in the one it rewrites and prunes globally"
+        );
+        drop(conn);
+
+        // **A later registration advances it**, which is the `ON CONFLICT` arm
+        // and not the insert arm above. Asserted separately because the two arms
+        // are different SQL: a statement that recorded the generation on insert
+        // and dropped it on conflict would satisfy every other leg here, and
+        // would then freeze the high-water at whatever the first registration
+        // said for the rest of the session's life.
+        store
+            .upsert_session_at_generation(&codex_session_row(&codex), Some(9))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(9),
+            "a re-registration at a later visit must move the high-water with it"
+        );
+
+        // A later write that knows nothing about visits must not erase it.
+        let mut heartbeat = codex_session_row(&codex);
+        heartbeat.cwd = "/elsewhere".into();
+        store.upsert_session(&heartbeat).unwrap().assert_present();
+        assert_eq!(
+            store.get_session(&codex.uid).unwrap().unwrap().cwd,
+            "/elsewhere",
+            "the premise: the later write really did land"
+        );
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(9),
+            "a writer with no news about generations must leave the high-water alone"
+        );
+
+        // And it survives the carry between tables, which moves a row wholesale.
+        let mut as_claude = session_row(&codex);
+        as_claude.agent = AgentKind::Claude;
+        store.upsert_session(&as_claude).unwrap().assert_present();
+        assert_eq!(
+            table_counts(&store),
+            (1, 0),
+            "the premise: the row really did move to the shared table"
+        );
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(9),
+            "the carry is INSERT … SELECT *, so a column the two tables disagreed \
+             about would have been dropped on the way across"
+        );
+    }
+
+    /// **The thread on a row was named by a registration at that row's exact
+    /// generation** (round-C F2) — the invariant the adoption guard states and
+    /// `COALESCE` alone did not provide.
+    ///
+    /// Under the old statement a generation could advance while the previous
+    /// visit's thread stayed put, and the pair left behind — `(G2, A)` for a
+    /// registration at G2 that named no thread — is read by
+    /// `Daemon::register_supervisor` as G2's *binding*. This asserts the three
+    /// shapes that pair can be reached through and the one the ordinary reconnect
+    /// still relies on:
+    ///
+    ///   * a generation that ADVANCES writes the thread it carries, absence
+    ///     included, so an inherited thread cannot pose as this visit's;
+    ///   * the same is true when the row predates the column entirely (a thread,
+    ///     no generation), which is the pre-A5.1 misattribution;
+    ///   * a write at or BELOW the standing generation still `COALESCE`s, which is
+    ///     the reconnect that names no thread and must change nothing;
+    ///   * and a writer with no generation at all — every hook, heartbeat and
+    ///     tailer in the daemon — is on the `COALESCE` arm regardless.
+    ///
+    /// **Mutation:** replace the `CASE` with the bare
+    /// `COALESCE(excluded.codex_thread_id, {table}.codex_thread_id)` and the first
+    /// two legs read back `th-first`, which is a thread generation 2 never named.
+    #[test]
+    fn a_generation_that_advances_does_not_inherit_the_previous_visits_thread() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let at = |thread: Option<&str>, generation: Option<u64>| {
+            let mut row = codex_session_row(&codex);
+            row.codex_thread_id = thread.map(str::to_string);
+            store
+                .upsert_session_at_generation(&row, generation)
+                .unwrap()
+                .assert_present();
+            store
+                .get_session(&codex.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+        };
+
+        assert_eq!(at(Some("th-first"), Some(1)), Some("th-first".into()));
+        assert_eq!(
+            at(None, Some(2)),
+            None,
+            "generation 2 named no thread, so the row must not claim generation 1's"
+        );
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(2),
+            "and the high-water still advanced — the thread is what does not carry, \
+             not the visit count"
+        );
+        assert_eq!(
+            at(Some("th-second"), Some(2)),
+            Some("th-second".into()),
+            "so generation 2's own first thread binds"
+        );
+        assert_eq!(
+            at(None, Some(2)),
+            Some("th-second".into()),
+            "and a write at the standing generation with no thread COALESCEs, which \
+             is the ordinary reconnect"
+        );
+        assert_eq!(
+            at(Some("th-heartbeat"), None),
+            Some("th-heartbeat".into()),
+            "the premise for the next leg: a generation-less writer takes the \
+             COALESCE arm and its thread lands"
+        );
+        assert_eq!(
+            at(None, None),
+            Some("th-heartbeat".into()),
+            "and cannot blank one, which is the rule every hook and heartbeat \
+             has always had"
+        );
+
+        // The pre-A5.1 row: a thread and no generation at all. The first
+        // generation ever recorded for it must not adopt that thread as its own.
+        let legacy = key("CY", "cx-2");
+        let mut row = codex_session_row(&legacy);
+        row.codex_thread_id = Some("th-from-the-seam".into());
+        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(store.codex_generation(&legacy.uid).unwrap(), None);
+        row.codex_thread_id = None;
+        store
+            .upsert_session_at_generation(&row, Some(9))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store
+                .get_session(&legacy.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id,
+            None,
+            "a NULL generation compares below every real one, so the seam-era \
+             thread is not misattributed to generation 9"
+        );
+    }
+
+    /// **A generation SQLite cannot represent is refused, never rounded**
+    /// (round-C F3).
+    ///
+    /// The column is `INTEGER`, which is `i64`; the caller's type is `u64`. This
+    /// used to saturate to `i64::MAX`, so the value read back was a different
+    /// number from the one written — and the adoption guard compares the two for
+    /// equality. Writing a number nobody asked for is the defect; that no honest
+    /// producer mints one is the reason it is refused rather than stored wider.
+    ///
+    /// The largest representable value is asserted too, so the refusal is a
+    /// boundary and not a range.
+    ///
+    /// **Mutation:** restore `.unwrap_or(i64::MAX)` and the second leg writes,
+    /// reading back `Some(9223372036854775807)` for a registration that claimed
+    /// 18446744073709551615.
+    #[test]
+    fn a_codex_generation_sqlite_cannot_represent_is_refused_not_saturated() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        store
+            .upsert_session_at_generation(&codex_session_row(&codex), Some(i64::MAX as u64))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(i64::MAX as u64),
+            "the largest representable generation round-trips"
+        );
+
+        let refused = store
+            .upsert_session_at_generation(&codex_session_row(&codex), Some(u64::MAX))
+            .expect_err("a generation the column cannot hold must not be written");
+        assert!(
+            format!("{refused:#}").contains(&codex.uid),
+            "the refusal names the run it refused: {refused:#}"
+        );
+        assert_eq!(
+            store.codex_generation(&codex.uid).unwrap(),
+            Some(i64::MAX as u64),
+            "and left the high-water exactly where it was"
+        );
+    }
+
+    /// A uid nothing has registered has no high-water, and neither does a Claude
+    /// run — the two cases the adoption guard must read as "nothing has been
+    /// adopted here", not as generation zero.
+    #[test]
+    fn an_unregistered_uid_and_a_claude_run_have_no_codex_generation() {
+        let (store, _path) = temp_store();
+        let claude = key("AA", "cc-1");
+        assert_eq!(
+            store.codex_generation(&claude.uid).unwrap(),
+            None,
+            "a uid with no row has no high-water"
+        );
+        store
+            .upsert_session(&session_row(&claude))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store.codex_generation(&claude.uid).unwrap(),
+            None,
+            "and a Claude run, whose sessions have no visits, has none either"
+        );
     }
 
     /// **The whole point of the split.** A Codex run is written to
@@ -6630,10 +7129,22 @@ mod tests {
 
     /// The two tables must not drift apart.
     ///
-    /// `all_sessions` selects the same thirteen columns from each, so a column
-    /// added to one and forgotten on the other turns every session read into a
-    /// prepare error at runtime. Read off the schema rather than restated, so a
-    /// future `COLUMN_ADDITIONS` entry that names only `sessions` fails here.
+    /// `all_sessions` selects the same columns from each, and `upsert_session`
+    /// carries a row between them with `INSERT … SELECT *`, so a column added to
+    /// one and forgotten on the other turns every session read into a prepare
+    /// error and every agent change into a column-count error at runtime. Read
+    /// off the schema rather than restated, so a future `COLUMN_ADDITIONS` entry
+    /// that names only `sessions` fails here.
+    ///
+    /// **The view is a narrower claim than the tables, and that is deliberate.**
+    /// It projects exactly the columns [`SessionRow`] carries, because
+    /// `session_row_from` decodes it positionally; `codex_generation` is a
+    /// fourteenth column on both tables and is deliberately *not* in the
+    /// projection (see [`Store::codex_generation`], which asks the two tables
+    /// directly). So the second assertion names the projection explicitly rather
+    /// than deriving it from the table shape — a derived assertion would have
+    /// forced this column into the view, and widening a `CREATE VIEW IF NOT
+    /// EXISTS` means recreating a view every existing database already has.
     #[test]
     fn both_session_tables_have_one_shape() {
         let (store, _path) = temp_store();
@@ -6660,13 +7171,42 @@ mod tests {
             columns("codex_sessions"),
             "the two session tables disagree on name, type, order or primary key"
         );
-        // And the view really does read both halves through that shape.
+        // And the view really does read both halves through the `SessionRow`
+        // shape — the thirteen columns `session_row_from` decodes by position.
         let stmt = conn.prepare("SELECT * FROM all_sessions").unwrap();
         let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
+        let projected = [
+            "session_uid",
+            "session_id",
+            "tmux_session",
+            "tmux_socket",
+            "cwd",
+            "claude_session_id",
+            "transcript_path",
+            "lifecycle",
+            "created_at",
+            "updated_at",
+            "agent",
+            "codex_thread_id",
+            "codex_socket",
+        ];
+        assert_eq!(
+            names, projected,
+            "all_sessions does not project the SessionRow shape"
+        );
+        // The projection must still be a leading slice of the physical shape,
+        // or the view is naming columns the tables no longer declare in that
+        // order and `session_row_from` decodes the wrong field.
         let declared: Vec<String> = columns("sessions").into_iter().map(|c| c.0).collect();
         assert_eq!(
-            names, declared,
-            "all_sessions does not project the row shape"
+            declared[..projected.len()],
+            projected[..],
+            "the projected columns are not the leading columns of the table"
+        );
+        assert_eq!(
+            declared[projected.len()..],
+            ["codex_generation"],
+            "the only column outside the fleet projection is the A5.1 high-water"
         );
     }
 
@@ -8485,6 +9025,123 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(store.list_devices().unwrap().len(), 1);
+    }
+
+    /// **The A5.1 high-water column is added to BOTH session tables on a
+    /// database the previous build wrote**, and the two shapes still match
+    /// afterwards.
+    ///
+    /// The three agent-seam columns needed only a `sessions` entry in
+    /// [`COLUMN_ADDITIONS`], because every database that could be missing them
+    /// predates `codex_sessions` and gets that table created fresh at the
+    /// current shape. `codex_generation` is the first column to arrive *after*
+    /// `codex_sessions` shipped, so it is the first one that needs the `ALTER`
+    /// on both halves — and a one-sided entry would not fail at open. It would
+    /// fail later and elsewhere: `all_sessions` would still prepare (it names
+    /// neither), and the break would surface as a column-count error inside
+    /// `upsert_session`'s `INSERT … SELECT *` the first time a run changed
+    /// agent.
+    ///
+    /// **The predecessor's two tables are written out rather than derived from
+    /// this build's**, and that is not the duplication it looks like. The
+    /// thirteen-column shape is *finished* — it is what a released build wrote
+    /// and will never write again — so a copy of it cannot drift out of step
+    /// with anything; deriving it instead would mean taking the column back off
+    /// a current database, and SQLite's `DROP COLUMN` reparses the stored
+    /// `CREATE TABLE` text and fails on the comments `create_schema` documents
+    /// these columns with (measured: `error in table sessions after drop
+    /// column: incomplete input`).
+    ///
+    /// Only these two tables are pre-created. `Store::open` builds the rest with
+    /// `CREATE TABLE IF NOT EXISTS`, finds these two already there — which is
+    /// precisely the situation that makes [`COLUMN_ADDITIONS`] the only thing
+    /// that can widen them — and then runs the additions.
+    ///
+    /// **Mutation:** delete the `("codex_sessions", "codex_generation", …)`
+    /// entry from [`COLUMN_ADDITIONS`] and this fails at the parity assertion
+    /// with `codex_sessions` one column short.
+    #[test]
+    fn the_generation_high_water_is_added_to_both_session_tables_on_an_upgrade() {
+        let path = legacy_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            for table in ["sessions", "codex_sessions"] {
+                conn.execute_batch(&format!(
+                    "CREATE TABLE {table}(
+                         session_uid       TEXT PRIMARY KEY,
+                         session_id        TEXT NOT NULL,
+                         tmux_session      TEXT NOT NULL,
+                         tmux_socket       TEXT NOT NULL,
+                         cwd               TEXT NOT NULL,
+                         claude_session_id TEXT,
+                         transcript_path   TEXT,
+                         lifecycle         TEXT NOT NULL,
+                         created_at        TEXT NOT NULL,
+                         updated_at        TEXT NOT NULL,
+                         agent             TEXT NOT NULL DEFAULT 'claude',
+                         codex_thread_id   TEXT,
+                         codex_socket      TEXT
+                     );"
+                ))
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO codex_sessions(session_uid, session_id, tmux_session, tmux_socket,
+                                            cwd, claude_session_id, transcript_path, lifecycle,
+                                            created_at, updated_at, agent, codex_thread_id,
+                                            codex_socket)
+                 VALUES(?1, 'cx-1', 'cx-1', 'codeconnect', '/tmp', NULL, NULL, 'live',
+                        '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z',
+                        'codex', 'th_ABC123', '/tmp/cch.test/ccd.sock')",
+                params!["01K1B3XQ8ZC0DE5FGH7JKMNPQR"],
+            )
+            .unwrap();
+            assert!(
+                needs_column_additions(&conn).unwrap(),
+                "the premise: this database is missing the A5.1 column"
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        let conn = store.read();
+        let columns = |table: &str| -> Vec<String> {
+            conn.prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            columns("sessions"),
+            columns("codex_sessions"),
+            "the upgrade widened one table and left the other"
+        );
+        assert!(columns("codex_sessions").contains(&"codex_generation".to_string()));
+        drop(conn);
+
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            None,
+            "a row that predates the column has no provable high-water, and reads \
+             as one — not as generation zero, which would refuse nothing"
+        );
+        let row = store.get_session(uid).unwrap().expect("the pre-A5.1 run");
+        assert_eq!(
+            row.agent,
+            AgentKind::Codex,
+            "and the run itself came through the widening intact"
+        );
+        assert_eq!(row.codex_thread_id.as_deref(), Some("th_ABC123"));
+
+        // And the widened database really does take a generation now, which is
+        // what "the upgrade path leaves a usable high-water" means.
+        store
+            .upsert_session_at_generation(&row, Some(2))
+            .unwrap()
+            .assert_present();
+        assert_eq!(store.codex_generation(uid).unwrap(), Some(2));
     }
 
     /// The second start finds nothing retired, and does not open a transaction

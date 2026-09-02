@@ -1140,6 +1140,16 @@ pub struct SupervisorHandle {
     /// any (D4). `None` for Claude, whose sessions have no generations. It is the
     /// high-water mark the adoption guard compares against, so a stale supervisor
     /// frame can never overwrite newer adapter state.
+    ///
+    /// **It is the last generation REGISTERED for this uid, not the link's live
+    /// visit count**, and the distinction is what plan A5.1's durable half is
+    /// built on. This field has exactly one writer — the handle publish in
+    /// [`Daemon::register_supervisor`], from `info.codex_generation` — while the
+    /// link's `visit.generation` bumps happen on a connection-local
+    /// `codex_link::Visit` that is never written back here. So
+    /// `codex_sessions.codex_generation`, written by the same acceptance in the
+    /// same statement as the row, restores exactly this quantity across a
+    /// restart, and the adoption guard reads the higher of the two.
     codex_generation: Option<u64>,
 }
 
@@ -5000,31 +5010,122 @@ impl Daemon {
         // first: a rejected frame must mutate nothing. Only a validated Codex
         // agent's generation participates (a Claude frame carrying one was
         // already refused above), so the Claude path never reaches this and is
-        // byte-identical. This reads the in-memory high-water only; **the
-        // structural generation-completeness and the durable high-water that
-        // makes this atomic across a restart are the binding Phase-2
-        // pre-exposure gate (plan amendment A5)** — still not built here. The
-        // reason has changed: it used to be that fail-closed registration made
-        // this whole branch unreachable, and now the branch is reached on every
-        // Codex registration. What is still missing is the durable half, so this
-        // reads the in-memory high-water alone and a daemon restart forgets it —
-        // which is exactly what A5 exists to close, and why it is a gate rather
-        // than an omission.
+        // byte-identical.
+        //
+        // **The high-water is read from two places and the higher one wins
+        // (plan A5.1, "durable high-water evidence in rollback-isolated
+        // storage").** The in-memory half is `SupervisorHandle::codex_generation`
+        // and it is *not* the link's live visit count — measured, not assumed:
+        // that field has exactly one writer, the handle publish below, from
+        // `info.codex_generation`, and the link's `visit.generation` bumps live
+        // on a connection-local `Visit` that is never written back. So the
+        // in-memory high-water means "the last generation REGISTERED for this
+        // uid", and `codex_sessions.codex_generation` — written by the same
+        // acceptance, in the same statement as the row — restores exactly that
+        // quantity after a restart. Restoring the same quantity is what makes
+        // the durable read incapable of stranding a live session: the only
+        // registration it can refuse is one at a generation this daemon has
+        // already adopted, which is the registration the in-memory check was
+        // always going to refuse anyway.
+        //
+        // Before A5.1 this read the in-memory half alone, and a daemon restart
+        // forgot the high-water entirely: a supervisor could kill ccd and
+        // re-register the session onto an older visit, which is the compare that
+        // was not atomic across a restart. Two halves rather than one because
+        // they can genuinely disagree in one direction — a registration whose
+        // row was written and whose handle publish was then refused as
+        // superseded leaves the durable value AHEAD of the surviving handle —
+        // and `max` is the fail-closed reading of that disagreement.
+        //
+        // **Both reads happen here, above every persistent mutation**, which is
+        // the ordering clause: the upsert and the card relabel are below, so a
+        // frame refused by either check has changed nothing in memory or on
+        // disk. `existing` is the row re-read under the acceptance gate a few
+        // lines up, so the thread this compares against is the one the writer
+        // this registration is racing cannot get in front of.
         if matches!(info.agent, protocol::agent::AgentKind::Codex) {
             if let Some(incoming) = info.codex_generation {
-                let current = {
+                let in_memory = {
                     let inner = self.inner.lock().await;
                     inner
                         .supervisors
                         .get(&uid)
                         .and_then(|handle| handle.codex_generation)
                 };
-                if let Some(current) = current {
+                let durable = self.db.codex_generation(uid.clone()).await?;
+                if let Some(current) = in_memory.into_iter().chain(durable).max() {
                     if incoming < current {
                         anyhow::bail!(
                             "ignoring registration for {uid} at generation {incoming}; \
                              generation {current} is already adopted"
                         );
+                    }
+                }
+
+                // **A generation's thread binding is immutable (plan A5.1).**
+                //
+                // A generation IS a visit: one Codex process, one attach, one
+                // thread. The stale check above is a statement about *order* and
+                // says nothing about identity, so without this a supervisor
+                // could re-register at the generation it already holds and swap
+                // the thread underneath it — and every frame the link has
+                // already attributed to that generation would silently become
+                // frames about a thread the session was never on. The row is the
+                // fleet's answer to "where is this session", the retained carry
+                // is keyed by generation (`Inner::seed_codex_carry`), and both
+                // would then be describing two threads under one visit with
+                // nothing to tell them apart. A relaunch is how a session
+                // legitimately changes thread, and a relaunch carries a *later*
+                // generation — which this leaves alone.
+                //
+                // **Asked of the durable binding, and only when the durable
+                // generation IS the incoming one.** That equality is what makes
+                // the row's `codex_thread_id` the thread *this* generation was
+                // registered with rather than some earlier one's: the two
+                // columns are written by the same statement, by the same
+                // acceptance, so a row reading `(G, T)` is the record of a
+                // registration at G that named T. Reading the thread without
+                // checking the generation would compare against whatever the
+                // last accepted registration left, whichever visit it belonged
+                // to.
+                //
+                // Both sides must be present to disagree, and neither absence is
+                // a violation. An incoming `None` claims no thread — the launch
+                // case `ControlLink::from_registration` documents, where
+                // `thread/started` has not happened yet — so nothing changes and
+                // there is nothing to refuse. A bound `None` is a generation
+                // that has not been given a thread yet, and naming one for the
+                // first time is binding it, not changing it.
+                //
+                // **"Present" is [`crate::codex_link::real_thread_id`]'s answer
+                // on both sides, not `Option::is_some`.** A `"   "` is a field
+                // filled with nothing, and it used to disagree with everything:
+                // offered blank against a real binding was refused as a
+                // rebinding, and a blank that had reached the row *was* the
+                // binding, so the visit's first real thread was refused. Neither
+                // side of a comparison between two thread ids may be a string
+                // that names no thread. The row side is normalized at the write
+                // below and so cannot acquire a new blank, but a row written by
+                // an older build can still hold one — and one spelling of the
+                // question is cheaper than an argument about which rows predate
+                // which build.
+                if durable == Some(incoming) {
+                    if let (Some(bound), Some(offered)) = (
+                        crate::codex_link::real_thread_id(
+                            existing
+                                .as_ref()
+                                .and_then(|row| row.codex_thread_id.as_deref()),
+                        ),
+                        crate::codex_link::real_thread_id(info.codex_thread_id.as_deref()),
+                    ) {
+                        if bound != offered {
+                            anyhow::bail!(
+                                "refusing to register {uid} at generation {incoming}: that \
+                                 generation is already bound to thread {bound}, and the frame \
+                                 offers {offered} — one visit is one thread, so a second thread \
+                                 under the same generation is a relaunch that forgot to advance it"
+                            );
+                        }
                     }
                 }
             }
@@ -5126,29 +5227,57 @@ impl Daemon {
             inner.stake(&uid, incarnation)
         };
 
+        // **The row and the generation it was accepted at, in one statement**
+        // (plan A5.1). The high-water read above is worthless if the value it
+        // reads can be written a moment after the row: a crash in between would
+        // leave the next daemon looking at this registration's row and the
+        // previous one's generation, which is a high-water that has gone
+        // backwards. `upsert_session_at_generation` is the ordinary upsert with
+        // the column in its parameter list, so there is no second write and no
+        // window to crash in. `None` for Claude — guarded above, where a Claude
+        // frame carrying a generation is refused outright — and `COALESCE` in
+        // the statement means every other writer of this row (hook, heartbeat,
+        // tailer) leaves the high-water alone rather than blanking it.
         let wrote = self
             .db
-            .upsert_session(SessionRow {
-                session_uid: uid.clone(),
-                session_id: info.session_id.clone(),
-                tmux_session: info.tmux_session.clone(),
-                tmux_socket: info.tmux_socket.clone(),
-                cwd: info.cwd.clone(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: existing
-                    .as_ref()
-                    .map(|r| r.created_at.clone())
-                    .unwrap_or_else(|| info.started_at.clone()),
-                updated_at: now,
-                // The registration is the authority on which agent this run is.
-                // Absent ⇒ Claude; an unrecognised name is preserved and fails
-                // closed downstream. Codex identity is carried through verbatim.
-                agent: info.agent.clone(),
-                codex_thread_id: info.codex_thread_id.clone(),
-                codex_socket: info.codex_socket.clone(),
-            })
+            .upsert_session_at_generation(
+                SessionRow {
+                    session_uid: uid.clone(),
+                    session_id: info.session_id.clone(),
+                    tmux_session: info.tmux_session.clone(),
+                    tmux_socket: info.tmux_socket.clone(),
+                    cwd: info.cwd.clone(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: Lifecycle::Live,
+                    created_at: existing
+                        .as_ref()
+                        .map(|r| r.created_at.clone())
+                        .unwrap_or_else(|| info.started_at.clone()),
+                    updated_at: now,
+                    // The registration is the authority on which agent this run
+                    // is. Absent ⇒ Claude; an unrecognised name is preserved and
+                    // fails closed downstream. Codex identity is carried through
+                    // verbatim.
+                    //
+                    // **Except that a blank thread id is not identity.** The link
+                    // built above already reads `"   "` as "no thread named"; the
+                    // row used to keep it verbatim, and the two readings are what
+                    // let a blank become a generation's durable *binding* and
+                    // refuse that visit's first real thread. Normalized with the
+                    // same function the link uses
+                    // ([`crate::codex_link::real_thread_id`]), so the fleet's
+                    // answer to "which thread is this session on" cannot be a
+                    // string no thread has.
+                    agent: info.agent.clone(),
+                    codex_thread_id: crate::codex_link::real_thread_id(
+                        info.codex_thread_id.as_deref(),
+                    )
+                    .map(str::to_string),
+                    codex_socket: info.codex_socket.clone(),
+                },
+                info.codex_generation,
+            )
             .await?;
         // **The supervisor is a cwd writer too.** A run that reconnects from a
         // different directory moves, and any card it is holding has to move
@@ -5218,10 +5347,29 @@ impl Daemon {
                     session.uid
                 );
             }
-            // The generation was accepted before any write (above); this block
-            // only installs the handle carrying the epoch staked with the row.
-            // Making the compare and the install one atomic step across a restart
-            // is the Phase-2 gate (A5).
+            // **Atomic compare/install (plan A5.1), and both halves of it are
+            // now here.**
+            //
+            // *In process*: the compare is the generation check above and the
+            // install is this line, and the `registration_gate` taken at the top
+            // of this function is held across both — it is taken above the
+            // generation refusal on purpose (see the note where it is taken),
+            // and it is not released until this function returns. There is no
+            // interleaving for a rival registration on this uid to occupy: it is
+            // not merely that the two steps are ordered, it is that no second
+            // acceptance for this uid can be anywhere between them. The `inner`
+            // lock this block holds is the narrower one and answers a different
+            // question — the epoch compare directly above — which is why the
+            // acceptance gate rather than `inner` is what makes this atomic.
+            //
+            // *Across a restart*: a held lock cannot outlive the process that
+            // holds it, so the in-process gate says nothing about a daemon that
+            // is killed between the compare and the next registration. That half
+            // is closed durably instead: the generation is written with the row
+            // (above) and read back as the high-water (above), so a restarted
+            // daemon compares against the same number the dead one installed.
+            // The gate's compare/install clause is therefore closed by the two
+            // together, and neither alone.
             inner.supervisors.insert(
                 session.uid.clone(),
                 SupervisorHandle {
@@ -11057,6 +11205,557 @@ mod tests {
         assert_eq!(
             handle.epoch, registration.epoch,
             "and the epoch the row was staked under"
+        );
+    }
+
+    // ------------------------------------------- generation-aware adoption (A5.1)
+
+    /// A complete Codex registration at a chosen generation and thread.
+    ///
+    /// The four A5.1 tests below disagree about exactly those two fields and
+    /// agree about everything else, so the frame is built once: three hand-built
+    /// copies would drift on the fields under test, which is the same reason
+    /// `codex_frame` exists for the retention tests.
+    ///
+    /// **The socket names nothing that listens, on purpose.** An accepted
+    /// registration spawns a control link, which dials, fails and backs off;
+    /// nothing here waits on the link or on anything it produces, so every
+    /// assertion below is about the row and the maps — both settled before
+    /// `register_supervisor` returns.
+    async fn register_codex_at(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        generation: u64,
+        thread: Option<&str>,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-9".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-9".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: thread.map(str::to_string),
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-a51-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(generation),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **A generation this daemon has already adopted is never re-adopted, and
+    /// the refusal costs the session nothing that was written.**
+    ///
+    /// The in-memory leg of plan A5.1's adoption guard, which had no test at all
+    /// before this one: the refusal existed and nothing exercised it, so a
+    /// deletion would have left the suite green while a stale supervisor could
+    /// walk a session back onto an older visit.
+    ///
+    /// The assertions are about what the *row* says, not only about the `Err`.
+    /// A refusal that arrives after the upsert is not a refusal — the ordering
+    /// clause A5.1 turns on is that a rejected frame mutates nothing — so the
+    /// row's cwd and thread are read back and must still be generation 2's.
+    ///
+    /// **Mutation:** change `incoming < current` to `incoming < 0` and the
+    /// stale frame is accepted; the row's thread becomes `th-g1` and the
+    /// high-water drops to 1.
+    #[tokio::test]
+    async fn a_generation_already_adopted_is_refused_and_writes_nothing() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 2, Some("th-g2"))
+            .await
+            .expect("the newer launch registers");
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 1, Some("th-g1"))
+                .await
+                .expect_err("a generation older than the adopted one must be refused")
+        );
+        assert!(
+            refusal.contains("generation 2 is already adopted"),
+            "the refusal must name the high-water it was made against: {refusal}"
+        );
+
+        let row = store.get_session(uid).unwrap().expect("the survivor's row");
+        assert_eq!(
+            row.codex_thread_id.as_deref(),
+            Some("th-g2"),
+            "a refused frame must not have reached the upsert"
+        );
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(2),
+            "nor moved the durable high-water backwards"
+        );
+    }
+
+    /// **The high-water survives the daemon that adopted it** (plan A5.1,
+    /// "durable high-water evidence" and the across-a-restart half of "atomic
+    /// compare/install").
+    ///
+    /// A held lock cannot outlive the process holding it, so the acceptance gate
+    /// makes the compare and the install atomic *in process* and says nothing
+    /// about a daemon that is killed in between. Before this the whole
+    /// high-water was one field of an in-memory `SupervisorHandle`, so `pkill
+    /// ccd` was a complete bypass: the next registration read `None`, refused
+    /// nothing, and the session settled on whichever visit re-registered first.
+    ///
+    /// The restart is literal — a second `Daemon` over the same `Store`, which
+    /// is what [`shared_store_on_disk`] is for — rather than a mock of one. The
+    /// second daemon's `supervisors` map is empty by construction, so the only
+    /// evidence it can possibly refuse on is the durable column.
+    ///
+    /// **Mutation:** drop the `.chain(durable)` from the high-water read and the
+    /// stale registration is accepted by the restarted daemon.
+    #[tokio::test]
+    async fn the_codex_generation_high_water_survives_a_daemon_restart() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 3, Some("th-g3"))
+                .await
+                .expect("the launch registers");
+        }
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        assert!(
+            !after.inner.lock().await.supervisors.contains_key(uid),
+            "the premise: a restarted daemon remembers no supervisor, so the \
+             in-memory high-water is gone"
+        );
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 2, Some("th-g2"))
+                .await
+                .expect_err("a restart must not forget which visit was adopted")
+        );
+        assert!(
+            refusal.contains("generation 3 is already adopted"),
+            "and must refuse against the generation read off the row: {refusal}"
+        );
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(3),
+            "the refused frame left the high-water where it was"
+        );
+
+        // The other direction is the point of the guard being a high-water and
+        // not a freeze: the relaunch this daemon has not seen is still adopted.
+        register_codex_at(&after, uid, 4, Some("th-g4"))
+            .await
+            .expect("a later visit is a relaunch and must be adopted");
+        assert_eq!(store.codex_generation(uid).unwrap(), Some(4));
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-g4"),
+            "a relaunch is how a session legitimately changes thread"
+        );
+    }
+
+    /// **One visit is one thread: an equal generation carrying a different
+    /// thread is refused** (plan A5.1, "an equal generation with a changed
+    /// thread is refused — immutable generation/thread binding").
+    ///
+    /// A generation IS a visit — one Codex process, one attach, one thread — and
+    /// the stale check is a statement about order that says nothing about
+    /// identity. Without this clause a supervisor could re-register at the
+    /// generation it already holds and swap the thread underneath it, and every
+    /// frame the link had already attributed to that generation would silently
+    /// become a frame about a thread the session was never on. The retained
+    /// carry is keyed by generation (`Inner::seed_codex_carry`) and the row is
+    /// the fleet's answer to "where is this session"; both would then describe
+    /// two threads under one visit with nothing to tell them apart.
+    ///
+    /// Three legs, because the refusal has to be exactly this narrow:
+    ///
+    ///   * the same thread at the same generation is the ordinary reconnect and
+    ///     is accepted — without this leg the test would pass against a rule
+    ///     that refused every re-registration;
+    ///   * a frame claiming **no** thread is the launch case
+    ///     `ControlLink::from_registration` documents, where `thread/started`
+    ///     has not happened yet. It changes nothing (`COALESCE` keeps the bound
+    ///     thread), so there is nothing to refuse;
+    ///   * a **different** thread at the same generation is refused, and the row
+    ///     still names the thread the generation was bound to.
+    ///
+    /// **Mutation:** replace the `bound != offered` refusal with `if false` and
+    /// the third leg is accepted, leaving the row on `th-second` at generation 1
+    /// — a second thread under one visit.
+    #[tokio::test]
+    async fn a_second_thread_under_one_codex_generation_is_refused() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 1, Some("th-bound"))
+            .await
+            .expect("the launch binds the generation to a thread");
+
+        register_codex_at(&daemon, uid, 1, Some("th-bound"))
+            .await
+            .expect("the same visit reconnecting on the same thread is an ordinary reconnect");
+
+        register_codex_at(&daemon, uid, 1, None)
+            .await
+            .expect("a frame that claims no thread changes nothing and is not a rebinding");
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-bound"),
+            "and COALESCE really did keep the binding, which is why it had \
+             nothing to refuse"
+        );
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 1, Some("th-second"))
+                .await
+                .expect_err("a second thread under one generation must be refused")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-bound"),
+            "the refusal must name the binding it protects: {refusal}"
+        );
+        assert!(
+            refusal.contains("th-second"),
+            "and what was offered in its place: {refusal}"
+        );
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-bound"),
+            "a refusal before any persistent mutation must leave the binding \
+             exactly where it was"
+        );
+    }
+
+    /// The binding refusal must survive a restart too, or it is a rule a
+    /// supervisor can shake off by killing the daemon.
+    ///
+    /// It reads the same durable pair the high-water does — the generation
+    /// column and `codex_thread_id`, written by one statement in one acceptance
+    /// — so the row a restarted daemon re-reads says `(G, T)` exactly when a
+    /// registration at G named T. This is what makes the equality test on the
+    /// generation load-bearing rather than decorative: without it the check
+    /// would compare against whatever thread the last accepted registration
+    /// left, whichever visit it belonged to.
+    ///
+    /// **Mutation:** change `durable == Some(incoming)` to `durable.is_some()`
+    /// and the second leg here — a *later* generation naming a new thread, which
+    /// is what a relaunch is — is refused instead of adopted.
+    #[tokio::test]
+    async fn the_generation_thread_binding_is_enforced_across_a_restart() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 1, Some("th-bound"))
+                .await
+                .expect("the launch binds the generation to a thread");
+        }
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 1, Some("th-second"))
+                .await
+                .expect_err("a restart must not forget which thread the visit is bound to")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-bound"),
+            "read back off the row, not off a handle the restart destroyed: {refusal}"
+        );
+
+        // And the binding is per generation, not per uid: the relaunch that
+        // legitimately changes thread carries a later one and is adopted.
+        register_codex_at(&after, uid, 2, Some("th-second"))
+            .await
+            .expect("a later visit is a new binding, not a changed one");
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-second")
+        );
+        assert_eq!(store.codex_generation(uid).unwrap(), Some(2));
+    }
+
+    /// **A generation binds only the thread IT was registered with** (round-C
+    /// F2) — the invariant the guard above states, now asserted end to end.
+    ///
+    /// The guard reads the row as a pair and calls `(G, T)` "the record of a
+    /// registration at G that named T". `COALESCE` alone did not make that true:
+    /// a registration at G2 carrying no thread advanced the generation while
+    /// preserving G1's thread, so the row read `(G2, A)` for an acceptance that
+    /// never happened — and the visit's first REAL thread was then refused as a
+    /// second thread under one generation. A session that relaunched and then
+    /// learned its thread could not record it.
+    ///
+    /// The three steps are the sequence exactly: `(G1,A)`, `(G2,none)`, `(G2,B)`.
+    /// The fourth is what keeps the fix from being a hole — once G2 has genuinely
+    /// bound B, a third thread under G2 is refused as it always was.
+    ///
+    /// **Reachability, measured and stated rather than assumed.** No producer in
+    /// this fleet can send this sequence today: `codex_coordinator` mints the
+    /// literal generation `1` and `supervisor::registration_frame` sends
+    /// `codex_thread_id: None` unconditionally, building the frame once and
+    /// replaying that same frame on exit. So the sequence arrives only from a
+    /// client that is not the coordinator — which is the only class of frame the
+    /// generation guard exists for, and the reason a wrong record of what was
+    /// adopted is worth fixing before a producer starts sending one.
+    ///
+    /// **Mutation:** restore the bare `COALESCE` on `codex_thread_id` in
+    /// `Store::upsert_session_at_generation` and step three is refused —
+    /// "generation 2 is already bound to thread th-a".
+    #[tokio::test]
+    async fn a_generation_that_named_no_thread_admits_its_own_first_one() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let thread = || {
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .clone()
+        };
+
+        register_codex_at(&daemon, uid, 1, Some("th-a"))
+            .await
+            .expect("the launch binds generation 1 to a thread");
+
+        register_codex_at(&daemon, uid, 2, None)
+            .await
+            .expect("the relaunch is a later visit and is adopted");
+        assert_eq!(
+            thread(),
+            None,
+            "generation 2 named no thread, so the row must not carry generation \
+             1's as though it were this visit's binding"
+        );
+
+        register_codex_at(&daemon, uid, 2, Some("th-b"))
+            .await
+            .expect("naming generation 2's thread for the first time is binding it");
+        assert_eq!(thread(), Some("th-b".into()));
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 2, Some("th-c"))
+                .await
+                .expect_err("and a SECOND thread under generation 2 is still refused")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-b"),
+            "against the thread generation 2 actually bound: {refusal}"
+        );
+    }
+
+    /// **The high-water advances on a frame that names no thread**, which is the
+    /// property that decided how F2 was fixed.
+    ///
+    /// The alternative fix was to hold the generation back on a write that did not
+    /// change the thread. It closes F2 and reopens the clause above it: the
+    /// generation is the ratchet the stale-frame refusal turns on
+    /// (`incoming < current`), so a G2 registration that recorded no G2 leaves the
+    /// durable high-water at 1 — and after a restart, which is the only place the
+    /// durable half is load-bearing at all, a stale G1 frame is adopted again.
+    /// Measured: with that variant in place, this test fails at the refusal below
+    /// while every A5.1 test that predates round C stays green, because none of
+    /// them registers a visit without a thread.
+    ///
+    /// Clearing the thread instead keeps both clauses: the visit count still
+    /// ratchets, and the thread — which is what the binding check reads — no
+    /// longer describes a visit that has ended.
+    ///
+    /// **Mutation:** drop `codex_generation` from the `ON CONFLICT DO UPDATE` list
+    /// and the restarted daemon adopts the stale generation-1 frame.
+    #[tokio::test]
+    async fn a_registration_that_names_no_thread_still_advances_the_high_water() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 1, Some("th-a"))
+                .await
+                .expect("the launch registers");
+            register_codex_at(&before, uid, 2, None)
+                .await
+                .expect("the relaunch registers before it knows its thread");
+        }
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(2),
+            "the visit the daemon adopted is the visit the row records"
+        );
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 1, Some("th-a"))
+                .await
+                .expect_err("a stale frame must still be refused after a restart")
+        );
+        assert!(
+            refusal.contains("generation 2 is already adopted"),
+            "on the evidence of the row, which is all a restarted daemon has: {refusal}"
+        );
+    }
+
+    /// **A whitespace thread id binds nothing** (round-C F4).
+    ///
+    /// `ControlLink` has always read `"   "` as "no thread named" — the same
+    /// reading it takes of the socket beside it — and the row did not, so a blank
+    /// was persisted verbatim and became the generation's durable binding. The
+    /// visit's first real thread was then refused against a thread nothing is on,
+    /// and the fleet reported that string as where the session was.
+    ///
+    /// Three legs, one per way the blank could still do damage: it must not be
+    /// stored, it must not refuse the real thread that follows it, and it must not
+    /// be read as a rebinding when it is what arrives *after* a real one.
+    ///
+    /// **Mutation:** drop the `real_thread_id` call at the row write and the
+    /// second leg is refused — "already bound to thread    ".
+    #[tokio::test]
+    async fn a_blank_thread_id_never_becomes_a_generations_binding() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let thread = || {
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .clone()
+        };
+
+        register_codex_at(&daemon, uid, 1, Some("   "))
+            .await
+            .expect("a blank thread is a frame that names none, not an invalid frame");
+        assert_eq!(
+            thread(),
+            None,
+            "a string with no content names no thread and must not reach the row"
+        );
+
+        register_codex_at(&daemon, uid, 1, Some("th-real"))
+            .await
+            .expect("so the visit's first real thread binds it rather than being refused");
+        assert_eq!(thread(), Some("th-real".into()));
+
+        register_codex_at(&daemon, uid, 1, Some("  "))
+            .await
+            .expect("and a blank offered against a real binding claims nothing to refuse");
+        assert_eq!(
+            thread(),
+            Some("th-real".into()),
+            "leaving the binding exactly where it was"
+        );
+    }
+
+    /// **A generation the ledger cannot record is refused before anything is
+    /// written** (round-C F3).
+    ///
+    /// `codex_generation` is a `u64` off a JSON frame; the column is SQLite's
+    /// `i64`. The store used to saturate the difference, and the saturation was
+    /// not a rounding error: the durable half read back `i64::MAX` while the
+    /// handle kept the real number, so `durable == Some(incoming)` was false and
+    /// the thread-binding check under it never ran — and a restart reloaded a
+    /// high-water that had regressed by the whole width of the range, re-admitting
+    /// every frame in it.
+    ///
+    /// **Nothing legitimate produces one, measured.** The fleet's only producer of
+    /// this field is `CodexSeat`, built with the literal `1`; there is no counter
+    /// and no flag anywhere that mints a second value. So a 64-bit generation is a
+    /// frame no launcher wrote, and refusing it is smaller and more honest than
+    /// widening the column to hold a number that would still be a lie.
+    ///
+    /// Asserted against the row and the high-water, not only against the `Err`:
+    /// the refusal happens at `ControlLink::from_registration`, above the
+    /// acceptance gate, the epoch stake and the upsert, so D4's "a refused frame
+    /// mutates nothing" is what the last two assertions are checking.
+    ///
+    /// **Mutation:** delete the `i64::try_from(generation).is_err()` bail in
+    /// `ControlLink::from_registration` and the frame is accepted as far as the
+    /// store, which then refuses it — after the epoch has been staked.
+    #[tokio::test]
+    async fn a_generation_the_ledger_cannot_hold_is_refused_before_any_mutation() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 5, Some("th-real"))
+            .await
+            .expect("the honest launch registers");
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, u64::MAX, Some("th-huge"))
+                .await
+                .expect_err("a generation no producer can mint must be refused")
+        );
+        assert!(
+            refusal.contains(&u64::MAX.to_string()),
+            "and the refusal must name the number it refused rather than \
+             silently storing another: {refusal}"
+        );
+
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(5),
+            "the high-water is the honest launch's, not a saturated i64::MAX"
+        );
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-real"),
+            "and the refused frame reached no write at all"
         );
     }
 

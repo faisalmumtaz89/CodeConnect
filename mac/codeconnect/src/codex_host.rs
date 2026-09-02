@@ -120,7 +120,8 @@
 //! ## How this host is reached (2e-2b)
 //!
 //! The coordinator puts it in a tmux pane: `tmux new-session … -- <codeconnect>
-//! internal-codex-host --uid … --nonce … --tmux-socket … --codex … --run-dir …`.
+//! internal-codex-host --uid … --nonce … --tmux-socket … --codex … --codex-sha256 …
+//! --run-dir …`.
 //! Before anything exists — no run dir, no sockets, no children — it presents
 //! itself to the D7 launch gate ([`crate::codex_custodian::late_host_admission`])
 //! and is admitted or refused; a refused host destroys its own uid's session and
@@ -226,6 +227,23 @@ const EX_HOST_FATAL: i32 = 70;
 /// stray child can outlive its record.
 const RECORD_LOCK_BUDGET: Duration = Duration::from_secs(1);
 
+/// How long [`note_run_dir_claimed`] may wait for the launch-record lock.
+///
+/// Deliberately its own budget, and deliberately longer than [`RECORD_LOCK_BUDGET`].
+/// That one bounds how long a launch sits inert while a *child's* identity is
+/// recorded, where giving up cheaply is right because the fence refuses the child and
+/// nothing is lost. This one guards a write that is now **launch-fatal**: losing the
+/// lock here does not degrade the launch, it ends it. And the contention is real
+/// rather than hypothetical — the coordinator and the custodian are both legitimate
+/// writers of this record, and each of their stores is a file write plus an fsync
+/// plus a rename plus a directory fsync, so a legitimate winner can lose a
+/// one-second race under I/O pressure through no fault of its own.
+///
+/// Five seconds is the trade: long enough that a launch is not failed for ordinary
+/// contention, short enough that a genuinely stuck lock still ends the launch well
+/// inside the coordinator's own bring-up patience rather than hanging the pane.
+const CLAIM_RECORD_BUDGET: Duration = Duration::from_secs(5);
+
 /// Exit code when the D7 gate refused this host admission to its launch:
 /// `EX_TEMPFAIL`, matching what `internal-codex-host-preflight` already returns
 /// for the same refusal so one meaning has one number. It is not a failure of the
@@ -266,13 +284,36 @@ pub fn run_host(args: &[String]) -> ! {
 pub(crate) struct HostArgs {
     /// The codex binary to exec for BOTH the app-server and the TUI.
     ///
-    /// The host takes this on trust and does **not** re-resolve, native-check or
-    /// version-pin it — `codex::resolve_codex_bin` / `ensure_pinned_version` run in
-    /// the caller (2e-2b's coordinator), which is what makes the reserved argv
-    /// grammar's 0.147 grounding apply. Stated plainly because it is a real
-    /// premise: `internal-codex-host --codex /any/path` execs that path twice.
-    /// Same-uid, so not a privilege boundary — but not a guarantee this file makes.
+    /// The host does **not** re-resolve, native-check or version-pin this path —
+    /// `codex::resolve_codex_bin` / `ensure_pinned_version` run upstream in the
+    /// launcher, which is what makes the reserved argv grammar's 0.147 grounding
+    /// apply. Stated plainly because it is a real premise:
+    /// `internal-codex-host --codex /any/path` will exec that path twice. Same-uid,
+    /// so not a privilege boundary — but not a guarantee this file makes.
+    ///
+    /// What the host **does** guarantee is [`codex_sha256`](Self::codex_sha256):
+    /// whatever path it is handed, the bytes it execs are the bytes the upstream
+    /// checks were performed on, or it refuses.
     codex: PathBuf,
+    /// The digest of the codex binary the upstream resolution inspected and
+    /// version-pinned (A7.1). Required — never defaulted, never derived here.
+    ///
+    /// **Why the host cannot compute this itself.** Hashing `--codex` on arrival
+    /// would pin whatever is at that path *now*, which is a statement about the
+    /// host's own moment and says nothing about the file that was magic-checked and
+    /// `--version`-pinned in another process some seconds earlier. That is precisely
+    /// the gap A7 names, re-opened one hop further down. The digest has to travel
+    /// with the path, from the process that did the inspecting.
+    ///
+    /// **Why a missing one is a refusal.** An absent digest would mean falling back
+    /// to trusting a pathname, silently, on the one dimension that decides which
+    /// code runs — the same reason no fingerprint dimension has a default here.
+    /// [`crate::codex::verify_codex_identity`] is then re-run immediately before
+    /// **each** of the two spawns, not once at parse time: the app-server and the
+    /// TUI start at different moments, separated by the app-server's bring-up and
+    /// the broker's bind, and a single early check would leave the second exec
+    /// unbound.
+    codex_sha256: String,
     /// The short, SUN_LEN-safe directory the host creates and owns.
     run_dir: PathBuf,
     /// The isolated `CODEX_HOME` passed to both the app-server and the TUI.
@@ -517,8 +558,8 @@ fn run_host_inner(args: &[String]) -> Result<i32> {
 
 /// Parse the host's charter, fail-closed in every dimension.
 ///
-/// `--codex`, `--run-dir`, `--codex-home` and **all five fingerprint dimensions**
-/// (`--approval-policy`, `--approvals-reviewer`, `--sandbox`, `--hooks-enabled`,
+/// `--codex`, `--codex-sha256`, `--run-dir`, `--codex-home` and **all five fingerprint
+/// dimensions** (`--approval-policy`, `--approvals-reviewer`, `--sandbox`, `--hooks-enabled`,
 /// `--launch-cwd`) are required: the host applies no policy default, because a default is a
 /// silent disagreement waiting to happen between the coordinator's durable launch
 /// record and what the broker actually enforces. Every flag takes a required,
@@ -538,6 +579,7 @@ fn run_host_inner(args: &[String]) -> Result<i32> {
 /// would otherwise surface as a pane that opens and immediately dies.
 pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     let mut codex: Option<PathBuf> = None;
+    let mut codex_sha256: Option<String> = None;
     let mut uid: Option<String> = None;
     let mut nonce: Option<String> = None;
     let mut tmux_socket: Option<String> = None;
@@ -555,6 +597,13 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
         let flag = arg.as_str();
         match flag {
             "--codex" => set_once(&mut codex, flag, PathBuf::from(value_of(&mut it, flag)?))?,
+            // A7.1: the identity of the bytes `--codex` must still be, checked
+            // against the same grammar the launcher writes it with.
+            "--codex-sha256" => {
+                let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
+                    .with_context(|| flag.to_string())?;
+                set_once(&mut codex_sha256, flag, parsed)?;
+            }
             "--uid" => set_once(&mut uid, flag, value_of(&mut it, flag)?)?,
             "--nonce" => set_once(&mut nonce, flag, value_of(&mut it, flag)?)?,
             "--tmux-socket" => set_once(&mut tmux_socket, flag, value_of(&mut it, flag)?)?,
@@ -592,8 +641,19 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     crate::codex::validate_codex_argv(&tui_args)
         .map_err(|refusal| anyhow!("refused passthrough TUI argument: {refusal}"))?;
 
+    // The absolute-path rule, from the module that owns it and that the coordinator
+    // applies to the same string. The host repeats it rather than trusting its
+    // parent: the process whose spawns this decides is the one that has to be sure.
+    let codex = codex.context("--codex <path> is required")?;
+    crate::codex::require_absolute_codex(&codex)?;
+
     Ok(HostArgs {
-        codex: codex.context("--codex <path> is required")?,
+        codex,
+        codex_sha256: codex_sha256.context(
+            "--codex-sha256 <hex> is required (the host verifies the codex binary's identity \
+             before each exec and applies no default: without it the launch would be trusting \
+             a pathname)",
+        )?,
         run_dir: run_dir.context("--run-dir <path> is required")?,
         codex_home: codex_home.context("--codex-home <path> is required")?,
         uid: uid.context("--uid <value> is required (the host must name its launch)")?,
@@ -775,10 +835,24 @@ fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> R
 
     // And make the published name itself durable, so a crash cannot lose the dirent
     // the record already points at.
-    std::fs::File::open(parent)
-        .with_context(|| format!("opening {} to flush it", parent.display()))?
-        .sync_all()
-        .with_context(|| format!("fsync of {}", parent.display()))
+    //
+    // A11.7 / round-2 finding 3: this is the one step that runs AFTER the publish, so
+    // a failure here is a failure by a host that has ALREADY claimed the directory.
+    // Returning straight out would strand that claimed directory and leave the caller
+    // exiting before it can either record the claim or sweep — a host that got past
+    // the fence, leaving no trace that it did. Take the directory back down first, so
+    // the only thing a post-publish failure leaves behind is the failure itself.
+    let durable = std::fs::File::open(parent)
+        .with_context(|| format!("opening {} to flush it", parent.display()))
+        .and_then(|dir| {
+            dir.sync_all()
+                .with_context(|| format!("fsync of {}", parent.display()))
+        });
+    if let Err(err) = durable {
+        sweep_own_run_dir(run_dir, uid, launch_nonce);
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Remove the run dir this host created, on the way out.
@@ -866,6 +940,16 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
     // preferred over an age-bounded sweep of unmarked dirs (no new clock, no
     // heuristic).
     create_run_dir_atomically(&args.run_dir, &args.uid, &args.nonce)?;
+    // A11.7: recording the claim is launch-fatal (see `note_run_dir_claimed`). A host
+    // that claimed the dir but cannot record it must not run on with the bit false —
+    // that is the exact state the gate's negative proof would misread as a fence
+    // refusal. Tear down the directory just created and exit fatal, so the only host
+    // that ever proceeds past here is one whose claim is on the record.
+    if let Err(err) = note_run_dir_claimed(&args) {
+        eprintln!("codex-host: {err:#}");
+        sweep_own_run_dir(&args.run_dir, &args.uid, &args.nonce);
+        return Ok(EX_HOST_FATAL);
+    }
 
     let outcome = run_session(&args, &paths, &mut signals).await;
 
@@ -888,6 +972,47 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
             EX_HOST_SIGNALLED
         }
     })
+}
+
+/// Record, durably, that this host got past the run-dir claim.
+///
+/// **LAUNCH-FATAL, not best-effort — the caller must refuse if this fails.** The
+/// bit it writes is read *negatively* by the A11.7 gate: a losing host with
+/// `host_claimed_run_dir == false` is taken as proof it was refused at the fence
+/// and never adopted the winner's directory. A best-effort write cannot support
+/// that proof. If this were allowed to fail-and-continue, a host that DID claim the
+/// dir (its `mkdir` won) but could not *record* the claim — the record lock held
+/// past [`RECORD_LOCK_BUDGET`], its identity unresolvable, the store faulted — would
+/// run on with the bit still false, and a later death (a colliding log, a socket in
+/// use) would present to the gate as a clean fence-refusal. The negative proof would
+/// then be true for exactly the host it must exclude.
+///
+/// So a failure here is a refusal. A host that cannot write its own claim cannot
+/// establish its lease/identity either — the same lease this write is fenced on — so
+/// it is in an unknown state with respect to the very record the custodian will
+/// later act on, and must not proceed. The caller tears down the directory it just
+/// created and exits fatal.
+///
+/// **What the false bit then licenses, stated exactly.** The invariant this buys is
+/// *no host enters `run_session` or spawns a child without its claim on the record* —
+/// so `host_claimed_run_dir == false` proves the host never got past the claim into
+/// the stages beyond it, which is what the A11.7 gate needs. It is NOT the stronger
+/// "this host never touched the directory": a host can still die between the
+/// `RENAME_EXCL` publish and this write (a SIGKILL, or the post-publish parent fsync
+/// failing — which `create_run_dir_atomically` now sweeps before returning, precisely
+/// so that case strands nothing). For the A11.7 *loser* the distinction cannot arise
+/// at all: it meets `EEXIST` at the publish and never owns a directory to claim.
+///
+/// A bool, not the claimed `(dev, ino)`. `host_claimed_run_dir == false` on a
+/// loser directly refutes "the host got past the claim", which is the whole of
+/// finding 11; carrying the inode too would let a gate ALSO prove an adopter
+/// walked past onto the *winner's* directory, but that is a strengthening this
+/// gate does not need and it is left unbuilt.
+fn note_run_dir_claimed(args: &HostArgs) -> Result<()> {
+    let me = crate::codex_launch::require_current_identity()?;
+    let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, CLAIM_RECORD_BUDGET)?;
+    crate::codex_launch::note_host_claimed_run_dir(&lock, &args.uid, &me)
+        .context("recording that this host claimed the run dir")
 }
 
 /// How the session ended, after teardown has already run.
@@ -1164,6 +1289,69 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
 
+    // A7.1: the last check before these bytes become a process. Deliberately here,
+    // among the fallible-but-childless work and *before* the guard owns anything:
+    // a mismatch must abort with nothing spawned, since the entire point is that
+    // this file never runs. Re-derived rather than remembered — the digest was
+    // taken in the launcher, in another process, and the question now is about this
+    // instant.
+    //
+    // Inline and blocking, unlike its counterpart before the TUI spawn, and the
+    // difference is the state of the world at each point. Here nothing is serving
+    // and nothing is spawned: the two log-file calls above are blocking too, so a
+    // signal arriving mid-check costs one whole-file read before a host that has
+    // created nothing exits. There the broker IS serving, and blocking a worker
+    // would make the host deaf to SIGTERM while a live session depends on it.
+    //
+    // ## The update race from here to `execve` is closed; a hostile peer is not
+    //
+    // `verify_codex_identity` no longer just reads and compares — it FREEZES the
+    // bytes immutable (`fchflags(fd, UF_IMMUTABLE)`) before hashing and hands back a
+    // guard that keeps them frozen. `frozen` below holds that guard across the whole
+    // tail this check used to leave open:
+    //
+    //   verify returns → `Command::spawn` → fork → the A11.1 fence rendezvous
+    //   (the child reports its pid, and `record_child_pid` writes this child's
+    //   identity DURABLY before the GO byte is sent) → GO → the child's `execve`
+    //
+    // While the flag is held, every way of replacing or rewriting that pathname FROM
+    // A FRESH START is refused by the kernel — `open(O_WRONLY)`/`open(O_RDWR)`,
+    // `ftruncate`, a write through any other hard link, `rename`-over,
+    // `renamex_np(RENAME_SWAP)`, `clonefile`-over, `unlink`, all measured
+    // `EPERM`/`EEXIST`/`EINVAL`. That is exactly the shape of the vector this gate
+    // was built for — an installer, an `npm` overwrite, a `standalone/current` flip
+    // landing mid-launch — so for the update race the bytes `execve` loads are the
+    // bytes hashed here, including against the same-inode overwrite a bare
+    // `(dev, ino)` comparison can never see.
+    //
+    // It is NOT a boundary against a hostile process running as this uid, and must
+    // not be read as one: `UF_IMMUTABLE` is owner-revocable (`chflags nouchg`), and a
+    // writable fd opened BEFORE the freeze keeps writing straight through it — both
+    // measured. That process is already out of scope by construction (see this
+    // module's own doc: it can `ptrace`, signal, or replace these binaries anyway),
+    // and macOS offers nothing that would change it — there is no exec-by-descriptor
+    // (`fexecve` is not even a symbol in libSystem; `execve("/dev/fd/N", …)` is
+    // `EACCES`), and a private staging copy is equally writable by that same uid.
+    // `protocol::hash::FrozenExecutable` carries all three measurements.
+    //
+    // ## What is left after the clear
+    //
+    // The freeze is cleared once the child is proven past `execve` (see the `drop`
+    // below). macOS demand-pages a Mach-O's text over the process's life and `execve`
+    // takes no snapshot, so an in-place write after the clear can reach a
+    // not-yet-faulted page — but codex is signed and hardened, and was measured
+    // running with `CS_HARD | CS_KILL`, so a substituted page is refused and the
+    // process KILLED rather than steered. Denial-of-service, not code execution, for
+    // a signed build. (A18/A20 number this gate "A7.1 executable hash-pin".)
+    let frozen = match crate::codex::verify_codex_identity(
+        &args.codex,
+        &args.codex_sha256,
+        "immediately before the app-server spawn",
+    ) {
+        Ok(frozen) => frozen,
+        Err(err) => return Outcome::Fatal(format!("{err:#}")),
+    };
+
     // --- The first spawn. Nothing fallible may run before the guard owns it --
     //
     // A11.1: spawned through the fence, so its identity is durable before it is ever
@@ -1200,8 +1388,15 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
         // it, so returning here drops it through `kill_on_drop`. A session whose
         // processes cleanup cannot name is the leak this chunk exists to remove.
+        // `frozen` also drops on this path, clearing the freeze — nothing ran.
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
+    // `spawn_fenced` returns only after the app-server is proven past `execve`
+    // (`prove_past_execve` + `confirm_child_exec`), so the bytes it loaded are the
+    // frozen, hashed bytes. The freeze has done its whole job; clear it. The tail
+    // after this — demand-paged text from a signed, hardened-runtime binary — is
+    // defended by the kernel's per-page code-signature check, not by this flag.
+    drop(frozen);
 
     let mut session = Session::new(appserver, sink);
     let outcome = drive(&mut session, args, paths, signals, &mut as_stderr_file).await;
@@ -1765,6 +1960,46 @@ async fn drive(
     }
 
     // --- Step 3: the real interactive TUI, foreground, inheriting our tty ----
+    //
+    // A7.1, checked a SECOND time and not because the first was in doubt. Steps 1
+    // and 2 stand between the two spawns — the app-server's bring-up and the
+    // broker's bind, seconds of real time during which the path is not being
+    // watched — so the app-server's check says nothing about the file this is about
+    // to exec. Each exec gets its own verify, immediately before it.
+    //
+    // On a blocking thread, and raced against a signal, because by this point the
+    // broker is SERVING. The verify is a whole-file read — measured at 0.478 / 0.459
+    // / 0.460 s for the 220 MB standalone codex in a release build, ~8 s unoptimised
+    // — and running that inline would park a runtime worker for its duration and,
+    // worse, leave the host deaf to SIGTERM for just as long. The host's whole
+    // contract is a bounded, signal-responsive exit; a guard that suspends it is not
+    // an acceptable guard, however correct. So this waits exactly like every other
+    // wait in this function.
+    //
+    // The verify FREEZES the bytes immutable and returns a guard that keeps them
+    // frozen; `frozen` below holds it across the spawn, so no installer or update can
+    // swap or rewrite the pathname between this check and the TUI's `execve`. The
+    // app-server verify above records the full accounting: what that closes (the
+    // update race, completely), what it does not (a hostile same-uid peer, which is
+    // out of scope and which macOS gives no way to exclude), and the post-clear
+    // demand-paging residual.
+    let (codex, codex_sha256) = (args.codex.clone(), args.codex_sha256.clone());
+    let verify = tokio::task::spawn_blocking(move || {
+        crate::codex::verify_codex_identity(
+            &codex,
+            &codex_sha256,
+            "immediately before the TUI spawn",
+        )
+    });
+    let frozen = tokio::select! {
+        biased;
+        name = signals.recv() => return Ok(Outcome::Signalled(name)),
+        // A join error here is a panic inside the verify. Failing closed on it is
+        // the only honest reading: a check that crashed did not pass. The `Ok` is the
+        // held freeze (see `verify_codex_identity`), kept across the spawn below.
+        verified = verify => verified
+            .context("the codex identity check panicked before the TUI spawn")??,
+    };
     let mut tui_cmd = Command::new(&args.codex);
     tui_cmd
         .arg("--remote")
@@ -1802,11 +2037,16 @@ async fn drive(
     // in which a SIGKILLed host left a live, unrecorded TUI on the user's pane.
     let tui = match spawn_fenced(&mut tui_cmd, args, "tui") {
         Ok(child) => child,
+        // `frozen` drops here too, clearing the freeze — nothing became codex.
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))
         }
     };
+    // The TUI is past `execve` (spawn_fenced proved it); the frozen bytes are the
+    // bytes that ran. Clear the freeze — the post-clear tail is the signed-binary
+    // demand-paging residual documented at the app-server spawn.
+    drop(frozen);
     session.tui = Some(tui);
 
     // --- Step 4: race the two children, the broker, and a host signal -------
@@ -2287,6 +2527,10 @@ mod tests {
             "/tmp/cc.tmux.sock",
             "--codex",
             "/usr/local/bin/codex",
+            // A7.1: the identity of the bytes at that path, as the launcher
+            // inspected them. Required — the host verifies it before each exec.
+            "--codex-sha256",
+            "2222222222222222222222222222222222222222222222222222222222222222",
             "--run-dir",
             "/tmp/cc.host.1",
             "--codex-home",
@@ -2355,6 +2599,10 @@ mod tests {
     fn parses_a_complete_charter_and_passthrough() {
         let a = parse_host_args(&complete(&["--", "--search", "hello world"])).unwrap();
         assert_eq!(a.codex, PathBuf::from("/usr/local/bin/codex"));
+        assert_eq!(
+            a.codex_sha256,
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        );
         assert_eq!(a.run_dir, PathBuf::from("/tmp/cc.host.1"));
         assert_eq!(a.codex_home, PathBuf::from("/tmp/cc.home.1"));
         assert_eq!(a.fingerprint.approval_policy, "untrusted");
@@ -2377,6 +2625,8 @@ mod tests {
             "/s",
             "--codex",
             "/c",
+            "--codex-sha256",
+            "2222222222222222222222222222222222222222222222222222222222222222",
             "--run-dir",
             "/r",
             "--codex-home",
@@ -2403,13 +2653,14 @@ mod tests {
 
     #[test]
     fn every_required_flag_is_required() {
-        // Dropping any one of the seven required flags fails closed. Each pair is
+        // Dropping any one of the required flags fails closed. Each pair is
         // the flag name and its value's position in `complete`.
         for drop in [
             "--uid",
             "--nonce",
             "--tmux-socket",
             "--codex",
+            "--codex-sha256",
             "--run-dir",
             "--codex-home",
             "--approval-policy",
@@ -2433,6 +2684,94 @@ mod tests {
                 "omitting {drop} must fail closed — the host applies no default"
             );
         }
+    }
+
+    /// A7.1 at the charter: the host will not run a binary it cannot check, and it
+    /// will not accept a digest in a shape it and the launcher could spell two ways.
+    #[test]
+    fn the_codex_digest_is_required_and_strictly_shaped() {
+        // Absent: a refusal that says why, not a fall-back to trusting the path.
+        let full = complete(&[]);
+        let at = full.iter().position(|a| a == "--codex-sha256").unwrap();
+        let mut without: Vec<String> = full.clone();
+        without.drain(at..at + 2);
+        // `HostArgs` is deliberately not `Debug` (it is a receipt, not a record),
+        // so the refusal is read out by hand rather than with `expect_err`.
+        let err = match parse_host_args(&without) {
+            Ok(_) => panic!("a host with no digest must refuse"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("--codex-sha256"), "names the flag: {err}");
+
+        // Malformed: too short, too long, non-hex, uppercase. Each is refused
+        // rather than normalised — see `codex::parse_codex_sha256`.
+        //
+        // The case probe is built from a real digest and checked to CONTAIN a
+        // letter first. The obvious spelling — uppercasing the all-digit fixture
+        // above — is a probe that tests nothing, because digits have no case; it
+        // passed here for exactly that reason until this assertion caught it.
+        let upper = protocol::hash::sha256_hex(b"codex").to_uppercase();
+        assert!(
+            upper.chars().any(|c| c.is_ascii_uppercase()),
+            "the case probe must actually differ from its lowercase form: {upper}"
+        );
+        for bad in [
+            "deadbeef",
+            "2222222222222222222222222222222222222222222222222222222222222222f",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            upper.as_str(),
+        ] {
+            let mut args = full.clone();
+            args[at + 1] = bad.to_string();
+            assert!(
+                parse_host_args(&args).is_err(),
+                "--codex-sha256 {bad:?} must be refused"
+            );
+        }
+
+        // And a second one is an ambiguous charter, not a last-wins override: two
+        // digests for one binary is a disagreement about which bytes are allowed.
+        let mut twice = full.clone();
+        twice.push("--codex-sha256".into());
+        twice.push("3333333333333333333333333333333333333333333333333333333333333333".into());
+        assert!(parse_host_args(&twice).is_err());
+    }
+
+    /// The digest is only worth what the path is worth. A `--codex` with no `/` is
+    /// read by `File::open` (the identity check) as `./codex` and by `Command::new`
+    /// (the spawn) as a `PATH` search — two files, one string, and a verify that
+    /// passes truthfully about the wrong bytes. That spelling is refused.
+    #[test]
+    fn a_codex_path_that_the_check_and_the_spawn_would_resolve_differently_is_refused() {
+        let full = complete(&[]);
+        let at = full.iter().position(|a| a == "--codex").unwrap();
+
+        // A bare name — the case where the two resolvers genuinely diverge.
+        let mut bare = full.clone();
+        bare[at + 1] = "codex".to_string();
+        let err = match parse_host_args(&bare) {
+            Ok(_) => panic!("a bare --codex name must be refused"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("absolute"), "names the requirement: {err}");
+        assert!(
+            err.contains("PATH"),
+            "and says why the two resolvers disagree: {err}"
+        );
+
+        // Relative spellings resolve the same way for both, but make both depend on
+        // the process's cwd — a second route to one string meaning two files.
+        for relative in ["./codex", "../bin/codex", "bin/codex"] {
+            let mut args = full.clone();
+            args[at + 1] = relative.to_string();
+            assert!(
+                parse_host_args(&args).is_err(),
+                "--codex {relative:?} must be refused"
+            );
+        }
+
+        // The absolute path the coordinator actually sends is accepted.
+        assert!(parse_host_args(&full).is_ok());
     }
 
     #[test]
@@ -3101,6 +3440,66 @@ mod tests {
             staged.display()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Finding 3 (round 2): recording the run-dir claim is LAUNCH-FATAL, so
+    /// `host_claimed_run_dir == false` is a sound negative proof.**
+    ///
+    /// The A11.7 loser-refusal gate reads that bit negatively: a losing host with the
+    /// bit false is taken as proof it was refused at the fence and never adopted the
+    /// winner's directory. That only holds if a host which got PAST the claim — won
+    /// its `mkdir` — always records it. Under the old best-effort write it did not: a
+    /// host that won the `mkdir` but could not record the claim (record lock past
+    /// budget, identity unresolvable, store faulted) ran on with the bit false, and a
+    /// later death then presented to the gate as a clean fence refusal.
+    ///
+    /// Here the record cannot be written — the uid names no launch record to write
+    /// under, the same "the host did not get to write it down" outcome a mid-launch
+    /// fault produces. The host wins its `mkdir`, then `note_run_dir_claimed` surfaces
+    /// the failure the old code swallowed, and the fatal path sweeps the directory it
+    /// created — so it never runs on with the bit false.
+    ///
+    /// **Mutation:** make `note_run_dir_claimed` best-effort again (swallow the error
+    /// and return) and this fails at the `expect_err` — the exact masking finding 3
+    /// names, back in place.
+    #[test]
+    fn a_host_that_cannot_record_its_claim_refuses_and_tears_down_the_dir_it_made() {
+        // A uid with no launch record, so the claim has nothing to be written into —
+        // exactly as `an_unrecordable_child_never_execs` forces `record_child_pid` to
+        // fail.
+        let mut args = parse_host_args(&complete(&[])).expect("charter");
+        args.uid = "01JQXV9K7B8N4M2P6R3T5WZZZZ".into();
+        let run = std::env::temp_dir().join(format!("cc-claim-fatal-{}", std::process::id()));
+        let staged = run.with_file_name(format!("cc-claim-fatal-{}.tmp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&run);
+        let _ = std::fs::remove_dir_all(&staged);
+        args.run_dir = run.clone();
+
+        // The host WINS its mkdir — it is past the fence, directory created and owned.
+        create_run_dir_atomically(&args.run_dir, &args.uid, &args.nonce).expect("win the mkdir");
+        assert!(run.exists(), "the host created and owns the run dir");
+
+        // But it cannot RECORD the claim. Best-effort would have returned `()` here
+        // and let the launch proceed with `host_claimed_run_dir == false`; now the
+        // failure is surfaced so the caller can refuse.
+        let err = note_run_dir_claimed(&args)
+            .expect_err("a host that cannot record its claim must not silently pass it");
+        assert!(
+            format!("{err:#}").contains("claimed the run dir"),
+            "the refusal should name the claim it could not record: {err:#}"
+        );
+
+        // And the fatal path tears down the directory it created, exactly as
+        // `orchestrate` does before returning EX_HOST_FATAL — so nothing is left
+        // running against a dir whose claim never reached the record.
+        sweep_own_run_dir(&args.run_dir, &args.uid, &args.nonce);
+        assert!(
+            !run.exists(),
+            "the run dir must be swept when the claim cannot be recorded: {}",
+            run.display()
+        );
+        let _ = std::fs::remove_dir_all(&run);
+        let _ = std::fs::remove_dir_all(&staged);
     }
 
     /// A11.5: the host's own teardown is bound to the directory it PROVED is its

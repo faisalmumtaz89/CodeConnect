@@ -33,6 +33,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+/// The A7.1 digest of the codex binary under test: the identity a launcher would
+/// have pinned at resolution, which the host re-verifies immediately before each of
+/// its two execs. Computed here rather than written down because these harnesses
+/// build (or copy) their codex at run time.
+fn codex_sha256(path: &Path) -> String {
+    protocol::hash::sha256_file(path).expect("hash the codex binary under test")
+}
+
 /// Locate tmux, or **fail the test**.
 ///
 /// Deliberately a panic rather than a skip, for exactly the reason stated below
@@ -273,9 +281,12 @@ impl Sandbox {
             .args(["--cwd", "/tmp"])
             .args(["--tmux-socket", self.sock.to_str().unwrap()])
             .args(["--deadline-ms", "60000"])
-            // The seven dimensions the host applies no default to. The
-            // coordinator carries them verbatim into the pane command.
+            // The dimensions the host applies no default to. The coordinator
+            // carries them verbatim into the pane command.
             .args(["--codex", self.codex.to_str().unwrap()])
+            // A7.1: the identity of the codex binary, re-verified in the host
+            // before each exec.
+            .args(["--codex-sha256", &codex_sha256(&self.codex)])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
             .args(["--approval-policy", "untrusted"])
             .args(["--approvals-reviewer", "user"])

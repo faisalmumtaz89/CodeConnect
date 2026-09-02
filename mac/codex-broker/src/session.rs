@@ -24,8 +24,9 @@
 //!    connection that made the request** (hence the [`ConnId`] parameter) for the RESPONSE
 //!    whose id matches the pending entry. Only that correlated response can install a
 //!    binding, and only if it carries all three proofs: `result.thread.id`, `result.cwd`
-//!    (**equal to the coordinator-owned launch cwd**), and a well-typed non-empty
-//!    `result.runtimeWorkspaceRoots`.
+//!    (**equal to the coordinator-owned launch cwd**), and `result.runtimeWorkspaceRoots`
+//!    (**exactly the single-element array `[that same launch cwd]`** — A10 follow-on, 2e-7c;
+//!    this was a bare shape check until then, which anchored nothing).
 //!
 //! `thread/started` / `thread/resumed` notifications may only ever **CONFIRM** an existing
 //! verified binding — an announcement of the id we already bound is a no-op. They may
@@ -256,6 +257,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use crate::fingerprint::is_launch_workspace_roots;
 use crate::message::RequestId;
 
 /// The one method that creates the session's thread. Named once so the outstanding ledger's
@@ -651,7 +653,9 @@ pub struct VerifiedThread {
     pub id: String,
     /// `result.cwd` — the SERVER-RESOLVED working directory, proven equal to the launch cwd.
     pub cwd: Value,
-    /// `result.runtimeWorkspaceRoots` — a non-empty array of non-empty path strings.
+    /// `result.runtimeWorkspaceRoots` — proven to be EXACTLY `[launch cwd]` (A10 follow-on),
+    /// so this field, like [`VerifiedThread::cwd`], is anchored to a coordinator-owned value
+    /// rather than to whatever the creating frame happened to name.
     pub roots: Value,
 }
 
@@ -1488,8 +1492,16 @@ impl SessionThreads {
     ///
     /// So the response is the only sound source, and it is also the one this broker can
     /// correlate to an admission. What the response canNOT supply is *authority* — the
-    /// server is echoing the client's own ask — so the `cwd` is additionally required to
-    /// equal the coordinator-owned launch cwd (round-2 P4, module header).
+    /// server is echoing the client's own ask — so BOTH workspace fields are additionally
+    /// required to match the coordinator-owned launch cwd: `cwd` equal to it (round-2 P4,
+    /// module header) and `runtimeWorkspaceRoots` equal to `[it]` (A10 follow-on, 2e-7c).
+    ///
+    /// The echo argument applies to `runtimeWorkspaceRoots` even more directly than to
+    /// `cwd`, which is why leaving it shape-checked was the hole 2e-7c closes: MEASURED, the
+    /// server echoes the REQUEST's `runtimeWorkspaceRoots` back verbatim (it does not derive
+    /// them), so before the anchor a client could name any directory on the machine and the
+    /// binding would follow — and the turn-side equality would then faithfully enforce that
+    /// client's choice for the life of the thread.
     ///
     /// ## Cheap guard
     ///
@@ -2051,11 +2063,25 @@ fn verify_creation_result(result: &Value, launch_cwd: &str) -> Option<VerifiedTh
         return None;
     }
 
-    // `runtimeWorkspaceRoots`: a non-empty ARRAY of non-empty strings. A null, a string, an
-    // empty array or an array with a non-string / empty-string element is a shape whose
-    // meaning this broker cannot prove.
+    // `runtimeWorkspaceRoots`: EXACTLY the single-element array `[launch_cwd]` — the same
+    // coordinator-owned anchor the `cwd` line above uses, from the same one definition
+    // (A10 follow-on, 2e-7c).
+    //
+    // This replaces a pure SHAPE check ("a non-empty array of non-empty strings"), which was
+    // not an anchor at all: the value is client-supplied and echoed back verbatim by the
+    // server (MEASURED — see `fingerprint::is_launch_workspace_roots`), so a shape check let
+    // whatever the first frame chose become the binding, and every later turn was then
+    // measured against that choice. The turn-side rule in `try_admit_turn` is unchanged and
+    // becomes SOUND for the first time here: exact equality against a binding that is itself
+    // anchored to the launch workspace is a transitive anchor, whereas exact equality against
+    // an unanchored binding was only self-consistency.
+    //
+    // The new rule strictly subsumes the old one: `[launch_cwd]` with a non-empty
+    // `launch_cwd` is by construction a non-empty array of non-empty strings, so every shape
+    // the old check refused is still refused — plus every well-shaped array naming the wrong
+    // workspace, which is the hole being closed.
     let roots = result.get("runtimeWorkspaceRoots")?;
-    if !is_nonempty_path_array(roots) {
+    if !is_launch_workspace_roots(launch_cwd, roots) {
         return None;
     }
 
@@ -2063,18 +2089,6 @@ fn verify_creation_result(result: &Value, launch_cwd: &str) -> Option<VerifiedTh
         id: thread_id.to_string(),
         cwd: cwd.clone(),
         roots: roots.clone(),
-    })
-}
-
-/// `runtimeWorkspaceRoots` must be a NON-EMPTY array of NON-EMPTY strings. A null, a bare
-/// string, an object, an empty array, or an array holding a non-string / empty-string
-/// element is a shape whose meaning this broker never measured and cannot prove.
-fn is_nonempty_path_array(v: &Value) -> bool {
-    v.as_array().is_some_and(|arr| {
-        !arr.is_empty()
-            && arr
-                .iter()
-                .all(|r| r.as_str().is_some_and(|s| !s.is_empty()))
     })
 }
 
@@ -2638,7 +2652,7 @@ mod tests {
             "result": {
                 "thread": {"id": thread},
                 "cwd": LAUNCH_CWD,
-                "runtimeWorkspaceRoots": ["/work"]
+                "runtimeWorkspaceRoots": [LAUNCH_CWD]
             }
         })
         .to_string()
@@ -2650,7 +2664,7 @@ mod tests {
         json!(LAUNCH_CWD)
     }
     fn roots() -> Value {
-        json!(["/work"])
+        json!([LAUNCH_CWD])
     }
 
     /// The `turn/start` RESPONSE, in the measured shape (`result.turn.id`). This is what
@@ -2687,7 +2701,7 @@ mod tests {
             Some(VerifiedThread {
                 id: "01a0".into(),
                 cwd: json!(LAUNCH_CWD),
-                roots: json!(["/work"]),
+                roots: json!([LAUNCH_CWD]),
             })
         );
         assert!(s.is_session_thread("01a0"));
@@ -2905,11 +2919,11 @@ mod tests {
     #[test]
     fn a_creation_response_missing_a_proof_closes_creation_rather_than_reopening_it() {
         for body in [
-            json!({"cwd": LAUNCH_CWD, "runtimeWorkspaceRoots": ["/work"]}),
-            json!({"thread": {"id": "01a0"}, "runtimeWorkspaceRoots": ["/work"]}),
+            json!({"cwd": LAUNCH_CWD, "runtimeWorkspaceRoots": [LAUNCH_CWD]}),
+            json!({"thread": {"id": "01a0"}, "runtimeWorkspaceRoots": [LAUNCH_CWD]}),
             json!({"thread": {"id": "01a0"}, "cwd": LAUNCH_CWD}),
-            json!({"thread": {"id": ""}, "cwd": LAUNCH_CWD, "runtimeWorkspaceRoots": ["/work"]}),
-            json!({"thread": {"id": "01a0"}, "cwd": null, "runtimeWorkspaceRoots": ["/work"]}),
+            json!({"thread": {"id": ""}, "cwd": LAUNCH_CWD, "runtimeWorkspaceRoots": [LAUNCH_CWD]}),
+            json!({"thread": {"id": "01a0"}, "cwd": null, "runtimeWorkspaceRoots": [LAUNCH_CWD]}),
             json!({"thread": {"id": "01a0"}, "cwd": LAUNCH_CWD, "runtimeWorkspaceRoots": null}),
         ] {
             let s = store();
@@ -3010,7 +3024,7 @@ mod tests {
                 "result": {
                     "thread": {"id": "01a0"},
                     "cwd": "/somewhere/else",
-                    "runtimeWorkspaceRoots": ["/work"]
+                    "runtimeWorkspaceRoots": [LAUNCH_CWD]
                 }
             })
             .to_string(),
@@ -3019,8 +3033,82 @@ mod tests {
         assert!(s.creation_closed_reason().is_some());
     }
 
+    // A10 FOLLOW-ON (2e-7c) — the RESPONSE-side workspace-roots anchor, the sibling of
+    // `a_creation_response_outside_the_launch_cwd_binds_nothing` above.
+    //
+    // This is the half that actually closes the gate. The value is client-supplied and echoed
+    // back verbatim by the app-server (MEASURED — see
+    // `crate::fingerprint::is_launch_workspace_roots`), so before 2e-7c a well-shaped array
+    // naming ANY directory bound successfully, and `try_admit_turn`'s equality then faithfully
+    // enforced that client's choice for the life of the thread. Each case below binds NOTHING.
+    #[test]
+    fn a_creation_response_with_roots_outside_the_launch_workspace_binds_nothing() {
+        for roots in [
+            json!(["/somewhere/else"]),
+            json!([LAUNCH_CWD, "/somewhere/else"]),
+            json!(["/somewhere/else", LAUNCH_CWD]),
+            // A strict ancestor: `/work` authorizes strictly more than `/work/proj`. No
+            // containment reasoning — this is the exact shape that used to bind.
+            json!(["/work"]),
+            // A strict descendant is a different workspace too.
+            json!([format!("{LAUNCH_CWD}/sub")]),
+            // The right path, duplicated: still not a one-element array.
+            json!([LAUNCH_CWD, LAUNCH_CWD]),
+        ] {
+            let s = store();
+            assert!(open(&s, A, &req("startup-1")));
+            s.observe_server_frame(
+                A,
+                &json!({
+                    "id": "startup-1",
+                    "result": {
+                        "thread": {"id": "01a0"},
+                        "cwd": LAUNCH_CWD,
+                        "runtimeWorkspaceRoots": roots
+                    }
+                })
+                .to_string(),
+            );
+            assert_eq!(s.bound_thread(), None, "roots {roots}");
+            // Indeterminate, not failed: the server may hold a thread we cannot name, so
+            // creation is CLOSED rather than reopened (the P2 state machine's third arm).
+            assert!(
+                s.creation_closed_reason().is_some(),
+                "an unanchored workspace must close creation, not reopen it: {roots}"
+            );
+        }
+    }
+
+    // A10 FOLLOW-ON — the one shape that DOES bind, kept adjacent to the refusals so the rule
+    // reads as a single fact: exactly `[launch cwd]`, the production shape the real TUI sends.
+    #[test]
+    fn a_creation_response_with_the_launch_workspace_roots_binds() {
+        let s = store();
+        assert!(open(&s, A, &req("startup-1")));
+        s.observe_server_frame(
+            A,
+            &json!({
+                "id": "startup-1",
+                "result": {
+                    "thread": {"id": "01a0"},
+                    "cwd": LAUNCH_CWD,
+                    "runtimeWorkspaceRoots": [LAUNCH_CWD]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            s.bound_thread().map(|t| t.roots),
+            Some(json!([LAUNCH_CWD])),
+            "the anchored roots are what gets bound"
+        );
+    }
+
     // ROUND-2 P4 — `runtimeWorkspaceRoots` must be a well-typed, non-empty array of
-    // non-empty strings.
+    // non-empty strings. Since 2e-7c this is SUBSUMED by the launch-workspace anchor above
+    // (`[launch cwd]` is by construction a one-element array of a non-empty string), but the
+    // cases are kept as their own test: they pin that the anchor did not *narrow* what the
+    // old shape check refused while widening what it accepted.
     #[test]
     fn malformed_workspace_roots_bind_nothing() {
         for roots in [
@@ -3030,6 +3118,9 @@ mod tests {
             json!([""]),
             json!(["/work", 2]),
             json!({"0": "/work"}),
+            json!(null),
+            // The launch cwd as a bare STRING rather than a one-element array.
+            json!(LAUNCH_CWD),
         ] {
             let s = store();
             assert!(open(&s, A, &req("startup-1")));
