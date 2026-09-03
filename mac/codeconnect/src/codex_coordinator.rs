@@ -605,11 +605,10 @@ fn fail(uid: &str, reason: &str, cleanup: CleanupState) -> Result<CoordinateOutc
 
 /// What the launcher's wait resolved to.
 ///
-/// `LaunchWait`/[`wait_on_record`] are the **launcher** half of D7 — consumed by
-/// `codeconnect codex` once it is ungated, which spawns the coordinator and then
-/// only waits here. Built and unit-tested; still undispatched, because
-/// [`crate::codex::start`] refuses before it would ever spawn a coordinator.
-#[allow(dead_code)]
+/// `LaunchWait`/[`wait_on_record`] are the **launcher** half of D7, consumed by
+/// [`crate::codex::launch`]: `codeconnect codex` spawns the coordinator and then
+/// only waits here, because the coordinator owns every forward mutation and the
+/// record owns the outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchWait {
     /// `ready` — the launcher attaches.
@@ -626,7 +625,6 @@ pub enum LaunchWait {
 /// elapses. A not-yet-created or transiently-unreadable record is treated as
 /// "still coming up" (the coordinator writes it as its first act), never as
 /// failure — only a durable `failed` fails the wait.
-#[allow(dead_code)] // launcher-side (2d ungate); unit-tested here.
 pub fn wait_on_record(
     uid: &str,
     patience: std::time::Duration,
@@ -666,7 +664,6 @@ pub fn wait_on_record(
 /// Reduce a failure reason to something safe to print at a terminal: single
 /// line, printable, length-bounded. The reasons this crate writes are already
 /// benign; this is defense in depth for anything that flows in from a step.
-#[allow(dead_code)] // launcher-side (2d ungate); unit-tested via wait_on_record.
 fn sanitize(reason: &str) -> String {
     let cleaned: String = reason
         .chars()

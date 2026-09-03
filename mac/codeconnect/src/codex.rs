@@ -18,12 +18,12 @@
 //! binary embeds (toml 0.9.11 / TOML 1.1), so a form codex applies cannot
 //! parse-fail here and be forwarded.
 //!
-//! **The command is gated.** Per the plan's pre-exposure gates (A5), the `codex`
-//! command may not actually launch a session until the wrapper and the two
-//! Phase-2 pre-exposure gates land. So [`start`] does the real work — resolve,
-//! version-pin, argv-validate, surfacing every one of those failures honestly —
-//! and then refuses with a "not yet enabled" message instead of spawning
-//! anything. A later chunk removes that final refusal.
+//! **The command is live.** [`start`] resolves, version-pins, argv-validates and
+//! preflights the daemon — surfacing every one of those failures honestly and
+//! before anything exists — and then launches: it mints the session identity,
+//! spawns the D7 coordinator, and waits on the durable launch record. See
+//! [`start`] for the boundary this launch path accepts, and [`launch`] for the
+//! shape it shares with `codeconnect claude`.
 //!
 //! **Grounded against the installed codex-cli 0.147.0.** Every acceptance and
 //! refusal below was probed against the live binary (flag arities and attached
@@ -126,39 +126,90 @@ pub struct ResolvedCodex {
 /// The `codex` command entry point.
 ///
 /// Resolves the binary, pins its version, validates the argv against the
-/// reserved grammar, and then — because the command is gated ahead of the
-/// wrapper and the pre-exposure gates — refuses to launch. Every earlier step
-/// can fail with its own honest error; only a fully-valid invocation reaches the
-/// gate.
+/// reserved grammar, preflights the daemon — every one of those can fail with its
+/// own honest error, and all of them fail *before anything exists* — and then
+/// launches ([`launch`]).
+///
+/// # THE ACCEPTED BOUNDARY (A22, and the single place it is stated)
+///
+/// Everything above this function was built to hold a launch closed against a
+/// binary that is not the one it inspected, a daemon that could never be told
+/// about the session, a passthrough that moves approval or sandbox ownership, and
+/// a rolled-back peer that would file the run as the wrong agent. One class of
+/// attacker is deliberately **out of scope**, and the ungate is the moment to say
+/// so once, plainly, rather than to leave it implied by a dozen local caveats:
+///
+/// **A hostile process already running as the user's own uid is not defended
+/// against.** It can `ptrace` this process, signal it, replace the binaries it is
+/// about to `execve`, revoke the `UF_IMMUTABLE` freeze
+/// ([`protocol::hash::FrozenExecutable`]) on the pinned executable, or hold a
+/// writable descriptor opened before that freeze was ever set. None of those has a
+/// userland answer on macOS: the mechanism a review would prescribe — hashing a
+/// descriptor and then executing *that descriptor* — does not exist on this
+/// platform, and its absence was measured rather than assumed (`fexecve` is not
+/// declared in the SDK; `execve("/dev/fd/N", …)` returns `EACCES` for a readable
+/// handle and for an `O_EXEC` handle alike, and an `O_EXEC` handle cannot be read
+/// and so could never have been hashed). This is the same posture
+/// [`crate::codex_host`]'s invariant 1 already states for its run directory, and
+/// it is stated **there by reference to here** so the two cannot drift into two
+/// different boundaries.
+///
+/// **What is defended, and must stay defended:** every cross-uid vector, and — for
+/// **the direct pinned executable** — the benign update race. A `codex` install or
+/// update landing mid-launch changes the file the resolved `--codex` pathname names,
+/// and that is refused at all three exec sites ([`verify_codex_identity`], with the
+/// freeze held across each `execve`); `PATH`/`./` confusion is refused
+/// ([`require_absolute_codex`]); cross-boot pid reuse is refused by boot identity; a
+/// rolled-back daemon's storage is isolated; and the wire pins hold. Stated that
+/// narrowly on purpose: the claim is about the bytes behind one pathname, not about
+/// every race a launch can lose.
+///
+/// AMFI narrows one thing here and not another, and the difference is worth being
+/// exact about, because page-hash validation checks an image against **its own**
+/// signature. So mutating the bytes of the signed codex image under a running
+/// process is bounded to denial of service — a page-hash mismatch is a `SIGKILL`,
+/// not silently executed foreign code. It does **not** reduce *substitution of a
+/// different, validly-signed binary* to denial of service: that image validates
+/// against its own signature and runs, and nothing in this launch path enforces a
+/// codex signing identity to compare it against.
+///
+/// **Separate accepted post-ungate residuals — not instances of the boundary above,
+/// because neither of them needs a hostile actor at all:**
+///
+///   * **A11.2**, a benign within-boot pid/pgid-reuse TOCTOU: the custodian's group
+///     kill can land on an unrelated same-uid process that inherited a recycled
+///     group id, with nobody attacking anything (`codex_custodian::group_warrant`
+///     carries the measurement). Closing it needs env-nonce provenance via
+///     `KERN_PROCARGS2`.
+///   * **F7**, a benign package update: the native `--codex` dispatcher is pinned
+///     faithfully and completely, but the subordinates it selects for `--version`,
+///     `app-server` and the TUI are not, so an ordinary update can change what
+///     actually runs while the pinned dispatcher's own bytes are unchanged and every
+///     gate here passes. Closing it needs a package-layout specification, which is a
+///     scoping decision about what a supported install is; see [`is_native_magic`].
 pub fn start(passthrough: &[String]) -> Result<()> {
     let config = Config::load();
 
     // Binary first, exactly as the Claude path resolves its binary first: a
     // missing or untested executable must surface before anything else. The
-    // canonicalised path is what we version-check and would exec.
+    // canonicalised path is what we version-check and exec.
     let resolved = resolve_codex_bin(&config)?;
     let version = read_codex_version(&resolved)?;
     ensure_pinned_version(&version)?;
 
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
-    // was refused and why, before the gate.
+    // was refused and why, before anything is created.
     validate_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
 
-    // Daemon preflight, before anything is created.
+    // Daemon preflight, before anything is created. Ordering is load-bearing and
+    // is what `new-old-new-real.sh` step 7(g) drives: a rolled-back daemon must
+    // refuse the launch with no uid minted, no tmux name taken, no coordinator
+    // spawned and no record written.
     refuse_unless_hostable(crate::daemon::agent_support(
         &protocol::agent::AgentKind::Codex,
     ))?;
 
-    // The gate. Resolution and parsing above are wired and exercised; the launch
-    // itself is withheld until the wrapper and the Phase-2 pre-exposure gates
-    // land. A later chunk removes this line.
-    bail!(
-        "codex support is not yet enabled in this build; \
-         resolved {} ({}, sha256 {}), arguments accepted, but the launcher is still gated",
-        resolved.path.display(),
-        version,
-        resolved.sha256
-    );
+    launch(&resolved, passthrough)
 }
 
 /// Refuse the launch when the daemon that is running cannot host Codex.
@@ -189,6 +240,272 @@ fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
              see it. Update or restart ccd, then try again."
         ),
     }
+}
+
+// ------------------------------------------------------------------- the launch
+
+/// The launch policy CodeConnect owns for every Codex session.
+///
+/// These four are the broker's [`codex_broker::fingerprint::LaunchFingerprint`]
+/// dimensions. The charter defaults none of them and neither does the host — an
+/// omitted dimension is a refused launch, not an assumed one — so the launcher is
+/// where the values are decided, and this is the only place they are written down.
+///
+/// **Each is the value a live session was actually proven on, not a preference.**
+/// `approval_policy` is `on-request` because `untrusted` was MEASURED to kill real
+/// sessions about two seconds in: the real 0.147 TUI's own `thread/start` asserts
+/// `approvalPolicy: "on-request"`, and a launch fingerprint of `untrusted` makes the
+/// broker refuse the TUI's opening request (CODEX-PLAN A14; both live harnesses moved
+/// to `on-request` for the same reason). The remaining three are the set every live
+/// gate in this repo has run on — `live_codex_coordinator`, `live_codex_host` and
+/// `codex_link_live` all launch with exactly these — so the fingerprint a user gets
+/// is the fingerprint the gates prove.
+///
+/// They are constants rather than configuration on purpose. The whole point of the
+/// reserved grammar above is that CodeConnect owns approval and sandbox policy for
+/// the session; a config key that moved them would hand back through the front door
+/// exactly what [`validate_codex_argv`] refuses at the command line.
+const LAUNCH_APPROVAL_POLICY: &str = "on-request";
+/// See [`LAUNCH_APPROVAL_POLICY`].
+const LAUNCH_APPROVALS_REVIEWER: &str = "user";
+/// See [`LAUNCH_APPROVAL_POLICY`].
+const LAUNCH_SANDBOX: &str = "read-only";
+/// See [`LAUNCH_APPROVAL_POLICY`]. Rendered as the charter's `true`/`false`.
+const LAUNCH_HOOKS_ENABLED: bool = true;
+
+/// How long the coordinator has to reach a terminal launch outcome.
+///
+/// 60s, which is what every live gate in this repo runs with, rather than the
+/// coordinator's own 30s fallback — which no live launch has ever been measured on.
+/// The work inside it is not small: the resolved codex is a 220 MB executable that
+/// gets frozen and re-hashed before each of three `execve`s (~0.5 s apiece), and an
+/// app-server has to come up and answer `initialize` before the TUI is spawned.
+const LAUNCH_DEADLINE_MS: u64 = 60_000;
+
+/// How long the launcher itself waits on the record, and how often it looks.
+///
+/// Strictly longer than [`LAUNCH_DEADLINE_MS`], because the deadline is the
+/// coordinator's budget to *decide* and the record transition it writes when the
+/// budget runs out is the thing worth waiting for: a launcher that gave up at the
+/// same instant would report its own impatience instead of the coordinator's
+/// recorded reason. The margin covers that write plus its fsync.
+const LAUNCH_PATIENCE: std::time::Duration =
+    std::time::Duration::from_millis(LAUNCH_DEADLINE_MS + 15_000);
+/// See [`LAUNCH_PATIENCE`].
+const RECORD_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Mint the session identity, spawn the coordinator, wait on the record, attach.
+///
+/// **This is `codeconnect claude`'s launch with one process substituted, and it is
+/// deliberately not a second design.** The Claude path (`main.rs::start_agent`)
+/// reads the cwd, takes the lowest free `cc-N` off the tmux server, mints a uid,
+/// creates the tmux session, spawns a detached supervisor and `exec`s into
+/// `tmux attach-session` — printing nothing, because the alternate screen erases
+/// anything it could print. Every one of those steps is here, in that order, using
+/// the same functions.
+///
+/// The one structural difference is D7's, and it is the reason the Codex path exists
+/// at all: **the launcher does not create the tmux session.** The coordinator
+/// performs every forward launch mutation itself, including `tmux new-session`, so
+/// that launcher death at any point changes nothing; the launcher spawns it *before
+/// tmux exists* and then only waits on the durable record
+/// ([`crate::codex_coordinator::wait_on_record`]). So where the Claude path attaches
+/// on the strength of `tmux new-session -d` having returned, this one attaches on the
+/// strength of a fsynced `Ready`.
+///
+/// Which makes the two ends identical again: on success the session name is a live
+/// tmux session on the shared server, and `exec_attach` puts the user in it. `ls`,
+/// `attach`, and closing the tab all behave the same for both agents because by that
+/// point there is nothing agent-shaped left in the picture.
+fn launch(resolved: &ResolvedCodex, passthrough: &[String]) -> Result<()> {
+    // The cwd is passed RAW, and that is not an oversight. The chain has exactly
+    // one canonicalization, in the coordinator
+    // (`codex_coordinator::canonical_launch_cwd`), because the canonical spelling
+    // is the anchor the broker's fingerprint, the creation-response check and every
+    // turn's workspace check are compared against by plain string equality. A
+    // second `canonicalize` here would be a second answer about the same directory,
+    // taken at a different instant, with nothing requiring the two to agree — the
+    // same failure the digest is carried rather than re-derived to avoid.
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let cwd = cwd.to_string_lossy().to_string();
+
+    // The same namespace `codeconnect claude` draws from, on the same tmux server:
+    // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet and
+    // two sessions can never collide on a name. (The coordinator would default to a
+    // fixed `cc-codex`, which is fine for a harness and wrong for a machine that
+    // runs more than one.)
+    let session_name = crate::tmux::next_session_name()?;
+    // Minted here, once, before anything else knows the session exists — the same
+    // rule and the same minter as the Claude path. The tmux name is reused as soon
+    // as this session exits; this is not, and it is what the event log and the
+    // launch record are keyed by.
+    let session_uid = protocol::uid::new().context("minting a session uid")?;
+
+    let charter = coordinator_charter(&CharterInputs {
+        uid: &session_uid,
+        launch_nonce: &crate::codex_launch::mint_nonce(),
+        custodian_nonce: &crate::codex_launch::mint_nonce(),
+        session_name: &session_name,
+        cwd: &cwd,
+        codex: resolved,
+        codex_home: &codex_home(),
+        tui_args: passthrough,
+    });
+    spawn_coordinator(&session_name, &session_uid, &charter)?;
+
+    match crate::codex_coordinator::wait_on_record(&session_uid, LAUNCH_PATIENCE, RECORD_POLL) {
+        // The record is `Ready` and proven durable. The coordinator has become the
+        // session's supervisor, the pane is real, and the session is on the shared
+        // tmux server under `session_name` — so this is the Claude path's own last
+        // line, reached the same way and printing the same nothing.
+        crate::codex_coordinator::LaunchWait::Ready => {
+            crate::tmux::exec_attach(&session_name)?;
+            unreachable!("exec replaces the process")
+        }
+        // **The record's reason, verbatim.** It is already sanitized to one printable
+        // bounded line by `wait_on_record`, and it is the only account of the failure
+        // that survives the runtime dir being swept — so it is reported as the record
+        // holds it rather than wrapped in a second story about it.
+        crate::codex_coordinator::LaunchWait::Failed(reason) => bail!("{reason}"),
+        // Not a verdict. The launcher's patience ran out; the coordinator and the
+        // custodian still own the outcome and will still drive the record to a
+        // terminal state. Say exactly that, and say where the answer will be.
+        crate::codex_coordinator::LaunchWait::TimedOut => bail!(
+            "the codex launch did not reach a terminal state within {}s. It has not been \
+             cancelled — the coordinator and its custodian still own it — but this command \
+             has stopped waiting. The outcome is recorded at {}; `codeconnect ls` shows the \
+             session if it came up.",
+            LAUNCH_PATIENCE.as_secs(),
+            crate::codex_launch::session_dir(&session_uid).display()
+        ),
+    }
+}
+
+/// The isolated `CODEX_HOME` the app-server and the TUI both run under.
+///
+/// `CODEX_HOME` if the operator set one, else codex's own default of `~/.codex` —
+/// which is the point: this is where the operator's `auth.json` lives, so a launch
+/// that pointed anywhere else would open a TUI parked on "Sign in with ChatGPT".
+/// The charter requires the value and defaults it nowhere, so it is named here
+/// explicitly rather than inherited from this process's environment by accident.
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| protocol::home_dir().join(".codex"))
+}
+
+/// Everything the launcher decides, gathered so [`coordinator_charter`] can stay a
+/// pure function of it.
+struct CharterInputs<'a> {
+    uid: &'a str,
+    launch_nonce: &'a str,
+    custodian_nonce: &'a str,
+    session_name: &'a str,
+    cwd: &'a str,
+    codex: &'a ResolvedCodex,
+    codex_home: &'a Path,
+    tui_args: &'a [String],
+}
+
+/// Build the `internal-codex-coordinator` charter argv.
+///
+/// Pure, and separated from the spawn precisely so the invariant below can be
+/// asserted by a test rather than by this paragraph.
+///
+/// # The digest is CARRIED, never re-derived — and that is the whole point of the pin
+///
+/// This function takes a [`ResolvedCodex`], not a path, and emits
+/// `--codex-sha256 {codex.sha256}`: the digest of the exact bytes
+/// [`inspect_candidate`] read, from the same single read that produced the Mach-O
+/// verdict, and that [`read_codex_version`] then froze and re-verified across
+/// `codex --version`. Re-hashing `codex.path` here instead would produce a digest of
+/// whatever the name reaches *now* — which, in the one scenario the pin exists for
+/// (an install or update landing mid-launch), is a truthful digest of the wrong
+/// binary, and the host's two pre-exec verifications would then dutifully confirm
+/// that the replacement is unchanged. The pin would still be a pin; it would just be
+/// pinned to the attacker's file. The coordinator is a courier for the same reason
+/// (`codex_coordinator::RealCoordinatorDeps::codex_sha256`), so the identity travels
+/// unbroken from the one process that inspected the bytes to the two `execve`s that
+/// run them.
+fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        "--uid".into(),
+        inputs.uid.into(),
+        "--nonce".into(),
+        inputs.launch_nonce.into(),
+        "--custodian-nonce".into(),
+        inputs.custodian_nonce.into(),
+        "--session-name".into(),
+        inputs.session_name.into(),
+        "--cwd".into(),
+        inputs.cwd.into(),
+        "--deadline-ms".into(),
+        LAUNCH_DEADLINE_MS.to_string(),
+        "--codex".into(),
+        inputs.codex.path.to_string_lossy().into_owned(),
+        // A7.1: the identity of the bytes, beside the name of the file. Carried from
+        // resolution — see this function's doc.
+        "--codex-sha256".into(),
+        inputs.codex.sha256.clone(),
+        "--codex-home".into(),
+        inputs.codex_home.to_string_lossy().into_owned(),
+        "--approval-policy".into(),
+        LAUNCH_APPROVAL_POLICY.into(),
+        "--approvals-reviewer".into(),
+        LAUNCH_APPROVALS_REVIEWER.into(),
+        "--sandbox".into(),
+        LAUNCH_SANDBOX.into(),
+        "--hooks-enabled".into(),
+        LAUNCH_HOOKS_ENABLED.to_string(),
+    ];
+    // `--tmux-socket` is deliberately absent: the coordinator's default is
+    // `protocol::TMUX_SOCKET_NAME`, the one server `codeconnect claude`, `ls` and
+    // `attach` all address. Naming it here would be a second copy of that constant
+    // with nothing keeping the two equal.
+    if !inputs.tui_args.is_empty() {
+        argv.push("--".into());
+        argv.extend(inputs.tui_args.iter().cloned());
+    }
+    argv
+}
+
+/// Spawn the coordinator so it outlives this process *and* the terminal tab.
+///
+/// The same daemonisation shape as the Claude path's `spawn_supervisor`, for the
+/// same two reasons and with one extra: `process_group(0)` keeps the SIGHUP/SIGINT
+/// aimed at the tab's foreground group away from it, and the redirected stdio means
+/// a log survives the tab. The extra is that this process is about to `exec` into a
+/// tmux client and the coordinator will then *continue as the session's supervisor*
+/// (`codex_coordinator::supervise_ready_session`) for the whole life of the run — a
+/// coordinator sharing this process group would be killed by the first Ctrl-C after
+/// the user detaches, and a `ready` record whose coordinator is gone is session-fatal.
+///
+/// Named by uid, like the supervisor's log and for the same reason: `cc-N` is reused
+/// the moment a session exits, and two runs sharing one log file makes the file
+/// useless exactly when it is needed.
+fn spawn_coordinator(session_name: &str, session_uid: &str, charter: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let current = std::env::current_exe().context("locating the codeconnect binary")?;
+    let log_path =
+        protocol::logs_dir().join(format!("coordinator-{session_name}-{session_uid}.out"));
+    std::fs::create_dir_all(protocol::logs_dir())?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+
+    Command::new(current)
+        .arg("internal-codex-coordinator")
+        .args(charter)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log.try_clone()?))
+        .stderr(std::process::Stdio::from(log))
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("spawning the codex coordinator for {session_name}"))?;
+    Ok(())
 }
 
 // ----------------------------------------------------------- binary resolution
@@ -421,12 +738,13 @@ fn inspect_candidate(path: &Path) -> CandidateIdentity {
 /// caught here as a [`CandidateIdentity::Wrapper`], while a *compiled* one is caught
 /// nowhere.
 ///
-/// **This is an explicit ungate blocker awaiting an owner decision.** No layout
-/// verifier is invented here: "e.g." in the plan is an example rather than a
-/// specification, and picking one unilaterally would silently narrow which installs
-/// CodeConnect supports — a scoping decision, not an implementation detail. Codex
-/// must not be ungated until the owner rules on what a supported install is and how
-/// it is verified.
+/// **This is F7, and it is an accepted residual rather than a blocker** — the owner
+/// ruled that at the 2e-7d ungate, and [`start`] records it as one of the two
+/// residuals that are separate from the A22 boundary. It stays open because no
+/// layout verifier can be invented here: "e.g." in the plan is an example rather
+/// than a specification, and picking one unilaterally would silently narrow which
+/// installs CodeConnect supports — a scoping decision, not an implementation detail.
+/// Closing it needs that ruling first.
 fn is_native_magic(magic: [u8; 4]) -> bool {
     matches!(
         u32::from_be_bytes(magic),
@@ -1554,6 +1872,229 @@ mod tests {
         refuse_unless_hostable(AgentSupport::Indeterminate("timed out".into()))
             .expect("doubt must never stop a launch");
         refuse_unless_hostable(AgentSupport::Hosted).expect("a hosting daemon is the happy path");
+    }
+
+    // ------------------------------------------------------------ the charter
+
+    /// The value of a flag in a charter argv, by name.
+    fn flag<'a>(argv: &'a [String], name: &str) -> Option<&'a str> {
+        argv.iter()
+            .position(|a| a == name)
+            .and_then(|i| argv.get(i + 1))
+            .map(String::as_str)
+    }
+
+    /// A charter over a REAL file whose recorded digest is deliberately NOT that
+    /// file's digest, so the two possible implementations give different answers.
+    fn charter_over_a_real_file_with(sha256: &str, tui_args: &[String]) -> (Vec<String>, PathBuf) {
+        // `std::env::current_exe()` is a real, readable, absolute file — and one
+        // whose actual sha256 is emphatically not the sentinel below.
+        let real = std::env::current_exe().expect("this test binary is a real file");
+        let resolved = ResolvedCodex {
+            path: real.clone(),
+            sha256: sha256.to_string(),
+        };
+        let argv = coordinator_charter(&CharterInputs {
+            uid: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            launch_nonce: "nonce-a",
+            custodian_nonce: "nonce-b",
+            session_name: "cc-7",
+            cwd: "/some/where",
+            codex: &resolved,
+            codex_home: Path::new("/home/u/.codex"),
+            tui_args,
+        });
+        (argv, real)
+    }
+
+    /// **The A7.1 invariant, as a falsifiable test rather than a paragraph: the
+    /// charter carries the digest resolution took, and never re-derives one.**
+    ///
+    /// The distinction is invisible on a quiet machine — re-hashing an unchanged
+    /// file returns the same string — and it is the entire value of the pin on a
+    /// busy one, where a `codex` install landing between resolution and this call
+    /// makes the two answers differ and only the carried one still describes the
+    /// bytes that were magic-checked and version-pinned.
+    ///
+    /// So the test makes them differ on purpose: the `ResolvedCodex` names a real
+    /// file and records a digest that is *not* that file's. A carrying
+    /// implementation emits the recorded value; a re-deriving one emits the file's.
+    /// MUTATION-VERIFIED — replacing `inputs.codex.sha256.clone()` in
+    /// [`coordinator_charter`] with `protocol::hash::sha256_file(&inputs.codex.path)`
+    /// fails this assertion.
+    #[test]
+    fn the_charter_carries_the_resolve_time_digest_and_never_re_derives_it() {
+        let pinned = "a".repeat(CODEX_SHA256_HEX_LEN);
+        let (argv, real) = charter_over_a_real_file_with(&pinned, &[]);
+
+        // The premise: these two really are different answers about one path.
+        let on_disk = protocol::hash::sha256_file(&real).expect("hash this test binary");
+        assert_ne!(
+            on_disk, pinned,
+            "the fixture must make carrying and re-deriving distinguishable, \
+             or this test proves nothing"
+        );
+
+        assert_eq!(
+            flag(&argv, "--codex-sha256"),
+            Some(pinned.as_str()),
+            "the charter must carry the digest resolution recorded, not one re-derived \
+             from the path: {argv:?}"
+        );
+        // And the well-formedness the coordinator will re-check on the way in.
+        assert!(parse_codex_sha256(&pinned).is_ok());
+    }
+
+    /// The charter fills every dimension the coordinator and the host refuse to
+    /// default, at the values the live gates run on, and leaves `--tmux-socket` to
+    /// the coordinator's own default (the one shared server).
+    #[test]
+    fn the_charter_names_every_undefaulted_dimension_and_no_tmux_socket() {
+        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[]);
+
+        // The eight the coordinator requires, plus the four the launcher owns.
+        for required in [
+            "--uid",
+            "--nonce",
+            "--custodian-nonce",
+            "--session-name",
+            "--cwd",
+            "--deadline-ms",
+            "--codex",
+            "--codex-sha256",
+            "--codex-home",
+            "--approval-policy",
+            "--approvals-reviewer",
+            "--sandbox",
+            "--hooks-enabled",
+        ] {
+            assert!(
+                flag(&argv, required).is_some(),
+                "the charter must name {required}, which nothing downstream defaults: {argv:?}"
+            );
+        }
+        assert_eq!(flag(&argv, "--session-name"), Some("cc-7"));
+        assert_eq!(flag(&argv, "--cwd"), Some("/some/where"));
+        assert_eq!(flag(&argv, "--approval-policy"), Some("on-request"));
+        assert_eq!(flag(&argv, "--approvals-reviewer"), Some("user"));
+        assert_eq!(flag(&argv, "--sandbox"), Some("read-only"));
+        assert_eq!(flag(&argv, "--hooks-enabled"), Some("true"));
+        assert_eq!(
+            flag(&argv, "--deadline-ms"),
+            Some(LAUNCH_DEADLINE_MS.to_string().as_str())
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--tmux-socket"),
+            "the launcher must not restate the tmux socket; the coordinator defaults to \
+             the one server `claude`, `ls` and `attach` all use: {argv:?}"
+        );
+        // And no test-only charter flag can ever ride out of a shipping launcher.
+        for forbidden in ["--test-bringup", "--test-newsession"] {
+            assert!(
+                !argv.iter().any(|a| a == forbidden),
+                "{forbidden} must never appear in a real charter: {argv:?}"
+            );
+        }
+    }
+
+    /// The `--` boundary: a passthrough is forwarded verbatim behind it, and is
+    /// absent entirely when there is none — so no empty boundary can turn a later
+    /// coordinator flag into a TUI argument.
+    #[test]
+    fn the_charter_forwards_a_passthrough_only_behind_the_boundary() {
+        let (bare, _) = charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &[]);
+        assert!(
+            !bare.iter().any(|a| a == "--"),
+            "an empty passthrough must add no boundary: {bare:?}"
+        );
+
+        let passthrough = vec!["--model".to_string(), "gpt-5".to_string(), "hi".to_string()];
+        let (with, _) =
+            charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &passthrough);
+        let at = with
+            .iter()
+            .position(|a| a == "--")
+            .expect("a passthrough must be fenced by the boundary");
+        assert_eq!(
+            &with[at + 1..],
+            passthrough.as_slice(),
+            "everything past the boundary is the TUI's, verbatim: {with:?}"
+        );
+        // The boundary is last: nothing the launcher owns may follow it.
+        assert!(
+            with[..at].iter().any(|a| a == "--hooks-enabled"),
+            "the launcher's own dimensions must all precede the boundary: {with:?}"
+        );
+    }
+
+    /// The daemon preflight runs before ANY identity is minted.
+    ///
+    /// **This pins an ordering that only a source read can see.** `new-old-new-real.sh`
+    /// step 7(g) measures the preflight's refusal by the absence of a launch record,
+    /// which is the first *durable* artifact — so it proves no launch was recorded,
+    /// and cannot distinguish that from a uid minted and a `cc-N` taken just before
+    /// the refusal. Those two are the visible fleet: `next_session_name` consumes a
+    /// name off the shared tmux server and `uid::new` burns a stamp the event log is
+    /// keyed by. Nothing observable would fail if they moved in front of
+    /// `refuse_unless_hostable`, so the ordering is asserted here instead.
+    ///
+    /// Read the source rather than call anything, for the same reason
+    /// `cc-hook`'s `version_flag_is_recognised_before_stdin_is_touched` does: the
+    /// order of two side effects inside a function that talks to a live daemon and a
+    /// live tmux server is not reachable from a unit test, and this is exactly the
+    /// class of regression that would otherwise land silently.
+    #[test]
+    fn the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken() {
+        let source = include_str!("codex.rs");
+        let body = |signature: &str| {
+            let at = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} must exist"));
+            let rest = &source[at..];
+            // rustfmt puts a top-level function's closing brace alone at column 0,
+            // so the first `\n}\n` past the signature ends the body.
+            &rest[..rest.find("\n}\n").expect("a closed function body")]
+        };
+
+        let start = body("pub fn start(passthrough: &[String]) -> Result<()> {");
+        let preflight = start
+            .find("refuse_unless_hostable(")
+            .expect("start must run the preflight");
+        let launch = start.find("launch(&resolved").expect("start must launch");
+        assert!(
+            preflight < launch,
+            "the preflight must run before the launch it guards"
+        );
+        for minter in ["uid::new(", "next_session_name("] {
+            assert!(
+                !start.contains(minter),
+                "{minter} moved into start(); it must stay behind the preflight, in launch()"
+            );
+        }
+
+        // And the other half: the minters really are in `launch`, so the assertion
+        // above is about where they are rather than about a spelling that vanished.
+        let launch_body = body("fn launch(resolved: &ResolvedCodex, passthrough: &[String])");
+        for minter in ["uid::new(", "next_session_name("] {
+            assert!(
+                launch_body.contains(minter),
+                "{minter} is no longer in launch(), so this test guards nothing"
+            );
+        }
+    }
+
+    /// `CODEX_HOME` is honoured when set, and codex's own default is used when it
+    /// is not — because that is where the operator's `auth.json` lives.
+    #[test]
+    fn the_codex_home_default_is_the_operators_own() {
+        let home = protocol::home_dir().join(".codex");
+        // Read through the same accessor the launcher uses, so an override that
+        // stopped being honoured would fail here.
+        let observed = codex_home();
+        match std::env::var_os("CODEX_HOME") {
+            Some(explicit) => assert_eq!(observed, PathBuf::from(explicit)),
+            None => assert_eq!(observed, home),
+        }
     }
 
     #[test]

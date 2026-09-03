@@ -33,15 +33,14 @@
 //! `mkdir` does not follow one (it gets `EEXIST`).
 //!
 //! State the premise honestly rather than overclaiming, because 0700 is not a
-//! universal exclusion: it excludes **other uids**, not a hostile process running
-//! as *this* uid, which could still create a socket inside the directory between
-//! the `mkdir` and the readiness poll. That process is out of scope by
-//! construction — a same-uid attacker can already `ptrace`, signal, or replace the
-//! binaries this host execs, so no filesystem check here would be a boundary
-//! against it. What the host actually relies on is: a **trusted parent path**
-//! (the host does not validate the parent chain, which the coordinator owns) plus
-//! a non-hostile same-uid environment. Within that premise, freshness is enforced
-//! by the host itself, and nothing else about the caller is trusted.
+//! universal exclusion: it excludes **other uids**, and the class it does not
+//! exclude is THE accepted boundary of the whole Codex launch path — stated once at
+//! [`crate::codex::start`] (A22) and deliberately not restated here or at any other
+//! site that leans on it, so the two cannot drift into two different boundaries.
+//! What the host actually relies on is: a **trusted parent path** (the host does not
+//! validate the parent chain, which the coordinator owns) plus that boundary's
+//! premise. Within it, freshness is enforced by the host itself, and nothing else
+//! about the caller is trusted.
 //!
 //! 2e-2b settled what that parent chain actually is, and it is not what this
 //! paragraph originally assumed ("a fresh path under the caller's own 0700 session
@@ -1327,9 +1326,9 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // It is NOT a boundary against a hostile process running as this uid, and must
     // not be read as one: `UF_IMMUTABLE` is owner-revocable (`chflags nouchg`), and a
     // writable fd opened BEFORE the freeze keeps writing straight through it — both
-    // measured. That process is already out of scope by construction (see this
-    // module's own doc: it can `ptrace`, signal, or replace these binaries anyway),
-    // and macOS offers nothing that would change it — there is no exec-by-descriptor
+    // measured. That class is already out of scope by construction — invariant 1 in
+    // this module's doc, which defers to `codex::start` (A22) for what it covers —
+    // and macOS offers nothing that would change it: there is no exec-by-descriptor
     // (`fexecve` is not even a symbol in libSystem; `execve("/dev/fd/N", …)` is
     // `EACCES`), and a private staging copy is equally writable by that same uid.
     // `protocol::hash::FrozenExecutable` carries all three measurements.
@@ -2431,9 +2430,9 @@ async fn wait_for_broker_listeners(
 /// This is only a *readiness* test, never an *ownership* test. What makes it
 /// trustworthy is the run dir having been exclusively created by this process
 /// moments earlier — which rules out stale residue and anything left by another
-/// uid, but is not a claim about a hostile process running as this same uid. That
-/// process is out of scope by construction; see invariant 1 in the module doc for
-/// the actual premise (trusted parent path, non-hostile same-UID environment).
+/// uid, but is not a claim about the class invariant 1 puts out of scope. See
+/// invariant 1 in the module doc for the actual premise, and `codex::start` (A22)
+/// for what that class is.
 fn is_ready_socket(path: &Path, mode: Option<u32>) -> bool {
     match std::fs::metadata(path) {
         Ok(meta) if meta.file_type().is_socket() => match mode {

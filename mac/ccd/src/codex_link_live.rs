@@ -1108,6 +1108,16 @@ impl LiveSandbox {
             // codex binary beside its path, and the host re-verifies it immediately
             // before each of its two execs. Required — a missing digest is refused,
             // never defaulted to trusting the pathname.
+            //
+            // Derived here rather than taken from the launcher, and since 2e-7d
+            // that is a choice: `codeconnect codex` pins its own digest now, and
+            // its whole path is gated end to end by
+            // `the_codex_command_launches_a_real_session_end_to_end`
+            // (`codeconnect/tests/live_codex_coordinator.rs`). This harness keeps
+            // spawning the coordinator directly because it holds the session at
+            // `--test-bringup hang` — a test-only charter flag the shipping
+            // launcher cannot emit, and the thing that lets this file drive the
+            // LINK against a session that is deliberately parked mid-bring-up.
             .args([
                 "--codex-sha256",
                 &protocol::hash::sha256_file(codex).expect("hash the codex binary under test"),

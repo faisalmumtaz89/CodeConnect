@@ -51,8 +51,6 @@ fn main() -> Result<()> {
 
     match command {
         "claude" => start_claude(rest),
-        // Gated: resolves the binary and parses argv, then refuses to launch
-        // until the wrapper and the Phase-2 pre-exposure gates land.
         "codex" => codex::start(rest),
         "attach" => attach(rest),
         "ls" | "list" => list(),
@@ -73,8 +71,9 @@ fn main() -> Result<()> {
         // target-side effect. Machinery, never typed by a human.
         "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
         // Hidden: the D7 launch coordinator (the supervisor in launch mode).
-        // Spawned by the gated `codex` launcher before tmux exists; it owns the
-        // launch record and every forward mutation. Machinery.
+        // Spawned by the `codex` launcher before tmux exists; it owns the launch
+        // record and every forward mutation, and stays on as the session's
+        // supervisor once it commits `ready`. Machinery.
         "internal-codex-coordinator" => codex_coordinator::run_coordinator(rest),
         // Hidden: the D7 launch custodian. Armed before `tmux new-session` with
         // independent cleanup authority. Machinery.
@@ -138,7 +137,7 @@ fn usage_text() -> &'static str {
 cc — CodeConnect shim
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
-  codeconnect codex [args…]       run codex in the private tmux server (not yet enabled)
+  codeconnect codex [args…]       run codex in the private tmux server, attached here
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
   codeconnect ls                  list what tmux is running (works with ccd down)
   codeconnect sessions            list what the event log knows, with lifecycle

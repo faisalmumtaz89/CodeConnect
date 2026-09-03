@@ -51,10 +51,23 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The A7.1 digest of the codex binary under test: the identity a launcher would
-/// have pinned at resolution, which the host re-verifies immediately before each of
-/// its two execs. Computed here rather than written down because these harnesses
-/// build (or copy) their codex at run time.
+/// The A7.1 digest of the codex binary under test: the identity resolution pins,
+/// which the host re-verifies immediately before each of its two execs. Computed
+/// here rather than written down because these harnesses build (or copy) their
+/// codex at run time.
+///
+/// **Derived locally, deliberately, and now that is a choice rather than the only
+/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
+/// before it would have spawned a coordinator, so every harness composed the
+/// charter a launcher would have written. The launcher exists now and its own path
+/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// (`live_codex_coordinator.rs`). This file still derives its own, because:
+///
+/// **several call sites here pass digests that are deliberately WRONG** — a digest
+/// pinned before the file's bytes are swapped, a self-swapping fake codex, a
+/// well-formed value that names nothing. Those are the host's fatal paths, and a
+/// real launcher can only ever produce truthful digests, so it could not drive one
+/// of them. Routing this file through the launcher would delete the tests.
 fn codex_sha256(path: &Path) -> String {
     protocol::hash::sha256_file(path).expect("hash the codex binary under test")
 }

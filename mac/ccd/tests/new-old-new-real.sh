@@ -103,6 +103,25 @@ CX=01K1B3XQ8ZC0DE5FGH7JKMNPCX
 # lets the seed change while the regex goes on searching for a string nothing
 # ever writes — a check that can no longer fail.
 CX_THREAD=th_ABC123
+# The tools this harness cannot run without, checked BEFORE anything is built or
+# started so a missing one is named here rather than discovered a few hundred lines
+# in, after a worktree build, as an unexplained failure of whatever step happened to
+# reach it first.
+#
+# `timeout` is the one worth naming: **stock macOS does not ship it** — it arrives
+# with GNU coreutils, usually via Homebrew — and this harness does not merely use it
+# as a net. `run()` below insists on exit code 124 as its evidence that a daemon
+# stayed up for its whole window, so `timeout` is the measuring instrument, not a
+# convenience that could be swapped for a background kill. A machine without it
+# cannot run this gate, and that is a sentence, not a silent skip.
+# `tmux` is deliberately NOT in this list: step 7(g)'s leftover-session check is
+# already guarded on its presence and skips cleanly without it.
+for tool in timeout python3 sqlite3 cc lsof; do
+  command -v "$tool" >/dev/null 2>&1 \
+    || { echo "FAIL: this harness needs \`$tool\` and it is not on PATH."; \
+         echo "      (\`timeout\` is not part of stock macOS: \`brew install coreutils\`.)"; exit 1; }
+done
+
 # A free ephemeral port, chosen at run time so the harness never collides with a
 # live ccd (or a parallel run) on a fixed port.
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
@@ -998,14 +1017,41 @@ grep -q "predates the agent seam" "$H/preflight-old.log" \
   || { echo "FAIL: the preflight mutated Codex state"; kill $OLDPID 2>/dev/null; exit 1; }
 [ "$(daemon_ipc_conns $OLDPID)" = "$CONNS_G_OLD" ] \
   || { echo "FAIL: the preflight left a connection behind on the old daemon"; kill $OLDPID 2>/dev/null; exit 1; }
+# **NO DURABLE LAUNCH RECORD — and that is exactly, and only, what this measures.**
+# While the command was gated this was true for free: the launcher could not launch
+# at all. The launcher is live now, so "the refusal lands before a launch exists" is
+# a claim about ordering that has to be measured. The launch record is the first
+# durable artifact of any launch (the coordinator writes it as its first act), so
+# its absence is the evidence: a preflight that ran too late would leave one behind
+# for a session this daemon can never be told about.
+#
+# **Round-4 finding 3: what this does NOT prove.** An absent record says no launch
+# was recorded. It does not say no uid was minted and no `cc-N` was taken — those
+# happen inside `codex::launch`, leave nothing on disk of their own, and a mutation
+# moving either in front of `refuse_unless_hostable` would still pass this arm. That
+# ordering is real and it is pinned where it is visible, in
+# `codex.rs::the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken`, which reads
+# the source of `start` and `launch`. This line stays narrow on purpose rather than
+# borrowing that test's claim.
+[ -z "$(ls "$H"/sessions/*/launch.json 2>/dev/null)" ] \
+  || { echo "FAIL: the preflight refused AFTER a launch was recorded: $(ls "$H"/sessions/*/launch.json)"; kill $OLDPID 2>/dev/null; exit 1; }
 kill $OLDPID 2>/dev/null; wait $OLDPID 2>/dev/null
 
 # **The falsifiability arm.** A launcher that refused for some unrelated reason —
 # a bad stub, a missing home, an argv it disliked — would satisfy every check
 # above. So the identical command is run again with the only difference being
-# WHICH DAEMON IS LISTENING, and it must get further: past the preflight, all the
-# way to the gate that is still in front of the launch itself. Same binary, same
-# stub, same home; a different answer on the wire.
+# WHICH DAEMON IS LISTENING, and it must get further: past the preflight, into the
+# launch itself. Same binary, same stub, same home; a different answer on the wire.
+#
+# **Ungate (2e-7d): what "further" means here changed, and so did the isolation.**
+# This arm used to assert the gate's own "not yet enabled" line, which was a
+# dependency on the refusal existing; the refusal is gone, so the marker is now the
+# first durable artifact of a real launch — a launch record the launcher spawned a
+# coordinator to write and then waited on. `TMUX_TMPDIR` is set for the same reason:
+# a live launcher takes a `cc-N` name and creates a tmux session, and it must take
+# them on this arm's own throwaway server rather than on the operator's fleet.
+GTMUX="$H/tmux-g"
+mkdir -p "$GTMUX"
 CODECONNECT_HOME="$H" "$NEW" > "$H/new-live-preflight.log" 2>&1 &
 NEWPID=$!
 daemon_accepting "$H" || { echo "FAIL: the new daemon did not accept for step 7(g)"; tail -20 "$H/new-live-preflight.log"; exit 1; }
@@ -1029,8 +1075,8 @@ kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for 
 # The count is what ties the line to the launcher: this daemon is fresh, this arm
 # runs one command against it, and `daemon_accepting` only connects — so exactly
 # one negotiation reached it, and it was the launcher's.
-CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
-  "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
+CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" TMUX_TMPDIR="$GTMUX" \
+  timeout 150 "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
 # The daemon writes its line once the answer is ON the connection's write queue
 # (round-3 F6: written before the enqueue and with the result discarded, this line
 # was an affirmative that a DROPPED answer could still produce). The enqueue and the
@@ -1055,11 +1101,136 @@ if grep -q "refusing to launch" "$H/preflight-new.log"; then
   cat "$H/preflight-new.log"
   exit 1
 fi
-grep -q "not yet enabled" "$H/preflight-new.log" \
-  || { echo "FAIL: against a hosting daemon the launcher did not reach the gate; it stopped somewhere else:"; cat "$H/preflight-new.log"; exit 1; }
+# **It launched.** The record is what the coordinator writes as its first act and
+# what the launcher then waits on, so one existing here is proof the command went
+# all the way through the wiring the preflight guards: minted an identity, spawned a
+# coordinator, and waited on its outcome. (Against the OLD daemon, the identical
+# command left none — asserted above.)
+GREC="$(ls "$H"/sessions/*/launch.json 2>/dev/null | head -1)"
+[ -n "$GREC" ] \
+  || { echo "FAIL: against a hosting daemon the launcher never started a launch; it stopped somewhere else:"; cat "$H/preflight-new.log"; exit 1; }
+# And it reached a TERMINAL outcome rather than being abandoned mid-flight. The
+# stub answers `--version` and nothing else, so it cannot host a session: the
+# app-server it is exec'd as exits immediately, bring-up fails, and the coordinator
+# terminalizes the record. `Failed` here is the honest end of a real launch, not a
+# refusal — which is exactly the distinction this arm exists to draw.
+grep -q '"Failed"' "$GREC" \
+  || { echo "FAIL: the launch record never reached a terminal state:"; cat "$GREC"; cat "$H/preflight-new.log"; exit 1; }
+# **The launcher reported the RECORD's reason, not one of its own.** This is the
+# wire between `wait_on_record` and the terminal, and without it a launch could
+# fail for one reason and be reported for another.
+#
+# Taken FROM the record rather than written down here, because the stub produces
+# several failure shapes and which one lands is a property of the machine. The stub
+# answers `--version` and exits, so the pane's command dies within milliseconds of
+# its `execve`; whether the coordinator notices during the bookkeeping that follows
+# `new-session` ("the created tmux session could not be made safe: remain-on-exit
+# could not be cleared…"), later in the bring-up wait ("wrapper bring-up failed: the
+# wrapper did not prove ready…"), or not before its own 60s budget runs out ("launch
+# deadline expired", seen on a loaded machine) is a race between two processes. All
+# three have been observed. Pinning any one of them would make this arm flaky for a
+# reason that has nothing to do with what it asserts — which is only that the
+# terminal shows what the record holds.
+# **Compared COMPLETE and EXACT** (round-4 finding 2). This used to `sed` the value
+# out and `grep -F` its first 40 characters, which was two holes at once. The prefix
+# was an unanchored substring, so a launcher that printed `different preface: <reason>`,
+# or appended a story of its own after the reason, or emitted the reason buried in
+# unrelated output, all passed. And the `sed`'d value is the JSON-ESCAPED spelling
+# while the terminal carries the decoded one, so any reason containing a character
+# JSON escapes was being compared against a string the launcher could never print.
+#
+# So: parse the record as JSON, and require the launcher's WHOLE output to be
+# anyhow's own `Error: <reason>` presentation and nothing else. That is the exact
+# rendering `codex::launch`'s `bail!("{reason}")` produces through
+# `main() -> Result<()>`, and on this path the launcher prints nothing else at all.
+CC_REC="$GREC" CC_OUT="$H/preflight-new.log" python3 - <<'PY' || exit 1
+import json, os, sys, unicodedata
+
+rec = json.load(open(os.environ["CC_REC"], encoding="utf-8"))
+state = rec.get("state")
+if not isinstance(state, dict) or "Failed" not in state:
+    sys.exit(f"FAIL: the terminal record carries no failure reason to compare against: {state!r}")
+reason = state["Failed"]["reason"]
+
+# The launcher prints `wait_on_record`'s SANITIZED reason (single line, printable,
+# 300 chars). Rather than reimplement that sanitizer here — a second copy of
+# production logic, which the harness would then only be proving against itself —
+# assert the recorded reason is already a FIXED POINT of it and compare verbatim.
+# Every reason this arm can produce is; one that is not fails here, loudly, rather
+# than quietly relaxing the comparison below.
+if (reason != reason.strip()
+        or any(unicodedata.category(c) == "Cc" for c in reason)
+        or len(reason) > 300):
+    sys.exit(f"FAIL: the recorded reason is not already terminal-safe, so this arm "
+             f"cannot compare it verbatim: {reason!r}")
+
+printed = open(os.environ["CC_OUT"], encoding="utf-8", errors="replace").read()
+expected = f"Error: {reason}\n"
+if printed != expected:
+    sys.exit("FAIL: the launcher printed something other than the recorded reason, exactly.\n"
+             f"  EXPECTED: {expected!r}\n"
+             f"  PRINTED:  {printed!r}")
+PY
+# Nothing survives it. A failed launch owes no tmux session and no run dir; the
+# coordinator and its custodian own that cleanup, and this is where it is measured.
+if [ -x "$(command -v tmux || echo /nonexistent)" ]; then
+  # `|| true` INSIDE the substitution, and it is load-bearing under this script's
+  # `set -o pipefail`: "no server running" is tmux's answer for the PASSING case
+  # here, and it is a non-zero exit. Without the guard the pipeline fails, the
+  # assignment inherits that status, and `set -e` kills the script on the success
+  # path with every assertion below silently unrun — the same shape as the
+  # `grep -q … && { … }` note further up.
+  LEFT="$( { TMUX_TMPDIR="$GTMUX" tmux -L codeconnect list-sessions 2>/dev/null || true; } | wc -l | tr -d ' ')"
+  [ "$LEFT" = "0" ] \
+    || { echo "FAIL: the failed launch left $LEFT tmux session(s) behind:"; TMUX_TMPDIR="$GTMUX" tmux -L codeconnect list-sessions 2>&1; exit 1; }
+fi
+# The record is pretty-printed, so the separator carries a space: `"run_dir": "…"`.
+GRUN="$(sed -n 's/.*"run_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$GREC" | head -1)"
+if [ -n "$GRUN" ]; then
+  [ ! -e "$GRUN" ] \
+    || { echo "FAIL: the failed launch left its run dir behind at $GRUN"; ls -la "$GRUN"; exit 1; }
+fi
+# **And no PROCESS survives it either** (round-4 finding 4). The two checks above are
+# about resources; "nothing survives" is also a claim about the two processes that
+# own them. A coordinator or custodian that wrote `Failed`, swept the session and the
+# run dir, and then simply kept running would satisfy every assertion above while
+# leaving exactly the kind of thing this whole gate exists to find — the live
+# `live_codex_coordinator` teardown gates check the recorded identities for that
+# reason, and this arm now does the same.
+#
+# By the identities the RECORD names, not by a name or a `ps` grep: the coordinator
+# is `codeconnect internal-codex-coordinator` and the custodian carries neither the
+# uid nor the run dir in its argv, so nothing else here can address them. Liveness is
+# `kill -0`, i.e. pid alone; the record's birth stamp is not compared, and the honest
+# consequence is stated rather than hidden: a pid recycled inside this window would
+# make this arm FAIL, never pass. It is bounded strictly the wrong way for masking.
+GPIDS="$(CC_REC="$GREC" python3 -c '
+import json, os
+rec = json.load(open(os.environ["CC_REC"], encoding="utf-8"))
+for field in ("coordinator", "custodian"):
+    who = rec.get(field)
+    if isinstance(who, dict) and isinstance(who.get("pid"), int):
+        print(field, who["pid"])
+')"
+[ -n "$GPIDS" ] \
+  || { echo "FAIL: the terminal record names no coordinator, so this arm cannot say what became of it:"; cat "$GREC"; exit 1; }
+while read -r GWHO GPID; do
+  [ -n "${GPID:-}" ] || continue
+  GONE=0
+  for _ in $(seq 1 300); do
+    kill -0 "$GPID" 2>/dev/null || { GONE=1; break; }
+    sleep 0.1
+  done
+  [ "$GONE" = "1" ] \
+    || { echo "FAIL: the failed launch's $GWHO (pid $GPID) is still alive 30s after the record went terminal:"; ps -p "$GPID" -o pid=,ppid=,lstart=,command= 2>&1; kill -KILL "$GPID" 2>/dev/null || true; exit 1; }
+done <<< "$GPIDS"
 echo "  (g) the REAL launcher refused to start a Codex session against the rolled-back daemon,"
-echo "      naming the daemon's own answer, mutating nothing and leaving no connection — and"
-echo "      the same command against the new daemon got past the preflight to the launch gate,"
+echo "      naming the daemon's own answer, mutating nothing, leaving no connection AND no"
+echo "      launch record — the refusal lands before a launch is recorded — and the same"
+echo "      command against the new daemon got past the preflight and actually LAUNCHED:"
+echo "      a coordinator wrote a record, the launcher waited on it and printed EXACTLY the"
+echo "      recorded reason and nothing else, and the failed launch left no tmux session, no"
+echo "      run dir and neither of the processes its own record names still running,"
 echo "      with the new daemon's OWN log showing exactly one negotiation — the launcher's —"
 echo "      answered supported=true, so the affirmative control is the launcher's round trip"
 echo "      rather than a second one the harness made on its own connection"
@@ -1105,6 +1276,7 @@ echo ""
 echo "      What the real new binary DID drive here is the half in front of the withhold:"
 echo "      \`codeconnect codex\` asked the rolled-back daemon the same question, read the"
 echo "      same undecodable-variant error, and REFUSED TO START — naming the daemon's own"
-echo "      answer, mutating no Codex state and leaving no connection behind. The identical"
-echo "      command against the new daemon got past that preflight to the launch gate, so"
-echo "      the refusal is the daemon's doing and not the launcher's mood."
+echo "      answer, mutating no Codex state and leaving no connection behind: the refusal"
+echo "      lands before a launch record exists. The identical command against the new"
+echo "      daemon got past that preflight and LAUNCHED for real, so the refusal is the"
+echo "      daemon's doing and not the launcher's mood."

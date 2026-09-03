@@ -68,10 +68,24 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The A7.1 digest of the codex binary under test: the identity a launcher would
-/// have pinned at resolution, which the host re-verifies immediately before each of
-/// its two execs. Computed here rather than written down because these harnesses
-/// build (or copy) their codex at run time.
+/// The A7.1 digest of the codex binary under test: the identity resolution pins,
+/// which the host re-verifies immediately before each of its two execs. Computed
+/// here rather than written down because these harnesses build (or copy) their
+/// codex at run time.
+///
+/// **Derived locally, deliberately, and now that is a choice rather than the only
+/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
+/// before it would have spawned a coordinator, so every harness composed the
+/// charter a launcher would have written. The launcher exists now and its own path
+/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// (`live_codex_coordinator.rs`). This file still derives its own, because:
+///
+/// **the coordinator gates in this file inject test-only charter flags** —
+/// `--test-bringup hang`, `--test-newsession hang`, hand-picked uid/nonce pairs
+/// engineered to collide on a run dir — none of which a shipping launcher can emit,
+/// by design. They drive the coordinator directly because the coordinator is their
+/// subject. The launcher's path is gated separately, in the same file, against the
+/// same real codex.
 fn codex_sha256(path: &Path) -> String {
     protocol::hash::sha256_file(path).expect("hash the codex binary under test")
 }
@@ -371,6 +385,17 @@ struct LiveSandbox {
     uid: String,
     nonce: String,
     run_dir: PathBuf,
+    /// Launches this sandbox did not name, and whose guardians `Drop` must still
+    /// reach.
+    ///
+    /// Every gate above spawns the coordinator itself, so `uid` above *is* the
+    /// launch and `Drop`'s identity sweep finds its record. The ungate gate does
+    /// not: `codeconnect codex` mints its own uid, which is the whole point, so
+    /// its record lives at a path this sandbox cannot predict and its coordinator
+    /// — which stays on as the session's supervisor for the life of the run —
+    /// would survive a failed assertion with nothing to kill it. A launcher-driven
+    /// test adopts the uid it discovers, and `Drop` sweeps that record too.
+    adopted: std::sync::Mutex<Vec<String>>,
 }
 
 /// Create `path` as a private (0700) directory that must not already exist.
@@ -669,6 +694,7 @@ impl LiveSandbox {
             uid,
             nonce,
             run_dir,
+            adopted: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -781,13 +807,13 @@ impl LiveSandbox {
     }
 
     fn record_text(&self) -> Option<String> {
-        std::fs::read_to_string(
-            self.home
-                .join("sessions")
-                .join(&self.uid)
-                .join("launch.json"),
-        )
-        .ok()
+        self.record_text_for(&self.uid)
+    }
+
+    /// The launch record of an arbitrary uid under this sandbox's home — used by
+    /// the ungate gate, whose uid is the launcher's rather than this sandbox's.
+    fn record_text_for(&self, uid: &str) -> Option<String> {
+        std::fs::read_to_string(self.home.join("sessions").join(uid).join("launch.json")).ok()
     }
 
     fn record_field(&self, key: &str) -> Option<String> {
@@ -879,7 +905,11 @@ impl LiveSandbox {
 
     /// A recorded `(pid, birth)` identity from the launch record.
     fn recorded_identity(&self, field: &str) -> Option<(i32, i64, i64)> {
-        let v: serde_json::Value = serde_json::from_str(&self.record_text()?).ok()?;
+        self.recorded_identity_of(&self.uid, field)
+    }
+
+    fn recorded_identity_of(&self, uid: &str, field: &str) -> Option<(i32, i64, i64)> {
+        let v: serde_json::Value = serde_json::from_str(&self.record_text_for(uid)?).ok()?;
         let c = v.get(field)?;
         Some((
             c.get("pid")?.as_i64()? as i32,
@@ -897,8 +927,14 @@ impl Drop for LiveSandbox {
         // used to leave a custodian polling a deleted record forever (observed
         // once, after a live run failed). The birth check is what keeps this from
         // signalling a recycled pid.
-        for field in ["coordinator", "custodian"] {
-            if let Some((pid, sec, usec)) = self.recorded_identity(field) {
+        let uids: Vec<String> = std::iter::once(self.uid.clone())
+            .chain(self.adopted.lock().expect("adopted uids").iter().cloned())
+            .collect();
+        for (uid, field) in uids
+            .iter()
+            .flat_map(|u| ["coordinator", "custodian"].map(|f| (u.clone(), f)))
+        {
+            if let Some((pid, sec, usec)) = self.recorded_identity_of(&uid, field) {
                 let id = protocol::proc_identity::ProcessIdentity {
                     pid,
                     birth: protocol::proc_identity::BirthIdentity {
@@ -1558,6 +1594,155 @@ impl LiveSandbox {
         self.fleet().into_iter().find(|s| s.session_uid == self.uid)
     }
 
+    // ------------------------------------------------- the launcher-driven gate
+    //
+    // Every helper above is keyed by the uid THIS sandbox minted, because every
+    // gate above spawns the coordinator itself. `codeconnect codex` mints its own,
+    // so the ungate gate has to discover the launch instead of naming it.
+
+    /// The single launch under this sandbox's home, as `(uid, record)`.
+    ///
+    /// Discovered rather than named. The assertion that there is at most one is
+    /// load-bearing for every caller below: they say "the launch", and a second
+    /// record would make that phrase quietly mean "an arbitrary one of them".
+    fn the_launch(&self) -> Option<(String, serde_json::Value)> {
+        let mut found: Vec<(String, serde_json::Value)> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.home.join("sessions")) else {
+            return None;
+        };
+        for entry in entries.flatten() {
+            let uid = entry.file_name().to_string_lossy().into_owned();
+            if let Some(text) = self.record_text_for(&uid) {
+                if let Ok(v) = serde_json::from_str(&text) {
+                    found.push((uid, v));
+                }
+            }
+        }
+        assert!(
+            found.len() <= 1,
+            "this gate runs exactly one launch; found {}: {:?}",
+            found.len(),
+            found.iter().map(|(u, _)| u).collect::<Vec<_>>()
+        );
+        found.pop()
+    }
+
+    /// Everything the launcher's detached coordinator wrote to its own log.
+    ///
+    /// The launcher redirects the coordinator's stdio to `logs/coordinator-<name>-
+    /// <uid>.out` precisely so a launch that fails has an account of itself after
+    /// the runtime dir is gone; a failure message here that could not reach it
+    /// would be reporting the one thing this gate cannot see.
+    fn coordinator_log(&self) -> String {
+        let dir = self.home.join("logs");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return format!("<no logs at {}>", dir.display());
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("coordinator-"))
+            })
+            .map(|p| format!("--- {} ---\n{}", p.display(), read_file(&p)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Adopt a launcher-minted uid so `Drop` sweeps its guardians. Idempotent.
+    fn adopt(&self, uid: &str) {
+        let mut adopted = self.adopted.lock().expect("adopted uids");
+        if !adopted.iter().any(|u| u == uid) {
+            adopted.push(uid.to_string());
+        }
+    }
+
+    /// The daemon's row for a discovered uid.
+    fn run_of(&self, uid: &str) -> Option<protocol::event::SessionSummary> {
+        self.fleet().into_iter().find(|s| s.session_uid == uid)
+    }
+
+    /// Type into the pane's tty.
+    ///
+    /// The only way to drive a session: the broker refuses `turn/start` to the ccd
+    /// role by design, so a turn can only ever be started by the real TUI, by
+    /// somebody typing. Addressed by NAME under this sandbox's `TMUX_TMPDIR`, like
+    /// everything else here.
+    fn send_keys(&self, session: &str, keys: &[&str]) {
+        let out = self
+            .tmux_cmd()
+            // `=name:` and not `=name`: the anchor form tmux accepts for a SESSION
+            // target is not a valid PANE target, and a pane is what send-keys and
+            // capture-pane address. Measured — `-t =cc-1` fails with "can't find
+            // pane", `-t =cc-1:` resolves to that session's current pane. The
+            // trailing colon keeps the `=`, so a `cc-1` here can still never be
+            // prefix-matched onto a `cc-10`.
+            .args([
+                "-f",
+                "/dev/null",
+                "send-keys",
+                "-t",
+                &format!("={session}:"),
+            ])
+            .args(keys)
+            .output()
+            .expect("run tmux send-keys");
+        assert!(
+            out.status.success(),
+            "tmux send-keys {keys:?} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn capture_pane(&self, session: &str) -> String {
+        match self
+            .tmux_cmd()
+            .args([
+                "-f",
+                "/dev/null",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-t",
+                &format!("={session}:"),
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Ok(o) => format!(
+                "<capture exited {}: {}>",
+                o.status,
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("<capture failed: {e}>"),
+        }
+    }
+
+    /// Is the real `codex --remote` TUI up in the pane yet? The host launches it
+    /// only after both broker legs bind, so legs alone are earlier than a session
+    /// anyone could type into.
+    fn tui_running(&self, run_dir: &Path) -> bool {
+        !tagged_pids(&format!(
+            "--remote unix://{}/tui.sock",
+            run_dir.to_str().expect("utf-8 run dir")
+        ))
+        .is_empty()
+    }
+
+    /// Whether a named session exists on this sandbox's tmux server.
+    fn has_session_named(&self, name: &str) -> bool {
+        self.tmux_cmd()
+            .args(["-f", "/dev/null", "has-session", "-t", &format!("={name}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     /// Run the real CLI against this sandbox, exactly as a person would.
     fn cli(&self, args: &[&str]) -> String {
         let out = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
@@ -1855,6 +2040,478 @@ fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
     let _ = coord.wait();
     let _ = daemon.kill();
     let _ = daemon.wait();
+}
+
+// ============================== THE UNGATE GATE ==============================
+//
+// 2e-7d. Every gate above spawns `internal-codex-coordinator` itself, because for
+// the whole of Phase 2 there was no launcher to spawn it: `codeconnect codex`
+// resolved, version-pinned, argv-validated, preflighted — and then refused. So the
+// charter those gates hand the coordinator is one the harness composed, including
+// the `--codex-sha256` each of them derives locally, standing in for a producer
+// that did not exist.
+//
+// This is that producer's gate. It types the command a person types, and asserts
+// the launch it produces is the same launch every gate above proved out: one that
+// registers, renders, adopts a thread on the ccd leg, runs a turn, survives a
+// daemon bounce, and leaves nothing behind when it ends.
+
+/// **THE UNGATE: `codeconnect codex`, run for real, launches a real Codex session.**
+///
+/// The command is driven under a pty (`script`), because on `Ready` it does what
+/// `codeconnect claude` does — `exec`s into `tmux attach-session` — and a launcher
+/// that only *claims* to attach would pass a test that never gave it a terminal.
+/// The attached client is asserted for the same reason.
+///
+/// **What this gate adds over the coordinator gate above** is precisely the wiring
+/// 2e-7d built, and each of these is a thing the harness used to do FOR the
+/// launcher: the uid is minted by the command (so it is discovered here, not
+/// named), the session name comes from the same `cc-N` sequence `codeconnect
+/// claude` draws from (not the coordinator's `cc-codex` fallback), the cwd is the
+/// directory the command was run in, and the digest on the charter is the one
+/// resolution pinned rather than one this file hashed.
+///
+/// **Deliberately NOT asserted here, for the reason the gate above states:**
+/// anything about a phone. No device is paired in this sandbox and none could
+/// advertise Codex if it were, so a "no Codex push was delivered" assertion would
+/// pass against any build whatsoever. That narrowing stays where it can fail — the
+/// `push_queue` recipient tests.
+#[test]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+fn the_codex_command_launches_a_real_session_end_to_end() {
+    let Some(codex) = live_gate() else { return };
+    let ccd = resolve_ccd();
+    let sb = LiveSandbox::new("ungate");
+    let mut daemon = sb.spawn_daemon(&ccd);
+    assert!(
+        sb.fleet().is_empty(),
+        "a fresh sandbox daemon must start with no sessions: {:?}",
+        sb.fleet()
+    );
+    assert!(
+        sb.the_launch().is_none(),
+        "and with no launch on disk, or the discovery below finds someone else's"
+    );
+
+    // **The cwd is a real directory the command is run IN**, not a flag it is
+    // handed — which is the whole difference between this and every gate above,
+    // where `--cwd /tmp` was written into a charter by hand.
+    let cwd = sb.base.join("work");
+    create_private_dir(&cwd).expect("mk the launch cwd");
+    let canonical_cwd = std::fs::canonicalize(&cwd)
+        .expect("canonicalize the launch cwd")
+        .to_string_lossy()
+        .into_owned();
+
+    // **THE COMMAND.** `script -q /dev/null` gives it a controlling terminal, so
+    // the `exec tmux attach-session` it ends with is a real attach. stdin is a
+    // pipe this test holds OPEN: an attached tmux client that reads EOF detaches,
+    // and the client staying is the evidence.
+    let out_path = sb.base.join("codex-command.out");
+    let out = std::fs::File::create(&out_path).expect("the command's output file");
+    let mut command = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            env!("CARGO_BIN_EXE_codeconnect"),
+            "codex",
+        ])
+        .current_dir(&cwd)
+        .env("CODECONNECT_HOME", &sb.home)
+        .env("CODEX_HOME", &sb.codex_home)
+        .env("CODECONNECT_CODEX_BIN", &codex)
+        .env("TMUX_TMPDIR", &sb.tmux_tmpdir)
+        .env("CODECONNECT_TMUX", &sb.tmux)
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(out.try_clone().expect("clone the output file")))
+        .stderr(Stdio::from(out))
+        .spawn()
+        .expect("run `codeconnect codex`");
+    let _held_stdin = command.stdin.take().expect("hold the pty's stdin open");
+
+    // **The launch the command minted.** Discovered, because the launcher owns the
+    // identity now — and adopted immediately, so a failure below still gets its
+    // coordinator killed (it stays on as the session's supervisor otherwise).
+    assert!(
+        wait_until(Duration::from_secs(30), || sb.the_launch().is_some()),
+        "`codeconnect codex` never wrote a launch record. output:\n{}",
+        read_file(&out_path)
+    );
+    let (uid, _) = sb.the_launch().expect("the launch");
+    sb.adopt(&uid);
+    assert_eq!(
+        uid.len(),
+        protocol::uid::UID_LEN,
+        "the launcher must mint a ULID uid, got {uid:?}"
+    );
+
+    assert!(
+        wait_until(Duration::from_secs(120), || {
+            sb.the_launch()
+                .and_then(|(_, r)| r.get("state")?.as_str().map(str::to_string))
+                .as_deref()
+                == Some("Ready")
+        }),
+        "the launch never reached Ready. record: {:?}\noutput:\n{}\ncoordinator log:\n{}",
+        sb.the_launch().map(|(_, r)| r.to_string()),
+        read_file(&out_path),
+        sb.coordinator_log(),
+    );
+    let (_, record) = sb.the_launch().expect("the ready launch");
+    let session_name = record
+        .get("session_name")
+        .and_then(|v| v.as_str())
+        .expect("the record names the session")
+        .to_string();
+    let run_dir = PathBuf::from(
+        record
+            .get("run_dir")
+            .and_then(|v| v.as_str())
+            .expect("a ready launch has a run dir"),
+    );
+
+    // **The name came from the shared `cc-N` sequence**, not the coordinator's own
+    // `cc-codex` fallback — so `ls`, `attach` and a second Claude launch all see
+    // one namespace on one server.
+    let n = session_name
+        .strip_prefix(protocol::SESSION_PREFIX)
+        .unwrap_or_else(|| panic!("the session must be named cc-N, got {session_name:?}"));
+    assert!(
+        n.parse::<u32>().is_ok(),
+        "the session must be named cc-N, got {session_name:?}"
+    );
+    assert!(
+        sb.has_session_named(&session_name),
+        "a Ready launch must have a live tmux session called {session_name}"
+    );
+
+    // **It attached.** The command's last act is `exec tmux attach-session`, and a
+    // client on this session is the only thing that proves it rather than merely
+    // having exited quietly.
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            let clients = sb
+                .tmux_cmd()
+                .args([
+                    "-f",
+                    "/dev/null",
+                    "list-clients",
+                    "-t",
+                    &format!("={session_name}"),
+                ])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            !clients.is_empty()
+        }),
+        "`codeconnect codex` did not attach the terminal to {session_name}. output:\n{}",
+        read_file(&out_path)
+    );
+
+    // **The fleet.** Same assertions as the coordinator gate, about a launch the
+    // command produced.
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.run_of(&uid).is_some()),
+        "the launched session never appeared in the daemon's fleet. ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    let row = sb.run_of(&uid).expect("the row");
+    assert_eq!(
+        row.agent,
+        protocol::agent::AgentKind::Codex,
+        "the run must be filed as the agent it is"
+    );
+    assert_eq!(row.session_id, session_name);
+    assert_eq!(row.tmux_session, session_name);
+    assert_eq!(row.lifecycle, protocol::event::Lifecycle::Live);
+    // **The cwd the command was run in, canonicalized once by the coordinator.**
+    assert_eq!(
+        row.cwd, canonical_cwd,
+        "the fleet must record the canonical directory the command was run in"
+    );
+
+    // The thread, adopted off the wire (the launch never learns one).
+    assert!(
+        wait_until(Duration::from_secs(120), || sb
+            .run_of(&uid)
+            .and_then(|s| s.codex_thread_id)
+            .is_some()),
+        "the daemon never adopted a thread for the launched session. ccd.log:\n{}\nbroker.log:\n{}",
+        read_file(&sb.base.join("ccd.log")),
+        read_file(&run_dir.join("broker.log"))
+    );
+    let thread = sb
+        .run_of(&uid)
+        .and_then(|s| s.codex_thread_id)
+        .expect("an adopted thread");
+
+    // On the ccd leg, and provably not the TUI's — see the coordinator gate for
+    // why `forward` and not `leg opened`.
+    let broker_log = read_file(&run_dir.join("broker.log"));
+    assert!(
+        broker_log.contains("Ccd: forward"),
+        "the daemon must reach the broker on the CCD leg. broker.log:\n{broker_log}"
+    );
+
+    // **`codeconnect ls`, which is what a person types next.**
+    let ls = sb.cli(&["ls"]);
+    let line = ls
+        .lines()
+        .find(|l| l.starts_with(&session_name))
+        .unwrap_or_else(|| panic!("`codeconnect ls` did not list {session_name}:\n{ls}"));
+    assert!(
+        line.contains(&uid),
+        "`ls` must show the launched run's uid:\n{ls}"
+    );
+    assert!(
+        !line.contains('—'),
+        "`ls` must not render an unknown column for a registered session:\n{ls}"
+    );
+    assert!(
+        line.contains(&canonical_cwd),
+        "`ls` must show the directory the command was run in:\n{ls}"
+    );
+    let sessions = sb.cli(&["sessions", "list"]);
+    assert!(
+        sessions.contains(&uid) && sessions.contains("live"),
+        "`codeconnect sessions list` must list the launched run as live:\n{sessions}"
+    );
+
+    // **The phone's session list carries it, and that is the same answer.**
+    //
+    // Asserted here rather than over a WebSocket, because it is not a second
+    // projection: `ClientMessage::Sessions` (ws_server.rs) and
+    // `ClientFrame::ListSessions` (ipc_server.rs) both call one `Daemon::sessions()`
+    // and both send the same `Vec<SessionSummary>`; the WS arm adds a serialization
+    // and an error code and nothing else. So `fleet()` above IS the list a paired
+    // phone would be sent, and dialling a socket to re-read it would prove the
+    // serializer, not the fleet. (What IS genuinely WS-only is the event STREAM —
+    // `Subscribe` has no IPC counterpart — which is why the turn below is observed
+    // at the broker and the pane rather than claimed for the phone.)
+    let phone_view = sb.run_of(&uid).expect("the phone-facing row");
+    assert_eq!(phone_view.agent, protocol::agent::AgentKind::Codex);
+    assert_eq!(phone_view.session_uid, uid);
+
+    // Printed, not just asserted. This gate is the evidence the ungate rests on, so
+    // a run of it has to leave behind what a reader would otherwise have to take on
+    // trust: what the command produced, what the fleet says, and what `ls` renders.
+    println!(
+        "--- `codeconnect codex` output (pty) ---\n{}",
+        read_file(&out_path)
+    );
+    println!("--- codeconnect ls ---\n{ls}");
+    println!("--- codeconnect sessions list ---\n{sessions}");
+    println!("--- the daemon's row ---\n{row:#?}");
+    println!(
+        "UNGATE PASS (launch) — `codeconnect codex` in {canonical_cwd} produced {session_name} \
+         uid {uid}, filed as codex on thread {thread}, attached, and rendered by `ls`"
+    );
+
+    // ------------------------------------------------------------------ a turn
+    //
+    // The session is only worth launching if it can be used. Typed into the pane,
+    // because nothing else may start a turn: the broker refuses `turn/start` to the
+    // ccd role, so a turn is by construction the real TUI's, driven by a keystroke.
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.tui_running(&run_dir)),
+        "the host never launched the real codex TUI. broker.log:\n{}",
+        read_file(&run_dir.join("broker.log"))
+    );
+    // The TUI is running, which is not the same as ready to accept a prompt; it
+    // still has a handshake and a first render to do. Settled the way the ccd live
+    // gate settles, then typed in two calls so the text lands before Enter does.
+    std::thread::sleep(Duration::from_secs(5));
+    let seq_before = sb.run_of(&uid).expect("the row before the turn").last_seq;
+    sb.send_keys(
+        &session_name,
+        &["Reply with the single word ok and nothing else."],
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    sb.send_keys(&session_name, &["Enter"]);
+
+    // **The broker forwarded it.** A turn that the broker refused would leave the
+    // pane looking similar and prove the opposite of what this gate claims.
+    let forwarded = wait_until(Duration::from_secs(120), || {
+        read_file(&run_dir.join("broker.log")).contains("Tui: forward (turn/start")
+    });
+    let broker_log = read_file(&run_dir.join("broker.log"));
+    assert!(
+        forwarded,
+        "the broker never forwarded the TUI's turn/start. broker.log:\n{broker_log}\npane:\n{}",
+        sb.capture_pane(&session_name)
+    );
+    assert!(
+        !broker_log.contains("refuse->synthetic error (turn/start"),
+        "the broker refused a turn on a session this launch created. broker.log:\n{broker_log}"
+    );
+
+    // **And it completed, in the pane a person is looking at.** The `•` is
+    // load-bearing: it marks the agent's reply, and without it the prompt's own
+    // echo — which also contains the word — would satisfy this.
+    let replied = wait_until(Duration::from_secs(120), || {
+        sb.capture_pane(&session_name)
+            .to_lowercase()
+            .contains("• ok")
+    });
+    let pane = sb.capture_pane(&session_name);
+    assert!(
+        replied,
+        "the turn was forwarded but never completed in the pane. pane:\n{pane}"
+    );
+
+    // **The daemon recorded it.** `last_seq` is the per-session event count on the
+    // fleet answer, so a strictly greater one is the observation reaching storage
+    // through the ccd link — the leg asserted as `Ccd: forward` above.
+    assert!(
+        wait_until(Duration::from_secs(60), || sb
+            .run_of(&uid)
+            .map(|s| s.last_seq > seq_before)
+            .unwrap_or(false)),
+        "the daemon recorded no event across a real turn (last_seq stuck at {seq_before}). \
+         ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    println!("--- the pane after the turn ---\n{pane}");
+    println!(
+        "UNGATE PASS (turn) — a turn typed into {session_name}'s real TUI pane was forwarded by \
+         the broker, completed in the pane, and reached the daemon (last_seq {} > {seq_before})",
+        sb.run_of(&uid).expect("the row after the turn").last_seq
+    );
+
+    // ------------------------------------------------------------- the bounce
+    //
+    // The daemon goes away under a live launched session and comes back. What must
+    // NOT happen is a second identity, a rewritten history, or a session torn down
+    // because its daemon blinked.
+    let created_at = row.created_at.clone();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert!(
+        sb.has_session_named(&session_name),
+        "killing ccd must not touch the session: the daemon never owned it"
+    );
+    let mut daemon = sb.spawn_daemon(&ccd);
+    // Waited on `link`, which is memory-only — a fresh daemon has no supervisors,
+    // so nothing but a real re-registration can make it `Attached`. (`Live` is a
+    // durable column the new daemon would read straight back off disk.)
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .run_of(&uid)
+            .map(|s| s.link == protocol::event::Link::Attached)
+            .unwrap_or(false)),
+        "the supervisor did not re-register the launched session after the daemon came back. \
+         ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+    let after = sb.run_of(&uid).expect("the row after the bounce");
+    assert_eq!(after.lifecycle, protocol::event::Lifecycle::Live);
+    assert_eq!(
+        after.session_uid, uid,
+        "a re-registration must not mint a second identity"
+    );
+    assert_eq!(
+        after.created_at, created_at,
+        "a re-registration must not rewrite when the run started"
+    );
+    assert_eq!(after.agent, protocol::agent::AgentKind::Codex);
+    assert_eq!(after.cwd, row.cwd);
+    assert_eq!(after.session_id, session_name);
+    assert_eq!(
+        sb.fleet().len(),
+        1,
+        "the bounce must leave exactly one row for one session: {:?}",
+        sb.fleet()
+    );
+    // **The thread comes back from the broker's replay**, and it is waited for
+    // rather than sampled: `link == Attached` is the supervisor's reconnect, which
+    // happens strictly before the fresh link subscribes, is handed the replayed
+    // `thread/started` and binds. Sampling here read the gap and saw `None`.
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .run_of(&uid)
+            .and_then(|s| s.codex_thread_id)
+            .is_some()),
+        "the thread did not come back across the daemon restart. ccd.log:\n{}\nbroker.log:\n{}",
+        read_file(&sb.base.join("ccd.log")),
+        read_file(&run_dir.join("broker.log"))
+    );
+    assert_eq!(
+        sb.run_of(&uid).and_then(|s| s.codex_thread_id),
+        Some(thread.clone()),
+        "the thread must come back naming the SAME thread, from the broker's replay"
+    );
+    assert!(
+        read_file(&run_dir.join("broker.log")).contains("replayed thread/started"),
+        "and it must have come from the broker's replay rather than a second live \
+         announcement this test cannot tell apart"
+    );
+    println!("UNGATE PASS (bounce) — {session_name} survived a daemon restart unchanged");
+
+    // -------------------------------------------------------------- teardown
+    //
+    // There is no `codeconnect stop`, for Claude or for Codex: a session ends when
+    // the thing in the pane ends. Killing the tmux session is that, deterministically
+    // — the TUI dies, the host reaps, and the supervisor the coordinator became
+    // reports the exit.
+    let coord = sb
+        .recorded_identity_of(&uid, "coordinator")
+        .map(
+            |(pid, sec, usec)| protocol::proc_identity::ProcessIdentity {
+                pid,
+                birth: protocol::proc_identity::BirthIdentity {
+                    start_sec: sec,
+                    start_usec: usec,
+                },
+            },
+        )
+        .expect("a ready record names its coordinator");
+    let _ = sb
+        .tmux_cmd()
+        .args([
+            "-f",
+            "/dev/null",
+            "kill-session",
+            "-t",
+            &format!("={session_name}"),
+        ])
+        .status();
+    let _ = command.kill();
+    let _ = command.wait();
+
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            protocol::proc_identity::liveness(&coord) == protocol::proc_identity::Liveness::Gone
+        }),
+        "the coordinator/supervisor outlived its session"
+    );
+    assert!(
+        wait_until(Duration::from_secs(60), || !run_dir.exists()),
+        "the run dir survived the session at {}",
+        run_dir.display()
+    );
+    assert!(
+        !sb.has_session_named(&session_name),
+        "the tmux session survived being killed"
+    );
+    assert!(
+        tagged_pids(run_dir.to_str().expect("utf-8 run dir")).is_empty(),
+        "processes carrying this launch's run dir survived it"
+    );
+    assert!(
+        wait_until(Duration::from_secs(60), || sb
+            .run_of(&uid)
+            .map(|s| s.lifecycle == protocol::event::Lifecycle::Exited)
+            .unwrap_or(false)),
+        "the daemon was never told the session ended. ccd.log:\n{}",
+        read_file(&sb.base.join("ccd.log"))
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    println!(
+        "UNGATE PASS (teardown) — {session_name} ended with no leaked process, run dir or pane"
+    );
 }
 
 // ============================= THE COLLISION GATE =============================
