@@ -491,6 +491,164 @@ pub fn daemon_stderr_log() -> PathBuf {
     logs_dir().join("ccd.err.log")
 }
 
+/// Where a Codex session's **broker decision log** is kept after the session is
+/// over, beside the supervisor and coordinator logs.
+///
+/// The broker writes that log into its host's run dir, which is disposable by
+/// design — three unix sockets and two log files under `/tmp`, removed on every
+/// exit path the host has. Measured: a launch whose first `thread/start` is
+/// refused says so in exactly one place, that file, and the sweep then deletes it
+/// before anyone can read it, so the user is left with an empty pane and no
+/// account of why. The host copies the file here on the way out
+/// (`codeconnect::codex_host`), and `ccd` names this path in the `session_end`
+/// reason it files for a session that never bound a thread — which is why the
+/// spelling lives here rather than in either of them.
+pub fn codex_broker_log(session_name: &str, session_uid: &str) -> PathBuf {
+    logs_dir().join(format!("broker-{session_name}-{session_uid}.log"))
+}
+
+/// Keep only the `keep` most recently modified `~/.codeconnect/logs/<prefix>*`
+/// files; delete the rest. Returns how many were removed.
+///
+/// **Written as one policy over a named family rather than as a rule about broker
+/// logs**, because the problem is not the broker's: every per-session log in this
+/// directory is minted per uid and none of them has ever been pruned. Measured on a
+/// working install before this existed — 2542 files, 10 MB, of which 2487 were
+/// `supervisor-*` — so "one file per session, for ever" is the directory's existing
+/// habit and the broker family would simply have joined it. A family-agnostic helper
+/// is what lets the other families adopt the same bound without a second, differently
+/// argued implementation.
+///
+/// Newest-first by mtime, and a file whose mtime cannot be read sorts oldest so it is
+/// a candidate for removal rather than an immortal one — an unreadable timestamp must
+/// not be a way to pin a file in place for ever.
+///
+/// Best-effort throughout: this runs on the way out of a session that has already
+/// ended, and a directory that cannot be read or a file that cannot be removed is not
+/// worth failing a teardown over. It never touches a name outside the prefix, so the
+/// daemon's own `ccd.err.log` and anything an operator has put here by hand are out of
+/// its reach by construction.
+pub fn prune_session_logs(prefix: &str, keep: usize) -> usize {
+    prune_logs_in_dir(&logs_dir(), prefix, keep)
+}
+
+/// [`prune_session_logs`] with the directory passed in rather than read from
+/// process-global state.
+///
+/// Split out so the policy can be tested against a directory of its own.
+/// `logs_dir()` resolves `CODECONNECT_HOME`, and a test that set that variable to
+/// exercise this would be mutating state every other test in the process shares —
+/// which is not a hypothetical: this module already has three tests that set it, and
+/// the first version of the retention test raced them into a failure. A function that
+/// takes its directory cannot have that bug, and the public wrapper above is then the
+/// only thing that needs to know where the logs live.
+pub fn prune_logs_in_dir(dir: &std::path::Path, prefix: &str, keep: usize) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut matching: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(prefix))
+                && e.file_type().is_ok_and(|t| t.is_file())
+        })
+        .map(|e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (mtime, e.path())
+        })
+        .collect();
+    if matching.len() <= keep {
+        return 0;
+    }
+    matching.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    matching
+        .into_iter()
+        .skip(keep)
+        .filter(|(_, path)| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
+#[cfg(test)]
+mod log_retention_tests {
+    /// **The pruner keeps `keep` files and touches nothing outside its family.**
+    ///
+    /// Both halves matter. The count is the bound the review asked for; the prefix
+    /// confinement is what makes it safe to run from a session teardown at all — the
+    /// daemon's own `ccd.err.log` and anything an operator has put in this directory
+    /// must be out of reach by construction, not by luck of ordering.
+    ///
+    /// Runs against a directory of its own and never touches `CODECONNECT_HOME`: three
+    /// other tests in this module set that variable, and the first version of this one
+    /// set it too and raced them into a failure. `prune_logs_in_dir` takes its directory
+    /// precisely so this test needs no process-global state.
+    #[test]
+    fn it_keeps_the_newest_and_never_leaves_its_prefix() {
+        let logs = std::env::temp_dir().join(format!("cc-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&logs);
+        std::fs::create_dir_all(&logs).unwrap();
+
+        // Ten in the family, written oldest-first, plus two files that are not.
+        for i in 0..10 {
+            let p = logs.join(format!("broker-cc-1-{i:02}.log"));
+            std::fs::write(&p, format!("log {i}")).unwrap();
+            // Distinct mtimes, so "newest" is a fact and not a tie.
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000 + i);
+            filetime_set(&p, t);
+        }
+        std::fs::write(logs.join("ccd.err.log"), "daemon").unwrap();
+        std::fs::write(logs.join("supervisor-cc-1-x.log"), "other family").unwrap();
+
+        let removed = super::prune_logs_in_dir(&logs, "broker-", 3);
+        assert_eq!(removed, 7, "ten in the family, three kept");
+
+        let mut left: Vec<String> = std::fs::read_dir(&logs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "broker-cc-1-07.log".to_string(),
+                "broker-cc-1-08.log".to_string(),
+                "broker-cc-1-09.log".to_string(),
+                "ccd.err.log".to_string(),
+                "supervisor-cc-1-x.log".to_string(),
+            ],
+            "the three NEWEST of the family survive, and neither the daemon's log nor \
+             another family is touched"
+        );
+
+        // Under the bound is a no-op, not a rewrite.
+        assert_eq!(super::prune_logs_in_dir(&logs, "broker-", 50), 0);
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    /// `utimes(2)` through libc, so the test can make mtimes deterministic without
+    /// pulling a crate in for three lines.
+    fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let times = [
+            libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+}
+
 pub fn config_path() -> PathBuf {
     root_dir().join("config.json")
 }

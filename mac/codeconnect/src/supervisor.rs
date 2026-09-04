@@ -1631,8 +1631,31 @@ fn report_exit(
             session_id: registration.session_id.clone(),
             session_uid: registration.session_uid.clone(),
             exit_code: None,
+            reason: registration
+                .session_uid
+                .as_deref()
+                .and_then(unbound_exit_reason),
         },
     )
+}
+
+/// The host's recorded "TUI exited without ever binding a thread" account for `uid`,
+/// if it made one.
+///
+/// **Read here rather than reconstructed downstream.** The supervisor is the process
+/// that tells `ccd` a run ended, and the host — a different process, already gone by
+/// now — is the only one that knows WHY in the one case the exit code cannot express.
+/// The launch record is the seam between them, so this is a read of an assertion, not
+/// an inference from silence: `None` means the host asserted nothing, which is what a
+/// clean session, a `Fatal` host and a signalled teardown all leave behind.
+///
+/// Best-effort: an unreadable record costs the reason, never the exit report. The run
+/// still ends; it just ends without an explanation, which is exactly where this
+/// started.
+fn unbound_exit_reason(uid: &str) -> Option<String> {
+    crate::codex_launch::load(uid)
+        .ok()
+        .and_then(|record| record.codex_unbound_exit)
 }
 
 /// [`report_exit`], retried within [`EXIT_REPORT_BUDGET`], then given up loudly.

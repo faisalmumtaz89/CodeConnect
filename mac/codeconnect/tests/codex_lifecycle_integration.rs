@@ -70,6 +70,12 @@ fn codex_sha256(path: &Path) -> String {
 /// SUN_LEN.
 static SOCK_SEQ: AtomicU32 = AtomicU32::new(0);
 
+/// The file that tells [`write_fake_codex`]'s TUI branch to exit instead of
+/// holding the pane. Written beside the fake codex, so it changes the script's
+/// behaviour without changing the script's bytes — the A7.1 digest the charter
+/// pins is taken over the file itself and must stay the same.
+const TUI_EXITS_MARKER: &str = "tui-exits";
+
 fn tmux_bin() -> PathBuf {
     for cand in [
         "/opt/homebrew/bin/tmux",
@@ -314,6 +320,35 @@ impl Sandbox {
             .expect("spawn coordinator")
     }
 
+    /// Make this sandbox's fake TUI die shortly after it starts, without ever
+    /// binding a thread. See [`TUI_EXITS_MARKER`].
+    fn arm_a_tui_that_exits(&self) {
+        std::fs::write(
+            self.codex.parent().unwrap().join(TUI_EXITS_MARKER),
+            "the TUI exits\n",
+        )
+        .expect("arm the exiting TUI");
+    }
+
+    /// Where the host is required to have kept this session's broker log once the
+    /// run dir is gone — the same spelling `protocol::codex_broker_log` derives,
+    /// restated here because integration tests link the binary, not a library.
+    fn preserved_broker_log(&self, uid: &str) -> PathBuf {
+        self.home
+            .join("logs")
+            .join(format!("broker-cc-1-{uid}.log"))
+    }
+
+    /// The record's failure reason, or `None` when it is not `Failed`.
+    fn failure_reason(&self, uid: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(&self.record_text(uid)?).ok()?;
+        v.get("state")?
+            .get("Failed")?
+            .get("reason")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
     fn record_text(&self, uid: &str) -> Option<String> {
         std::fs::read_to_string(self.home.join("sessions").join(uid).join("launch.json")).ok()
     }
@@ -507,6 +542,20 @@ impl Drop for Sandbox {
 /// 0600 (past the real app-server's bind→chmod race, which is what the host's
 /// readiness gate waits for) and sleeps; every other invocation — the TUI — just
 /// sleeps, holding the session open.
+///
+/// **Unless [`TUI_EXITS_MARKER`] sits beside it**, in which case the TUI sleeps
+/// briefly and exits 0. That is the measured shape of the defect this suite could
+/// not previously express: a pane whose host came up perfectly — both legs
+/// serving, both children past `execve` and alive, the session `Live` — and whose
+/// TUI then died without a thread ever binding, because the broker refused its
+/// first `thread/start`.
+///
+/// The sleep is not padding. `spawn_fenced` proves the TUI is past `execve` by
+/// requiring it to be ALIVE under an image that is not the host's own, so a TUI
+/// that exited instantly would fail the spawn and produce a launch-fatal host
+/// instead of the thing under test. A marker file rather than an environment
+/// variable because the pane's environment comes from the tmux SERVER, which the
+/// keepalive already started before the coordinator existed.
 fn write_fake_codex(dir: &Path, python: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = format!(
@@ -535,10 +584,23 @@ if argv and argv[0] == "app-server":
         while True:
             time.sleep(3600)
 
+# The TUI only — the app-server's parent falls through to the same loop below,
+# and an app-server that exited would be a dead upstream, which is a different
+# (and already-covered) failure than the one this marker exists to stage.
+if not (argv and argv[0] == "app-server"):
+    here = os.path.dirname(os.path.realpath(__file__))
+    if os.path.exists(os.path.join(here, "{marker}")):
+        # Long enough for the host's `prove_past_execve` to see a live, exec'd
+        # child, short enough that the coordinator is still inside its
+        # thread-binding grace.
+        time.sleep(2)
+        sys.exit(0)
+
 while True:
     time.sleep(3600)
 "#,
-        python.display()
+        python.display(),
+        marker = TUI_EXITS_MARKER
     );
     let path = dir.join("fake-codex");
     std::fs::write(&path, script).expect("write fake codex");
@@ -786,6 +848,99 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
         wait_until(Duration::from_secs(30), || !run.exists()),
         "the run dir must be swept with the session it belonged to: {}",
         run.display()
+    );
+}
+
+/// **A PANE THAT COMES UP PERFECTLY AND THEN DIES IS A FAILED LAUNCH, AND THE
+/// USER IS TOLD SO.**
+///
+/// The measured defect, reproduced without a live codex: from a directory the
+/// owner's `~/.codex` marks `trust_level = "trusted"`, the TUI's first
+/// `thread/start` is refused by the launch fingerprint and codex 0.153 exits
+/// immediately. Every fact the coordinator's bring-up checks is true for the whole
+/// ~2 s before it does — both broker legs serving under a run dir this uid owns, a
+/// live host lease, both children past `execve` and alive, the tmux session `Live`
+/// — so `Ready` committed, `codeconnect codex` `exec`ed into `tmux attach-session`,
+/// and the user got a pane that flickered to `[exited]` with nothing said. The only
+/// account of why lived in `<run_dir>/broker.log`, and the sweep deleted it.
+///
+/// Three things are asserted, one per half of the fix:
+///
+///   * the launch reaches `Failed` — so `wait_on_record` gives the launcher
+///     `LaunchWait::Failed`, which `codex::launch` prints verbatim in the user's own
+///     terminal, instead of `Ready` and an `exec_attach` into a dead pane;
+///   * the reason says what happened, in words, in the durable record; and
+///   * `broker.log` is at `~/.codeconnect/logs/` after the run dir is gone.
+///
+/// **Mutations, both run:** delete the `report_launch_without_a_thread` call in
+/// `codex_host::run_session` and the launch commits `Ready` — the exact old
+/// behaviour, and the first two assertions fail. Delete the `preserve_broker_log`
+/// call and the third fails with the file absent.
+#[test]
+fn a_tui_that_dies_without_binding_a_thread_fails_the_launch_and_keeps_the_broker_log() {
+    let uid = "01JQXV9K7B8N4M2P6R3T5W9YQM";
+    let sb = Sandbox::new("nothread", uid);
+    sb.keepalive();
+    sb.arm_a_tui_that_exits();
+    let run = sb.expected_run_dir(uid);
+    let mut coord = sb.spawn_coordinator(uid);
+
+    // The premise: the pane really did come up. Without this the test could pass on
+    // a launch that failed for some ordinary bring-up reason, which is the opposite
+    // of what it is about — the whole point is that every classic readiness fact
+    // held first.
+    assert!(
+        wait_until(Duration::from_secs(30), || broker_legs_bound(&run)),
+        "the pane's host must bind both broker legs before its TUI dies: {}",
+        run.display()
+    );
+
+    // The TUI exits ~2s in, the host records the failure, and the coordinator —
+    // still inside its thread-binding grace, having never seen a binding — reports
+    // it instead of committing Ready.
+    assert!(
+        wait_until(Duration::from_secs(45), || sb.state(uid).as_deref()
+            == Some("Failed")),
+        "a launch whose TUI never started a thread must not be Ready: {:?}",
+        sb.record_text(uid)
+    );
+    let reason = sb.failure_reason(uid).expect("a Failed record carries one");
+    assert!(
+        reason.contains("without ever starting a thread"),
+        "the reason must say what happened, in the words the launcher will print: {reason:?}"
+    );
+
+    // And the evidence outlives the run dir it was written in.
+    let kept = sb.preserved_broker_log(uid);
+    assert!(
+        wait_until(Duration::from_secs(30), || kept.exists()),
+        "the broker log must be kept at {} once the run dir is swept",
+        kept.display()
+    );
+    assert!(
+        std::fs::read_to_string(&kept)
+            .unwrap()
+            .contains("listening on tui.sock and ccd.sock"),
+        "the kept log must be the broker's own decision log, not an empty file"
+    );
+    assert!(
+        reason.contains(kept.to_str().unwrap()),
+        "the reason must name the file an operator is supposed to read: {reason:?}"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || !run.exists()),
+        "the run dir is still swept: {}",
+        run.display()
+    );
+    // And it does not become a supervisor. A failed launch has no session to hold,
+    // so the coordinator leaves — the outcome lives in the record either way, which
+    // is why this asserts that it EXITED and not what it exited with.
+    assert!(
+        wait_until(Duration::from_secs(30), || matches!(
+            coord.try_wait(),
+            Ok(Some(_))
+        )),
+        "the coordinator must not stay as the supervisor of a launch that failed"
     );
 }
 

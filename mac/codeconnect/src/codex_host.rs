@@ -128,6 +128,7 @@
 //! refuses, so nothing but the tests reaches any of this yet.
 
 use std::io::Write;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -135,7 +136,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use codex_broker::relay::{Broker, EventSink};
+use codex_broker::relay::{BoundThreadProbe, Broker, EventSink};
 use codex_broker::upstream::WsUdsUpstreamFactory;
 use codex_broker::LaunchFingerprint;
 use tokio::process::{Child, Command};
@@ -181,6 +182,47 @@ const RUNTIME_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 /// How much of a failed child's stderr is quoted into an error message. A child
 /// can write unbounded stderr; the host surfaces only the tail, marked truncated.
 const STDERR_EXCERPT_LIMIT: usize = 4096;
+
+/// How often the thread-binding watcher asks the broker whether a thread has
+/// bound yet.
+///
+/// Half the coordinator's `BRINGUP_POLL`, so the record has normally been written
+/// by the time the coordinator's next look reads it — the point of the watcher is
+/// to shorten the healthy launch's extra wait, and a poll slower than the reader's
+/// would spend that saving again.
+const THREAD_BINDING_POLL: Duration = Duration::from_millis(50);
+
+/// How much of a preserved broker log is kept at each end. See
+/// [`preserve_broker_log`] for the measurement that made it both ends.
+///
+/// 64 KiB apiece, so a bounded copy is at most 128 KiB plus one elision line. A real
+/// failed launch measured ~17 KB entire, which is the case this feature exists for
+/// and which the bound therefore never touches.
+const PRESERVED_LOG_EDGE_BYTES: usize = 64 * 1024;
+
+/// The filename prefix the preserved broker logs share, and the number of them kept.
+///
+/// The prefix must agree with [`protocol::codex_broker_log`]'s spelling; it is named
+/// once here so the pruner and the writer cannot disagree about which family is
+/// being bounded.
+///
+/// 50 files, which with the size bound above is a hard ceiling of ~6.4 MB for the
+/// family — a number chosen against the measured directory (2542 files, 10 MB, none
+/// of it ever pruned) so that adding a durable per-session artifact makes that
+/// directory smaller-bounded rather than larger.
+const PRESERVED_LOG_PREFIX: &str = "broker-";
+/// See [`PRESERVED_LOG_PREFIX`].
+const PRESERVED_LOG_KEEP: usize = 50;
+
+/// The substring that marks the one broker disposition which ENDS a TUI.
+///
+/// Measured on codex 0.153: a `thread/start` the fingerprint refuses is answered
+/// with a synthetic JSON-RPC error, and the TUI exits within milliseconds — the
+/// broker log's very next line is `Tui leg ended: IO error: Broken pipe`. The
+/// other two refusal dispositions (`drop, keep open`, `drop, close leg`) do not
+/// produce that, so quoting one of them as the reason a session never started
+/// would be a guess dressed as evidence. This is deliberately the narrow marker.
+const REFUSAL_MARKER: &str = ": refuse->synthetic error (";
 
 /// Exit code when bring-up could not be proven, or the app-server / broker died
 /// while the session was up (session-fatal). `EX_SOFTWARE`.
@@ -1283,8 +1325,13 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
             ))
         }
     };
+    // The broker's decision lines go to the log file as before, and the ONE line
+    // that explains a session that never started is kept in memory as well — the
+    // run dir is swept on the way out, and the record write that quotes it happens
+    // after the session is already over.
+    let first_refusal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let sink = match file_event_sink(&paths.broker_log) {
-        Ok(s) => s,
+        Ok(s) => refusal_watching_sink(s, Arc::clone(&first_refusal)),
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
 
@@ -1400,10 +1447,311 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     let mut session = Session::new(appserver, sink);
     let outcome = drive(&mut session, args, paths, signals, &mut as_stderr_file).await;
     session.teardown().await;
-    match outcome {
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(err) => Outcome::Fatal(format!("{err:#}")),
+    };
+
+    // **The session is over and the run dir is about to be swept, so this is the
+    // last moment either of these facts exists.** `orchestrate` calls
+    // `sweep_own_run_dir` the instant this function returns, and that removes
+    // `broker.log` — the only account of why a session ended the way it did.
+    // **On the blocking pool.** Even bounded, this is file I/O plus a directory scan
+    // and a handful of unlinks, and it sits on the path a live runtime is trying to
+    // shut down. `spawn_blocking` is the same placement the thread-binding watcher's
+    // record write uses, and for the same reason: an async worker is the wrong thread
+    // to do syscall-bound work on. Awaited rather than detached — the reason text
+    // below names the file this produces, so it has to exist before that sentence is
+    // written; and a join error yields `None`, which reads as "not preserved" and is
+    // exactly what it is.
+    let preserved = {
+        let uid = args.uid.clone();
+        let broker_log = paths.broker_log.clone();
+        tokio::task::spawn_blocking(move || preserve_broker_log(&uid, &broker_log))
+            .await
+            .ok()
+            .flatten()
+    };
+    // Reported for a TUI that RAN AND EXITED, and for nothing else. A `Fatal`
+    // outcome is a dead broker or a dead app-server, which already has its own
+    // reason, its own `EX_HOST_FATAL` and its own stderr line; a `Signalled` one is
+    // a pane that was torn down on request, which is the custodian's story to tell.
+    // Neither is "the session never started", and wording them that way would put a
+    // sentence in the record that is not true of them.
+    if matches!(outcome, Outcome::TuiExited(_)) && !session.thread_ever_bound() {
+        let quoted = first_refusal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|line| crate::codex_coordinator::sanitize(&line));
+        let reason = no_thread_reason(quoted.as_deref(), preserved.as_deref());
+        // Two writes, because they answer two different readers and only one of them
+        // is still listening. `report_launch_without_a_thread` drives the RECORD to
+        // `failed`, which is what the launcher is blocked on — and `to_failed`
+        // refuses `ready → failed`, so it is a no-op once the launch has committed.
+        // The line below is the durable FACT, written whatever the record's state,
+        // and it is what the supervisor reads to tell `ccd` why a committed session
+        // ended. Without it a session that reached `ready` and then died unbound had
+        // nowhere to say so, which is precisely the case the daemon used to guess at.
+        report_launch_without_a_thread(&args.uid, &reason);
+        record_unbound_exit(&args.uid, &reason);
     }
+    outcome
+}
+
+/// Wrap `sink` so the host keeps the **first** refusal the broker sent a leg.
+///
+/// A wrapper rather than a second responsibility inside [`file_event_sink`],
+/// because the two have different lifetimes: the file is closed with the run dir,
+/// and this outlives it.
+///
+/// # First, not last — measured on a live refused launch
+///
+/// A dying TUI produces more than one refusal. From a directory the owner's
+/// `~/.codex` marks `trust_level = "trusted"`, the preserved log of a session that
+/// never started holds, in this order:
+///
+/// ```text
+/// 317: Tui: refuse->synthetic error (thread/start: fingerprint refused (Conflict): params.sandbox: …)
+/// 319: Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted))
+/// 320: Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted))
+/// ```
+///
+/// The `thread/start` is the refusal that ended the session; the two `thread/list`
+/// refusals are what a TUI already on its way out asks next. Keeping the last
+/// match named the `thread/list` one, and the user's terminal then reported an
+/// allowlist problem that is not the bug — a red herring pointing away from the
+/// sandbox mismatch that actually caused it. In a session that never bound a
+/// thread the first synthetic-error refusal is the cause and everything after it
+/// is consequence, so the slot is written once and never overwritten.
+fn refusal_watching_sink(sink: EventSink, first_refusal: Arc<Mutex<Option<String>>>) -> EventSink {
+    Arc::new(move |line: &str| {
+        if line.contains(REFUSAL_MARKER) {
+            if let Ok(mut slot) = first_refusal.lock() {
+                if slot.is_none() {
+                    *slot = Some(line.to_string());
+                }
+            }
+        }
+        sink(line);
+    })
+}
+
+/// Copy this session's `broker.log` out of the disposable run dir and into
+/// `~/.codeconnect/logs/`, beside the supervisor and coordinator logs. Returns
+/// where it landed, or `None` if it could not be kept.
+///
+/// **The run dir is ephemeral by design; the log is not.** Measured: a launch
+/// whose first `thread/start` the fingerprint refuses records that refusal in
+/// exactly one place — `<run_dir>/broker.log` — and every one of the host's own
+/// exit paths then removes the directory. The user is left with a pane that
+/// flickers, `[exited]`, and no artifact at all. Nothing else in the system holds
+/// that sentence.
+///
+/// Best-effort in the same literal sense as [`crate::supervisor`]'s `log_for`: a
+/// failure to keep a log must never change how a session ended, so every error is
+/// swallowed. Owner-only, because a broker log quotes material that came off the
+/// wire.
+///
+/// The session name is read from the launch record rather than carried in the
+/// charter. The host's argv is the coordinator's entire agreement with it, and a
+/// flag added only so a file could be named is one more thing the two can disagree
+/// about; the uid in the filename is the identity either way.
+///
+/// # Bounded, and bounded at BOTH ends — measured
+///
+/// A broker log grows with the session: every forwarded request is a line, so a long
+/// working session has no size this function can assume. It used to `io::copy` the
+/// whole thing, which made the durable file as large as the session was chatty and
+/// put an unbounded synchronous copy in the teardown path.
+///
+/// The bound keeps a head and a tail rather than either alone, because the line that
+/// explains a failure is not where it seems it should be. MEASURED on the real
+/// refused launch this whole change exists for: the log is 332 lines and the causal
+/// `thread/start` refusal is **line 317** — the first ~316 are handshake, capability
+/// reads and bootstrap forwards. A head-only bound would therefore have thrown away
+/// precisely the sentence being preserved. The tail carries the verdict; the head
+/// carries the session's opening, which is what says which fingerprint it ran under.
+///
+/// [`PRESERVED_LOG_EDGE_BYTES`] each end. A whole failed launch is ~17 KB, so the
+/// common case — every case this feature is for — is copied entire and the bound
+/// never engages; it exists for the long healthy session, whose middle is the part
+/// nobody reads.
+fn preserve_broker_log(uid: &str, broker_log: &Path) -> Option<PathBuf> {
+    preserve_broker_log_into(&protocol::logs_dir(), uid, broker_log)
+}
+
+/// [`preserve_broker_log`] with the destination directory passed in rather than read
+/// from process-global state.
+///
+/// Split for the same reason [`protocol::prune_session_logs`] is, and the reason is a
+/// scar: the retention test's first version set `CODECONNECT_HOME` to point
+/// `logs_dir()` at a scratch directory, raced another test that clears the same
+/// variable, and pruned the REAL log directory instead — deleting nine of an
+/// operator's preserved broker logs. A function that takes its directory cannot be
+/// aimed at the wrong one by a concurrent test, and no test now reaches the env at
+/// all.
+fn preserve_broker_log_into(dir: &Path, uid: &str, broker_log: &Path) -> Option<PathBuf> {
+    let session_name = crate::codex_launch::load(uid)
+        .map(|record| record.session_name)
+        .unwrap_or_else(|_| "unknown".to_string());
+    protocol::fsperm::private_dir(dir).ok()?;
+    let dest = dir.join(format!("broker-{session_name}-{uid}.log"));
+    let mut src = std::fs::File::open(broker_log).ok()?;
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(protocol::fsperm::FILE_MODE)
+        .open(&dest)
+        .ok()?;
+    let len = src.metadata().ok()?.len();
+    let edge = PRESERVED_LOG_EDGE_BYTES as u64;
+    if len <= edge * 2 {
+        std::io::copy(&mut src, &mut out).ok()?;
+    } else {
+        let mut head = vec![0u8; PRESERVED_LOG_EDGE_BYTES];
+        src.read_exact(&mut head).ok()?;
+        out.write_all(&head).ok()?;
+        // The elision is stated in the file, with the exact byte count, so a reader
+        // can never mistake a bounded copy for a complete one.
+        let dropped = len - edge * 2;
+        out.write_all(
+            format!("\n… {dropped} bytes elided by the preserved-log bound …\n").as_bytes(),
+        )
+        .ok()?;
+        src.seek(SeekFrom::End(-(edge as i64))).ok()?;
+        let mut tail = vec![0u8; PRESERVED_LOG_EDGE_BYTES];
+        src.read_exact(&mut tail).ok()?;
+        out.write_all(&tail).ok()?;
+    }
+    protocol::prune_logs_in_dir(dir, PRESERVED_LOG_PREFIX, PRESERVED_LOG_KEEP);
+    Some(dest)
+}
+
+/// The reason a launch is failed with when its TUI exited without a thread ever
+/// binding.
+///
+/// The preserved log path comes **before** the quoted refusal, and that ordering
+/// is load-bearing rather than stylistic: the launcher prints this line through
+/// `codex_coordinator::sanitize`, which bounds it at 300 characters, and the
+/// measured `thread/start` refusal is 232 characters on its own. Putting the path
+/// second would see it truncated away in exactly the case an operator needs it —
+/// leaving a message that describes a problem and names nothing to read about it.
+///
+/// So the refusal is the half that truncates, and that is the right half to lose
+/// the tail of: measured live, what survives the bound is
+/// `thread/start: fingerprint refused (Conflict): params.sandbox: a sandbox mode
+/// string(len=15) t…` — method, verdict, offending parameter and the value's
+/// length, which is the whole diagnosis. The rest is in the log this names.
+fn no_thread_reason(first_refusal: Option<&str>, broker_log: Option<&Path>) -> String {
+    let mut reason = "the codex TUI exited without ever starting a thread".to_string();
+    if let Some(path) = broker_log {
+        reason.push_str(&format!(
+            "; the broker's decision log is at {}",
+            path.display()
+        ));
+    }
+    if let Some(line) = first_refusal {
+        reason.push_str(&format!("; first refusal: {line}"));
+    }
+    reason
+}
+
+/// Fail the launch record with `reason`, so the launcher prints it instead of
+/// `exec`ing into a pane that is already gone.
+///
+/// **`to_failed` refusing `ready → failed` is the guard this leans on, not an
+/// obstacle to it.** A launch the coordinator has already committed is one the
+/// user is attached to, and a live session's teardown belongs to the supervisor —
+/// so a session that outlived [`crate::codex_launch::THREAD_BINDING_GRACE`]
+/// without binding a thread is reported by `ccd`'s `session_end` reason instead,
+/// and this call is a no-op for it. While the record is still `pending`, though,
+/// the launcher is sitting in `wait_on_record` with nothing yet printed, and this
+/// is what turns the flicker into a sentence.
+///
+/// Best-effort: a record this host cannot write is one the coordinator's own
+/// deadline still owns.
+fn report_launch_without_a_thread(uid: &str, reason: &str) {
+    if let Ok(lock) = crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET) {
+        let _ = crate::codex_launch::to_failed(
+            &lock,
+            uid,
+            reason,
+            crate::codex_launch::CleanupState::Pending,
+        );
+    }
+}
+
+/// Record, durably and whatever the launch record's state, that this session's TUI
+/// exited without a thread ever binding. See [`LaunchRecord::codex_unbound_exit`].
+///
+/// Best-effort for the same reason every other host write at teardown is: a record
+/// this host cannot take the lock on is one whose outcome the coordinator's own
+/// deadline still owns, and failing the session over a missing explanation would
+/// trade a legibility gap for an availability one.
+fn record_unbound_exit(uid: &str, reason: &str) {
+    if let Ok(lock) = crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET) {
+        let _ = crate::codex_launch::note_codex_unbound_exit(&lock, uid, reason);
+    }
+}
+
+/// Watch for the broker's first thread binding and record it durably, so the
+/// coordinator's bring-up can stop waiting and attach.
+///
+/// **It runs until teardown aborts it, and deliberately carries no deadline of its
+/// own.** It used to stop after [`crate::codex_launch::THREAD_BINDING_GRACE`], on the
+/// reasoning that the coordinator had stopped asking by then — but the two intervals
+/// do not start together. This watcher starts the moment the broker does, BEFORE both
+/// legs are proven and before the TUI is spawned; the coordinator's grace starts only
+/// once classic bring-up reaches `Ready`. On a slow start-up the writer's ten seconds
+/// could therefore expire before the reader's began, and a thread that bound in that
+/// window went unrecorded — leaving the launcher to sit out the whole grace and then
+/// attach, which is the right outcome reached the slow way, for no reason.
+///
+/// Ending at teardown removes the mismatch without needing the two clocks to agree:
+/// the task is a cancellable `tokio` task held on [`Session::thread_watcher`], and
+/// teardown aborts it. The cost of the longer life is one atomic-bool probe every
+/// [`THREAD_BINDING_POLL`] until either the binding lands or the session ends, and
+/// the write it guards happens at most once.
+///
+/// **An async task, cancellable, and NOT `spawn_blocking` — measured.** The first
+/// version was a blocking-pool thread sleeping between polls, and a blocking task
+/// cannot be aborted: it held the host's exit for the whole of
+/// [`RUNTIME_SHUTDOWN_BUDGET`] after teardown had finished and the run dir had
+/// already been swept. The lifecycle suite caught it exactly there — a host still
+/// referencing a run directory that no longer existed. So the poll is a
+/// `tokio::time::sleep` the teardown's `abort` can interrupt, and only the write
+/// itself — one file lock and one fsync, once per session — goes to the blocking
+/// pool, where that kind of work belongs.
+///
+/// A failed write is retried on the next poll rather than reported. There is
+/// nowhere to report it to — the TUI owns the tty and host chatter over it
+/// corrupts the user's display — and a lock held by another writer for one poll is
+/// the ordinary case this would otherwise give up on.
+fn spawn_thread_binding_watcher(uid: String, bound: BoundThreadProbe) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if bound() {
+                let for_write = uid.clone();
+                let wrote =
+                    tokio::task::spawn_blocking(move || note_thread_bound(&for_write).is_ok())
+                        .await
+                        .unwrap_or(false);
+                if wrote {
+                    return;
+                }
+            }
+            tokio::time::sleep(THREAD_BINDING_POLL).await;
+        }
+    })
+}
+
+/// The record write [`spawn_thread_binding_watcher`] makes, under the same bounded
+/// lock every other host write takes.
+fn note_thread_bound(uid: &str) -> Result<()> {
+    let lock = crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET)?;
+    crate::codex_launch::note_codex_thread_bound(&lock, uid)
+        .context("recording that a thread bound in the launch record")
 }
 
 /// The fixed-width frame a fenced child writes to report its own pid (A11.1).
@@ -1964,7 +2312,17 @@ async fn drive(
     } else {
         codex_broker::FrameTee::off()
     });
+    // Taken LAST, after both builder methods above: they replace fields through
+    // `Arc::get_mut` and would panic on a context this has already cloned. The
+    // handle has to outlive the broker, since `serve` consumes it on the next line.
+    let bound_thread = broker.bound_thread_probe();
     session.broker = Some(tokio::spawn(broker.serve()));
+    session.bound_thread = Some(Arc::clone(&bound_thread));
+    // The coordinator is holding the launcher at the record until this says a
+    // thread bound, so start looking now rather than after the TUI is spawned:
+    // nothing binds before the TUI exists, but the watcher's first successful poll
+    // is what the healthy launch's extra ~225 ms is spent waiting for.
+    session.thread_watcher = Some(spawn_thread_binding_watcher(args.uid.clone(), bound_thread));
 
     // Wait until BOTH legs are bound (or the serve task ended early — a bind
     // failure). Any doubt aborts the whole host. Cancellable, like every wait.
@@ -2033,6 +2391,41 @@ async fn drive(
     tui_cmd
         .arg("--remote")
         .arg(format!("unix://{}", paths.tui_sock.display()))
+        // **The sandbox CodeConnect owns, actually set on the process that asks for
+        // it.** The reserved grammar refuses a user-supplied `--sandbox` with
+        // "`--sandbox` is set by CodeConnect (the session sandbox policy)" — and
+        // until this line that sentence was FALSE. The TUI was spawned with no
+        // sandbox flag at all, so it chose its own from the project's `trust_level`
+        // in the user's `~/.codex/config.toml`: measured, a `trust_level =
+        // "trusted"` project produced a `thread/start` asserting
+        // `"sandbox":"workspace-write"` against a fingerprint pinned `read-only`,
+        // and the broker refused it (`params.sandbox` Conflict) — a launch the user
+        // could do nothing about, killed by a knob the grammar claimed to own and
+        // nobody set. The grammar's claim is now true by construction: the flag is
+        // on the argv of the process that sends the request, so the request carries
+        // this mode whatever the config says.
+        //
+        // The value is `args.fingerprint.sandbox` — the very string the broker
+        // asserts, handed to this host on its own argv — and not a second copy of
+        // `codex::LAUNCH_SANDBOX`. A separate constant could drift from the pin; a
+        // shared field cannot. If it is ever a mode codex does not know, codex
+        // refuses at parse time (`invalid value '…' for '--sandbox <SANDBOX_MODE>'
+        // [possible values: read-only, workspace-write, danger-full-access]`) and
+        // no session comes up, which is the correct outcome for a fingerprint the
+        // TUI could not have honoured.
+        //
+        // Measured on codex 0.153: `--sandbox` is accepted alongside `--remote` (a
+        // bad value gives the `invalid value` error above; an unrecognised flag
+        // gives `unexpected argument` instead, so the flag really is parsed here).
+        // There is deliberately no matching flag on the app-server spawn — `codex
+        // app-server --help` contains no `--sandbox` at all, because the sandbox is
+        // a PER-THREAD parameter carried on `thread/start`, which the TUI sends.
+        // Nobody should go looking for the other half; this is the whole of it.
+        //
+        // Before the fenced passthrough, so it is a flag rather than something that
+        // could be read as one of the TUI's own positionals.
+        .arg("--sandbox")
+        .arg(&args.fingerprint.sandbox)
         .args(&fenced)
         .env("CODEX_HOME", &args.codex_home)
         // Inherit stdio (the pane's tty) so this IS the session the user drives —
@@ -2195,6 +2588,14 @@ struct Session {
     tui_reaped: bool,
     broker: Option<JoinHandle<std::io::Result<()>>>,
     log: EventSink,
+    /// The broker's own answer to "did a thread ever bind here?", kept past the
+    /// serve task that `Broker::serve` consumed. `None` until the broker exists —
+    /// i.e. only on the bring-up paths that abort before step 2, which never had a
+    /// TUI to draw a conclusion about.
+    bound_thread: Option<BoundThreadProbe>,
+    /// [`spawn_thread_binding_watcher`]'s task, so teardown can end it rather than
+    /// leave the runtime's own shutdown to.
+    thread_watcher: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -2206,7 +2607,20 @@ impl Session {
             tui_reaped: false,
             broker: None,
             log,
+            bound_thread: None,
+            thread_watcher: None,
         }
+    }
+
+    /// Whether a thread ever bound in this session.
+    ///
+    /// Asked of the broker rather than of the record: the record's bit is written
+    /// under a grace that has usually expired by the time a session ends, and this
+    /// is the fact itself. Fails closed — no broker means no thread.
+    fn thread_ever_bound(&self) -> bool {
+        self.bound_thread
+            .as_ref()
+            .is_some_and(|has_bound| has_bound())
     }
 
     /// Abort the broker, then make a bounded best-effort to reap both children,
@@ -2232,6 +2646,15 @@ impl Session {
     /// logged and printed when it cannot be shown, with `kill_on_drop` beneath.
     async fn teardown(&mut self) {
         let mut unproven: Vec<&'static str> = Vec::new();
+
+        // First, and not awaited. It writes nothing the session still needs — the
+        // coordinator stopped reading the bit when it stopped waiting — and it is
+        // sleeping between polls, so `abort` lands at once. Ending it here rather
+        // than leaving it to the runtime's shutdown is what keeps the host's exit
+        // as prompt as it was before the watcher existed.
+        if let Some(watcher) = self.thread_watcher.take() {
+            watcher.abort();
+        }
 
         if let Some(task) = self.broker.take() {
             task.abort();
@@ -2543,6 +2966,168 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// **THE WATCHER IS STILL WATCHING AFTER THE OLD DEADLINE.**
+    ///
+    /// It used to stop after [`crate::codex_launch::THREAD_BINDING_GRACE`], which
+    /// looked equivalent to the coordinator's wait and is not: this timer starts when
+    /// the broker does — before leg readiness, before the TUI is spawned — while the
+    /// coordinator's starts only at `Ready`. A slow start-up could therefore retire
+    /// the writer before the reader began waiting, so a thread binding in that window
+    /// went unrecorded and the launcher sat out the whole grace before attaching
+    /// anyway: the right answer reached the slow way, for no reason.
+    ///
+    /// **What this asserts, and why it is the poll and not the write.** The record
+    /// write happens on the blocking pool, and `codex_launch`'s test sandbox is keyed
+    /// by THREAD — so a write from that pool lands in a different sandbox than the one
+    /// this test can read, which measures the harness rather than the fix. The
+    /// property the fix is actually about is the watcher's LIFETIME, and that is
+    /// observable directly: the probe must still be being called after the old
+    /// deadline has passed. Under the old code the task had returned by then and the
+    /// count would be frozen.
+    ///
+    /// **Mutation:** restore the `deadline` and its `return`, and `after` stops
+    /// advancing past `at_deadline`.
+    #[tokio::test]
+    async fn the_watcher_is_still_watching_after_the_old_deadline() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        // Never binds: the watcher has no reason to return except a deadline, which
+        // is exactly the thing under test.
+        let probe: BoundThreadProbe = Arc::new(move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        });
+        let watcher = spawn_thread_binding_watcher("UIDWATCHLIFE".to_string(), probe);
+
+        let grace = crate::codex_launch::THREAD_BINDING_GRACE;
+        tokio::time::sleep(grace + Duration::from_millis(500)).await;
+        let at_deadline = calls.load(std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let after = calls.load(std::sync::atomic::Ordering::Relaxed);
+        watcher.abort();
+
+        assert!(
+            at_deadline > 0,
+            "the watcher must have been polling at all before this proves anything"
+        );
+        assert!(
+            after > at_deadline,
+            "the watcher must still be polling past the old {}s deadline — it stopped \
+             at {at_deadline} polls and was still at {after} a second later",
+            grace.as_secs()
+        );
+    }
+
+    /// **A PRESERVED LOG IS BOUNDED, AND KEEPS BOTH ENDS.**
+    ///
+    /// The bound exists because a broker log grows with the session and the copy used
+    /// to be unbounded. Which ends it keeps is the measured part: on the real refused
+    /// launch this feature exists for, the causal `thread/start` refusal is line 317
+    /// of 332 — so a head-only bound would have discarded exactly the sentence being
+    /// preserved. This drives a log far larger than the bound and asserts that a
+    /// marker planted at each end survives and the middle does not.
+    ///
+    /// **Mutation:** drop the tail branch and the `TAIL-MARKER` assertion fails,
+    /// which is the failure that matters.
+    #[test]
+    fn a_preserved_broker_log_is_bounded_at_both_ends() {
+        let dir = std::env::temp_dir().join(format!("cc-preserve-{}", std::process::id()));
+        let logs = dir.join("logs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&logs).unwrap();
+
+        // A run log an order of magnitude past the bound, with a marker at each end.
+        let src = dir.join("broker.log");
+        let filler = "x".repeat(1024);
+        let mut body = String::from("HEAD-MARKER\n");
+        for _ in 0..(PRESERVED_LOG_EDGE_BYTES * 3 / 1024) {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str("TAIL-MARKER\n");
+        std::fs::write(&src, &body).unwrap();
+        assert!(
+            body.len() > PRESERVED_LOG_EDGE_BYTES * 2,
+            "the bound must bite"
+        );
+
+        let dest = preserve_broker_log_into(&logs, "UIDPRESERVE", &src).expect("preserved");
+        let kept = std::fs::read_to_string(&dest).unwrap();
+
+        assert!(
+            kept.len() < body.len(),
+            "the copy must be smaller than the log"
+        );
+        assert!(
+            kept.len() <= PRESERVED_LOG_EDGE_BYTES * 2 + 128,
+            "and within the stated bound, got {}",
+            kept.len()
+        );
+        assert!(kept.starts_with("HEAD-MARKER"), "the head is kept");
+        assert!(
+            kept.contains("TAIL-MARKER"),
+            "the TAIL is kept — this is the half the measurement says carries the verdict"
+        );
+        assert!(
+            kept.contains("bytes elided by the preserved-log bound"),
+            "and a bounded copy says so, so it is never mistaken for a whole one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE FIRST REFUSAL IS THE CAUSE; EVERYTHING AFTER IT IS CONSEQUENCE.**
+    ///
+    /// Replays the exact sequence a live refused launch wrote to `broker.log`: the
+    /// `thread/start` the fingerprint refused, then the two `thread/list` refusals a
+    /// TUI already on its way out produces. Keeping the last match put the
+    /// `thread/list` line in the user's terminal — an allowlist problem that is not
+    /// the bug, pointing an operator away from the sandbox mismatch that is.
+    ///
+    /// **Mutation:** change the sink's `slot.is_none()` guard back to an
+    /// unconditional write and this fails, naming `thread/list`.
+    #[test]
+    fn the_first_refusal_is_the_one_reported() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let inner: EventSink = Arc::new(move |line: &str| {
+            recorder.lock().unwrap().push(line.to_string());
+        });
+        let refusal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sink = refusal_watching_sink(inner, Arc::clone(&refusal));
+
+        sink("Tui: leg opened (conn 155)");
+        sink(
+            "Tui: refuse->synthetic error (thread/start: fingerprint refused (Conflict): \
+             params.sandbox: a sandbox mode string(len=15) that is not the fingerprint's \
+             \"read-only\") (conn 155)",
+        );
+        sink("Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted)) (conn 155)");
+        sink("Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted)) (conn 155)");
+
+        let kept = refusal.lock().unwrap().clone().expect("a refusal was seen");
+        assert!(
+            kept.contains("thread/start") && kept.contains("params.sandbox"),
+            "the causal refusal must be the one kept, not the fallout: {kept}"
+        );
+        // And the wrapper is a wrapper: every line still reaches the log unchanged,
+        // refusals included.
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            4,
+            "watching the stream must not consume any of it"
+        );
+
+        // The reason names it, after the path — which is what survives `sanitize`'s
+        // 300-character bound (see `no_thread_reason`).
+        let reason = no_thread_reason(Some(&kept), Some(Path::new("/tmp/logs/broker-cc-1-U.log")));
+        let printed = crate::codex_coordinator::sanitize(&reason);
+        assert!(
+            printed.contains("/tmp/logs/broker-cc-1-U.log") && printed.contains("thread/start"),
+            "the printed line must name both the log and the causal refusal: {printed}"
+        );
     }
 
     /// The minimum complete charter: every required flag, no passthrough.
@@ -2928,6 +3513,43 @@ mod tests {
         assert!(
             !spawn.contains("args.tui_args"),
             "the raw passthrough must not reach the TUI spawn: {spawn}"
+        );
+    }
+
+    /// **THE SANDBOX THE GRAMMAR CLAIMS IS THE SANDBOX THE TUI IS SPAWNED WITH.**
+    ///
+    /// `codex::validate_codex_argv` refuses a user's `--sandbox` with "`--sandbox` is
+    /// set by CodeConnect (the session sandbox policy)". That sentence is only true
+    /// if this spawn sets it. Without the flag the TUI picks its mode from the
+    /// project's `trust_level`, and a `trusted` project sends
+    /// `"sandbox":"workspace-write"` at a fingerprint pinned `read-only` — a launch
+    /// the broker refuses and the user cannot fix.
+    ///
+    /// Read from source for the same reason as the fenced-argv test above: what has
+    /// to be proven is a property of the one call site, and no unit test reaches it.
+    /// The value is asserted to be the fingerprint's own field rather than a second
+    /// copy of `codex::LAUNCH_SANDBOX`, because two constants can drift and the flag
+    /// must never disagree with the pin the broker enforces.
+    ///
+    /// **Mutation:** delete the `.arg("--sandbox")` pair from the spawn and this
+    /// fails; spell the value as a literal or as `codex::LAUNCH_SANDBOX` and it
+    /// fails too.
+    #[test]
+    fn the_tui_is_spawned_with_the_fingerprints_own_sandbox() {
+        let src = include_str!("codex_host.rs");
+        let spawn = src
+            .split("let mut tui_cmd = Command::new(&args.codex);")
+            .nth(1)
+            .expect("the TUI spawn is in this file");
+        let spawn = &spawn[..spawn.find("CODEX_HOME").unwrap_or(spawn.len())];
+        assert!(
+            spawn.contains(".arg(\"--sandbox\")"),
+            "the TUI spawn must set the sandbox CodeConnect claims to own: {spawn}"
+        );
+        assert!(
+            spawn.contains(".arg(&args.fingerprint.sandbox)"),
+            "the flag must carry the fingerprint's own value, so it cannot drift from \
+             the pin the broker enforces: {spawn}"
         );
     }
 

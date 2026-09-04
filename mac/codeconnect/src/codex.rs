@@ -281,6 +281,12 @@ fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
 /// reserved grammar above is that CodeConnect owns approval and sandbox policy for
 /// the session; a config key that moved them would hand back through the front door
 /// exactly what [`validate_codex_argv`] refuses at the command line.
+///
+/// **What a user notices:** because `--sandbox read-only` is now genuinely set on
+/// the TUI (`codex_host`'s TUI spawn) rather than merely claimed here, a session in
+/// a project the user had marked `trust_level = "trusted"` will ask for approval on
+/// writes and commands where an unpinned codex would not have — that is this
+/// pre-Phase-3 policy working, not a regression.
 const LAUNCH_APPROVAL_POLICY: &str = "on-request";
 /// See [`LAUNCH_APPROVAL_POLICY`].
 const LAUNCH_APPROVALS_REVIEWER: &str = "user";

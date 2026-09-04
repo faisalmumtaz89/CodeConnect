@@ -281,6 +281,7 @@ async fn read_loop(
                 session_id,
                 session_uid,
                 exit_code,
+                reason,
             } => {
                 // **The registration this connection made is the identity the
                 // report is established against** (round-9 F3), on the same terms
@@ -296,6 +297,7 @@ async fn read_loop(
                         &session_id,
                         session_uid.as_deref(),
                         exit_code,
+                        reason.as_deref(),
                         registered.as_ref(),
                     )
                     .await;
@@ -798,6 +800,7 @@ mod tests {
                 session_id: "cc-1".to_string(),
                 session_uid: Some(uid.clone()),
                 exit_code: None,
+                reason: None,
             })
             .await;
 
@@ -849,6 +852,7 @@ mod tests {
                 session_id: "cc-1".to_string(),
                 session_uid: Some(uid.clone()),
                 exit_code: None,
+                reason: None,
             })
             .await;
 
@@ -882,6 +886,7 @@ mod tests {
                 session_id: "cc-1".to_string(),
                 session_uid: Some(uid.clone()),
                 exit_code: None,
+                reason: None,
             })
             .await;
 

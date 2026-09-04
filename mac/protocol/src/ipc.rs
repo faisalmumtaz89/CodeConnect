@@ -62,6 +62,18 @@ pub enum ClientFrame {
         session_uid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Why the run ended, when the process that ended it can say something the
+        /// exit code cannot — today, only "the codex TUI exited without a thread
+        /// ever binding", asserted by the host and relayed verbatim by the
+        /// supervisor that read it off the launch record.
+        ///
+        /// **Absent means "nothing was asserted", never "it ended cleanly."** The
+        /// daemon files it as the `session_end` payload's `reason` when present and
+        /// files no reason at all when not; it does not infer one. An older
+        /// supervisor omits the field and an older daemon ignores it, so this is
+        /// additive in both directions and needs no minor bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ListSessions,
     /// `codeconnect sessions prune`. Remove the runs that have **ended**, and their

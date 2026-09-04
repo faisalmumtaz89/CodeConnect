@@ -5762,6 +5762,10 @@ impl Daemon {
         session_id: &str,
         session_uid: Option<&str>,
         exit_code: Option<i32>,
+        // The reporter's own account of WHY, when it has one the exit code cannot
+        // carry. Filed verbatim; never derived here. See the note above
+        // `mark_exited` for what this replaced and why.
+        reason: Option<&str>,
         reported_by: Option<&Registration>,
     ) {
         // Reported over a *fresh* connection by a supervisor whose session is
@@ -5849,7 +5853,7 @@ impl Daemon {
             row_writes: None,
         };
         if !self
-            .mark_exited(&row.key(), exit_code, None, observed)
+            .mark_exited(&row.key(), exit_code, reason, observed)
             .await
         {
             crate::log_info!(
@@ -5860,6 +5864,29 @@ impl Daemon {
         }
     }
 
+    /// **Why there is no `never_started_a_thread` here any more.**
+    ///
+    /// This used to derive the `session_end` reason itself, by counting
+    /// `session_start` events and calling zero of them "the codex TUI ended without a
+    /// thread ever binding". Three things were wrong with that, and all three are
+    /// structural rather than fixable in place:
+    ///
+    /// * **It over-claimed.** A host that died before the TUI ever ran, and a session
+    ///   torn down by signal, file no `session_start` either — so both were reported
+    ///   as the thread-binding failure, replacing a real startup or cancellation
+    ///   diagnosis with a false one.
+    /// * **It raced.** The count and `mark_exited` were separate awaits, so a
+    ///   `session_start` filed between them turned a healthy session's ending into
+    ///   the unbound reason.
+    /// * **It named a file that need not exist.** Preserving `broker.log` out of the
+    ///   ephemeral run dir is best-effort, and the early failures this reason was
+    ///   most likely to be attached to are exactly the ones that never reach the
+    ///   copy — so the operator was pointed at a path with nothing behind it.
+    ///
+    /// The reason now arrives on [`protocol::ipc::ClientFrame::SessionExited`],
+    /// asserted by the host (which is the only process that can know it), relayed by
+    /// the supervisor, and filed verbatim. Absent means nothing was asserted, and
+    /// this daemon files no reason rather than inventing one.
     /// Record that a run has ended: the durable lifecycle change, then the fact.
     ///
     /// The single place either half happens, because there are now two ways an
@@ -8864,7 +8891,13 @@ mod tests {
             tool_call(&daemon, "cc-1", &first.session.uid, &format!("toolu_a{i}")).await;
         }
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0), Some(&first))
+            .session_exited(
+                "cc-1",
+                Some(&first.session.uid),
+                Some(0),
+                None,
+                Some(&first),
+            )
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -9085,7 +9118,7 @@ mod tests {
         // Once that run has exited, the same hook is a *new* run: `cc-1` having
         // ended and `cc-1` having restarted are indistinguishable from a name.
         daemon
-            .session_exited("cc-1", Some(&live.session.uid), Some(0), Some(&live))
+            .session_exited("cc-1", Some(&live.session.uid), Some(0), None, Some(&live))
             .await;
         daemon
             .handle_hook(HookPost {
@@ -9133,7 +9166,13 @@ mod tests {
             )
             .unwrap();
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0), Some(&first))
+            .session_exited(
+                "cc-1",
+                Some(&first.session.uid),
+                Some(0),
+                None,
+                Some(&first),
+            )
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -9555,7 +9594,7 @@ mod tests {
             })
             .await;
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
             .await;
         let kinds: Vec<EventKind> = daemon
             .store
@@ -9577,7 +9616,7 @@ mod tests {
         // had run at all.
         let daemon = test_daemon();
         daemon
-            .session_exited("cc-9", Some(TEST_UID), Some(0), None)
+            .session_exited("cc-9", Some(TEST_UID), Some(0), None, None)
             .await;
         assert!(
             daemon
@@ -9600,7 +9639,7 @@ mod tests {
         let registration = register(&daemon, "cc-9", Some(TEST_UID)).await;
         assert_eq!(registration.session.uid, TEST_UID);
         daemon
-            .session_exited("cc-9", Some(TEST_UID), Some(0), Some(&registration))
+            .session_exited("cc-9", Some(TEST_UID), Some(0), None, Some(&registration))
             .await;
 
         let kinds: Vec<EventKind> = daemon
@@ -9736,6 +9775,115 @@ mod tests {
             })
             .unwrap()
             .assert_present();
+    }
+
+    /// The same seed, for a run hosted by Codex rather than Claude.
+    fn seed_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+    }
+
+    /// The payload of the `session_end` filed for `uid`, or `None` if none was.
+    fn end_payload(daemon: &Arc<Daemon>, uid: &str) -> Option<serde_json::Value> {
+        daemon
+            .store
+            .events_after(uid, 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::SessionEnd)
+            .map(|event| event.payload)
+    }
+
+    /// **THE REPORTER'S REASON IS FILED VERBATIM, AND NOTHING IS INFERRED.**
+    ///
+    /// The exit code alone cannot carry this. `exit_code: 0` is equally true of a
+    /// session someone worked in for an hour and of one whose first `thread/start`
+    /// the broker refused — and the second is the shape of the defect: the pane
+    /// flickers, the log the refusal was written in is swept with the run dir, and
+    /// nothing anywhere says a session never started.
+    ///
+    /// The reason arrives on the wire, asserted by the host that watched the TUI die
+    /// and relayed by the supervisor. This daemon files it and does not interpret it,
+    /// which is the whole of the contract: the string that reaches the operator is
+    /// the string the process that knew wrote.
+    ///
+    /// **Mutation:** drop `reason` on the way into `mark_exited` and the payload
+    /// carries no `reason` at all.
+    #[tokio::test]
+    async fn a_reported_reason_is_filed_verbatim() {
+        let daemon = test_daemon();
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
+        let reported = "the codex TUI exited without ever starting a thread; the broker's \
+                        decision log is at /tmp/logs/broker-cc-1-U.log";
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(reported), None)
+            .await;
+
+        let payload = end_payload(&daemon, TEST_UID).expect("the end was recorded");
+        assert_eq!(
+            payload.get("reason").and_then(|r| r.as_str()),
+            Some(reported),
+            "the reporter's own sentence must reach the operator unaltered: {payload}"
+        );
+        // The exit code still rides alongside, exactly as it did — a client that has
+        // never heard of `reason` renders what it always rendered.
+        assert_eq!(payload.get("exit_code").and_then(|c| c.as_i64()), Some(0));
+    }
+
+    /// **No reason reported, no reason invented — for every ending that is not the
+    /// one the host asserts.**
+    ///
+    /// This is the regression the review named. The daemon used to derive the reason
+    /// itself by counting `session_start` events, so a host that died BEFORE the TUI
+    /// ran, and a session torn down by signal, were both handed "the codex TUI ended
+    /// without a thread ever binding" — a diagnosis of a failure that had not
+    /// happened, pointing at a broker log that in those paths is never even written.
+    /// Absence of a report now means absence of a reason.
+    #[tokio::test]
+    async fn an_unreported_ending_gets_no_invented_reason() {
+        // A codex run that filed no `session_start` at all — the exact shape the old
+        // count-based inference mislabelled. Without a reported reason it must now
+        // end with none, because nothing asserted one.
+        let pre_thread_crash = test_daemon();
+        seed_codex_session(&pre_thread_crash, TEST_UID, "cc-1");
+        pre_thread_crash
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
+        assert_eq!(
+            end_payload(&pre_thread_crash, TEST_UID).expect("the end was recorded"),
+            serde_json::json!({"exit_code": 0}),
+            "a codex run whose host died before the TUI ran must NOT be told it \
+             exited without binding a thread"
+        );
+
+        let claude = test_daemon();
+        seed_session(&claude, TEST_UID, "cc-1", Lifecycle::Live);
+        claude
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
+        assert_eq!(
+            end_payload(&claude, TEST_UID).expect("the end was recorded"),
+            serde_json::json!({"exit_code": 0}),
+            "and a Claude run is untouched"
+        );
     }
 
     fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
@@ -15887,7 +16035,7 @@ mod tests {
         let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
         daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
             .await;
 
         let ends = kinds_of(&daemon, TEST_UID)
@@ -16203,7 +16351,7 @@ mod tests {
         );
 
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&stale))
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&stale))
             .await;
 
         assert_eq!(
@@ -16221,7 +16369,7 @@ mod tests {
         // And the owner's own report still lands, which is what keeps this a guard
         // rather than a refusal to record exits.
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&replacement))
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&replacement))
             .await;
         assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
         assert!(kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
@@ -16258,7 +16406,7 @@ mod tests {
         );
 
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(&stale))
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&stale))
             .await;
         assert_eq!(
             lifecycle_of(&daemon, TEST_UID),
@@ -16274,7 +16422,7 @@ mod tests {
         let only = register(&daemon, "cc-2", Some(other)).await;
         daemon.unregister_supervisor(&only).await;
         daemon
-            .session_exited("cc-2", Some(other), Some(0), Some(&only))
+            .session_exited("cc-2", Some(other), Some(0), None, Some(&only))
             .await;
         assert_eq!(
             lifecycle_of(&daemon, other),
@@ -16335,7 +16483,7 @@ mod tests {
         let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
         seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
         daemon
-            .session_exited("cc-1", Some(TEST_UID), Some(0), None)
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
             .await;
         assert_eq!(
             tails.try_recv().expect("the tailer must be told to stop"),

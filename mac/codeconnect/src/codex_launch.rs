@@ -397,6 +397,46 @@ pub struct LaunchRecord {
     /// is what an operator reads to tell "the assertion held" from "it never ran".
     #[serde(default)]
     pub remain_on_exit_asserted: bool,
+    /// **A thread actually bound in this session** — the broker admitted a
+    /// creation, correlated its response on the connection that asked, and proved
+    /// the server-resolved `cwd` equal to the launch cwd
+    /// (`codex_broker::relay::BoundThreadProbe`). Written by the host, read by the
+    /// coordinator's bring-up, never cleared.
+    ///
+    /// It exists because the bring-up evidence that used to decide `Ready` — both
+    /// broker legs serving, the host's lease live, both children past `execve` and
+    /// alive — is all true of a pane that is about to die. Measured: with a
+    /// `~/.codex` that marks the launch cwd `trust_level = "trusted"`, the TUI's
+    /// first `thread/start` is refused by the fingerprint and the 0.153 TUI exits
+    /// immediately; the legs, the lease and both children satisfy every one of
+    /// those checks for the whole of the ~2 s before it does. So `Ready` committed,
+    /// the launcher `exec`ed into the pane, and the user got a flicker and
+    /// `[exited]` with nothing said. The legs prove the HOST came up; this proves
+    /// the SESSION did, and only the second is what the launcher is waiting for.
+    ///
+    /// A bool rather than the thread id: the id is the ccd link's business and it
+    /// reaches the daemon through the `session_start` event, which is where a
+    /// consumer that needs it should read it. Nothing here has any use for it, and
+    /// a field the record does not need is a field that can disagree.
+    #[serde(default)]
+    pub codex_thread_bound: bool,
+    /// **The host's own account of a TUI that ran and exited without a thread ever
+    /// binding**, written once, at teardown, by the only process that can know it.
+    ///
+    /// `None` is not "the session was fine" — it is "the host did not assert this",
+    /// which is also what a `Fatal` host, a `Signalled` teardown, and a session that
+    /// bound a thread all leave here. That asymmetry is the point. The daemon used to
+    /// infer the same conclusion from the ABSENCE of a `session_start` event, and
+    /// absence is true of every one of those other endings too, so a pre-thread
+    /// crash was reported to the operator as "the TUI exited without starting a
+    /// thread" — a diagnosis of the wrong failure. A fact one process states beats a
+    /// fact three processes' silence is read as.
+    ///
+    /// It carries the reason text verbatim, already bounded and sanitized, and names
+    /// the preserved broker log ONLY when preservation actually succeeded — so the
+    /// operator is never sent to a file that was not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_unbound_exit: Option<String>,
     pub children: Vec<ChildEntry>,
     pub created_ms: i64,
 }
@@ -992,6 +1032,8 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         host_claimed_run_dir: false,
         session_observed: false,
         remain_on_exit_asserted: false,
+        codex_thread_bound: false,
+        codex_unbound_exit: None,
         children: Vec::new(),
         created_ms: new.created_ms,
     };
@@ -1216,6 +1258,65 @@ pub fn note_remain_on_exit_asserted(_lock: &LaunchLock, uid: &str) -> Result<()>
         return Ok(());
     }
     record.remain_on_exit_asserted = true;
+    store_atomic(uid, &record)
+}
+
+/// How long the coordinator waits, past the classic bring-up evidence, for the
+/// pane to prove a thread bound — and, on the writing side, how long the host
+/// keeps looking for one to record.
+///
+/// **Measured: 225 ms.** On a healthy launch the ccd leg's `session_start` — the
+/// daemon event carrying `thread_id`, `rollout_path` and `cli_version` — is filed
+/// 225 ms after the leg attaches, and the broker's own binding is strictly earlier
+/// than that (the daemon learns of it from a frame the broker had already bound
+/// on). So the healthy launch pays roughly a fifth of a second here and then
+/// attaches exactly as it did before.
+///
+/// 10 s is ~40x that measurement, and the failing launch does not wait it out: the
+/// host writes `pending → failed` the moment its TUI dies, which ends the wait at
+/// once (measured ~2 s from pane start). The only launch that pays the full budget
+/// is one where the pane is up, nothing has died, and no thread has bound — and
+/// that one **attaches**, exactly as today. Expiry is not a verdict, which is why
+/// this is a grace and not a second deadline: the launch deadline
+/// (`codex::LAUNCH_DEADLINE_MS`, 60 s) still dominates and still bounds the whole
+/// bring-up, so this can only ever spend budget the coordinator already had.
+///
+/// Shared rather than written twice because the two sides are one agreement: a
+/// host that stopped watching before the coordinator stopped waiting would leave
+/// the coordinator waiting out the grace on evidence nobody was still writing.
+pub const THREAD_BINDING_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Note that the broker bound a thread for this launch — the session, and not
+/// merely the pane, is up. See [`LaunchRecord::codex_thread_bound`].
+///
+/// **History, not state**, like [`note_host_reached_gate`] and
+/// [`note_remain_on_exit_asserted`]: a thread that bound stays bound-once for
+/// ever, so this carries no `pending` guard and is never cleared. Idempotent.
+pub fn note_codex_thread_bound(_lock: &LaunchLock, uid: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.codex_thread_bound {
+        return Ok(());
+    }
+    record.codex_thread_bound = true;
+    store_atomic(uid, &record)
+}
+
+/// Record the host's account of a TUI that exited without a thread ever binding.
+///
+/// **History, not state**, like [`note_codex_thread_bound`]: it describes something
+/// that already happened, so it carries no `pending` guard — the record is routinely
+/// `ready` by the time a session ends, and a guard would drop the one write whose
+/// whole purpose is to outlive the launch. First writer wins, so a retry cannot
+/// overwrite the original account with a later, thinner one. Idempotent.
+///
+/// See [`LaunchRecord::codex_unbound_exit`] for why this is asserted rather than
+/// inferred downstream.
+pub fn note_codex_unbound_exit(_lock: &LaunchLock, uid: &str, reason: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.codex_unbound_exit.is_some() {
+        return Ok(());
+    }
+    record.codex_unbound_exit = Some(reason.to_string());
     store_atomic(uid, &record)
 }
 

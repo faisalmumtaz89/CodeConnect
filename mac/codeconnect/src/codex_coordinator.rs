@@ -127,6 +127,7 @@ pub enum NewSessionOutcome {
 }
 
 /// What the wrapper bring-up reported.
+#[derive(Debug, PartialEq, Eq)]
 pub enum BringUp {
     /// The host's evidence was observed: both broker legs bound under the run
     /// dir, and the pane's session still proven ours.
@@ -664,7 +665,12 @@ pub fn wait_on_record(
 /// Reduce a failure reason to something safe to print at a terminal: single
 /// line, printable, length-bounded. The reasons this crate writes are already
 /// benign; this is defense in depth for anything that flows in from a step.
-fn sanitize(reason: &str) -> String {
+///
+/// `pub(crate)` for the host, which quotes a broker refusal into a record reason
+/// — material that ultimately came off the wire, and the one input this function's
+/// "defense in depth" wording was always about. Bounding it where it is composed
+/// rather than only where it is printed keeps the record itself readable too.
+pub(crate) fn sanitize(reason: &str) -> String {
     let cleaned: String = reason
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -1282,6 +1288,79 @@ fn bringup_step(obs: &BringupObservation) -> BringupStep {
     }
 }
 
+/// After the pane is proven up, wait a bounded while for it to prove a **session**
+/// is up: a thread bound in the broker, or a failure the host recorded instead.
+///
+/// # Why `Ready` was not enough, measured
+///
+/// Everything [`bringup_step`] checks — both broker legs serving under a run dir
+/// this uid owns, a live host lease, both children past `execve` and alive, the
+/// tmux session `Live` — is true of a pane that is about to die. From a directory
+/// the owner's `~/.codex` marks `trust_level = "trusted"`, the TUI's first
+/// `thread/start` is refused by the launch fingerprint and codex 0.153 exits
+/// immediately; for the whole ~2 s before it does, every one of those facts holds.
+/// So `Ready` committed, `codeconnect codex` `exec`ed into `tmux attach-session`,
+/// and the user got a pane that flickered to `[exited]` with nothing said anywhere
+/// they could see it. The legs prove the HOST came up. Only a bound thread proves
+/// the session did, and that is what the launcher is actually waiting for.
+///
+/// # The three ways out, and why only one of them is a verdict
+///
+///   * **A bound thread** — [`codex_launch::LaunchRecord::codex_thread_bound`],
+///     written by the host from the broker's own verified binding. Measured at
+///     ~225 ms past leg attach on a healthy launch, which is what this costs.
+///   * **A recorded failure** — the host's `pending → failed`, written the moment
+///     its TUI dies without a thread. Reported as [`BringUp::Failed`], whose reason
+///     [`fail`] then reads back out of the record first-reason-wins, so what
+///     reaches the user's terminal is the host's sentence and not a wrapper around
+///     it.
+///   * **The grace, or the launch deadline, running out** — [`BringUp::Ready`],
+///     deliberately. Expiry means no evidence either way, and turning "we did not
+///     hear" into a failed launch would break every slow-but-healthy launch to
+///     catch a fast broken one. That case attaches exactly as it did before this
+///     function existed; `broker.log` now survives the run dir, and `ccd` files a
+///     `session_end` reason for it, so it is no longer silent either.
+fn await_thread_binding(uid: &str, deadline_monotonic_nanos: u64) -> BringUp {
+    let grace_expires = std::time::Instant::now() + codex_launch::THREAD_BINDING_GRACE;
+    loop {
+        // Evidence before the clock, on every pass, for the same reason
+        // `bring_up_wrapper`'s own loop checks it in that order: a binding that
+        // lands in the instant the grace does should be read, not discarded.
+        if let Ok(record) = codex_launch::load(uid) {
+            // **`Failed` is read BEFORE the binding bit, and the order is the rule.**
+            // `note_codex_thread_bound` is history, not state: it is written with no
+            // `pending` guard and is never cleared, so `Failed { .. }` and
+            // `codex_thread_bound: true` are reachable together — a broker or
+            // app-server that dies after a thread bound but before the launch commits
+            // is exactly that shape. Reading the bit first would answer `Ready` for a
+            // launch whose failure had already been recorded, and the launcher would
+            // `exec` into a pane that is on its way out: the very defect this whole
+            // wait exists to remove, reintroduced one layer up. A recorded failure is
+            // a verdict; a binding is only evidence that one part of bring-up got
+            // somewhere.
+            if let LaunchState::Failed { reason } = record.state {
+                return BringUp::Failed(reason);
+            }
+            if record.codex_thread_bound {
+                return BringUp::Ready;
+            }
+        }
+        if std::time::Instant::now() >= grace_expires {
+            return BringUp::Ready;
+        }
+        // The launch deadline still dominates: this grace can only spend budget the
+        // coordinator already had. An unreadable clock ends the wait — but with
+        // `Ready`, not the `Failed` its counterpart in `bring_up_wrapper` returns,
+        // because by this point readiness is already proven and the only thing that
+        // cannot be bounded is the extra look.
+        match protocol::proc_identity::monotonic_now_nanos() {
+            Some(now) if now < deadline_monotonic_nanos => {}
+            _ => return BringUp::Ready,
+        }
+        std::thread::sleep(BRINGUP_POLL);
+    }
+}
+
 /// Whether the run dir is one **this uid** owns, private (0700), and a real
 /// directory rather than a symlink to one.
 ///
@@ -1626,7 +1705,11 @@ impl CoordinatorDeps for RealCoordinatorDeps {
                 session,
             };
             match bringup_step(&observed) {
-                BringupStep::Ready => return BringUp::Ready,
+                // The pane is up. That is not yet the thing the launcher is
+                // waiting for — see [`await_thread_binding`].
+                BringupStep::Ready => {
+                    return await_thread_binding(&self.uid, self.deadline_monotonic_nanos)
+                }
                 BringupStep::Failed(why) => return BringUp::Failed(why),
                 BringupStep::KeepWaiting => {}
             }
@@ -2906,6 +2989,170 @@ mod tests {
         set_mode(&dir, 0o700);
         // Provable again ⇒ Ready again.
         assert_eq!(wait_on_record("c10", ms(200), ms(5)), LaunchWait::Ready);
+    }
+
+    /// Seed a `pending` record for `uid` so the thread-binding wait has something
+    /// to read. The three tests below drive it to each of that wait's exits.
+    fn pending_record(uid: &str) {
+        let lock = LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            NewLaunch {
+                launch_nonce: "n".into(),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: current_identity().unwrap(),
+                boot: boot_identity().unwrap(),
+                deadline_monotonic_nanos: far(),
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    /// **The healthy launch's cost is the binding, not the grace.**
+    ///
+    /// Measured in production: the ccd leg's `session_start` lands 225 ms after the
+    /// legs attach, and the broker's own binding — what the host records here — is
+    /// earlier still. So the wait must return the instant the bit is on the record,
+    /// not when [`codex_launch::THREAD_BINDING_GRACE`] runs out; a wait that only
+    /// checked on expiry would add ten seconds to every launch that works.
+    #[test]
+    fn a_bound_thread_ends_the_wait_at_once() {
+        pending_record("tb1");
+        let lock = LaunchLock::acquire("tb1").unwrap();
+        codex_launch::note_codex_thread_bound(&lock, "tb1").unwrap();
+        drop(lock);
+        let began = std::time::Instant::now();
+        assert_eq!(await_thread_binding("tb1", far()), BringUp::Ready);
+        assert!(
+            began.elapsed() < codex_launch::THREAD_BINDING_GRACE,
+            "a bound thread must not be made to wait out the grace"
+        );
+    }
+
+    /// **The failure the host recorded is the failure the launcher prints.**
+    ///
+    /// The reason travels verbatim: `fail` reads it back off the record
+    /// first-reason-wins, so what reaches the user's terminal is the host's own
+    /// sentence about its dead TUI rather than a coordinator's wrapper around it.
+    #[test]
+    fn a_recorded_failure_ends_the_wait_with_that_reason() {
+        pending_record("tb2");
+        let lock = LaunchLock::acquire("tb2").unwrap();
+        codex_launch::to_failed(
+            &lock,
+            "tb2",
+            "the codex TUI exited without ever starting a thread",
+            CleanupState::Pending,
+        )
+        .unwrap();
+        drop(lock);
+        assert_eq!(
+            await_thread_binding("tb2", far()),
+            BringUp::Failed("the codex TUI exited without ever starting a thread".into())
+        );
+    }
+
+    /// **A RECORDED FAILURE WINS OVER THE BINDING BIT WHEN BOTH ARE SET.**
+    ///
+    /// `note_codex_thread_bound` is history and carries no `pending` guard, so
+    /// `Failed { .. }` together with `codex_thread_bound: true` is a reachable state:
+    /// a broker or app-server that dies after a thread bound but before the launch
+    /// commits produces exactly it. Reading the bit first answered `Ready` for a
+    /// launch whose failure was already on the record — the launcher would then
+    /// `exec` into a dying pane, which is the defect this wait exists to prevent,
+    /// reintroduced one layer up.
+    ///
+    /// **Mutation:** swap the two checks back and this fails with
+    /// `left: Ready right: Failed("the broker died after the thread bound")`.
+    #[test]
+    fn a_recorded_failure_beats_the_binding_bit() {
+        pending_record("tb4");
+        let lock = LaunchLock::acquire("tb4").unwrap();
+        codex_launch::note_codex_thread_bound(&lock, "tb4").unwrap();
+        codex_launch::to_failed(
+            &lock,
+            "tb4",
+            "the broker died after the thread bound",
+            CleanupState::Pending,
+        )
+        .unwrap();
+        drop(lock);
+        let record = codex_launch::load("tb4").unwrap();
+        assert!(
+            record.codex_thread_bound && matches!(record.state, LaunchState::Failed { .. }),
+            "the premise: both are set at once, which is why the ORDER of the two \
+             checks is the thing under test"
+        );
+        assert_eq!(
+            await_thread_binding("tb4", far()),
+            BringUp::Failed("the broker died after the thread bound".into())
+        );
+    }
+
+    /// **Running out of time is not a verdict.**
+    ///
+    /// No binding, no recorded failure, and the launch deadline already past: the
+    /// pane is up and nothing has died, so this attaches exactly as it did before
+    /// the wait existed. Turning "we did not hear" into a failed launch would break
+    /// every slow-but-healthy launch in order to catch a fast broken one.
+    #[test]
+    fn an_expired_wait_still_attaches() {
+        pending_record("tb3");
+        let began = std::time::Instant::now();
+        assert_eq!(
+            await_thread_binding("tb3", monotonic_now_nanos().unwrap() - 1),
+            BringUp::Ready
+        );
+        assert!(
+            began.elapsed() < codex_launch::THREAD_BINDING_GRACE,
+            "the launch deadline bounds the grace, not the other way round"
+        );
+    }
+
+    /// **A SLOW-BUT-HEALTHY LAUNCH MUST STILL ATTACH.**
+    ///
+    /// The guard on the failure mode this whole wait could have introduced. A launch
+    /// that is progressing normally and simply has not bound a thread yet — no
+    /// binding, no recorded failure, and the launch deadline still far away — must
+    /// come out of the grace as [`BringUp::Ready`] and attach. The alternative is to
+    /// break every launch that is merely slow in order to catch a fast broken one,
+    /// which is a strictly worse product than the silent-dead-pane bug being fixed:
+    /// that one was rare, and this one would be every user on a cold cache.
+    ///
+    /// Distinct from [`an_expired_wait_still_attaches`], which exercises the OTHER
+    /// exit — the launch deadline running out. This one leaves the deadline far away
+    /// so the `grace_expires` branch is the branch that fires; that is why it is a
+    /// separate test and not another assertion in that one.
+    ///
+    /// **It really does pay [`codex_launch::THREAD_BINDING_GRACE`]**, and the elapsed
+    /// assertions are load-bearing in both directions: it must not return early (an
+    /// early return would mean it never entered the branch this test is about) and it
+    /// must not run past the grace (an unbounded wait is its own bug). The wall time
+    /// is the price of testing a timeout, and this timeout is worth a test.
+    ///
+    /// **Mutation:** make the `grace_expires` branch return
+    /// `BringUp::Failed(...)` — the "no news is bad news" reading — and this fails.
+    #[test]
+    fn a_launch_that_is_merely_slow_still_attaches_when_the_grace_runs_out() {
+        pending_record("tb4");
+        let began = std::time::Instant::now();
+        assert_eq!(
+            await_thread_binding("tb4", far()),
+            BringUp::Ready,
+            "a launch with no bad news must attach, not fail"
+        );
+        let waited = began.elapsed();
+        assert!(
+            waited >= codex_launch::THREAD_BINDING_GRACE,
+            "the grace must actually be waited out, or this test proves nothing about \
+             its expiry: waited {waited:?}"
+        );
+        assert!(
+            waited < codex_launch::THREAD_BINDING_GRACE * 2,
+            "the grace must also BOUND the wait: waited {waited:?}"
+        );
     }
 
     fn set_mode(dir: &std::path::Path, mode: u32) {

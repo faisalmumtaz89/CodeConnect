@@ -44,6 +44,18 @@ use crate::upstream::{ws_config, UpstreamFactory};
 /// production wires this to `tracing`, tests to a recording buffer.
 pub type EventSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// "Has this session bound a thread yet?", asked of a broker that
+/// [`Broker::serve`] has already consumed.
+///
+/// The answer is the broker's OWN verified binding
+/// ([`crate::session::ThreadBinding::bound_thread`]) — a thread this broker
+/// admitted the creation of, correlated on the connection that asked, with the
+/// server-resolved `cwd` proven equal to the launch cwd — never a guess read back
+/// out of the log's text. It is the one fact that separates "the pane came up and
+/// a session started" from "the pane came up and the TUI's first `thread/start`
+/// was refused", and the host reads it to decide which of those to record.
+pub type BoundThreadProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The broker: two listeners, a launch fingerprint, and a per-connection upstream
 /// factory. Generic over the factory so integration tests drive captured frames through
 /// a fake upstream with no live app-server.
@@ -268,6 +280,21 @@ impl<F: UpstreamFactory> Broker<F> {
     pub fn with_frame_tee(mut self, tee: FrameTee) -> Self {
         Arc::get_mut(&mut self.ctx).expect("no clones yet").tee = tee;
         self
+    }
+
+    /// Take a [`BoundThreadProbe`] on this broker's thread store.
+    ///
+    /// **Call it last, after every `with_*` builder method.** Those replace fields
+    /// through `Arc::get_mut` and so require the context to be un-cloned; this
+    /// clones it, which is the whole point — the handle has to outlive `serve`,
+    /// which consumes the broker. Taking the probe first turns the next builder
+    /// call into the "no clones yet" panic.
+    ///
+    /// A closure rather than a handle on the store itself, so the private context
+    /// type stays private and no caller can reach past this one question.
+    pub fn bound_thread_probe(&self) -> BoundThreadProbe {
+        let ctx = Arc::clone(&self.ctx);
+        Arc::new(move || ctx.threads.bound_thread().is_some())
     }
 
     /// Bind both listeners and accept forever. Each accepted connection is handled in its

@@ -1615,6 +1615,8 @@ pub(crate) mod tests {
             // asserted the option, so the premise the no-A escape rests on holds.
             // The test that cares about its ABSENCE clears it explicitly.
             remain_on_exit_asserted: true,
+            codex_thread_bound: false,
+            codex_unbound_exit: None,
             children: vec![],
             created_ms: 0,
         }
