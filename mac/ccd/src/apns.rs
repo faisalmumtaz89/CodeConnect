@@ -101,24 +101,27 @@ impl PushHint {
             // they have no way to open to phones that cannot see it, and skipping
             // the phones that can answer it.
             //
-            // So all four fields describe one subject. While any run is holding a
-            // decision the doorbell is about the decision deck, and the deck's agent
-            // is what governs; only when none is does the run that rang speak for
-            // itself.
+            // So all four fields describe one subject — and as of Phase 3 that
+            // subject is **always the ringing run's own agent**.
             //
-            // **The deck is Claude's in this build, and that is a fact rather than
-            // an assumption**: a Codex approval card cannot be raised — the Codex
-            // approval contracts are Phase 3 — so every card `blocked_sessions` can
-            // count belongs to a Claude run. This line is where Phase 3 must compute
-            // the deck's agent from the blocked set instead. Until it does, the
-            // failure direction is silence: a Codex-only device is left out of a
-            // doorbell about Codex cards that do not yet exist, never told about one
-            // it cannot open.
-            agent: if blocked > 0 {
-                protocol::agent::AgentKind::Claude
-            } else {
-                self.agent.clone()
-            },
+            // **What this line used to do, and why it stopped.** It re-described
+            // the doorbell as Claude's whenever any card was open, because the
+            // deck could only ever be Claude's: a Codex approval card could not
+            // be raised at all. That premise is now false — the Codex approval
+            // observer raises them — and the hardcode would have become the very
+            // bug it was written to avoid, in the other direction: a Codex turn
+            // ringing while a Codex card was open would be described and
+            // authorized as Claude, offering a Codex decision to phones that
+            // cannot render one and skipping the phones that can.
+            //
+            // The fix is not to compute a deck agent from the blocked set, which
+            // would only move the question to "what does a MIXED deck say?" and
+            // have no honest answer. It is to make the count agree with the
+            // subject instead: `blocked_runs` counts only runs of this run's own
+            // agent, so the deck is single-agent by construction and the run that
+            // rang can speak for it without re-description. One agent, four
+            // fields, no cross-agent inflation and no misauthorization.
+            agent: self.agent.clone(),
         }
     }
 }
@@ -500,9 +503,18 @@ pub fn alert(hint: &PushHint) -> (String, String) {
     } else {
         hint.project_label.clone()
     };
+    // **The count names its agent, because the count is now single-agent.**
+    // `blocked_runs` counts only runs of the ringing run's own agent, so "3
+    // agents need you" would be true of a fleet the reader cannot see: three
+    // Codex decisions and two Claude ones are two separate doorbells, and a
+    // sentence that said "5" would describe neither. Naming the agent is what
+    // keeps the number and the deck the same thing.
     let body = match hint.blocked_sessions {
         0 | 1 => hint.kind.sentence().to_string(),
-        n => format!("{n} agents need you"),
+        n => match hint.agent {
+            protocol::agent::AgentKind::Claude => format!("{n} agents need you"),
+            _ => format!("{n} {} agents need you", hint.agent.as_str()),
+        },
     };
     (title, body)
 }
@@ -575,13 +587,24 @@ mod tests {
 
     /// **Whoever the doorbell speaks for is who it is delivered to.**
     ///
-    /// `agent` is not copy — it is the authorization subject the fan-out narrows on
-    /// — so it has to move with the sentence. A Codex turn finishing while a Claude
-    /// card was open used to produce a Claude `Approval` alert naming a Claude
-    /// project, authorized to Codex-capable phones only: offered to devices with
-    /// nothing to open behind it, and withheld from the ones that could answer it.
+    /// `agent` is not copy — it is the authorization subject the fan-out narrows
+    /// on — so it has to agree with the sentence. It used to be forced to Claude
+    /// whenever a card was open, because the decision deck could only be
+    /// Claude's: no Codex card could be raised. Phase 3 raises them, and that
+    /// hardcode would now do the very thing it was written to prevent, pointing
+    /// the other way — a Codex turn ringing while a Codex card waits, described
+    /// and authorized as Claude, offered to phones that cannot open it and
+    /// withheld from the ones that can.
+    ///
+    /// The subject is therefore the ringing run's own agent, unconditionally,
+    /// and the count is what changed to make that safe: `blocked_runs` counts
+    /// only runs of that same agent, so the deck can never be somebody else's.
+    ///
+    /// **Mutation:** restore `if blocked > 0 { Claude }` and the Codex arms
+    /// below go red at one card and at several — the two legs round-9 F5 found
+    /// were separately reachable.
     #[test]
-    fn the_re_described_doorbell_is_authorized_as_what_it_says() {
+    fn a_doorbell_is_authorized_as_the_agent_that_rang() {
         let codex = protocol::agent::AgentKind::Codex;
         let mut rang = hint(0);
         rang.kind = PushKind::Completed;
@@ -595,28 +618,31 @@ mod tests {
         let deck = rang.describing(1, Some("Aion".into()));
         assert_eq!(deck.kind, PushKind::Approval);
         assert_eq!(
-            deck.agent,
-            protocol::agent::AgentKind::Claude,
-            "a doorbell re-described as the decision deck is authorized as that deck"
+            deck.agent, codex,
+            "a Codex doorbell about a Codex card stays Codex, or it reaches phones \
+             that cannot open it"
         );
 
-        // **And the deck of SEVERAL, which is a different arm of the same
-        // expression** (round-9 F5). Every multi-card assertion above this one
-        // starts from a Claude hint, so `blocked == 1 ? Claude : self.agent`
-        // survived them all: the one-card leg was checked from a Codex hint and the
-        // many-card leg only from Claude hints, which the mutation returns
-        // unchanged. Two cards is reachable the moment a second Claude run blocks
-        // while a Codex turn finishes, and under that mutation the phone gets the
-        // Claude approval-deck sentence on a notification authorized to
-        // Codex-capable devices — a deck of Claude cards offered to phones that
-        // cannot open one, and withheld from every phone that can.
+        // The several-card leg, which is a different arm of the same expression
+        // (round-9 F5) and was separately reachable under the old hardcode.
         let deck = rang.describing(2, None);
         assert_eq!(deck.kind, PushKind::Approval);
         assert_eq!(
-            deck.agent,
-            protocol::agent::AgentKind::Claude,
-            "the deck speaks for the fleet whether it holds one card or several, and \
-             is authorized as what it says either way"
+            deck.agent, codex,
+            "one card or several, the subject is the agent that rang"
+        );
+        assert_eq!(
+            alert(&deck).1,
+            "2 codex agents need you",
+            "the sentence names the agent, because the count is that agent's alone"
+        );
+
+        // And a Claude deck still reads exactly as it always did.
+        let mut claude_rang = hint(0);
+        claude_rang.kind = PushKind::Completed;
+        assert_eq!(
+            alert(&claude_rang.describing(3, None)).1,
+            "3 agents need you"
         );
     }
 
@@ -637,11 +663,11 @@ mod tests {
     /// Over every kind, because the passthrough is the arm the hook path takes for
     /// all four of them — this is the majority route, not an edge.
     ///
-    /// **Mutation:** replace `self.agent.clone()` in the `else` arm of
+    /// **Mutation:** replace `self.agent.clone()` in
     /// [`PushHint::describing`]'s `agent:` expression with
     /// `protocol::agent::AgentKind::Codex`. This goes red;
-    /// `the_re_described_doorbell_is_authorized_as_what_it_says` and
-    /// `a_doorbell_speaks_for_the_fleet_while_any_decision_waits` stay green.
+    /// `a_doorbell_is_authorized_as_the_agent_that_rang` — which asks a Codex
+    /// hint what it becomes — cannot see it, which is why this test exists.
     #[test]
     fn an_unblocked_doorbell_is_authorized_as_the_run_that_rang_and_that_is_usually_claude() {
         for &rang in PushKind::ALL {

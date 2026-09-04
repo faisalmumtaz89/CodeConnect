@@ -809,6 +809,24 @@ pub enum ClearCause {
     TurnCompleted,
     /// A thread switch retired the old visit's pending (D4).
     Superseded,
+    /// **The item the card was about finished, and no answer to it was ever
+    /// observed.**
+    ///
+    /// The retirement a link that missed the answer still sees. `serverRequest/
+    /// resolved` is broadcast once and never replayed, so a link that dropped
+    /// between the request and its resolution comes back to a card whose
+    /// question has already been settled at the keyboard — and the only frame
+    /// left that says so is the item's own `item/completed`, which a resumed
+    /// link does receive.
+    ///
+    /// **Deliberately not [`ClearCause::TurnCompleted`].** The turn is still
+    /// running when this fires — measured on 0.147 in
+    /// `fixtures/codex/file-change.jsonl`, where the approved `fileChange`
+    /// item completes at line 22 and its turn does not terminalize until line
+    /// 43, twenty-one frames later. Reporting a live turn as completed would
+    /// be a false statement about the run, made to reuse a word; the item
+    /// finishing is what actually happened and is what this says.
+    ItemCompleted,
 }
 
 /// How far a phone claim got before delivery became uncertain. Present only on
@@ -1877,6 +1895,12 @@ mod tests {
             CodexResolution::Cleared {
                 cause: ClearCause::Superseded,
             },
+            CodexResolution::Cleared {
+                cause: ClearCause::TurnCompleted,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted,
+            },
             CodexResolution::Timeout,
             CodexResolution::Unknown {
                 attempted_by: ResolutionActor::Phone,
@@ -1903,6 +1927,29 @@ mod tests {
             })
             .unwrap(),
             r#"{"status":"answered","by":"local"}"#
+        );
+        // The item-bound retirement, pinned by hand like its siblings. Written
+        // out rather than derived from the variant name: this string is what a
+        // phone matches on, so a rename that kept compiling would be a silent
+        // wire change.
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted
+            })
+            .unwrap(),
+            r#"{"status":"cleared","cause":"item_completed"}"#
+        );
+        // And it is a DIFFERENT string from the turn terminal it must never be
+        // confused with — the distinction the variant exists to make.
+        assert_ne!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted
+            })
+            .unwrap(),
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::TurnCompleted
+            })
+            .unwrap()
         );
     }
 

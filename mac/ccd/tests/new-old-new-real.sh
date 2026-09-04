@@ -21,17 +21,20 @@
 #     session at any generation on the way back up.
 #
 #   * **A REAL schema downgrade, and agent-scoped isolation under it.** The new
-#     binary is now `SCHEMA_VERSION` 4 (agent-scoped session storage); v0.6.0 is
-#     3. So a genuine v3-binary-opens-a-v4-database downgrade happens here, and
-#     the `user_version` really is driven 4 -> 3 -> 4. That is measured, not
+#     binary is now `SCHEMA_VERSION` 5 (agent-scoped session storage at 4,
+#     agent-scoped approval CARDS at 5); v0.6.0 is 3. So a genuine
+#     v3-binary-opens-a-v5-database downgrade happens here, and
+#     the `user_version` really is driven 5 -> 3 -> 5. That is measured, not
 #     assumed: v0.6.0 reads `user_version`, ignores what it finds, and writes 3
 #     back unconditionally — which is also exactly why a version fence could
 #     never have protected anything, and why the isolation does not rest on one.
 #     It rests on the table name: v0.6.0 contains no statement that names
-#     `codex_sessions` — and, for the one path that could still have put a Codex
-#     run into the table it DOES name, on the `sessions_refuse_codex_shadow`
-#     trigger, which lives in the schema and so is the one part of this version a
-#     rolled-back binary keeps and runs against itself (step 7).
+#     `codex_sessions` and none that names `codex_pending_approvals` — and, for
+#     the two paths that could still have put Codex state into the tables it DOES
+#     name, on the `sessions_refuse_codex_shadow` and
+#     `pending_approvals_refuse_codex_card` triggers, which live in the schema and
+#     so are the parts of this version a rolled-back binary keeps and runs against
+#     itself (step 7).
 #     Steps 3 and 5 below drive the real old daemon AND its
 #     real `codeconnect sessions prune` — the two paths measured to enumerate and
 #     then DELETE a Codex row when one lived in the shared table — and require
@@ -103,6 +106,13 @@ CX=01K1B3XQ8ZC0DE5FGH7JKMNPCX
 # lets the seed change while the regex goes on searching for a string nothing
 # ever writes — a check that can no longer fail.
 CX_THREAD=th_ABC123
+# The Codex approval identity a real card carries (chunk 3a). `CX_REQ` is a real
+# `protocol::composite_id` value — the opaque id the phone would answer by — and
+# is what the non-enumeration greps look for, because a short fake would match
+# nothing and prove nothing.
+CX_ITEM=exec-cf7b67c7-3a19-4dd8-a9a6-6f243db33bd4
+CX_TURN=01a01282-c951-76c1-84d1-6e33d6fdb219
+CX_REQ=AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gACXRoX0FCQzEyMwEAKWV4ZWMtY2Y3YjY3YzctM2ExOS00ZGQ4LWE5YTYtNmYyNDNkYjMzYmQ0AAAAAAAAAAc
 # The tools this harness cannot run without, checked BEFORE anything is built or
 # started so a missing one is named here rather than discovered a few hundred lines
 # in, after a worktree build, as an unexplained failure of whatever step happened to
@@ -203,7 +213,7 @@ q() { sqlite3 "$H/events.db" "$1"; }
 # Every string that identifies the seeded Codex run: its tmux/session name, its
 # uid, and its thread id. One regex, built once, so a non-enumeration check
 # cannot quietly cover less than it claims to.
-codex_identifiers() { printf 'cx-1|%s|%s' "$CX" "$CX_THREAD"; }
+codex_identifiers() { printf 'cx-1|%s|%s|%s|%s|%s' "$CX" "$CX_THREAD" "$CX_REQ" "$CX_ITEM" "$CX_TURN"; }
 
 # Run an OLD CLI command and assert BOTH halves of non-enumeration:
 #   (a) the command SUCCEEDED, and
@@ -305,13 +315,15 @@ DEVICE_SEAM_SEEDED='{"agents":["codex"]}|epoch_probe'
 
 echo "== 1) new ccd migrates the DB =="
 run "$NEW" new1
-assert_uv 4 "after new migrate"
+assert_uv 5 "after new migrate"
 assert_seam_columns_exist "after new migrate"
-for object in codex_sessions all_sessions; do
+for object in codex_sessions all_sessions codex_pending_approvals all_pending_approvals \
+              pending_approvals_refuse_codex_card; do
   [ "$(q "SELECT COUNT(*) FROM sqlite_master WHERE name='$object';")" = "1" ] \
     || { echo "FAIL: $object was not built by the new binary"; exit 1; }
 done
-echo "  agent-scoped storage built: codex_sessions, all_sessions"
+echo "  agent-scoped storage built: codex_sessions, all_sessions, codex_pending_approvals,"
+echo "                              all_pending_approvals, pending_approvals_refuse_codex_card"
 
 echo "== 2) seed a live Claude session + a device, with PROBE values in every seam column =="
 # A raw insert (not registration) so we can put a distinct value in each seam
@@ -337,9 +349,29 @@ q "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cw
    VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex',NULL,NULL,'live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
    INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
    VALUES('$CX','cx-1',1,'t','tool_call','{}','hook','x1'),('$CX','cx-1',2,'t','tool_call','{}','hook','x2');"
+# **And an OPEN APPROVAL CARD for that run** (chunk 3a). This is the row the
+# approval observer now produces, and it is the second half of the same
+# rollback question the `codex_sessions` seed asks. `pending_approvals` is one
+# of the four tables v0.6.0 reads GLOBALLY — its recovery does not walk a
+# `sessions` row to reach them — so a Codex card sitting there is one that
+# daemon enumerates and can delete. `codex_pending_approvals` is a table it has
+# never heard of, and that is the whole isolation.
+#
+# `request_id` is a real derived composite id, not a placeholder: it is what
+# `codex_approval::Approval::request_id` mints over (session_uid, thread_id,
+# itemId, generation), and the enumeration probes below grep for it. A short
+# fake would match nothing and prove nothing.
+q "INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,generation,created_ms,thread_id,turn_id,item_id,family)
+   VALUES('$CX','cx-1','$CX_REQ','{\"request_id\":\"$CX_REQ\",\"payload_hash\":\"h\",\"tool_name\":\"command\",\"tool_input\":{},\"display_text\":\"d\"}',7,1787016966352,'$CX_THREAD','$CX_TURN','$CX_ITEM','commandExecution');"
+[ "$(q "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: the Codex card seed did not land"; exit 1; }
+# And prove the read side answers for both agents while the write side is split.
+[ "$(q "SELECT COUNT(*) FROM all_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: all_pending_approvals does not see the scoped card"; exit 1; }
+
 # The complete durable Codex state, hashed. Anything the old daemon or the old
-# CLI touches changes this.
-codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid='$CX' ORDER BY seq;"; }
+# CLI touches changes this — the run, its events, AND its open cards.
+codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid='$CX' ORDER BY seq; SELECT * FROM codex_pending_approvals ORDER BY request_id;"; }
 [ -n "$(codex_state)" ] || { echo "FAIL: the Codex seed did not land"; exit 1; }
 echo "  seeded: codex_sessions=$(q 'SELECT COUNT(*) FROM codex_sessions;') codex events=$(q "SELECT COUNT(*) FROM events WHERE session_uid='$CX';") lifecycle=$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$CX';")"
 
@@ -393,7 +425,7 @@ echo "  (2) the LIVE Codex run is byte-for-byte untouched by the old daemon, and
 
 echo "== 4) new ccd reopens =="
 run "$NEW" new2
-assert_uv 4 "after new reopen"
+assert_uv 5 "after new reopen"
 [ "$(q "SELECT lifecycle FROM sessions;")" = "exited" ] || { echo "FAIL: lifecycle lost"; exit 1; }
 # The Codex run came through the downgrade untouched and did not leak into the
 # table the old binary sweeps.
@@ -429,7 +461,7 @@ CODECONNECT_HOME="$H" "$OLD" > "$H/old-live.log" 2>&1 &
 OLDPID=$!
 sleep 4
 kill -0 $OLDPID 2>/dev/null || { echo "FAIL: the old daemon died on a database it must tolerate"; tail -20 "$H/old-live.log"; exit 1; }
-echo "  the old daemon is up on a v4 database it does not understand"
+echo "  the old daemon is up on a v5 database it does not understand"
 
 # (1) ENUMERATION. Nothing either old-daemon log says may name the Codex run —
 # not its session name, not its uid, not its thread id, and not the word codex.
@@ -442,7 +474,7 @@ echo "  (1) neither old-daemon log names a Codex session, thread or uid"
 # At 8e5b172 `list()` asks tmux and returns early — printing "no CodeConnect
 # sessions" — whenever tmux is empty, which it is here; the daemon is consulted
 # only for names tmux already returned. So a clean `ls` says the old CLI still
-# runs against a v4 database, which is worth asserting and is all it says.
+# runs against a v5 database, which is worth asserting and is all it says.
 assert_old_cli_clean "ls (command health)" "$OLDCC" ls
 
 # **The binding enumeration probe.** `codeconnect sessions list` at 8e5b172 goes
@@ -499,17 +531,99 @@ q "UPDATE codex_sessions SET lifecycle='$CODEX_LIFECYCLE_BEFORE';"
   echo "  BEFORE: $CODEX_BEFORE_OLD2"; echo "  AFTER : $(codex_state)"; exit 1; }
 [ "$(q "SELECT COUNT(*) FROM events WHERE session_uid='$CX';")" = "$CODEX_EVENTS_BEFORE" ] \
   || { echo "FAIL: Codex events were destroyed"; exit 1; }
-echo "  (2) every Codex row and event is byte-for-byte what it was"
+echo "  (2) every Codex row, event and open card is byte-for-byte what it was"
+[ "$(q "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: the old daemon's approval recovery reached the Codex card"; exit 1; }
+echo "  (2) and the open Codex approval card survived the old daemon and its real prune"
+
+echo "== 5b) THE FALSIFIABILITY ARM FOR THE CARD SPLIT =="
+# Without this, "the card survived" is exactly what a green run would also
+# report if v0.6.0 had never been able to touch `pending_approvals` at all — and
+# then the split above would be ceremony rather than a fix.
+#
+# So the SAME card is staged where a build without this schema would have put
+# it: the shared table, with the one object that refuses it removed.
+#
+# **On a home built from scratch, not a copy of `$H`.** The (b0) principle
+# applies twice over here: a window must contain the old binary and only the old
+# binary, and this window must also contain a database no other daemon has
+# already recovered. `$H` has been through two old-daemon windows and a real
+# prune by this point, and staging on top of that would make the measurement
+# depend on all of it.
+H3="$H.sharedcard"
+mkdir -p "$H3"
+sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 1))/" "$H/config.json" > "$H3/config.json"
+run_at() { CODECONNECT_HOME="$3" timeout "$DAEMON_WINDOW" "$1" > "$3/$2.log" 2>&1 || [ $? = 124 ]; }
+run_at "$NEW" new-sharedcard "$H3"
+q3() { sqlite3 "$H3/events.db" "$1"; }
+[ "$(q3 'PRAGMA user_version;')" = "5" ] || { echo "FAIL: (5b) staging home is not at v5"; exit 1; }
+q3 "DROP TRIGGER pending_approvals_refuse_codex_card;"
+[ "$(q3 "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='pending_approvals_refuse_codex_card';")" = "0" ] \
+  || { echo "FAIL: the pre-trigger staging did not remove the card trigger, so (5b) proves nothing"; exit 1; }
+# The trigger is gone, so these are the rows a build without the split really
+# could have written. Staged by hand because no shipping binary can write them
+# any more, which is the point. The CLAIM is staged with the CARD because the
+# claim is what v0.6.0's recovery walks: `unresolved_answer_claims` reads
+# `answer_claims` globally, with no session join and no state filter, and
+# `settle_indeterminate` then deletes the matching card.
+q3 "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+    VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex','live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
+    INSERT INTO pending_approvals(session_uid,session_id,request_id,card,generation,created_ms)
+    VALUES('$CX','cx-1','$CX_REQ','{}',7,1787016966352);
+    INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,generation,created_ms,thread_id,turn_id,item_id,family)
+    VALUES('$CX','cx-1','$CX_REQ','{}',7,1787016966352,'$CX_THREAD','$CX_TURN','$CX_ITEM','commandExecution');
+    INSERT INTO answer_claims(session_uid,session_id,request_id,payload_hash,decision,started_at)
+    VALUES('$CX','cx-1','$CX_REQ','h','\"allow\"','2026-08-28T00:00:00.000Z');"
+[ "$(q3 "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  && [ "$(q3 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  && [ "$(q3 "SELECT COUNT(*) FROM answer_claims WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: the (5b) staging did not land, so it would prove nothing"; exit 1; }
+echo "  (5b) staged: the IDENTICAL card in BOTH tables, plus the claim v0.6.0 walks"
+
+run_at "$OLD" old-sharedcard "$H3"
+SHARED_CARD_LEFT="$(q3 "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")"
+SHARED_CLAIM_LEFT="$(q3 "SELECT COUNT(*) FROM answer_claims WHERE session_uid='$CX';")"
+SCOPED_CARD_LEFT="$(q3 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")"
+echo "  (5b) MEASURED against the real v0.6.0: shared_card_left=$SHARED_CARD_LEFT"
+echo "       claim_left=$SHARED_CLAIM_LEFT scoped_card_left=$SCOPED_CARD_LEFT"
+# The harm, measured rather than asserted from a comment: v0.6.0's recovery
+# walks `answer_claims` globally, records the claim as indeterminate, and
+# DELETES the pending card — for a run it has no other way of seeing. It cannot
+# even file the outcome, because `record_answer` needs a `sessions` row this uid
+# does not have, so the card and the claim are both destroyed and nothing is
+# written in their place.
+[ "$SHARED_CARD_LEFT" = "0" ] && [ "$SHARED_CLAIM_LEFT" = "0" ] \
+  || { echo "FAIL: with the trigger dropped and the card in the SHARED table, v0.6.0 left it";
+       echo "      alone — so the split above is defending against nothing and this arm must be";
+       echo "      re-derived against what v0.6.0 actually does:";
+       grep -iE "recovery|approval|claim" "$H3/old-sharedcard.log" | head -10; exit 1; }
+# And the same daemon, in the same run, on the same database, could not reach
+# the scoped copy of the very same card.
+[ "$SCOPED_CARD_LEFT" = "1" ] \
+  || { echo "FAIL: v0.6.0 reached codex_pending_approvals, which it cannot name"; exit 1; }
+grep -qiE "$(codex_identifiers)" "$H3/old-sharedcard.log" \
+  && { echo "FAIL: (5b) the old daemon named Codex state in its log"; exit 1; } || true
+echo "  (5b) THE HARM REPRODUCED: v0.6.0 recorded the Codex claim as indeterminate and"
+echo "       DESTROYED the shared-table card (1 -> 0) and its claim (1 -> 0), for a run it"
+echo "       cannot list, cannot name and cannot file an answer for. The IDENTICAL card in"
+echo "       codex_pending_approvals survived the same daemon, in the same run, untouched."
+echo "       Same binary, same database, same card, one table apart — so the split is the"
+echo "       thing doing the work, and nothing else is."
+rm -rf "$H3"
 
 
 echo "== 6) new ccd reopens after the old prune: the forward path is intact =="
 run "$NEW" new3
-assert_uv 4 "after the final new reopen"
+assert_uv 5 "after the final new reopen"
 [ "$(q "SELECT COUNT(*) FROM codex_sessions WHERE session_uid='$CX';")" = "1" ] \
   || { echo "FAIL: the Codex run did not survive the whole round trip"; exit 1; }
 [ "$(q "SELECT COUNT(*) FROM sessions WHERE agent <> 'claude';")" = "0" ] \
   || { echo "FAIL: a Codex row leaked back into the shared table"; exit 1; }
-echo "  the Codex run survived new -> old -> new -> old + real prune -> new"
+[ "$(q "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: the open Codex card did not survive the whole round trip"; exit 1; }
+[ "$(q "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")" = "0" ] \
+  || { echo "FAIL: a Codex card leaked into the shared table on the way back up"; exit 1; }
+echo "  the Codex run and its open card survived new -> old -> new -> old + real prune -> new"
 
 echo "== 7) THE PRODUCER, and the two guards that close it — real binaries throughout =="
 # Everything above proves the old binary cannot reach a Codex row *that stays in

@@ -109,7 +109,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     is deliberately **not** gated on this number for the mirror-image reason
 ///     — a rollback resets `user_version` to 3, and the move still has to
 ///     re-run correctly on the way back up.
-const SCHEMA_VERSION: i64 = 4;
+///   * `5` — agent-scoped approval cards: a Codex run's open cards live in
+///     `codex_pending_approvals`, and `pending_approvals` goes back to being
+///     Claude-only. The same reasoning as `4` one table down: the old daemon
+///     reads `pending_approvals` GLOBALLY, without walking a session row, so
+///     `4`'s session split did not hide the cards. `2e-7a` deferred this split
+///     only because nothing produced a Codex card; the approval observer is
+///     that producer. Ships with `pending_approvals_refuse_codex_card`, which a
+///     rollback keeps for the same reason the session trigger is kept, and with
+///     the `all_pending_approvals` view for the reads that answer for both
+///     agents. `answer_claims` and `text_mutations` are deliberately NOT split:
+///     nothing writes a Codex row into either, and a table split ahead of its
+///     producer is the speculative half-surface this plan refuses.
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct Store {
     /// The only connection that writes. One, so `BEGIN IMMEDIATE` never has to
@@ -368,6 +380,61 @@ pub struct PendingApprovalRow {
     pub created_ms: i64,
 }
 
+/// The same card for a Codex run, plus the four columns that make one Codex
+/// approval identifiable.
+///
+/// The six shared columns keep their names, types and meaning — the same
+/// `ApprovalCard` in `card`, the same `(session_uid, request_id)` key the
+/// in-memory `pending` map is already keyed by. Only the storage moved, and it
+/// moved because a rolled-back v0.6.0 daemon reads `pending_approvals`
+/// globally. See `create_schema`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexPendingApprovalRow {
+    pub session_uid: String,
+    pub session_id: String,
+    /// Derived from `(thread_id, item_id)`, never read off the wire — a Codex
+    /// `serverRequest` id identifies nothing across the reconnect it would most
+    /// need to. See [`Store::raise_codex_pending_approval`].
+    pub request_id: String,
+    /// Serialised [`protocol::ws::ApprovalCard`].
+    pub card: String,
+    pub generation: u64,
+    pub created_ms: i64,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    /// `commandExecution` | `fileChange`. The observe-only families never reach
+    /// this table, because no card is built for them.
+    pub family: String,
+}
+
+/// What one commit boundary decided about a Codex card.
+///
+/// There are only two answers because there is only one transaction: either the
+/// row and the fact it stands behind both landed, or neither did.
+#[derive(Debug)]
+pub struct CodexCardRaise {
+    /// What the commit decided. Only [`CodexCardOutcome::Filed`] and
+    /// [`CodexCardOutcome::Rebound`] mean a card is open for this request; the
+    /// other two rolled the transaction back and left nothing at all.
+    pub outcome: CodexCardOutcome,
+    /// The `ApprovalRequest` this raise appended, or `None` when an earlier
+    /// sighting of the same item already filed one under the same `perm:` source
+    /// id — a re-delivery, not a second question. Always `None` on an outcome
+    /// that rolled back, because the same rollback took it.
+    pub event: Option<Event>,
+}
+
+impl CodexCardRaise {
+    /// Whether a card is now open for this request.
+    pub fn is_open(&self) -> bool {
+        matches!(
+            self.outcome,
+            CodexCardOutcome::Filed | CodexCardOutcome::Rebound
+        )
+    }
+}
+
 /// A durable claim on an answer, written **before** anything is typed.
 ///
 /// It exists for one question a restart would otherwise be unable to answer:
@@ -477,6 +544,10 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "events",
     "answers",
     "pending_approvals",
+    // Agent-scoped, and still swept by THIS daemon: isolation from a rolled-back
+    // v0.6.0 is not a licence to leak rows here. A deleted Codex run takes its
+    // open cards with it exactly as a Claude one does.
+    "codex_pending_approvals",
     "answer_claims",
     "text_mutations",
     "mutation_ledger",
@@ -678,6 +749,22 @@ impl Store {
                 done.moved + done.reconciled,
                 done.moved,
                 done.reconciled
+            );
+        }
+        // **Fourth, and it has to follow the session move.** The predicate asks
+        // whether a card's uid is a Codex run, and the only witness of that is a
+        // `codex_sessions` row — which the move above is what puts there. Run
+        // before it, a card belonging to a still-misfiled run would look Claude
+        // and be left in the swept table.
+        //
+        // Not gated on `from_version`, for the reason version 4 gives: a
+        // rollback resets the number, and the rows are the only honest question.
+        if needs_codex_card_move(&tx)? {
+            let moved = move_codex_pending_approvals(&tx)?;
+            crate::log_info!(
+                "schema: took {moved} approval card(s) out of the shared pending_approvals \
+                 table, where a rolled-back v0.6 daemon enumerates and deletes them without \
+                 going through a sessions row"
             );
         }
         tx.commit()?;
@@ -893,6 +980,66 @@ impl Store {
     pub fn break_session_lookups_for_tests(&self) {
         let conn = self.write();
         conn.execute_batch("DROP TABLE sessions")
+            .expect("test fixture");
+    }
+
+    /// Make every Codex card write fail, on the same terms and for the same
+    /// reason.
+    ///
+    /// What it buys is the arm neither a constraint refusal nor a deleted
+    /// session can reach: an *ordinary* write failure in the middle of raising
+    /// or retiring a card. The behaviour under test is whether that failure
+    /// leaves half a card behind, and nothing the daemon does can produce one on
+    /// demand.
+    #[cfg(test)]
+    pub fn break_codex_card_writes_for_tests(&self) {
+        let conn = self.write();
+        conn.execute_batch("DROP TABLE codex_pending_approvals")
+            .expect("test fixture");
+    }
+
+    /// Make every Codex card query fail, **reversibly**.
+    ///
+    /// The dropped-table fixtures above stand in for a permanent failure; this
+    /// one stands in for the transient class — `database is locked`, a
+    /// contended write — which is the only class a *retry* can be a correct
+    /// answer to, and therefore the only one that can prove a retry happens.
+    /// A rename rather than a drop because SQLite rewrites the references in
+    /// `all_pending_approvals` both ways, so the view is whole again afterwards.
+    #[cfg(test)]
+    pub fn hide_codex_cards_for_tests(&self, hidden: bool) {
+        let conn = self.write();
+        let (from, to) = if hidden {
+            ("codex_pending_approvals", "codex_pending_approvals_hidden")
+        } else {
+            ("codex_pending_approvals_hidden", "codex_pending_approvals")
+        };
+        conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .expect("test fixture");
+    }
+
+    /// Make every **event append** fail, reversibly, while every other read and
+    /// write keeps working.
+    ///
+    /// The narrower failure, and the only one that reaches the arm that matters:
+    /// a retirement is a store *read* (which open cards does this terminal
+    /// name?) followed by a *transaction* (delete the row, append the
+    /// resolution). Breaking the cards table breaks the read, so the loop that
+    /// decides what to do with a failed retirement is never entered at all —
+    /// which is how a test can look like it covers that arm and cover nothing.
+    /// Breaking only the append lets the read succeed and the transaction fail,
+    /// which is the shape of a contended or corrupt log.
+    ///
+    /// No view or trigger names `events`, so the rename is symmetric.
+    #[cfg(test)]
+    pub fn break_event_appends_for_tests(&self, broken: bool) {
+        let conn = self.write();
+        let (from, to) = if broken {
+            ("events", "events_hidden")
+        } else {
+            ("events_hidden", "events")
+        };
+        conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .expect("test fixture");
     }
 
@@ -2549,6 +2696,125 @@ impl Store {
         Ok(())
     }
 
+    /// **File one Codex approval card and the fact it stands behind, in one
+    /// commit.**
+    ///
+    /// The two halves were two writes, and the gap between them was where the
+    /// durable-card guarantee leaked. The `ApprovalRequest` event went first,
+    /// so a row the schema then refused — the unique index catching a broken
+    /// derivation — left a filed request event with no card anywhere and no
+    /// terminal that could ever retire it: a permanently unresolved fact in the
+    /// log. And an ordinary write failure left the reverse, an in-memory card
+    /// the phone was rung about and a restart forgot.
+    ///
+    /// One `BEGIN IMMEDIATE` removes both orderings. `append_batch_with_cursor`
+    /// took the same shape for the same reason: a projection and the fact it
+    /// projects cannot be two commits.
+    ///
+    /// The row is written **first inside the transaction**, so a constraint
+    /// refusal aborts before any event is appended rather than after.
+    pub fn raise_codex_pending_approval(
+        &self,
+        row: &CodexPendingApprovalRow,
+        pending: &PendingEvent,
+    ) -> Result<CodexCardRaise> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let outcome = upsert_codex_card_in_tx(&tx, row)?;
+        if !matches!(outcome, CodexCardOutcome::Filed | CodexCardOutcome::Rebound) {
+            // The run was deleted mid-flight, or the re-delivery carried a
+            // different question. Rolled back rather than committed empty, so
+            // the event does not land either and the stored card is untouched.
+            tx.rollback()?;
+            return Ok(CodexCardRaise {
+                outcome,
+                event: None,
+            });
+        }
+        let event = append_in_tx(&tx, pending)?;
+        tx.commit()?;
+        Ok(CodexCardRaise { outcome, event })
+    }
+
+    /// **Retire one Codex card: delete the row and file its terminal, in one
+    /// commit.**
+    ///
+    /// The mirror of [`Store::raise_codex_pending_approval`], and it closes the
+    /// mirror failure. A failed delete followed by a successful resolution event
+    /// left a row that recovery restores — an already-answered question back on
+    /// the phone after a restart, because nothing writes a Codex row into
+    /// `answers` and the recovery read's terminal check is asked of that table.
+    /// A successful delete followed by a failed append lost the only terminal
+    /// this card will ever have.
+    ///
+    /// Returns the resolution event, or `None` when it was a duplicate — the
+    /// `resolved:{request_id}` source id is the third of the three
+    /// first-terminal-wins guards and the only one that survives a reconnect.
+    pub fn retire_codex_pending_approval(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        pending: &PendingEvent,
+    ) -> Result<Option<Event>> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM codex_pending_approvals WHERE session_uid = ?1 AND request_id = ?2",
+            params![session_uid, request_id],
+        )?;
+        let event = append_in_tx(&tx, pending)?;
+        tx.commit()?;
+        Ok(event)
+    }
+
+    /// Every open Codex card for one run, with the Codex identity the fleet
+    /// view deliberately does not project.
+    ///
+    /// Retirement is what needs this and it is why the four identity columns
+    /// exist: a turn terminal clears the cards bound to that turn, a thread
+    /// switch clears the ones bound to the retired thread, and an item's own
+    /// terminal clears the one bound to that item. Asked of the whole run in one
+    /// read and filtered in Rust rather than three narrower queries — a run
+    /// holds a handful of open cards at most, and one statement is one thing to
+    /// keep true.
+    ///
+    /// Unlike [`Store::list_pending_approvals`] this does **not** exclude rows
+    /// with a matching `answers` entry: nothing writes a Codex row into that
+    /// shared table, so the predicate would be a filter that can never fire
+    /// standing in front of the sweep that retires these cards.
+    pub fn codex_pending_approvals(
+        &self,
+        session_uid: &str,
+    ) -> Result<Vec<CodexPendingApprovalRow>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT session_uid, session_id, request_id, card, generation, created_ms,
+                    thread_id, turn_id, item_id, family
+               FROM codex_pending_approvals
+              WHERE session_uid = ?1
+              ORDER BY created_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![session_uid], |row| {
+            Ok(CodexPendingApprovalRow {
+                session_uid: row.get(0)?,
+                session_id: row.get(1)?,
+                request_id: row.get(2)?,
+                card: row.get(3)?,
+                generation: row.get::<_, i64>(4)? as u64,
+                created_ms: row.get(5)?,
+                thread_id: row.get(6)?,
+                turn_id: row.get(7)?,
+                item_id: row.get(8)?,
+                family: row.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Every card that was open when the daemon stopped.
     ///
     /// Rows whose approval has since been answered are excluded in SQL: the
@@ -2557,8 +2823,13 @@ impl Store {
     pub fn list_pending_approvals(&self) -> Result<Vec<PendingApprovalRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
+            // `all_pending_approvals`, not `pending_approvals`: recovery answers
+            // "what is this fleet blocked on?" for both agents, and a Codex card
+            // that survived a restart is exactly as real as a Claude one. Only
+            // the OLD daemon is meant to be blind to half of them, and it is
+            // blind by not knowing the second table's name — see `create_schema`.
             "SELECT p.session_uid, p.session_id, p.request_id, p.card, p.generation, p.created_ms
-               FROM pending_approvals p
+               FROM all_pending_approvals p
               WHERE NOT EXISTS (SELECT 1 FROM answers a
                                  WHERE a.session_uid = p.session_uid
                                    AND a.request_id = p.request_id)
@@ -3496,6 +3767,107 @@ refusing to file a second copy of it in the shared sessions table');
             PRIMARY KEY(session_uid, request_id)
         );
 
+        -- The same cards for Codex runs, in a table a rolled-back v0.6.0 daemon
+        -- has never heard of.
+        --
+        -- `pending_approvals` above is one of the four tables the old daemon
+        -- reads GLOBALLY rather than by walking a session row, so a Codex card
+        -- sitting there is a card its recovery can enumerate and delete. That
+        -- was a bound obligation while nothing produced one; the Codex approval
+        -- observer is the producer, so the split lands with it.
+        --
+        -- **The six shared columns keep their names, types and their meaning**,
+        -- because everything above the store is reused verbatim: the same
+        -- `ApprovalCard` in `card`, the same generation, the same
+        -- `(session_uid, request_id)` primary key the in-memory `pending` map
+        -- and the answer path are already keyed by. Only the storage moved.
+        --
+        -- **The four added columns are the Codex identity, and `request_id` is
+        -- not part of it.** A Codex `serverRequest` id is a per-CONNECTION
+        -- integer from zero, shared across families: measured on 0.153, the
+        -- very same approval re-delivered to a reconnecting link arrives as
+        -- `id: 0` again, and two unrelated approvals on two connections would
+        -- both call themselves zero. What is stable is `itemId` — a uuid,
+        -- measured byte-identical across the re-delivery — so identity is
+        -- `(thread_id, item_id)` and `request_id` is derived from it rather
+        -- than read off the wire. That is what makes a daemon bounce rebind
+        -- one card instead of minting a second.
+        --
+        -- `turn_id` is a column rather than a detail inside `card` because
+        -- retirement queries it: a `turn/completed{interrupted}` clears every
+        -- card bound to that turn, and reading it back out of serialised JSON
+        -- to do so would be a second parser of the same field.
+        CREATE TABLE IF NOT EXISTS codex_pending_approvals(
+            session_uid TEXT    NOT NULL,
+            session_id  TEXT    NOT NULL,
+            request_id  TEXT    NOT NULL,
+            card        TEXT    NOT NULL,
+            generation  INTEGER NOT NULL,
+            created_ms  INTEGER NOT NULL,
+            -- The Codex identity. `family` is the request method's family
+            -- (`commandExecution` | `fileChange`); the observe-only families
+            -- never reach this table because no card is built for them.
+            thread_id   TEXT    NOT NULL,
+            turn_id     TEXT    NOT NULL,
+            item_id     TEXT    NOT NULL,
+            family      TEXT    NOT NULL,
+            PRIMARY KEY(session_uid, request_id)
+        );
+
+        -- Retirement reads by turn (a turn terminal clears its cards) and the
+        -- dedup that makes a rebind idempotent reads by item.
+        CREATE INDEX IF NOT EXISTS codex_pending_approvals_turn
+            ON codex_pending_approvals(session_uid, turn_id);
+        -- The measured identity, enforced rather than merely intended: two rows
+        -- for one wire item is the "second card" this whole split is here to
+        -- make impossible.
+        CREATE UNIQUE INDEX IF NOT EXISTS codex_pending_approvals_item
+            ON codex_pending_approvals(session_uid, thread_id, item_id);
+
+        -- Both agents' open cards, for the reads that answer for the fleet.
+        --
+        -- The same shape as `all_sessions` and for the same reason: splitting
+        -- the write side does not split the read side. Every projection this
+        -- daemon shows a human — the pending list, recovery — has to answer for
+        -- both agents, so those reads changed their FROM clause and nothing
+        -- else. Named something v0.6.0 has never heard of, and sitting BESIDE
+        -- `pending_approvals` rather than shadowing it, so the old daemon still
+        -- finds a table it can INSERT and DELETE.
+        --
+        -- The four Codex columns are not projected: a reader of this view is by
+        -- definition agent-agnostic, and a NULL-padded identity would invite
+        -- exactly the agent-specific branch the view exists to avoid. The
+        -- Codex-only reads go to the physical table.
+        CREATE VIEW IF NOT EXISTS all_pending_approvals AS
+            SELECT session_uid, session_id, request_id, card, generation, created_ms
+              FROM pending_approvals
+            UNION ALL
+            SELECT session_uid, session_id, request_id, card, generation, created_ms
+              FROM codex_pending_approvals;
+
+        -- A Codex card in the shared table is refused, not repaired afterwards.
+        --
+        -- The mirror of `sessions_refuse_codex_shadow`, and it earns its place
+        -- the same way: it lives in the SCHEMA, so a rollback that swaps the
+        -- daemon does not drop it, and it goes on refusing while v0.6.0 is the
+        -- one running. `pending_approvals` has no `agent` column to read, so
+        -- the `WHEN` clause asks the question the uid can answer — is this uid
+        -- a Codex run? — at the cost of one indexed primary-key seek per
+        -- approval insert, the same shape and the same cost the session
+        -- trigger's note measures.
+        --
+        -- It does not stand in front of this build's own writes: the Codex
+        -- observer inserts into `codex_pending_approvals`, which this trigger
+        -- does not watch.
+        CREATE TRIGGER IF NOT EXISTS pending_approvals_refuse_codex_card
+        BEFORE INSERT ON pending_approvals
+        WHEN EXISTS(SELECT 1 FROM codex_sessions AS c
+                     WHERE c.session_uid = NEW.session_uid)
+        BEGIN
+            SELECT RAISE(ABORT, 'this session_uid is a Codex run and its cards live in \
+codex_pending_approvals; refusing to file one in the shared pending_approvals table');
+        END;
+
         -- Written before anything is typed, deleted in the same transaction as
         -- the terminal answer. A row surviving a restart means exactly one
         -- thing: we do not know whether the keystroke landed.
@@ -3948,6 +4320,66 @@ fn move_codex_sessions(tx: &Connection) -> Result<CodexSessionMove> {
         );
     }
     Ok(CodexSessionMove { moved, reconciled })
+}
+
+/// A card in the shared table whose run is a Codex run.
+///
+/// Written against the alias `p`, and named once so the predicate in
+/// [`needs_codex_card_move`] and the statement in
+/// [`move_codex_pending_approvals`] cannot answer it differently.
+///
+/// **Asked of the data, never of `user_version`** — see
+/// [`needs_codex_session_move`] for why a rollback makes the number the wrong
+/// question.
+const MISFILED_CARD: &str = "EXISTS(SELECT 1 FROM codex_sessions AS c
+                                    WHERE c.session_uid = p.session_uid)";
+
+fn needs_codex_card_move(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "pending_approvals")? || !table_exists(conn, "codex_sessions")? {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM pending_approvals AS p WHERE {MISFILED_CARD})"),
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Take Codex cards out of the shared table — by **deleting** them, and that is
+/// the honest action rather than a lossy one.
+///
+/// A card is a projection, not a fact: the fact is the `approval_request` event,
+/// and the card exists so a restart can answer "what is this agent blocked on?".
+/// Moving one into `codex_pending_approvals` would need the Codex identity that
+/// table is keyed by — `thread_id`, `turn_id`, `item_id` — and a row in the
+/// shared table has none of them and no way to reconstruct them: the wire that
+/// could name the item is a `serverRequest` on an app-server connection that no
+/// longer exists. A synthesised identity would be a fabricated one, and it would
+/// occupy the unique index that stops a real re-delivery from rebinding.
+///
+/// **Nothing this build ships can produce such a row**, which is the reason this
+/// is a delete and not a migration worth more code: the three 2e-7a producers
+/// refuse a non-Claude run before any durable write, and the observer that
+/// replaces one of those refusals writes `codex_pending_approvals` directly. A
+/// row here therefore means an intermediate build or a hand-edited database, and
+/// leaving it is the one thing that is definitely wrong — it is precisely the
+/// card a rolled-back v0.6.0 enumerates and deletes on its own, without the log
+/// line below.
+fn move_codex_pending_approvals(tx: &Connection) -> Result<usize> {
+    let removed = tx.execute(
+        &format!("DELETE FROM pending_approvals AS p WHERE {MISFILED_CARD}"),
+        [],
+    )?;
+    if removed > 0 {
+        crate::log_error!(
+            "schema: {removed} Codex approval card(s) were in the shared pending_approvals \
+             table, which no shipping build can write; they carry no Codex item identity and \
+             cannot be re-keyed, so they were removed rather than left where a rolled-back \
+             v0.6 daemon sweeps them. The runs themselves are untouched, and a live approval \
+             is re-delivered by the app-server on the next resume"
+        );
+    }
+    Ok(removed)
 }
 
 /// Columns added to an existing table after the fact.
@@ -4463,6 +4895,114 @@ fn migrate_to_session_uids(conn: &mut Connection) -> Result<()> {
         names.len()
     );
     Ok(())
+}
+
+/// What filing one Codex approval card decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCardOutcome {
+    /// A new card. Nothing held this derived id before.
+    Filed,
+    /// The same question again, byte for byte — a re-delivery to a reconnecting
+    /// link. The stored row already says exactly this, so nothing is written and
+    /// the card the phone holds is still the right one.
+    Rebound,
+    /// The run was deleted while the request was in flight.
+    SessionGone,
+    /// A re-delivery under the same derived id carrying a **different question**.
+    /// Refused; the stored card stands. See [`upsert_codex_card_in_tx`].
+    ContentChanged,
+}
+
+/// File one Codex approval card, in the table a rolled-back v0.6.0 daemon
+/// has never heard of.
+///
+/// **Idempotent on the item, which is the only stable identity.** A Codex
+/// `serverRequest` id is a per-connection integer from zero, so the same
+/// approval re-delivered to a reconnecting link arrives calling itself `0`
+/// again; `request_id` is therefore derived from `(thread_id, item_id)` by
+/// [`crate::codex_approval::Approval::request_id`] and a re-delivery lands on
+/// the row that id already holds. The unique index on
+/// `(session_uid, thread_id, item_id)` is the second half of the same rule and
+/// catches the case the primary key cannot — a *broken* derivation, which
+/// produces a different key for one item and would otherwise put two cards on
+/// the phone for one question.
+///
+/// The `WHERE EXISTS` guard is `upsert_pending_approval`'s, for the same
+/// reason: an approval for a run deleted mid-flight must not leave an orphan
+/// row that recovery later raises for a session nobody can name.
+///
+/// # A re-delivery is compared, not merged
+///
+/// This used to be an `ON CONFLICT … DO UPDATE SET card, turn_id`, and that
+/// silently split the card in half. The row and the in-memory card would take
+/// the new content while the already-filed `ApprovalRequest` — and every
+/// connected client holding it — kept the old one, with no event and no ring to
+/// say the question had changed. A phone would then be showing, and Phase 3b
+/// answering, a question the app-server had replaced.
+///
+/// So the stored row is read and compared instead. **Byte equality of `card`,
+/// not hash equality**, because it is both simpler and strictly stronger: the
+/// hash is a field *inside* the card, so equal bytes imply an equal hash and
+/// also catch drift in `display_text` or `tool_input` that a hash comparison
+/// alone would not. Nothing in the card varies non-semantically — `request_id`
+/// is derived, `generation` is part of that derivation so it cannot differ
+/// within one conflict, and `risk` is a pure function of the content — so equal
+/// bytes are exactly "the same question again". `turn_id` is compared for the
+/// same reason: an item belongs to its turn, so a re-delivery naming a different
+/// one is not a re-delivery of the same thing.
+///
+/// A difference is **refused**, not reconciled. Every capture of a re-delivery
+/// shows a byte-identical question, so a content-changing one is a shape the
+/// wire has never produced; inventing a reconciliation for it would be building
+/// machinery for an input nothing can currently generate, and guessing at which
+/// half of the representation to move. The stored card stands and the mismatch
+/// is logged loudly.
+///
+/// Takes the transaction rather than the store, because it is never one
+/// write on its own: see [`Store::raise_codex_pending_approval`].
+fn upsert_codex_card_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    row: &CodexPendingApprovalRow,
+) -> Result<CodexCardOutcome> {
+    let held: Option<(String, String)> = tx
+        .query_row(
+            "SELECT card, turn_id FROM codex_pending_approvals
+              WHERE session_uid = ?1 AND request_id = ?2",
+            params![row.session_uid, row.request_id],
+            |stored| Ok((stored.get(0)?, stored.get(1)?)),
+        )
+        .optional()?;
+    if let Some((card, turn_id)) = held {
+        if card == row.card && turn_id == row.turn_id {
+            return Ok(CodexCardOutcome::Rebound);
+        }
+        return Ok(CodexCardOutcome::ContentChanged);
+    }
+
+    let changed = tx.execute(
+        "INSERT INTO codex_pending_approvals(session_uid, session_id, request_id, card,
+                                             generation, created_ms, thread_id, turn_id,
+                                             item_id, family)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+          WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
+        params![
+            row.session_uid,
+            row.session_id,
+            row.request_id,
+            row.card,
+            row.generation as i64,
+            row.created_ms,
+            row.thread_id,
+            row.turn_id,
+            row.item_id,
+            row.family,
+        ],
+    )?;
+    Ok(if changed > 0 {
+        CodexCardOutcome::Filed
+    } else {
+        CodexCardOutcome::SessionGone
+    })
 }
 
 fn append_in_tx(tx: &rusqlite::Transaction<'_>, pending: &PendingEvent) -> Result<Option<Event>> {
@@ -7276,14 +7816,16 @@ mod tests {
             LedgerWrite::Existing { .. }
         ));
 
-        // `upsert_pending_approval`, `claim_text_mutation`, `claim_mutation`.
-        // Their guards accept a Codex run *on purpose*: what keeps these tables
-        // free of Codex rows is an explicit refusal in the daemon, at the three
-        // producers, and a store guard that silently dropped the row instead
-        // would report success and lose it. The refusal is the layer that can
-        // tell the caller; this layer can only obey. See
-        // `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally`.
-        assert!(store
+        // `upsert_pending_approval` no longer accepts a Codex run, and that is
+        // the one guard in the six that changed. It used to, on purpose, while
+        // the daemon's own refusal was the thing keeping the shared table clean
+        // — scaffolding that stood only because nothing produced a Codex card.
+        // The approval observer is that producer, so the table split landed and
+        // the refusal moved into the schema, where a rolled-back binary keeps
+        // it. Refused rather than silently dropped: a store guard that reported
+        // success and lost the card is the failure this whole seam exists to
+        // prevent in the other direction.
+        let refused = store
             .upsert_pending_approval(&PendingApprovalRow {
                 session_uid: codex.uid.clone(),
                 session_id: codex.name.clone(),
@@ -7292,7 +7834,23 @@ mod tests {
                 generation: 1,
                 created_ms: 0,
             })
-            .unwrap());
+            .expect_err("a Codex card must not land in the shared table");
+        assert!(
+            format!("{refused:#}").contains("codex_pending_approvals"),
+            "the refusal must name where the card belongs: {refused:#}"
+        );
+
+        // And the table it moved to takes the same run, asking the same fleet
+        // question the other five guards ask.
+        assert_eq!(
+            insert_codex_card(&store, &codex, "req-2", "exec-1", "tu-1", 0, "{}").unwrap(),
+            CodexCardOutcome::Filed
+        );
+
+        // `claim_text_mutation` and `claim_mutation` still accept a Codex run on
+        // purpose: their tables are deliberately NOT split, because nothing
+        // writes a Codex row into either. Splitting a table ahead of its
+        // producer is the speculative half-surface this plan refuses.
         assert_eq!(
             store
                 .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
@@ -7409,6 +7967,358 @@ mod tests {
                  ship. See `create_schema`."
             );
         }
+    }
+
+    /// A Codex card lands in the agent-scoped table, and the shared one refuses
+    /// it — in the SCHEMA, so a rollback keeps the refusal.
+    ///
+    /// This is the half of the 2e-7a obligation that `create_schema` said would
+    /// come due "the day somebody edits those refusals". The daemon-side gate
+    /// could only ever protect a daemon that still had it; a trigger protects
+    /// the database from the binary, which is the direction a rollback runs in.
+    ///
+    /// **Mutation:** drop `pending_approvals_refuse_codex_card` from
+    /// `create_schema` and the `expect_err` goes green-then-red — the shared
+    /// insert succeeds and the card sits exactly where a v0.6.0 sweep finds it.
+    #[test]
+    fn a_codex_card_is_refused_by_the_shared_table_and_kept_by_the_scoped_one() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+
+        let shared = store.upsert_pending_approval(&PendingApprovalRow {
+            session_uid: codex.uid.clone(),
+            session_id: codex.name.clone(),
+            request_id: "derived-1".into(),
+            card: "{}".into(),
+            generation: 1,
+            created_ms: 10,
+        });
+        let err = shared.expect_err("the shared table must refuse a Codex card");
+        assert!(
+            matches!(
+                err.downcast_ref::<rusqlite::Error>()
+                    .and_then(|e| e.sqlite_error_code()),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            ),
+            "refused, but not by the constraint that is supposed to do it: {err:#}"
+        );
+
+        insert_codex_card(&store, &codex, "derived-1", "exec-1", "tu-1", 10, "{}").unwrap();
+
+        // A Claude run is untouched by the refusal: it is the uid that decides,
+        // and a trigger that over-refused would take the Claude path with it.
+        let claude = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&claude))
+            .unwrap()
+            .assert_present();
+        assert!(store
+            .upsert_pending_approval(&PendingApprovalRow {
+                session_uid: claude.uid.clone(),
+                session_id: claude.name.clone(),
+                request_id: "req-1".into(),
+                card: "{}".into(),
+                generation: 1,
+                created_ms: 11,
+            })
+            .unwrap());
+    }
+
+    /// **A re-delivered approval rebinds its card instead of minting a second.**
+    ///
+    /// Measured on codex 0.153: when a link reconnects and resumes, the
+    /// app-server re-sends the outstanding `requestApproval` with a
+    /// byte-identical `itemId` — and with its per-connection `id` back at `0`,
+    /// which is why the wire id identifies nothing and `request_id` is derived
+    /// from `(thread_id, item_id)` instead. That derivation is what makes the
+    /// second sighting a conflict rather than a new row.
+    ///
+    /// **A re-delivery rebinds one card; a re-delivery that changed the question
+    /// is refused.**
+    ///
+    /// The derived request id follows `(thread_id, item_id)`, so the same
+    /// approval re-delivered to a reconnecting link lands on the row it already
+    /// has. What that lands *as* is the whole of this test.
+    ///
+    /// It used to be `ON CONFLICT … DO UPDATE SET card, turn_id` — a silent
+    /// refresh — and that split the card in half: the row took the new content
+    /// while the already-filed `ApprovalRequest` and every connected phone kept
+    /// the old one, with no event and no ring to say the question had changed.
+    /// So the stored row is compared instead: byte-identical is a rebind and
+    /// writes nothing, and anything else is refused with the stored card left
+    /// standing. A content-changing re-delivery is a shape no capture has ever
+    /// produced, so there is nothing measured to reconcile it against.
+    ///
+    /// **Mutations:** put the `DO UPDATE SET` back and the stored-card assertion
+    /// goes red; compare only `card` and the `turn_id` assertion goes red.
+    #[test]
+    fn a_redelivered_codex_approval_rebinds_one_card() {
+        let (store, _path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+
+        assert_eq!(
+            insert_codex_card(
+                &store,
+                &codex,
+                "derived-1",
+                "exec-1",
+                "tu-1",
+                10,
+                r#"{"v":1}"#
+            )
+            .unwrap(),
+            CodexCardOutcome::Filed
+        );
+        // The same item, seen again after a reconnect: same derived id, same
+        // question, byte for byte. The measured case.
+        assert_eq!(
+            insert_codex_card(
+                &store,
+                &codex,
+                "derived-1",
+                "exec-1",
+                "tu-1",
+                99,
+                r#"{"v":1}"#
+            )
+            .unwrap(),
+            CodexCardOutcome::Rebound,
+            "an identical re-delivery is a rebind, and writes nothing"
+        );
+
+        let open = store.list_pending_approvals().unwrap();
+        assert_eq!(open.len(), 1, "a re-delivery must not mint a second card");
+        assert_eq!(open[0].card, r#"{"v":1}"#);
+        assert_eq!(
+            open[0].created_ms, 10,
+            "and it is the same question, not a newer one"
+        );
+
+        // A re-delivery whose CONTENT changed. Refused, and the stored card is
+        // untouched — the phone is holding it and the filed request event
+        // describes it.
+        assert_eq!(
+            insert_codex_card(
+                &store,
+                &codex,
+                "derived-1",
+                "exec-1",
+                "tu-1",
+                10,
+                r#"{"v":2}"#
+            )
+            .unwrap(),
+            CodexCardOutcome::ContentChanged
+        );
+        // A re-delivery naming a different turn is the same refusal: an item
+        // belongs to its turn, so this is not the same thing arriving twice.
+        assert_eq!(
+            insert_codex_card(
+                &store,
+                &codex,
+                "derived-1",
+                "exec-1",
+                "tu-9",
+                10,
+                r#"{"v":1}"#
+            )
+            .unwrap(),
+            CodexCardOutcome::ContentChanged
+        );
+        let after = store.list_pending_approvals().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].card, r#"{"v":1}"#,
+            "the refused re-delivery must not have moved the stored card"
+        );
+
+        // A genuinely different item is a genuinely different card.
+        assert_eq!(
+            insert_codex_card(&store, &codex, "derived-2", "exec-2", "tu-2", 30, "{}").unwrap(),
+            CodexCardOutcome::Filed
+        );
+        assert_eq!(store.list_pending_approvals().unwrap().len(), 2);
+
+        // **And the one-item-one-card rule is enforced in SQL, not merely
+        // implied by the derivation above it.** `request_id` is derived from
+        // `(thread_id, item_id)`, so a second id for one item can only mean the
+        // derivation broke — the exact failure that would put two cards on the
+        // phone for one question, and the one thing the comparison above cannot
+        // catch, because a broken derivation finds no row to compare against.
+        let err = insert_codex_card(
+            &store,
+            &codex,
+            "derived-1-forked",
+            "exec-1",
+            "tu-2",
+            40,
+            "{}",
+        )
+        .expect_err("one wire item must not become two cards");
+        assert!(
+            matches!(
+                err.downcast_ref::<rusqlite::Error>()
+                    .and_then(|e| e.sqlite_error_code()),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            ),
+            "refused, but not by the uniqueness that is supposed to do it: {err:#}"
+        );
+        assert_eq!(store.list_pending_approvals().unwrap().len(), 2);
+    }
+
+    /// Recovery answers for both agents, and deleting a run takes its Codex
+    /// cards with it.
+    ///
+    /// Isolation from a rolled-back binary is not a licence to leak rows here:
+    /// `codex_pending_approvals` is in `SESSION_SCOPED_TABLES`, so THIS daemon
+    /// sweeps it exactly as it sweeps the Claude table.
+    ///
+    /// **Mutation:** point `list_pending_approvals` back at `pending_approvals`
+    /// and the fleet assertion drops to one; remove `codex_pending_approvals`
+    /// from `SESSION_SCOPED_TABLES` and the post-delete assertion finds the
+    /// orphan.
+    #[test]
+    fn the_fleet_read_sees_both_agents_and_a_delete_takes_the_codex_cards() {
+        let (store, _path) = temp_store();
+        let claude = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&claude))
+            .unwrap()
+            .assert_present();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+
+        store
+            .upsert_pending_approval(&PendingApprovalRow {
+                session_uid: claude.uid.clone(),
+                session_id: claude.name.clone(),
+                request_id: "req-1".into(),
+                card: "{}".into(),
+                generation: 1,
+                created_ms: 1,
+            })
+            .unwrap();
+        insert_codex_card(&store, &codex, "derived-1", "exec-1", "tu-1", 2, "{}").unwrap();
+
+        let open = store.list_pending_approvals().unwrap();
+        assert_eq!(open.len(), 2, "recovery must answer for the whole fleet");
+
+        // The lifecycle predicate that guards deletion lives in the SQL, so the
+        // run has to have actually ended before it can be deleted.
+        let mut ended = codex_session_row(&codex);
+        ended.lifecycle = Lifecycle::Exited;
+        store.upsert_session(&ended).unwrap().assert_present();
+        store.delete_exited_session(&codex.uid).unwrap();
+        let after = store.list_pending_approvals().unwrap();
+        assert_eq!(after.len(), 1, "a deleted Codex run leaves no orphan card");
+        assert_eq!(after[0].session_uid, claude.uid);
+    }
+
+    /// A Codex card written by a build that had no scoped table is taken out of
+    /// the shared one on the way up.
+    ///
+    /// It cannot be re-keyed — the shared row carries no `itemId`, and the
+    /// connection that could name one is gone — so it is removed rather than
+    /// left where a rolled-back v0.6.0 enumerates and deletes it anyway. The
+    /// run and its events are untouched.
+    ///
+    /// **Mutation:** make `needs_codex_card_move` return `false` and the
+    /// post-migration count stays at one, in the shared table.
+    #[test]
+    fn a_codex_card_left_in_the_shared_table_is_taken_out_on_the_way_up() {
+        let (store, path) = temp_store();
+        let codex = key("CX", "cx-1");
+        let mut row = codex_session_row(&codex);
+        row.lifecycle = Lifecycle::Live;
+        store.upsert_session(&row).unwrap().assert_present();
+        store
+            .append_event(&pending(&codex, EventKind::ToolCall, Some("one")))
+            .unwrap();
+        drop(store);
+
+        // Staged the way `from_before_the_refusal` stages one: with the object
+        // that would refuse it removed, so the row is the one a build without
+        // this schema really could have written.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TRIGGER pending_approvals_refuse_codex_card")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
+                                           generation, created_ms)
+             VALUES(?1, 'cx-1', 'stale', '{}', 1, 0)",
+            params![codex.uid],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        let conn = store.read();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_approvals WHERE session_uid = ?1",
+                params![codex.uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "the misfiled card must not survive the migration");
+        drop(conn);
+        assert_eq!(
+            store.count_events(&codex.uid).unwrap(),
+            1,
+            "the run's own facts are untouched"
+        );
+    }
+
+    /// Insert one Codex card exactly as the approval observer will: a direct
+    /// write to the agent-scoped table, with the identity the wire supplies.
+    ///
+    /// SQL rather than a `Store` method on purpose — the Rust writer lands with
+    /// the observer that calls it, and a store API with no producer is the
+    /// speculative half-surface this plan refuses. What these tests are about
+    /// is the SCHEMA: the table, the view over both agents, the uniqueness that
+    /// makes a re-delivery rebind, and the trigger that keeps the shared table
+    /// clean while a rolled-back binary is the one running.
+    fn insert_codex_card(
+        store: &Store,
+        session: &SessionKey,
+        request_id: &str,
+        item_id: &str,
+        turn_id: &str,
+        created_ms: i64,
+        card: &str,
+    ) -> Result<CodexCardOutcome> {
+        // Through the production statement, not a copy of it. A hand-written
+        // duplicate here would let the two drift, and the drift would be
+        // invisible: this helper is the only thing asserting that a re-delivery
+        // *refreshes* a card rather than being refused, so it has to be asserting
+        // it about the statement the daemon actually runs.
+        let mut conn = store.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let outcome = upsert_codex_card_in_tx(
+            &tx,
+            &CodexPendingApprovalRow {
+                session_uid: session.uid.clone(),
+                session_id: session.name.clone(),
+                request_id: request_id.to_string(),
+                card: card.to_string(),
+                generation: 1,
+                created_ms,
+                thread_id: "th-1".to_string(),
+                turn_id: turn_id.to_string(),
+                item_id: item_id.to_string(),
+                family: "commandExecution".to_string(),
+            },
+        )?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// **The write that arrives after the delete.** Ending a run stops its tail
@@ -9367,7 +10277,7 @@ mod tests {
         // Written out rather than compared against the constant that produced
         // it: a version on disk is a fact other builds read, and a test that
         // asks the schema what the schema said would agree with any answer.
-        assert_eq!(version, 4, "the schema version other builds will read");
+        assert_eq!(version, 5, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());

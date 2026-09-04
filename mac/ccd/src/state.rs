@@ -123,6 +123,38 @@ const PROMPT_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 /// is only unique within one.
 type ApprovalId = (String, String);
 
+/// What one terminal did to one Codex card.
+///
+/// **Three answers, because two of them used to be the same `false` and they are
+/// opposites.** "Somebody else already retired this" means nothing is owed;
+/// "the commit failed" means everything is still owed — the claim is back, the
+/// card is still on a phone, and whatever else would let a later terminal finish
+/// the job must be kept too. A caller that cannot tell them apart throws away
+/// the wire mapping on both, and a failed retirement silently becomes a
+/// permanent one. See [`Daemon::retire_codex_approval`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retirement {
+    /// This terminal owned the card, and its removal and resolution are
+    /// committed.
+    Retired,
+    /// There was no claim to take: an earlier terminal won the race. Nothing
+    /// failed, and nothing is owed.
+    AlreadyGone,
+    /// The transaction failed. The claim has been put back and the card is still
+    /// open; the caller owes it every route a later terminal could arrive by.
+    Failed,
+}
+
+impl Retirement {
+    /// Whether this card is settled — by this terminal or by an earlier one.
+    ///
+    /// The question every caller actually has: may I forget about this card? A
+    /// `Failed` is the only answer that means no.
+    pub(crate) fn is_settled(self) -> bool {
+        !matches!(self, Retirement::Failed)
+    }
+}
+
 /// Where the phone should connect. Resolved once at startup and printed into
 /// the QR, so the code the operator scans and the socket the daemon opened can
 /// never describe different endpoints.
@@ -1354,6 +1386,14 @@ struct PendingApproval {
     /// answered or another run can block, so the name and the number stop
     /// describing the same moment.
     project_label: String,
+    /// Which agent this card belongs to.
+    ///
+    /// **Captured with the card, for the same reason the label is.** It decides
+    /// which doorbells may count this card ([`blocked_runs`]) and therefore
+    /// which devices that doorbell is authorized to — a question that must be
+    /// answered from the same locked snapshot as the count, not by a database
+    /// read taken after the lock was released.
+    agent: protocol::agent::AgentKind,
     /// Which prompt this card belongs to. Compared against the run's current
     /// generation before anything is typed.
     generation: u64,
@@ -1501,15 +1541,27 @@ fn card_is_open(inner: &Inner, session_uid: &str, key: &CardKey) -> bool {
     })
 }
 
-/// Which runs are holding a decision, and what each is called.
+/// Which runs **of one agent** are holding a decision, and what each is called.
 ///
 /// **Runs, not cards.** One run can hold a second decision while its first is
 /// claimed and mid-injection — the superseding sweep deliberately leaves a
 /// claimed card in place — and the alert says "agents", so counting cards would
 /// make the sentence say something untrue about the fleet.
-fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
+///
+/// **And one agent, not the fleet.** The count this produces is the number the
+/// doorbell says out loud *and* the deck the doorbell is authorized as (see
+/// [`crate::apns::PushHint::describing`]). Counting both agents would make those
+/// two disagree the moment a Codex card exists: a Claude doorbell would say "3
+/// agents need you" while naming a deck a Claude-only phone cannot open, and a
+/// Codex doorbell would be inflated by cards its audience will never see. The
+/// filter is what lets `describing` keep the ringing run's own agent instead of
+/// re-describing the alert as somebody else's.
+fn blocked_runs(inner: &Inner, agent: &protocol::agent::AgentKind) -> Vec<(String, String)> {
     let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for pending in inner.pending.values() {
+        if &pending.agent != agent {
+            continue;
+        }
         by_run.insert(&pending.session.uid, &pending.project_label);
     }
     by_run
@@ -1669,53 +1721,66 @@ impl Daemon {
         ]
     }
 
-    /// Whether a run hosted by `agent` may put a row in the four tables that are
-    /// still shared between agents: `text_mutations`, `pending_approvals`,
-    /// `answer_claims`, `answers`.
+    /// Whether a run hosted by `agent` may put a row in the tables that are
+    /// still shared between agents: `text_mutations`, `answer_claims`,
+    /// `answers`.
+    ///
+    /// **There were four, and `pending_approvals` left.** It was split into
+    /// `codex_pending_approvals` the day it got a Codex producer — the approval
+    /// observer — because a table split ahead of its producer is the speculative
+    /// half-surface this plan refuses, and a table left shared *behind* one is
+    /// the rollback hazard the whole split exists to close. The three that
+    /// remain have no Codex producer, so they are still shared and this refusal
+    /// is still what keeps them clean.
     ///
     /// **Temporary scaffolding, and the reason it exists is a rollback.** Sessions
     /// were split by agent so a rolled-back v0.6.0 daemon cannot touch a Codex
-    /// run; these four were deliberately left shared, because that daemon reads
+    /// run; these were deliberately left shared, because that daemon reads
     /// them *globally* rather than by walking a `sessions` row and no split would
     /// have hidden them anyway. What it does with them is not passive:
     /// `recover_text_mutations` rewrites every `applying` row it finds to
     /// `indeterminate`, and its approval recovery deletes `answer_claims` and the
     /// pending cards that match them — for runs it has no other way of seeing.
     /// The justification for leaving them shared was that no Codex row could
-    /// reach them, and that holds only while the three entry producers refuse
-    /// one: [`Daemon::send_text`], the `PermissionRequest` hook, and
-    /// [`Daemon::answer`]. This is that refusal, in one place, so the three read
-    /// as one decision rather than three coincidences.
+    /// reach them, and that holds only while the entry producers refuse one:
+    /// [`Daemon::send_text`] and [`Daemon::answer`]. This is that refusal, in one
+    /// place, so the two read as one decision rather than two coincidences.
     ///
-    /// Phase 3 splits these tables per agent, and this method and its three call
-    /// sites are what it deletes.
+    /// **The `PermissionRequest` hook was the third caller and is no longer one.**
+    /// Its table split, so the ledger argument stopped applying to it; it still
+    /// refuses a Codex run, for the different and narrower reason written at that
+    /// gate. A refusal that outlived its justification and kept quoting it would
+    /// be the most misleading kind of comment there is.
+    ///
+    /// The phase that splits the remaining tables per agent is what deletes this
+    /// method and its two call sites.
     ///
     /// **This was `supported_agents().contains(agent)`, and the day that stopped
     /// being right has arrived.** The coupling was deliberate and it was a
-    /// tripwire: the three `..._is_refused_before_...` tests name
+    /// tripwire: the `..._is_refused_before_...` tests name
     /// `AgentKind::Codex` outright so that admitting the agent would turn them
-    /// red rather than quietly opening these four tables to a Codex run. It did.
+    /// red rather than quietly opening these tables to a Codex run. It did.
     /// The decision it forced is recorded here: **the refusal stays, and the
     /// coupling goes.** Hosting a Codex session — listing it, observing its
     /// turns, reporting its exit — is what this build gained; writing Codex
-    /// approvals and Codex text mutations into tables a rolled-back v0.6.0
-    /// daemon rewrites and deletes globally is not, and Phase 3 is where the
-    /// split that makes it safe lives.
+    /// text mutations and Codex answers into tables a rolled-back v0.6.0
+    /// daemon rewrites and deletes globally is not, and the phase that splits
+    /// them is where the change that makes it safe lives.
     ///
     /// So the question is now asked of the value, not of the list — the one place
     /// in this daemon where that is the right question, because what is being
     /// asked is not "can this build drive the agent" but "is this run's state
     /// safe in a table the previous build sweeps". Only the agent that predates
     /// the split is, and it is the *only* agent a v0.6.0 daemon can even name.
-    /// The three tests continue to drive the real producers against a real Codex
+    /// The tests continue to drive the real producers against a real Codex
     /// row — a *registered* one now, rather than one staged into the store
     /// because registration was impossible — so the refusal stays proven at the
-    /// place a Phase-3 change would have to remove it.
+    /// place a later change would have to remove it.
     ///
     /// **Asking this of a row is only sound because the answer cannot change
-    /// under the asker.** Each of the three producers reads the row's agent and
-    /// then does its durable write later — `send_text` in the same breath, the
-    /// hook seven awaits later, `answer` five — and none of them holds the
+    /// under the asker.** Each producer reads the row's agent and
+    /// then does its durable write later — `send_text` in the same breath,
+    /// `answer` five awaits later — and neither of them holds the
     /// registration gate across the pair. A Claude → Codex re-registration landing
     /// in that window would have the read admit a row the write then lands on as
     /// Codex, which is exactly the isolation this method claims. It cannot: a uid
@@ -1838,10 +1903,24 @@ impl Daemon {
                 // Resolved before the lock, because naming a run reads the
                 // database and the lock below admits no awaits.
                 let mut labels: HashMap<String, String> = HashMap::new();
+                // The card's agent, resolved here for the same reason the label
+                // is: `blocked_runs` reads it under a lock that admits no awaits.
+                // A row whose session has since gone is dropped rather than
+                // guessed — a recovered card counted under the wrong agent would
+                // be a doorbell authorized to devices that cannot open it, which
+                // is the failure the agent-scoped count exists to prevent.
+                let mut agents: HashMap<String, protocol::agent::AgentKind> = HashMap::new();
                 for row in &rows {
                     if !labels.contains_key(&row.session_uid) {
                         let label = self.effective_project_label(&row.session_uid).await;
                         labels.insert(row.session_uid.clone(), label);
+                    }
+                    if !agents.contains_key(&row.session_uid) {
+                        if let Ok(Some(session)) =
+                            self.db.get_session(row.session_uid.clone()).await
+                        {
+                            agents.insert(row.session_uid.clone(), session.agent);
+                        }
                     }
                 }
 
@@ -1852,6 +1931,15 @@ impl Daemon {
                         crate::log_error!(
                             "recovery: dropping an undecodable pending card for {}",
                             row.request_id
+                        );
+                        continue;
+                    };
+                    let Some(agent) = agents.get(&row.session_uid).cloned() else {
+                        crate::log_error!(
+                            "recovery: dropping a pending card for {} whose run is gone; its \
+                             agent cannot be known, and a card counted under the wrong one \
+                             rings phones that cannot open it",
+                            row.session_uid
                         );
                         continue;
                     };
@@ -1877,6 +1965,7 @@ impl Daemon {
                                 .get(&row.session_uid)
                                 .cloned()
                                 .unwrap_or_default(),
+                            agent,
                             created_ms: row.created_ms,
                             responder: None,
                             claimed: false,
@@ -2464,15 +2553,27 @@ impl Daemon {
         post: &HookPost,
         input: &HookInput,
     ) -> Result<HookDecision> {
-        // **Refused before the card is built, let alone written.** See
-        // [`Daemon::shared_ledgers_admit`]. `ensure_session` has just upserted
-        // this run, and its agent arm preserves whatever the row already said —
-        // a Codex row stays Codex — so a hook posted against a Codex uid arrives
-        // here with nothing downstream that ever looks at the agent again: the
-        // approval event is appended, `persist_pending` writes
-        // `pending_approvals`, and the card is answerable. The row read is a read
-        // this path did not previously make; it costs one indexed lookup on the
-        // one hook that can create a card.
+        // **Refused before the card is built, let alone written**, and this is
+        // the one of the three [`Daemon::shared_ledgers_admit`] refusals that
+        // does NOT lift with the approval observer.
+        //
+        // The refusal was scaffolding for the shared `pending_approvals` table,
+        // and that table is now split: a Codex card goes to
+        // `codex_pending_approvals`, which a rolled-back v0.6.0 daemon has never
+        // heard of. But this path is not the Codex producer. It is the **Claude
+        // hook**, and a `PermissionRequest` posted against a Codex uid is not a
+        // Codex approval arriving by another road — it is a hook this daemon
+        // deliberately does not install for Codex, so a post carrying one means
+        // the uid is wrong or the payload is somebody else's. Carding it would
+        // mint a Claude-shaped card with a Claude `tool_use_id` for a run whose
+        // real approvals arrive as typed app-server requests, and then two cards
+        // would answer for one question. The real producer is
+        // [`Daemon::raise_codex_approval`], reached from the link's approval
+        // observer, and it writes the scoped table directly.
+        //
+        // So the gate stays and the *reason* changed. It is stated against the
+        // agent rather than against the ledger, because the ledger argument is
+        // the one that expired.
         //
         // Passthrough, not a denial, and for the same reason the deleted-session
         // arm above passes through: this daemon is declining to *observe* the
@@ -2482,10 +2583,11 @@ impl Daemon {
         // `pending_approvals` — unreachable for a non-Claude run: it is only ever
         // called from the task spawned below, for an entry inserted below.
         match self.db.get_session(session.uid.clone()).await? {
-            Some(row) if !self.shared_ledgers_admit(&row.agent) => {
+            Some(row) if !row.agent.is_claude() => {
                 crate::log_info!(
-                    "dropping a PermissionRequest for {}: it is a {} session, and a card for one \
-                     would be a row in tables a rolled-back daemon rewrites",
+                    "dropping a PermissionRequest for {}: it is a {} session, whose approvals \
+                     reach this daemon as app-server requests on its control link, not as \
+                     Claude hooks",
                     session.uid,
                     row.agent.as_str()
                 );
@@ -2594,6 +2696,19 @@ impl Daemon {
 
         let created_ms = protocol::time::now_unix_ms();
         let label = self.effective_project_label(&session.uid).await;
+        // Read here, beside the label, and for the same reason: it is needed
+        // under a lock that admits no awaits. Read rather than assumed Claude —
+        // this path is Claude's today, but a card that lied about its agent
+        // would misdirect every doorbell that counts it, and the value is one
+        // row read away.
+        let agent = self
+            .db
+            .get_session(session.uid.clone())
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.agent)
+            .unwrap_or(protocol::agent::AgentKind::Claude);
         {
             let mut inner = self.inner.lock().await;
             inner.pending.insert(
@@ -2602,6 +2717,7 @@ impl Daemon {
                     card: card.clone(),
                     session: session.clone(),
                     project_label: label.clone(),
+                    agent,
                     created_ms,
                     responder: responder_tx,
                     claimed: false,
@@ -3069,7 +3185,11 @@ impl Daemon {
                         return;
                     }
                 }
-                blocked_runs(&held)
+                // The ringing run's own agent, which is also the agent
+                // `describing` will keep and `recipients` will authorize
+                // against. One agent through all three, so the sentence, the
+                // count and the audience cannot disagree.
+                blocked_runs(&held, &hint.agent)
             };
             // The subject's name comes out of the same snapshot as the count —
             // see `PushHint::describing` and `PendingApproval::project_label`.
@@ -3273,6 +3393,346 @@ impl Daemon {
     /// no provenance flag of its own.
     pub(crate) fn note_codex_switch(&self, session_uid: &str) {
         self.push_gate.note_progress(session_uid);
+    }
+
+    /// **Raise a Codex approval card, through the machinery that already raises
+    /// Claude's.**
+    ///
+    /// The same `ApprovalCard`, the same `inner.pending` map keyed by
+    /// `(session_uid, request_id)`, the same `EventKind::ApprovalRequest` event,
+    /// the same `PushKind::Approval` doorbell. Four things differ, and each is
+    /// a measured difference rather than a style choice:
+    ///
+    ///   * the card goes to `codex_pending_approvals`, because a rolled-back
+    ///     v0.6.0 daemon enumerates and deletes rows in the shared table without
+    ///     ever walking a session row (see `Store::create_schema`);
+    ///   * `agent` is Codex on the card and on the hint, so `blocked_runs`
+    ///     counts it only for a Codex doorbell and `push_queue::recipients`
+    ///     authorizes it only to devices that advertise Codex;
+    ///   * there is no responder and no prompt fingerprint. Nothing is blocked
+    ///     on this daemon's answer — the human at the TUI is being asked — and
+    ///     there is no pane this daemon can type into, which is why
+    ///     `identity_bound` is false and stays false;
+    ///   * the row and the event are **one commit**. Claude's card is a
+    ///     projection of a fact a hook is still blocking on, so losing it to a
+    ///     restart loses nothing a restart had not already lost. A Codex card
+    ///     has no responder and nothing waiting: durability is the entire thing
+    ///     it is for, and a half-written one is either a fact with no card or a
+    ///     card with no fact. See [`crate::store::Store::raise_codex_pending_approval`].
+    ///
+    /// Returns whether a card is now open for this request, so a caller can
+    /// remember it. A re-delivery of an approval already carded answers `true`
+    /// without ringing a second time: the event dedups on its
+    /// `source_event_id`, and the doorbell hangs off a filed event exactly as
+    /// the turn-completion one does. **Every failure answers `false` and leaves
+    /// nothing behind** — no event, no in-memory card, no ring — because an
+    /// approval this daemon cannot mirror honestly is one the operator is still
+    /// being asked at the keyboard.
+    pub(crate) async fn raise_codex_approval(
+        &self,
+        session: &SessionKey,
+        card: ApprovalCard,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        family: &str,
+    ) -> bool {
+        let request_id = card.request_id.clone();
+        let generation = card.generation;
+        let created_ms = protocol::time::now_unix_ms();
+
+        // The fact the card stands behind. It is committed with the row rather
+        // than before it — see the commit boundary below — and a `None` back
+        // from that commit is a re-delivery: the same item, the same derived
+        // request id, the same `perm:` source id the first sighting filed.
+        let payload = serde_json::json!({ "card": card });
+
+        // **The aggregate bound, checked on the serialised card against the
+        // limit that would destroy it.**
+        //
+        // [`Daemon::truncate_payload`] does not *trim* an oversized payload, it
+        // REPLACES it with a preview object — and a phone handed that decodes no
+        // card at all. `codex_approval`'s per-field bounds keep this rare, and
+        // they cannot make it impossible: nothing on the wire bounds a path, an
+        // execpolicy amendment, or a field a later codex adds, and every field
+        // rides the payload twice because `display_text` is `tool_input`
+        // stringified. So the *total* is asked here, where the real limit lives,
+        // and an approval that cannot be carded honestly is not carded at all.
+        //
+        // Refusing loudly is the right failure: the question is being asked at
+        // the keyboard and is still answerable there, which is the pre-3a status
+        // quo. A silently dead card is not.
+        let encoded_payload = payload.to_string();
+        if encoded_payload.len() > self.config.max_payload_bytes {
+            crate::log_error!(
+                "refusing to card the Codex approval {request_id} for {}: the event would be \
+                 {} bytes against a {}-byte payload limit, and a payload the daemon replaces \
+                 is a card the phone cannot decode. The request stands and is answerable at \
+                 the keyboard.",
+                session.name,
+                encoded_payload.len(),
+                self.config.max_payload_bytes
+            );
+            return false;
+        }
+        let pending =
+            PendingEvent::new(session, EventKind::ApprovalRequest, payload, Source::Daemon)
+                .with_source_event_id(format!("perm:{request_id}"));
+
+        let encoded = match serde_json::to_string(&card) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                crate::log_error!("could not encode the Codex card for {request_id}: {err:#}");
+                return false;
+            }
+        };
+        let row = crate::store::CodexPendingApprovalRow {
+            session_uid: session.uid.clone(),
+            session_id: session.name.clone(),
+            request_id: request_id.clone(),
+            card: encoded,
+            generation,
+            created_ms,
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item_id: item_id.to_string(),
+            family: family.to_string(),
+        };
+
+        // **One commit boundary, and nothing is exposed before it holds.**
+        //
+        // The event used to be filed first and the row written after, which made
+        // three failures reachable and all three silent. A constraint refusal —
+        // the unique index catching a broken derivation — left the request event
+        // filed with no card and no terminal that could ever retire it. An
+        // ordinary write failure returned success and rang the phone for a card
+        // a restart would forget. And the reverse ordering would have lost the
+        // fact instead of the card.
+        //
+        // So the row and the event share a transaction, and **every** failure of
+        // it is answered the same way: no event, no in-memory card, no ring, and
+        // a loud log. That is not a degraded mode — the request is being asked at
+        // the keyboard and is still answerable there, which is exactly where it
+        // was before this daemon observed anything.
+        //
+        // Published inside the gate for `ingest`'s reason: no later seq may
+        // overtake this one on the way to a socket.
+        let gate = self.publish_gate(&session.uid).await;
+        let raised = {
+            let _ordered = gate.lock().await;
+            let raised = self.db.raise_codex_pending_approval(row, pending).await;
+            if let Ok(crate::store::CodexCardRaise {
+                event: Some(event), ..
+            }) = &raised
+            {
+                let _ = self.events_tx.send(event.clone());
+            }
+            raised
+        };
+        let approval_event = match raised {
+            Ok(raise) if raise.is_open() => raise.event,
+            // The re-delivery carried a DIFFERENT question under the same item
+            // id. Refused loudly and the stored card stands: merging it would
+            // move the row and the in-memory card to the new content while the
+            // filed `ApprovalRequest` and every connected phone kept the old
+            // one — half a representation, changed with no event and no ring to
+            // say so. No capture has ever produced this, so there is nothing
+            // measured to reconcile it against.
+            Ok(crate::store::CodexCardRaise {
+                outcome: crate::store::CodexCardOutcome::ContentChanged,
+                ..
+            }) => {
+                crate::log_error!(
+                    "refusing a re-delivery of the Codex approval {request_id} for {}: item \
+                     {item_id} already holds a card for a DIFFERENT question. The card the \
+                     phone is holding stands, because changing it under a filed request \
+                     event would leave the two disagreeing. This shape is unmeasured.",
+                    session.name
+                );
+                return false;
+            }
+            // The run was deleted between the frame arriving and the card being
+            // filed. Neither half landed, so there is nothing to undo.
+            Ok(_) => {
+                crate::log_info!(
+                    "dropping Codex approval {request_id} for {}: the session was deleted \
+                     while it was in flight",
+                    session.name
+                );
+                return false;
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "refusing the Codex approval {request_id} for {}: neither the card nor \
+                     the request event could be committed, so nothing is raised and nothing \
+                     rings. The request stands and is answerable at the keyboard: {err:#}",
+                    session.name
+                );
+                return false;
+            }
+        };
+
+        let label = self.effective_project_label(&session.uid).await;
+        {
+            let mut inner = self.inner.lock().await;
+            inner
+                .last_seen_ms
+                .insert(session.uid.clone(), protocol::time::now_unix_ms());
+            inner.pending.insert(
+                (session.uid.clone(), request_id.clone()),
+                PendingApproval {
+                    card,
+                    session: session.clone(),
+                    project_label: label.clone(),
+                    agent: protocol::agent::AgentKind::Codex,
+                    created_ms,
+                    // No hook is held open on a Codex approval: the app-server
+                    // asked the TUI, not this daemon, and nothing here is
+                    // blocking on an answer to hand back.
+                    responder: None,
+                    claimed: false,
+                    local_misses: 0,
+                    tool_ran: false,
+                    generation,
+                    // There is no prompt on a pane this daemon can fingerprint,
+                    // so remote actuation stays refused for the reason the field
+                    // exists rather than by a second rule.
+                    prompt: None,
+                },
+            );
+        }
+
+        // The doorbell hangs off the FILED event, and only a first sighting
+        // files one. A re-delivery after a reconnect is not a second question.
+        if let Some(event) = approval_event {
+            if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &request_id) {
+                self.dispatch_push(
+                    session.uid.clone(),
+                    event.seq,
+                    PushHint {
+                        project_label: label,
+                        kind: crate::apns::PushKind::Approval,
+                        blocked_sessions: 0,
+                        session_uid: session.uid.clone(),
+                        // The ringing run's own agent, which is what
+                        // `describing` keeps and `recipients` authorizes
+                        // against. A Codex decision offered to a phone that
+                        // cannot render one is the failure this narrows away.
+                        agent: protocol::agent::AgentKind::Codex,
+                    },
+                    ticket,
+                    false,
+                    Some(CardKey::Request(request_id.clone())),
+                );
+            }
+        }
+        true
+    }
+
+    /// **Retire one Codex card, first terminal wins.**
+    ///
+    /// Claim by removal, exactly as [`Daemon::resolve_without_phone`] does: the
+    /// caller that takes the entry out of `inner.pending` owns the resolution,
+    /// so a `serverRequest/resolved` arriving *after* a `turn/completed
+    /// {interrupted}` already cleared the card finds nothing and overwrites
+    /// nothing. That ordering is not hypothetical — it is what the wire does,
+    /// measured in `fixtures/codex/interrupt.jsonl`, where the turn terminal is
+    /// frame 33 and the resolution is frame 34.
+    ///
+    /// **This claim is one of three guards, and it is not the durable one.**
+    /// Mutation-measured: removing it alone changes nothing, because the link's
+    /// own `outstanding` map has already forgotten the request, and removing
+    /// both of those still changes nothing, because the `resolved:{request_id}`
+    /// source id makes the second event a duplicate the log declines. Only
+    /// removing all three lets a second resolution be filed. The ordering
+    /// matters: the connection map is per-socket and dies with it, the claim is
+    /// per-process and dies with a restart, and the dedup key is in the log — so
+    /// the log is what still holds after a reconnect on a different connection,
+    /// which is exactly the case a re-delivered request produces.
+    ///
+    /// **It does not touch `answers`.** That table is one of the four a
+    /// rolled-back v0.6.0 daemon rewrites globally, and Codex's resolution
+    /// taxonomy does not fit `AnswerOutcome`'s `decision + resolved_by +
+    /// applied_via` shape anyway. [`protocol::ws::CodexResolution`] rides its
+    /// own event for both reasons at once.
+    ///
+    /// # The two durable halves are one commit, and a failure is retryable
+    ///
+    /// Deleting the row and filing the resolution were two writes with the claim
+    /// already given up between them, and both orderings lost something. A
+    /// failed delete followed by a filed resolution left a row recovery restores
+    /// — an already-answered question back on a phone after a restart, because
+    /// nothing writes a Codex row into `answers` and that is the only terminal
+    /// the recovery read knows how to ask about. A successful delete followed by
+    /// a failed append lost the card's only terminal.
+    ///
+    /// They now share a transaction, and the claim is **put back** when it
+    /// fails: the card is still open, still on the phone, and the next terminal
+    /// the wire produces — the item's own `item/completed`, the turn's, or the
+    /// `/new` sweep — retires it for real. Giving the claim away on a failed
+    /// write would make the first terminal both the winner and the loser.
+    ///
+    /// # Three answers, not two
+    ///
+    /// "There was no claim to take" and "the commit failed" are opposite facts
+    /// and were both `false`. A caller that cannot tell them apart cannot know
+    /// whether it still owes this card anything — and the one that could not,
+    /// [`Connection::retire_codex_cards`], threw away the wire mapping on both,
+    /// which is how a failed retirement quietly became a permanent one.
+    pub(crate) async fn retire_codex_approval(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        resolution: protocol::ws::CodexResolution,
+    ) -> Retirement {
+        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
+        let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
+            return Retirement::AlreadyGone;
+        };
+        let pending = PendingEvent::new(
+            session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&resolution).unwrap_or(serde_json::Value::Null),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("resolved:{request_id}"));
+
+        // Published inside the gate for `ingest`'s reason: no later seq may
+        // overtake this one on the way to a socket.
+        let gate = self.publish_gate(&session.uid).await;
+        let retired = {
+            let _ordered = gate.lock().await;
+            let retired = self
+                .db
+                .retire_codex_pending_approval(session.uid.clone(), request_id.to_string(), pending)
+                .await;
+            if let Ok(Some(event)) = &retired {
+                let _ = self.events_tx.send(event.clone());
+            }
+            retired
+        };
+        if let Err(err) = retired {
+            // The claim goes back, so this terminal has neither retired the card
+            // nor consumed the right to: a later one still can.
+            self.inner.lock().await.pending.insert(id, claimed);
+            crate::log_error!(
+                "could not retire the Codex approval {request_id} in {}: neither the card \
+                 nor its resolution was committed, so the card stays open and the next \
+                 terminal will try again: {err:#}",
+                session.name
+            );
+            return Retirement::Failed;
+        }
+        self.inner
+            .lock()
+            .await
+            .last_seen_ms
+            .insert(session.uid.clone(), protocol::time::now_unix_ms());
+        crate::log_info!(
+            "codex approval {request_id} in {} retired: {resolution:?}",
+            session.name
+        );
+        Retirement::Retired
     }
 
     /// **The doorbell for a Codex turn this daemon watched finish.**
@@ -6926,12 +7386,29 @@ impl Daemon {
 
         // Snapshot first: capturing a pane is a subprocess round-trip and must
         // not happen with the state lock held.
+        //
+        // **Claude's cards only, and that is now a filter rather than a fact.**
+        // Every line of this sweep is about a *Claude* prompt: it searches the
+        // pane for Claude's permission box and Claude's composer, it binds a
+        // Claude prompt fingerprint, and it resolves through
+        // [`Daemon::resolve_without_phone`], which writes `answers` — one of the
+        // tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
+        // from `pending_approvals`, which is not where a Codex card lives.
+        //
+        // Until the approval observer there were no Codex cards in `pending`, so
+        // the whole sweep was Claude-only by construction and needed no filter.
+        // There are now, and run against one the sweep would do three wrong
+        // things at once: read a Codex TUI pane for a Claude prompt, leak a
+        // Codex row into `answers`, and delete nothing from
+        // `codex_pending_approvals` — leaving the card on the phone with the only
+        // thing that could retire it already gone from memory. A Codex card is
+        // retired by the frames that actually settle it, on the link.
         let candidates: Vec<(String, SessionKey, bool, i64)> = {
             let inner = self.inner.lock().await;
             inner
                 .pending
                 .iter()
-                .filter(|(_, p)| !p.claimed)
+                .filter(|(_, p)| !p.claimed && p.agent.is_claude())
                 .map(|((_, request_id), p)| {
                     (
                         request_id.clone(),
@@ -10054,6 +10531,16 @@ mod tests {
     /// second decision while its first is claimed — is not reachable through
     /// the hooks.
     fn pending_card(uid: &str, label: &str) -> PendingApproval {
+        pending_card_for(uid, label, protocol::agent::AgentKind::Claude)
+    }
+
+    /// The same, for a named agent — the agent-scoped count is what makes the
+    /// distinction observable.
+    fn pending_card_for(
+        uid: &str,
+        label: &str,
+        agent: protocol::agent::AgentKind,
+    ) -> PendingApproval {
         PendingApproval {
             card: serde_json::from_value(json!({
                 "request_id": "r", "payload_hash": "h", "tool_name": "Bash",
@@ -10062,6 +10549,7 @@ mod tests {
             .unwrap(),
             session: SessionKey::new(uid, "cc-1"),
             project_label: label.into(),
+            agent,
             created_ms: 0,
             responder: None,
             claimed: false,
@@ -10090,7 +10578,7 @@ mod tests {
             pending_card("other-run", "Ledger"),
         );
 
-        let mut blocked = blocked_runs(&inner);
+        let mut blocked = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
         blocked.sort();
         assert_eq!(
             blocked,
@@ -10100,7 +10588,44 @@ mod tests {
             ],
             "two cards on one run are one agent, named once"
         );
-        assert!(blocked_runs(&Inner::default()).is_empty());
+        assert!(blocked_runs(&Inner::default(), &protocol::agent::AgentKind::Claude).is_empty());
+    }
+
+    /// **A Codex card does not inflate a Claude doorbell, and vice versa.**
+    ///
+    /// The count a doorbell says out loud is also the deck it is authorized as
+    /// (`PushHint::describing` keeps the ringing run's agent, and
+    /// `push_queue::recipients` narrows by it). Counting the other agent's
+    /// cards would make a Claude alert say "2 agents need you" while naming a
+    /// deck half of which a Claude-only phone cannot open — the exact
+    /// misauthorization the hardcoded-Claude line used to cause in reverse.
+    ///
+    /// **Mutation:** drop the `agent` filter from `blocked_runs` and both
+    /// counts become 2.
+    #[test]
+    fn a_card_is_counted_only_by_a_doorbell_of_its_own_agent() {
+        let mut inner = Inner::default();
+        inner.pending.insert(
+            ("claude-run".to_string(), "r-1".to_string()),
+            pending_card_for("claude-run", "Aion", protocol::agent::AgentKind::Claude),
+        );
+        inner.pending.insert(
+            ("codex-run".to_string(), "r-2".to_string()),
+            pending_card_for("codex-run", "Ledger", protocol::agent::AgentKind::Codex),
+        );
+
+        let claude = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
+        assert_eq!(
+            claude,
+            vec![("claude-run".to_string(), "Aion".to_string())],
+            "a Codex card must not be counted by a Claude doorbell"
+        );
+        let codex = blocked_runs(&inner, &protocol::agent::AgentKind::Codex);
+        assert_eq!(
+            codex,
+            vec![("codex-run".to_string(), "Ledger".to_string())],
+            "a Claude card must not be counted by a Codex doorbell"
+        );
     }
 
     /// **A run that moves takes its open cards with it.**
@@ -18513,6 +19038,28 @@ mod tests {
         assert_no_insert_was_attempted(&db, uid);
     }
 
+    /// **A Claude hook is not the road a Codex approval arrives on.**
+    ///
+    /// This tripwire used to say something stronger and now says something
+    /// narrower, and the narrowing is the point. It was written when *no* Codex
+    /// card could exist, because `pending_approvals` was shared with a v0.6.0
+    /// daemon that sweeps it globally; the table is now split and
+    /// [`Daemon::raise_codex_approval`] raises Codex cards for real. What
+    /// remains true — and is what this pins — is that they do not arrive
+    /// *here*. This daemon installs no `PermissionRequest` hook for Codex, so a
+    /// hook posted against a Codex uid means the uid or the payload is somebody
+    /// else's, and carding it would mint a second, Claude-shaped card for a
+    /// question the link is already asking properly.
+    ///
+    /// So the assertions are unchanged and their justification is not: no card,
+    /// no row in any shared ledger, and a passthrough rather than a denial —
+    /// declining to observe must never reach the agent as the human's answer.
+    ///
+    /// **Mutation:** change the gate's arm to `self.shared_ledgers_admit(..)`
+    /// and this stays green, which is why the sentence matters more than the
+    /// predicate; delete the gate entirely and both the card assertion and
+    /// `assert_no_insert_was_attempted` go red, because `persist_pending` writes
+    /// the shared table and the schema trigger then refuses the write.
     #[tokio::test]
     async fn a_permission_request_for_a_codex_session_raises_no_card() {
         let (store, db) = shared_store_on_disk();
@@ -18605,6 +19152,9 @@ mod tests {
             PendingApproval {
                 card,
                 session: SessionKey::new(uid, "cc-1"),
+                // The tripwire's whole point is a Codex card that got into
+                // memory some other way, so it is a Codex card here too.
+                agent: protocol::agent::AgentKind::Codex,
                 created_ms: protocol::time::now_unix_ms(),
                 responder: Some(responder_tx),
                 claimed: false,
@@ -18633,5 +19183,601 @@ mod tests {
         // `apply_decision` down the typing path instead, which is not the path
         // that writes the most.
         drop(responder_rx);
+    }
+
+    /// **The Claude pane sweep does not touch a Codex card.**
+    ///
+    /// Every line of `sweep_local_resolutions` is about a Claude prompt: it
+    /// searches the pane for Claude's permission box and Claude's composer, and
+    /// it resolves through `resolve_without_phone`, which writes `answers` — one
+    /// of the tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
+    /// from `pending_approvals`, which is not where a Codex card lives.
+    ///
+    /// Before the approval observer this was safe by construction, because
+    /// `pending` could hold nothing but Claude cards. It now can, and run
+    /// against one the sweep would do three wrong things at once: read a Codex
+    /// TUI pane for a Claude prompt, leak a Codex row into `answers`, and delete
+    /// nothing from `codex_pending_approvals` — leaving the card on the phone
+    /// with the only thing that could retire it already gone from memory.
+    ///
+    /// **`tool_ran` is set by hand, and that is what makes this test mean
+    /// anything.** This sweep has two arms: the `tool_ran` arm, which resolves
+    /// at once and needs no pane, and the pane arm, which is behind a
+    /// `capture_visible` that fails outright in a test with no supervisor. The
+    /// first version of this test drove only the pane arm — and passed with the
+    /// filter REMOVED, because the capture failed and the sweep `continue`d
+    /// before reaching anything. Measured, not suspected. So it drives the arm
+    /// that runs, which is the one immediately behind the filter.
+    ///
+    /// **Mutation:** drop `p.agent.is_claude()` from the candidate filter and
+    /// the Codex card is resolved: `answers` gets a row for a Codex run, which
+    /// is a table a rolled-back v0.6.0 daemon rewrites globally, and the card
+    /// leaves memory while its row in `codex_pending_approvals` stays — the
+    /// phone keeps a card nothing can ever retire.
+    #[tokio::test]
+    async fn the_claude_pane_sweep_leaves_a_codex_card_alone() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        // No grace, so a single sweep is enough to resolve anything the filter
+        // admits. Without it this would pass for the trivial reason that nothing
+        // had waited long enough.
+        let config = Config {
+            local_resolve: true,
+            local_resolve_grace_ms: 0,
+            ..Config::default()
+        };
+        let daemon = daemon_on(Arc::clone(&store), config);
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+
+        let request_id = "codex-composite-1";
+        let tool_input = json!({ "command": "touch /tmp/a" });
+        let card = ApprovalCard {
+            request_id: request_id.to_string(),
+            payload_hash: approval_payload_hash("command", &tool_input),
+            tool_name: "command".into(),
+            tool_input: tool_input.clone(),
+            display_text: approval_payload_text("command", &tool_input),
+            permission_suggestions: None,
+            prompt_id: None,
+            permission_mode: None,
+            risk: None,
+            generation: 1,
+            identity_bound: false,
+        };
+        daemon.inner.lock().await.pending.insert(
+            (uid.to_string(), request_id.to_string()),
+            PendingApproval {
+                card,
+                session: SessionKey::new(uid, "cc-1"),
+                agent: protocol::agent::AgentKind::Codex,
+                // Old enough that the grace cannot be what saves it.
+                created_ms: 0,
+                responder: None,
+                claimed: false,
+                local_misses: 0,
+                // See the note above: the arm of this sweep that resolves
+                // without reading a pane, so the filter is what has to stop it.
+                tool_ran: true,
+                project_label: "cc-1".into(),
+                generation: 1,
+                prompt: None,
+            },
+        );
+
+        // Swept as many times as the miss counter could possibly need.
+        for _ in 0..(LOCAL_RESOLVE_MISSES + 2) {
+            daemon.sweep_local_resolutions().await;
+        }
+
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), request_id.to_string())),
+            "a Codex card is retired by the frames that settle it, not by a sweep \
+             looking for a Claude prompt on a Codex pane"
+        );
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+    }
+
+    /// Raise one ordinary Codex command card, the way the link does.
+    async fn raise_codex_card(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        item_id: &str,
+    ) -> bool {
+        let approval = crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::Command,
+            &json!({
+                "threadId": "th-1",
+                "turnId": "tu-1",
+                "itemId": item_id,
+                "environmentId": "local",
+                "command": "/bin/zsh -lc 'touch /tmp/a'",
+                "cwd": "/work",
+                "availableDecisions": ["accept", "cancel"],
+            }),
+            None,
+        )
+        .expect("a command approval");
+        let card = approval.card(request_id.to_string(), 1);
+        daemon
+            .raise_codex_approval(
+                &SessionKey::new(uid, "cc-1"),
+                card,
+                &approval.thread_id,
+                &approval.turn_id,
+                &approval.item_id,
+                "commandExecution",
+            )
+            .await
+    }
+
+    fn approval_events(daemon: &Daemon, uid: &str, kind: EventKind) -> Vec<Event> {
+        daemon
+            .store
+            .events_after(uid, 0, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .collect()
+    }
+
+    /// **A card the store refuses files no fact about it.**
+    ///
+    /// The unique index on `(session_uid, thread_id, item_id)` is the schema
+    /// saying one wire item is one card, and it catches the one failure the
+    /// primary key cannot: a *broken derivation*, which produces a different
+    /// request id for the same item. The event used to be appended first, so
+    /// that refusal left an `ApprovalRequest` in the log with no card anywhere
+    /// and no terminal that could ever retire it — a question the timeline shows
+    /// forever. One transaction is what makes the refusal total.
+    ///
+    /// **Mutation:** append the event before the row (or in a second
+    /// transaction) and the second assertion goes red with two request events
+    /// for one item.
+    #[tokio::test]
+    async fn a_card_the_schema_refuses_leaves_no_request_event_behind() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        // The same item under a second derived id: the derivation broke, and the
+        // index is what says so.
+        assert!(
+            !raise_codex_card(&daemon, uid, "derived-1-forked", "exec-1").await,
+            "one wire item must not become two cards"
+        );
+
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).len(),
+            1,
+            "the refused card must file no request event: an ApprovalRequest with no \
+             card behind it can never be resolved"
+        );
+        let pending = daemon.inner.lock().await;
+        assert_eq!(pending.pending.len(), 1);
+        assert!(pending
+            .pending
+            .contains_key(&(uid.to_string(), "derived-1".to_string())));
+    }
+
+    /// **A re-delivery that changed the question is refused, not merged.**
+    ///
+    /// The silent-refresh path moved one half of the representation. The stored
+    /// row and the in-memory card would take the new content while the
+    /// already-filed `ApprovalRequest` — the fact every connected client holds,
+    /// and the fact Phase 3b would answer against — kept the old one. No event,
+    /// no ring, nothing anywhere saying the question had changed under a card a
+    /// human is looking at.
+    ///
+    /// The measured re-delivery is byte-identical (the live bounce capture), so
+    /// this shape is one the wire has never produced; the honest answer is to
+    /// refuse it loudly and leave the card the phone is holding alone, rather
+    /// than invent a reconciliation for an input nothing can currently generate.
+    ///
+    /// **Mutation:** restore `ON CONFLICT … DO UPDATE SET card, turn_id` and the
+    /// stored-card assertion goes red while the request-event count stays at 1 —
+    /// which is exactly the two halves disagreeing.
+    #[tokio::test]
+    async fn a_redelivery_that_changed_the_question_is_refused_and_the_card_stands() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        let filed = daemon.store.codex_pending_approvals(uid).unwrap();
+        assert_eq!(filed.len(), 1);
+        let stored = filed[0].card.clone();
+
+        // The same item and the same derived id, carrying a different command.
+        let approval = crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::Command,
+            &json!({
+                "threadId": "th-1",
+                "turnId": "tu-1",
+                "itemId": "exec-1",
+                "environmentId": "local",
+                "command": "/bin/zsh -lc 'rm -rf /'",
+                "cwd": "/work",
+                "availableDecisions": ["accept", "cancel"],
+            }),
+            None,
+        )
+        .expect("a command approval");
+        let swapped = approval.card("derived-1".to_string(), 1);
+        assert_ne!(
+            swapped.payload_hash, filed[0].card,
+            "the premise: this is a different question"
+        );
+        assert!(
+            !daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    swapped,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "commandExecution",
+                )
+                .await,
+            "a re-delivery that changed the question is not a rebind"
+        );
+
+        let after = daemon.store.codex_pending_approvals(uid).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].card, stored,
+            "the stored card must still be the one the filed request event describes"
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).len(),
+            1,
+            "and no second request event was filed for it either"
+        );
+        // The in-memory card is the stored one too, so nothing on this daemon
+        // holds the swapped question.
+        let held = daemon.inner.lock().await;
+        let entry = held
+            .pending
+            .get(&(uid.to_string(), "derived-1".to_string()))
+            .expect("the original card is still open");
+        assert_eq!(serde_json::to_string(&entry.card).unwrap(), stored);
+    }
+
+    /// **A card that cannot be persisted is not raised at all.**
+    ///
+    /// The old arm called an I/O failure "not evidence of anything about the
+    /// card", kept the in-memory half and rang the phone — a card that exists
+    /// only in this process, that a restart forgets, and that the rebind path
+    /// can never find because the store is its only witness. For Codex that is
+    /// the whole guarantee: nothing is blocked on this daemon's answer, so a
+    /// card's only value is that it is durable. Refusing loudly leaves the
+    /// question where it already is — in front of the operator at the keyboard.
+    ///
+    /// **Mutation:** restore the `Err` arm that logs and falls through, and all
+    /// three assertions go red.
+    #[tokio::test]
+    async fn a_card_that_cannot_be_persisted_is_refused_rather_than_raised_in_memory() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        store.break_codex_card_writes_for_tests();
+
+        assert!(!raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty(),
+            "no card, so no fact claiming there is one"
+        );
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "an in-memory-only card is a card the rebind path can never find"
+        );
+        // And the doorbell was never admitted: the gate's key for this request is
+        // still free, which it would not be if a push had been dispatched.
+        assert!(
+            daemon.push_gate.admit_decision(uid, "derived-1").is_some(),
+            "a refused card must not have rung"
+        );
+    }
+
+    /// **A retirement that cannot commit keeps the card, and the SAME daemon
+    /// finishes it.**
+    ///
+    /// Deleting the row and filing the resolution were two writes with the claim
+    /// given up between them. A failed delete plus a filed resolution left a row
+    /// recovery restores — an answered question back on a phone after a restart.
+    /// A successful delete plus a failed append lost the only terminal the card
+    /// will ever have. One transaction removes both, and putting the claim back
+    /// is what keeps the failure retryable: a terminal that neither retired the
+    /// card nor consumed the right to must not be the winner.
+    ///
+    /// **The retry is on the same daemon, the same store and the same claim**,
+    /// because that is the only version of the question worth asking. An earlier
+    /// draft of this test "retried" by building a fresh store, a fresh daemon and
+    /// a fresh card — which exercises a first retirement, not a retry, and would
+    /// have passed with the restored claim thrown away. The failure is therefore
+    /// injected reversibly (`hide_codex_cards_for_tests`) so the retry meets the
+    /// card the first terminal left behind.
+    ///
+    /// **Mutation:** drop the `pending.insert(id, claimed)` on the error arm and
+    /// the retry finds `AlreadyGone` — the card is gone from memory with no
+    /// resolution anywhere and its row still in the store.
+    #[tokio::test]
+    async fn a_retirement_that_cannot_commit_is_retried_by_the_next_terminal() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        // The row is unreachable, so the delete half cannot land. Reversible, so
+        // the retry below is a real retry.
+        store.hide_codex_cards_for_tests(true);
+        let cleared = protocol::ws::CodexResolution::Cleared {
+            cause: protocol::ws::ClearCause::TurnAborted,
+        };
+        assert_eq!(
+            daemon
+                .retire_codex_approval(&SessionKey::new(uid, "cc-1"), "derived-1", cleared.clone())
+                .await,
+            Retirement::Failed,
+            "a failed commit must not report itself as a settled card"
+        );
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).is_empty(),
+            "a resolution filed against a card still in the store is what resurrects \
+             it on the next restart"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), "derived-1".to_string())),
+            "the claim goes back, or this terminal has consumed the right to retire \
+             the card without retiring it"
+        );
+
+        // The store answers again, and the next terminal — same daemon, same
+        // claim, same card — finishes what the first one could not.
+        store.hide_codex_cards_for_tests(false);
+        assert_eq!(
+            daemon
+                .retire_codex_approval(&SessionKey::new(uid, "cc-1"), "derived-1", cleared)
+                .await,
+            Retirement::Retired,
+            "the restored claim is what makes the next terminal able to retire it"
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).len(),
+            1
+        );
+        assert!(daemon
+            .store
+            .codex_pending_approvals(uid)
+            .unwrap()
+            .is_empty());
+        assert!(daemon.inner.lock().await.pending.is_empty());
+
+        // And a third terminal for the same card is `AlreadyGone`, not a second
+        // failure and not a second resolution.
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Cleared {
+                        cause: protocol::ws::ClearCause::ItemCompleted,
+                    },
+                )
+                .await,
+            Retirement::AlreadyGone
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).len(),
+            1,
+            "first terminal wins, and the loser files nothing"
+        );
+    }
+
+    /// **A resolved card leaves no row for recovery to resurrect.**
+    ///
+    /// Recovery restores every open card in `all_pending_approvals` whose
+    /// request has no `answers` row — and nothing writes a Codex row into
+    /// `answers`, by design, because that table is one of the four a rolled-back
+    /// v0.6.0 daemon rewrites globally. So for a Codex card the SQL terminal
+    /// check can never fire, and the *only* thing standing between an answered
+    /// question and a second appearance on the phone is that its row is gone.
+    /// The atomic retirement is what guarantees that, and this is the assertion
+    /// that says so end to end.
+    ///
+    /// **Mutation:** delete the row and file the resolution as two writes, break
+    /// the delete, and the restored count comes back 1.
+    #[tokio::test]
+    async fn recovery_does_not_resurrect_a_codex_card_that_was_already_resolved() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Answered {
+                        by: protocol::ws::ResolutionActor::Local,
+                        decision: None,
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+
+        // A fresh daemon over the same store is exactly what a restart is.
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        restarted.recover().await;
+        assert!(
+            restarted.inner.lock().await.pending.is_empty(),
+            "a question that was answered before the restart must not come back \
+             asking to be answered again"
+        );
+    }
+
+    /// The largest card `codex_approval`'s bounds can produce: every field at
+    /// its ceiling, and the file list at `MAX_CHANGES` with maximal diffs.
+    fn worst_case_codex_approval() -> crate::codex_approval::Approval {
+        let started = json!({
+            "type": "fileChange",
+            "id": "exec-worst",
+            "changes": (0..64)
+                .map(|n| json!({
+                    "path": format!("/work/{}/file{n}.txt", "ünïcodé".repeat(64)),
+                    "kind": {"type": "update", "move_path": serde_json::Value::Null},
+                    "diff": "→".repeat(64 * 1024),
+                }))
+                .collect::<Vec<serde_json::Value>>(),
+        });
+        crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::FileChange,
+            &json!({
+                "threadId": "01a06db1-b6a5-7500-8956-6c35b83b32d2",
+                "turnId": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0",
+                "itemId": "exec-worst",
+            }),
+            Some(&started),
+        )
+        .expect("a worst-case file change is still readable")
+    }
+
+    /// **A worst-case card survives the daemon's own truncation, intact.**
+    ///
+    /// This is the assertion the per-field bounds were believed to buy and did
+    /// not. `Daemon::truncate_payload` does not trim an oversized payload — it
+    /// REPLACES it with `{_codeconnect_truncated, _original_bytes, _preview}`,
+    /// and a phone handed that decodes no card, so both buttons are gone. The
+    /// old ceilings multiplied out to 512 KiB of diffs *before* counting that
+    /// every field rides the payload twice (once as `tool_input`, once
+    /// JSON-escaped inside `display_text`): a 32-file patch of maximal diffs
+    /// measured 1,056,469 bytes against the 524,288-byte default, and the cliff
+    /// was at **sixteen** files, not thirty-two.
+    ///
+    /// So the bound that matters is the aggregate one, it is measured on the
+    /// serialised card, and it is checked here — through the real `ingest`, at
+    /// the real configured limit, not against a constant this test also owns.
+    ///
+    /// **Mutation:** restore the per-file `MAX_DIFF_BYTES` in place of the
+    /// shared `MAX_TOTAL_DIFF_BYTES` split and the filed payload comes back
+    /// replaced by the preview object.
+    #[tokio::test]
+    async fn the_largest_card_the_bounds_admit_survives_the_daemons_truncation() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let approval = worst_case_codex_approval();
+        let card = approval.card("codex-worst-case".into(), 1);
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    card,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "fileChange",
+                )
+                .await,
+            "the worst case the bounds admit must still be cardable"
+        );
+
+        let event = daemon
+            .store
+            .events_after(uid, 0, 50)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == EventKind::ApprovalRequest)
+            .expect("the approval must be logged");
+        assert!(
+            event.payload["_codeconnect_truncated"].is_null(),
+            "the daemon replaced its own card with a preview object; the phone \
+             decodes nothing from that. Payload was {} bytes against a {}-byte limit.",
+            event.payload.to_string().len(),
+            daemon.config.max_payload_bytes
+        );
+        // And it is still the card the phone verifies, after the round trip.
+        let filed: ApprovalCard =
+            serde_json::from_value(event.payload["card"].clone()).expect("a decodable card");
+        assert_eq!(
+            filed.payload_hash,
+            protocol::hash::sha256_hex(filed.display_text.as_bytes())
+        );
+    }
+
+    /// **And a card that cannot fit is refused rather than filed dead.**
+    ///
+    /// The per-field bounds make the aggregate check rare; they cannot make it
+    /// unreachable, because nothing on the wire bounds a path, an execpolicy
+    /// amendment, or a field a later codex adds — and `max_payload_bytes` is an
+    /// operator setting that clamps as low as 4 KiB. When the total does not
+    /// fit, the honest answer is no card: the question is being asked at the
+    /// keyboard and is still answerable there. A filed event whose payload the
+    /// daemon replaced is a permanent unanswerable card.
+    ///
+    /// **Mutation:** delete the size check in `raise_codex_approval` and the
+    /// event is filed with `_codeconnect_truncated`, in memory and on the phone.
+    #[tokio::test]
+    async fn a_card_too_large_for_the_payload_limit_is_refused_rather_than_filed_dead() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(
+            Arc::clone(&store),
+            Config {
+                max_payload_bytes: 4096,
+                ..Config::default()
+            },
+        );
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let approval = worst_case_codex_approval();
+        let card = approval.card("codex-too-large".into(), 1);
+        assert!(
+            !daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    card,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "fileChange",
+                )
+                .await,
+            "a card the daemon would have to replace is not a card"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 50)
+                .unwrap()
+                .into_iter()
+                .all(|e| e.kind != EventKind::ApprovalRequest),
+            "a refused card files no request event"
+        );
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "and leaves nothing in memory to ring about"
+        );
     }
 }

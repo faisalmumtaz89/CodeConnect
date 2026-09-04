@@ -1065,6 +1065,33 @@ impl CodexAdapter {
         )
     }
 
+    /// The `item/started` snapshot of one still-open item, scoped to its thread.
+    ///
+    /// **The only reader is the approval observer, and only for a `fileChange`.**
+    /// That family's `requestApproval` carries no content at all — measured
+    /// `reason: null`, `grantRoot: null`, nothing else — while its `item/started`
+    /// carries `changes[].{path, kind, diff}` and arrives two frames earlier
+    /// (`fixtures/codex/file-change.jsonl`, frames 17 and 19). So the content a
+    /// human is being asked about lives here, and joining on the item id is how
+    /// the card gets it.
+    ///
+    /// Keyed by `(thread, turn, item)` — the whole of what an `OpenItem` is
+    /// stored under, and the same key [`CodexAdapter::close_open`] uses. Reading
+    /// on a narrower key than the one the entry is filed by is how a frame ends
+    /// up joined against another turn's item, and the request carries every part
+    /// of it (`threadId`, `turnId`, `itemId` are all required in both bundles).
+    pub(crate) fn open_item(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+    ) -> Option<&Value> {
+        self.open
+            .iter()
+            .find(|o| o.thread_id == thread_id && o.turn_id == turn_id && o.item_id == item_id)
+            .map(|o| &o.started)
+    }
+
     /// Remove one open item by (thread, id) — it completed normally. Scoped to
     /// the thread so a cross-thread frame can never close another thread's item.
     fn close_open(&mut self, thread_id: &str, turn_id: &str, item_id: &str) {

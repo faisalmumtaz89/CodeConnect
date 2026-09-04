@@ -1173,6 +1173,30 @@ impl LiveSandbox {
     /// Type into the pane's TTY. The only way to drive the session: ccd may not
     /// start turns (the broker refuses `turn/start` to the ccd role by design), so
     /// a turn can only ever be started by the real TUI.
+    /// Type one line into the composer and keep pressing Enter until the thing
+    /// it was typed for has happened.
+    ///
+    /// **The retry is measured, not defensive.** A TUI that has painted its
+    /// composer is not yet a TUI that acts on a keypress: the first Enter after
+    /// a fresh paint is swallowed, the line sits in the composer, and the turn
+    /// never starts. Two consecutive runs of the bounce gate died exactly there,
+    /// on the warm-up turn, with the pane still showing the splash and the
+    /// prompt unsent — which is how a probe that asserted nothing could sit in
+    /// the tree looking like coverage. Driving to the *outcome* rather than to a
+    /// fixed sleep is the difference between a gate and a coin flip.
+    async fn submit_until(&self, line: &str, budget: Duration, done: impl Fn() -> bool) -> bool {
+        self.send_keys(&[line]);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let deadline = std::time::Instant::now() + budget;
+        while std::time::Instant::now() < deadline {
+            self.send_keys(&["Enter"]);
+            if wait_until(Duration::from_secs(5), &done).await {
+                return true;
+            }
+        }
+        false
+    }
+
     fn send_keys(&self, keys: &[&str]) {
         let out = Command::new(&self.tmux)
             .args([
@@ -3420,4 +3444,1115 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         .status();
     let _ = coord.wait();
     println!("PASS the_control_link_observes_a_real_codex_session_and_reattaches_by_resume");
+}
+
+// ============================================================ MEASUREMENT PROBE
+//
+// Chunk 3a grounding, NOT a gate. It exists to answer four questions the design
+// cannot be written without, and it answers them by reading the wire rather than
+// by reasoning about it:
+//
+//   1. Does the app-server deliver `*/requestApproval` on the **ccd** upstream at
+//      all, and does it require a subscription? (Two connections, one resumed and
+//      one merely initialized, are tapped side by side.)
+//   2. What does 0.153 actually put in `availableDecisions` — Phase 0 measured
+//      exactly `[accept, acceptWithExecpolicyAmendment, cancel]` on 0.147, while
+//      the schema admits six.
+//   3. What retirement signal reaches ccd when the keyboard answers.
+//   4. What a `fileChange` request carries, which has no `availableDecisions` at all.
+//
+// Delete once the answers are pinned in fixtures and gates.
+
+/// Every frame one ccd connection was handed, verbatim, with the write half kept
+/// so the connection can still be driven and barrier-probed.
+struct WireTap {
+    tx: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<UnixStream>, Message>,
+    frames: Arc<Mutex<Vec<Value>>>,
+    handle: tokio::task::JoinHandle<()>,
+    label: &'static str,
+    next_id: i64,
+}
+
+impl WireTap {
+    /// Split a connection that has already completed `initialize`/`initialized`.
+    fn split(raw: RawCcd, label: &'static str) -> WireTap {
+        let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let (tx, mut rx) = raw.ws.split();
+        let sink = Arc::clone(&frames);
+        let handle = tokio::spawn(async move {
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(text) = msg {
+                    println!("[{label}] {}", frame_preview(&text, 4000));
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        sink.lock().expect("wire tap sink").push(v);
+                    }
+                }
+            }
+            println!("[{label}] closed");
+        });
+        WireTap {
+            tx,
+            frames,
+            handle,
+            label,
+            next_id: 7000,
+        }
+    }
+
+    async fn send(&mut self, frame: Value) {
+        println!("[{}] -> {frame}", self.label);
+        self.tx
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write to the tapped ccd leg");
+    }
+
+    fn seen(&self) -> Vec<Value> {
+        self.frames.lock().expect("wire tap sink").clone()
+    }
+
+    /// Close this leg for real, the way a daemon bounce closes one.
+    ///
+    /// Aborting the reader alone is not enough: the task owns the read half, so
+    /// the socket stays open and the app-server still counts this connection as
+    /// present. Aborting drops the read half and returning drops the write half,
+    /// and only then has the connection gone away.
+    fn close(self) -> Vec<Value> {
+        let seen = self.seen();
+        self.handle.abort();
+        seen
+    }
+
+    /// Every `method` this connection has been handed, in order.
+    fn methods(&self) -> Vec<String> {
+        self.seen()
+            .iter()
+            .filter_map(|v| v["method"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The first frame carrying this method, if any.
+    fn first(&self, method: &str) -> Option<Value> {
+        self.seen()
+            .into_iter()
+            .find(|v| v["method"].as_str() == Some(method))
+    }
+
+    /// A round trip on this very connection, so a zero-count is a fact about the
+    /// wire rather than about a corpse. Same barrier discipline as
+    /// [`Observer::probe`]: everything the server had for this connection is in
+    /// the sink once the answer to this id lands.
+    async fn barrier(&mut self, budget: Duration) -> bool {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(serde_json::json!({"id": id, "method": "thread/loaded/list", "params": {}}))
+            .await;
+        let frames = Arc::clone(&self.frames);
+        wait_until(budget, || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v["method"].is_null())
+        })
+        .await
+    }
+}
+
+/// Drive one real turn that must ask for a command approval, and read what the
+/// ccd leg was handed while it did.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_the_approval_wire_on_the_ccd_leg() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("appr");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+
+    // The control comparison: a ccd connection that completes the handshake and
+    // then subscribes to NOTHING. If an approval reaches this one too, delivery
+    // does not depend on the resume.
+    let unsubscribed = {
+        let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+        let init = raw.initialize().await;
+        assert!(
+            init["result"].is_object(),
+            "unsubscribed initialize: {init}"
+        );
+        raw.notify("initialized", serde_json::json!({})).await;
+        WireTap::split(raw, "UNSUB")
+    };
+
+    // The subject: a ccd connection in exactly the production link's position —
+    // initialized, then resumed onto the session's own thread.
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    let init = raw.initialize().await;
+    assert!(init["result"].is_object(), "subscribed initialize: {init}");
+    raw.notify("initialized", serde_json::json!({})).await;
+
+    // **One harmless turn first, and it is a premise rather than a warm-up.**
+    // MEASURED: a thread the TUI has only just created has `turns: []` and no
+    // rollout file yet, and `thread/resume` on it is refused outright —
+    // `{"error":{"code":-32600,"message":"no rollout found for thread id …"}}`.
+    // A leg that swallowed that error would be unsubscribed while looking
+    // connected, and every frame it then failed to receive would read as a fact
+    // about the app-server instead of a fact about this harness. Driving a turn
+    // to completion is what puts a rollout on disk for the resume to find.
+    // **Wait for the composer before typing into it.** `tui_running` is satisfied
+    // by a process that has not painted yet: measured, keys sent that early land
+    // in the buffer but the Enter is swallowed by the still-starting TUI, and the
+    // prompt then sits in the composer for ever. The footer is the readiness
+    // signal the other gates in this file use.
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer to type into. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    sb.send_keys(&["Reply with the single word amber and nothing else."]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    assert!(
+        wait_until(Duration::from_secs(180), || sb
+            .capture_pane()
+            .to_lowercase()
+            .contains("• amber"))
+        .await,
+        "the warm-up turn never completed, so no rollout exists to resume onto. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // Learn the live thread the way the link does: ask, do not guess.
+    let mut thread_id = String::new();
+    for _ in 0..60 {
+        let loaded = raw
+            .request(
+                "thread/loaded/list",
+                serde_json::json!({}),
+                Duration::from_secs(20),
+            )
+            .await;
+        // MEASURED shape: `{"result":{"data":["<threadId>", …],"nextCursor":null}}`
+        // — a flat array of id strings, not objects.
+        if let Some(id) = loaded["result"]["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+        {
+            thread_id = id.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        !thread_id.is_empty(),
+        "no loaded thread to resume onto; the TUI never started one. pane:\n{}",
+        sb.capture_pane()
+    );
+    println!("MEASURED thread_id = {thread_id}");
+
+    let mut subscribed = WireTap::split(raw, "SUB");
+    // Retried the way the production link retries, and then ASSERTED. The whole
+    // question this probe exists to answer is what a subscribed ccd leg is
+    // handed, so an unsubscribed leg must fail the run rather than answer it.
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 500 + attempt;
+        subscribed
+            .send(serde_json::json!({
+                "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+            }))
+            .await;
+        let frames = Arc::clone(&subscribed.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        let answer = subscribed
+            .seen()
+            .into_iter()
+            .find(|v| v.get("id").and_then(Value::as_i64) == Some(id));
+        match answer {
+            Some(v) if v.get("result").is_some() => {
+                println!("MEASURED thread/resume answered: {v}");
+                resumed = true;
+                break;
+            }
+            Some(v) => println!("resume attempt {attempt} refused: {v}"),
+            None => println!("resume attempt {attempt} unanswered"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        resumed,
+        "the ccd leg never subscribed, so nothing it fails to receive is evidence \
+         about the app-server. broker.log:\n{}",
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    assert!(
+        subscribed.barrier(Duration::from_secs(30)).await,
+        "the subscribed leg must answer a barrier after its resume"
+    );
+
+    // ---- the turn that must ask ------------------------------------------
+    // The session's sandbox is read-only and its approval policy is on-request,
+    // so any write at all has to be asked for.
+    sb.send_keys(&[
+        "Run the shell command `touch /tmp/cc-approval-probe.txt` now. Do not explain, just run it.",
+    ]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+
+    let asked = wait_until(Duration::from_secs(180), || {
+        subscribed
+            .methods()
+            .iter()
+            .any(|m| m.ends_with("/requestApproval"))
+    })
+    .await;
+    println!("pane at the approval:\n{}", sb.capture_pane());
+
+    println!("SUB methods: {:?}", subscribed.methods());
+    println!("UNSUB methods: {:?}", unsubscribed.methods());
+
+    assert!(
+        asked,
+        "no approval reached the subscribed ccd leg in 180s. pane:\n{}\nbroker.log:\n{}",
+        sb.capture_pane(),
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+
+    let request = subscribed
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    println!(
+        "MEASURED requestApproval VERBATIM:\n{}",
+        serde_json::to_string_pretty(&request).expect("pretty")
+    );
+    println!(
+        "MEASURED availableDecisions = {}",
+        request["params"]["availableDecisions"]
+    );
+
+    // Q1, answered against the control — and now ASSERTED, because the whole
+    // reason the observer sits behind a subscription is that an unsubscribed leg
+    // is handed nothing to observe.
+    let unsubscribed_approvals = unsubscribed
+        .methods()
+        .iter()
+        .filter(|m| m.ends_with("/requestApproval"))
+        .count();
+    println!("MEASURED unsubscribed-leg approval count = {unsubscribed_approvals}");
+    assert_eq!(
+        unsubscribed_approvals,
+        0,
+        "an approval reached a connection that resumed NOTHING. Delivery would then \
+         not depend on the subscription, and the whole shape of the observer — one \
+         card per subscribed visit, filtered by thread — would be built on a premise \
+         the wire had stopped honouring. unsubscribed saw: {:?}",
+        unsubscribed.methods()
+    );
+
+    // ---- THE GATE: the real parser, on the real frame ---------------------
+    //
+    // This is what turns the probe above into something that keeps working. Every
+    // fact `codex_approval` reads is read here from the frame the live 0.153
+    // app-server just sent, by the production code, and the card that comes out
+    // is checked against the two gates the phone applies before it will draw a
+    // button. A codex release that moves any of it fails here rather than
+    // silently putting an unreadable card on somebody's phone.
+    let params = &request["params"];
+    let approval =
+        crate::codex_approval::Approval::read(crate::codex_approval::Family::Command, params, None)
+            .expect("the production parser must read a live 0.153 command approval");
+
+    // The option set is the WIRE's, and this is the assertion that says the
+    // schema's stable/experimental split is not the runtime frame:
+    // `availableDecisions` is declared only in the experimental bundle and
+    // arrives here, populated, on a stable launch with no `--experimental`.
+    assert!(
+        params["availableDecisions"].is_array(),
+        "0.153 stopped sending availableDecisions on the stable wire; the command \
+         family would then have no option set to read and every card would be \
+         refused. Got: {}",
+        params["availableDecisions"]
+    );
+    let offered: Vec<&str> = approval
+        .choices
+        .iter()
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        ["accept", "acceptWithExecpolicyAmendment", "cancel"],
+        "the live option set moved. Three of the schema's six, measured on 0.147 and \
+         again here; a new one arriving is not a failure of this build so much as a \
+         label this build has not measured yet — add it to `Family::labels` with the \
+         pane that shows what the TUI calls it, never by guessing."
+    );
+    assert_eq!(
+        approval.choices[1].payload,
+        Some(params["availableDecisions"][1]["acceptWithExecpolicyAmendment"].clone()),
+        "the amendment the server proposed must ride the card verbatim, or an answer \
+         could name one the server never offered"
+    );
+
+    let request_id = approval
+        .request_id("01K1B3XQ8ZC0DE5FGH7JKMNPCX", 1)
+        .expect("a live item id must fit the composite id's bounds");
+    let card = approval.card(request_id, 1);
+    println!(
+        "MEASURED the card this build raises from that frame:\n{}",
+        serde_json::to_string_pretty(&card).expect("pretty")
+    );
+
+    // Gate one: the app decodes five keys non-optionally, and a card missing any
+    // of them renders as "Approval request could not be read".
+    let wire = serde_json::to_value(&card).expect("the card must serialize");
+    for required in [
+        "request_id",
+        "payload_hash",
+        "tool_name",
+        "tool_input",
+        "display_text",
+    ] {
+        assert!(
+            wire.get(required).is_some_and(|value| !value.is_null()),
+            "the phone cannot decode a card without a non-null {required}: {wire}"
+        );
+    }
+    // Gate two: `CardVerification.swift` recomputes this and replaces the card
+    // with a banner — killing both actions — when it disagrees.
+    assert_eq!(
+        card.payload_hash,
+        protocol::hash::sha256_hex(card.display_text.as_bytes()),
+        "a card built from the live wire must still hash to its own display text"
+    );
+    assert_eq!(
+        card.display_text,
+        format!("{}\n{}", card.tool_name, card.tool_input),
+        "and must still re-render as the app re-renders it"
+    );
+    // And the live command really is on the card, under the key the phone's
+    // `principalArgument` reads first.
+    assert_eq!(card.tool_input["command"], params["command"]);
+    assert_eq!(card.tool_input["cwd"], params["cwd"]);
+    println!("GATE PASS — the live 0.153 approval became a card the phone can verify");
+
+    // ---- answer it at the keyboard, and watch the retirement --------------
+    sb.send_keys(&["Enter"]);
+    let resolved = wait_until(Duration::from_secs(60), || {
+        subscribed
+            .methods()
+            .iter()
+            .any(|m| m == "serverRequest/resolved")
+    })
+    .await;
+    println!("pane after the keyboard answer:\n{}", sb.capture_pane());
+    println!(
+        "MEASURED serverRequest/resolved = {:?}",
+        subscribed.first("serverRequest/resolved")
+    );
+    println!("MEASURED resolved-observed = {resolved}");
+    println!("SUB methods after the answer: {:?}", subscribed.methods());
+
+    let _ = subscribed.barrier(Duration::from_secs(30)).await;
+    println!(
+        "FINAL SUB methods: {:?}\nFINAL UNSUB methods: {:?}",
+        subscribed.methods(),
+        unsubscribed.methods()
+    );
+
+    subscribed.handle.abort();
+    unsubscribed.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file("/tmp/cc-approval-probe.txt");
+}
+
+/// Does this frame **settle** the approval on `item_id`?
+///
+/// Only two frames do: the `serverRequest/resolved` that answers the request,
+/// and the item's own `item/completed`. Nothing else is an answer, and the
+/// distinction is not pedantic — the bounce gate's predicate used to accept any
+/// frame whose `/params/item/id` matched, which the `item/started` a leg is
+/// handed *before* the approval satisfies on arrival. A gate resting on that
+/// would go green without a single settling frame ever reaching the replacement
+/// leg, which is the one thing it exists to prove.
+fn settles_the_approval(frame: &Value, item_id: &str) -> bool {
+    match frame.get("method").and_then(Value::as_str) {
+        Some("serverRequest/resolved") => true,
+        Some("item/completed") => {
+            frame.pointer("/params/item/id").and_then(Value::as_str) == Some(item_id)
+        }
+        _ => false,
+    }
+}
+
+/// **`item/started` is not an answer.**
+///
+/// Runs in the ordinary suite — it needs no codex — because the claim is about
+/// the predicate and not about the wire. The frames are the real shapes:
+/// `item/started` and `item/completed` carry the id at `/params/item/id`, the
+/// approval request carries it at `/params/itemId`, and `serverRequest/resolved`
+/// carries no item at all.
+///
+/// **Mutation:** widen the match back to any frame with a matching
+/// `/params/item/id` and the first assertion goes red.
+#[test]
+fn only_a_terminal_settles_an_approval_for_the_bounce_gate() {
+    const ITEM: &str = "exec-1a54b0d3-1d17-4025-8202-e478fb329f00";
+    let with_item = |method: &str| serde_json::json!({"method": method, "params": {"item": {"id": ITEM, "type": "commandExecution"}}});
+
+    assert!(
+        !settles_the_approval(&with_item("item/started"), ITEM),
+        "the frame that OPENS the item must never be read as the answer to it"
+    );
+    assert!(!settles_the_approval(
+        &serde_json::json!({
+            "method": "item/commandExecution/requestApproval",
+            "params": {"itemId": ITEM},
+        }),
+        ITEM
+    ));
+    assert!(!settles_the_approval(
+        &serde_json::json!({"method": "thread/status/changed", "params": {}}),
+        ITEM
+    ));
+
+    assert!(settles_the_approval(&with_item("item/completed"), ITEM));
+    assert!(settles_the_approval(
+        &serde_json::json!({
+            "method": "serverRequest/resolved",
+            "params": {"threadId": "t", "requestId": 0},
+        }),
+        ITEM
+    ));
+    // And an item/completed for somebody ELSE's item settles nothing.
+    assert!(!settles_the_approval(
+        &serde_json::json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "exec-other", "type": "commandExecution"}},
+        }),
+        ITEM
+    ));
+}
+
+/// **What a rebinding connection is told about an approval that is still pending.**
+///
+/// The rebind gate needs one fact the wire has not yet been asked for: when the
+/// daemon bounces mid-approval and resumes, does the app-server (a) re-deliver
+/// the outstanding `requestApproval` to the new connection, (b) describe the
+/// blocked item in the resume answer, or (c) say nothing at all? Each answer
+/// implies a different rebind rule, and only one of them is real:
+///
+/// * re-delivered ⇒ the card must dedupe on `(threadId, itemId)`, because the
+///   request id is per-connection and would otherwise mint a second card;
+/// * described-only ⇒ the card rebinds from the store and the resume answer
+///   confirms it is still live;
+/// * silent ⇒ the store is the only witness, and a resumed link can never learn
+///   that a pending card is already dead.
+///
+/// It was a probe that printed those three and asserted none of them, which left
+/// the rebind rule resting on a Rust test that installed the ordering it wanted.
+/// It is now a gate: it drives the bounce for real, pins the measured answer, and
+/// writes the capture the Rust-side rebind gate replays.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_card_raised_before_a_daemon_bounce_rebinds_onto_one_card() {
+    /// How many times the app-server re-delivers an outstanding
+    /// `*/requestApproval` to a connection that resumes after the subscribed one
+    /// went away.
+    ///
+    /// **Measured on live 0.153.2: one.** Of the three behaviours this gate was
+    /// written to tell apart, the wire does the first — it re-delivers, with a
+    /// fresh per-connection wire id and a byte-identical `itemId`. That is what
+    /// makes deduping on the item the *correct* rebind rule rather than a
+    /// defensive one: without it a bounced daemon mints a second card for a
+    /// question already on the phone.
+    const REBIND_REDELIVERIES: usize = 1;
+    /// Whether the resume answer's own turn state names the pending item.
+    ///
+    /// **Measured: no.** The answer's `turns[]` came back
+    /// `["completed", "inProgress"]` and never named the blocked item, so the
+    /// resume answer is not a witness for a pending approval and nothing may
+    /// read it as one. The re-delivery above is the witness.
+    const REBIND_DESCRIBED: bool = false;
+
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("rebind");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI"
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // A rollout must exist before any resume is possible (measured: a thread with
+    // `turns: []` is refused with "no rollout found for thread id").
+    assert!(
+        sb.submit_until(
+            "Reply with the single word amber and nothing else.",
+            Duration::from_secs(180),
+            || sb.capture_pane().to_lowercase().contains("• amber"),
+        )
+        .await,
+        "the warm-up turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    raw.initialize().await;
+    raw.notify("initialized", serde_json::json!({})).await;
+    let loaded = raw
+        .request(
+            "thread/loaded/list",
+            serde_json::json!({}),
+            Duration::from_secs(20),
+        )
+        .await;
+    let thread_id = loaded["result"]["data"][0]
+        .as_str()
+        .expect("a loaded thread")
+        .to_string();
+    println!("MEASURED thread_id = {thread_id}");
+
+    let mut watcher = WireTap::split(raw, "WATCH");
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 500 + attempt;
+        watcher
+            .send(serde_json::json!({
+                "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+            }))
+            .await;
+        let frames = Arc::clone(&watcher.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        if watcher
+            .seen()
+            .iter()
+            .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v.get("result").is_some())
+        {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(resumed, "the watcher never subscribed");
+
+    // Park a turn on an approval and LEAVE it there.
+    let frames = Arc::clone(&watcher.frames);
+    assert!(
+        sb.submit_until(
+            "Run the shell command `touch /tmp/cc-rebind-probe.txt` now. Do not explain, just run it.",
+            Duration::from_secs(180),
+            || frames.lock().expect("wire tap sink").iter().any(|f| f
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.ends_with("/requestApproval"))),
+        )
+        .await,
+        "no approval to rebind onto. pane:\n{}",
+        sb.capture_pane()
+    );
+    println!("pane while the approval is pending:\n{}", sb.capture_pane());
+
+    // The frame the rebind has to agree with: the approval this leg was handed
+    // before it went away.
+    let before = watcher.seen();
+    let asked = before
+        .iter()
+        .find(|f| {
+            f.get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.ends_with("/requestApproval"))
+        })
+        .cloned()
+        .expect("the approval frame the subscribed leg was handed");
+    let asked_item = asked["params"]["itemId"]
+        .as_str()
+        .expect("an itemId")
+        .to_string();
+    println!("MEASURED pending approval itemId = {asked_item}");
+
+    // ---- THE BOUNCE ---------------------------------------------------------
+    // The subscribed leg goes away entirely, which is what a daemon bounce is.
+    // Leaving it open would ask a different question: what a *second* observer
+    // is handed, not what a *replacement* one is.
+    let before = watcher.close();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut fresh = RawCcd::connect(&sb.ccd_sock()).await;
+    fresh.initialize().await;
+    fresh.notify("initialized", serde_json::json!({})).await;
+    let answer = fresh
+        .request(
+            "thread/resume",
+            serde_json::json!({"threadId": thread_id}),
+            Duration::from_secs(30),
+        )
+        .await;
+    println!(
+        "MEASURED resume-during-pending-approval ANSWER:\n{}",
+        serde_json::to_string_pretty(&answer).expect("pretty")
+    );
+    assert!(
+        answer["result"].is_object(),
+        "the replacement leg must resume, or nothing below is about a rebind: {answer}"
+    );
+
+    let mut rebound = WireTap::split(fresh, "REBIND");
+    // A window in which the app-server could re-deliver the outstanding request
+    // to the replacement connection, then a barrier — so what follows is a fact
+    // about the wire and not about timing.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        rebound.barrier(Duration::from_secs(30)).await,
+        "the rebound leg must answer a barrier"
+    );
+    let redelivered: Vec<Value> = rebound
+        .seen()
+        .into_iter()
+        .filter(|f| {
+            f.get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.ends_with("/requestApproval"))
+        })
+        .collect();
+    println!(
+        "MEASURED re-delivered-to-the-replacement-leg count = {}",
+        redelivered.len()
+    );
+    println!("REBIND methods: {:?}", rebound.methods());
+
+    // Is the pending approval described in the resume answer's own turn state?
+    let turns = &answer["result"]["thread"]["turns"];
+    println!(
+        "MEASURED resume answer turns[] statuses = {:?}",
+        turns.as_array().map(|a| a
+            .iter()
+            .map(|t| t["status"].clone())
+            .collect::<Vec<Value>>())
+    );
+    let described = turns.to_string().contains(&asked_item);
+    println!("MEASURED pending item described in the resume answer = {described}");
+
+    // ---- THE ASSERTION ------------------------------------------------------
+    // **The measured answer, pinned.** Three behaviours were possible and they
+    // imply three different rebind rules (re-delivered ⇒ the card must dedupe on
+    // the item; described-only ⇒ the card rebinds from the store and the answer
+    // confirms it is live; silent ⇒ the store is the only witness). Whichever it
+    // is, it is now a gate: a codex release that changes it fails here rather
+    // than silently changing what a bounced daemon shows a phone.
+    assert_eq!(
+        redelivered.len(),
+        REBIND_REDELIVERIES,
+        "the app-server's redelivery behaviour on a mid-approval resume has \
+         changed. Measured {} re-deliveries against the pinned {REBIND_REDELIVERIES}; \
+         if this is the new truth, re-derive the rebind rule and the committed \
+         capture before moving the constant. REBIND methods: {:?}",
+        redelivered.len(),
+        rebound.methods()
+    );
+    if let Some(again) = redelivered.first() {
+        assert_eq!(
+            again["params"]["itemId"].as_str(),
+            Some(asked_item.as_str()),
+            "a re-delivery that names a different item is not a re-delivery"
+        );
+        assert_eq!(
+            again["params"]["threadId"], asked["params"]["threadId"],
+            "and it must be about the thread this leg resumed onto"
+        );
+        // The identity the card is derived from is byte-stable across the
+        // bounce; the WIRE id is not, and that is the whole reason the derived
+        // id is taken from the item.
+        assert_ne!(
+            again.get("id"),
+            None,
+            "a server request carries a wire id even on re-delivery"
+        );
+    }
+    assert_eq!(
+        described, REBIND_DESCRIBED,
+        "whether the resume answer describes the pending item has changed"
+    );
+
+    // ---- THE TERMINAL AFTER THE BOUNCE --------------------------------------
+    // The operator answers at the keyboard. The card raised before the bounce
+    // must be retired by what the REPLACEMENT leg is handed, or a bounced daemon
+    // leaves an answered question on a phone forever.
+    sb.send_keys(&["Enter"]);
+    let frames = Arc::clone(&rebound.frames);
+    let settled = wait_until(Duration::from_secs(60), || {
+        frames
+            .lock()
+            .expect("wire tap sink")
+            .iter()
+            .any(|f| settles_the_approval(f, &asked_item))
+    })
+    .await;
+    println!("pane after the keyboard answer:\n{}", sb.capture_pane());
+    assert!(
+        settled,
+        "the replacement leg was handed no terminal for the approval raised before \
+         the bounce — neither serverRequest/resolved nor the item's own \
+         item/completed. The card would stay on the phone after the question was \
+         answered. REBIND methods: {:?}",
+        rebound.methods()
+    );
+
+    // ---- THE CAPTURE --------------------------------------------------------
+    // Written in the `{conn,dir,frame}` shape the committed fixtures use, so the
+    // Rust-side rebind gate replays the real bounce rather than a hand-built one.
+    let after = rebound.seen();
+    // The run dir is swept when the sandbox drops, so a capture written there is
+    // a capture nobody can commit. `CC_CODEX_BOUNCE_CAPTURE` names somewhere it
+    // survives, the way `CC_CODEX_FRAME_TEE` does for the broker's tee.
+    let capture = match std::env::var("CC_CODEX_BOUNCE_CAPTURE") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("bounce-capture.jsonl"),
+    };
+    let mut lines = String::new();
+    let mut write = |conn: &str, dir: &str, frame: &Value| {
+        lines.push_str(&serde_json::json!({"conn": conn, "dir": dir, "frame": frame}).to_string());
+        lines.push('\n');
+    };
+    // **Method-less frames are kept, and that is the whole point of this one.**
+    // An earlier writer dropped them, which silently excluded the single most
+    // load-bearing frame in the capture: the `thread/resume` RESPONSE, whose
+    // `turns[]` is the evidence for "the resume answer does not describe the
+    // pending item". A fixture that cannot witness the claim the gate makes is
+    // a fixture the Rust replay has to take on trust.
+    for frame in &before {
+        write("ccd-before-bounce", "s2c", frame);
+    }
+    // The request/response pair the replacement leg opened with. `RawCcd` owns
+    // this exchange, so it never reaches the tap — it is written explicitly, in
+    // arrival order, ahead of the tapped frames.
+    write(
+        "ccd-after-bounce",
+        "c2s",
+        &serde_json::json!({
+            // The id the answer came back under, so the pair in the capture is
+            // the pair that was actually exchanged.
+            "id": answer.get("id").cloned().unwrap_or(Value::Null),
+            "method": "thread/resume",
+            "params": {"threadId": thread_id},
+        }),
+    );
+    write("ccd-after-bounce", "s2c", &answer);
+    for frame in &after {
+        write("ccd-after-bounce", "s2c", frame);
+    }
+    std::fs::write(&capture, &lines).expect("write the bounce capture");
+    println!("CAPTURE WRITTEN: {}", capture.display());
+    println!("GATE PASS — a card raised before a daemon bounce rebinds onto one card and is retired by what the replacement leg is handed");
+
+    rebound.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file("/tmp/cc-rebind-probe.txt");
+}
+
+/// **What a `fileChange` approval carries, and what the TUI offers for it.**
+///
+/// The one shape the design cannot be written without and that no capture in
+/// this repository holds. `item/fileChange/requestApproval` declares **no
+/// `availableDecisions` field at all** — verified against both vendored
+/// bundles, 0.147 and 0.153, stable and experimental — so unlike the command
+/// family there is nothing on the wire to read an option set from. The daemon
+/// must therefore own a label table pinned to what the TUI actually offers,
+/// and that can only be learned by looking at the screen while the decision is
+/// up.
+///
+/// So this probe reads two things at the same moment: the request frame
+/// verbatim (to pin which params are populated on 0.153 — 0.147 sent `reason`
+/// and `grantRoot` both null), and the **pane**, which is where the TUI renders
+/// the choices a human is being given.
+///
+/// Delete once the answers are pinned in fixtures and gates.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_a_file_change_approval_offers() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("fc");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI"
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // A file for it to change. `fileChange` is an edit of something that
+    // exists; asking for a creation gets a shell command and the wrong family.
+    let target = std::path::PathBuf::from("/tmp/cc-fc-probe.txt");
+    std::fs::write(&target, "hello from the codex approvals probe\n").expect("seed the target");
+
+    // The rollout the resume needs (measured: a thread with `turns: []` is
+    // refused with "no rollout found for thread id").
+    sb.send_keys(&["Reply with the single word amber and nothing else."]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    assert!(
+        wait_until(Duration::from_secs(180), || sb
+            .capture_pane()
+            .to_lowercase()
+            .contains("• amber"))
+        .await,
+        "the warm-up turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    raw.initialize().await;
+    raw.notify("initialized", serde_json::json!({})).await;
+    let loaded = raw
+        .request(
+            "thread/loaded/list",
+            serde_json::json!({}),
+            Duration::from_secs(20),
+        )
+        .await;
+    let thread_id = loaded["result"]["data"][0]
+        .as_str()
+        .expect("a loaded thread")
+        .to_string();
+    println!("MEASURED thread_id = {thread_id}");
+
+    let mut sub = WireTap::split(raw, "SUB");
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 500 + attempt;
+        sub.send(serde_json::json!({
+            "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+        }))
+        .await;
+        let frames = Arc::clone(&sub.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        if sub
+            .seen()
+            .iter()
+            .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v.get("result").is_some())
+        {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        resumed,
+        "the ccd leg never subscribed, so nothing it fails to receive is evidence"
+    );
+
+    sb.send_keys(&[
+        "Use apply_patch to edit /tmp/cc-fc-probe.txt, replacing the word hello with goodbye. \
+         Do not explain, just do it.",
+    ]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+
+    let asked = wait_until(Duration::from_secs(240), || {
+        sub.methods()
+            .iter()
+            .any(|m| m == "item/fileChange/requestApproval")
+    })
+    .await;
+
+    // **The pane, captured while the decision is up.** This is the measurement:
+    // the wire carries no option set for this family, so what the TUI renders
+    // is the only evidence of what a human is actually offered.
+    let pane = sb.capture_pane();
+    println!("MEASURED pane WHILE THE FILE-CHANGE APPROVAL IS UP:\n{pane}");
+    println!("SUB methods: {:?}", sub.methods());
+
+    if let Some(started) = sub.seen().into_iter().find(|v| {
+        v["method"].as_str() == Some("item/started")
+            && v.pointer("/params/item/type").and_then(Value::as_str) == Some("fileChange")
+    }) {
+        println!(
+            "MEASURED the fileChange item/started that carries the CONTENT:\n{}",
+            serde_json::to_string_pretty(&started).expect("pretty")
+        );
+    }
+
+    assert!(
+        asked,
+        "no fileChange approval reached the subscribed ccd leg. pane:\n{pane}\nmethods: {:?}",
+        sub.methods()
+    );
+    let request = sub
+        .first("item/fileChange/requestApproval")
+        .expect("the file-change approval frame");
+    println!(
+        "MEASURED fileChange requestApproval VERBATIM:\n{}",
+        serde_json::to_string_pretty(&request).expect("pretty")
+    );
+
+    // ---- THE GATE: the real parser, on the real frame ---------------------
+    //
+    // The same gate the command probe carries, for the family that needs it
+    // most: this request carries no content at all, so the card can only be
+    // built by joining it against the `item/started` two frames earlier. If that
+    // ordering ever stopped holding, the observer would refuse to card a real
+    // approval — silently, in production — and this is where that shows up.
+    let started = sub
+        .seen()
+        .into_iter()
+        .find(|v| {
+            v["method"].as_str() == Some("item/started")
+                && v.pointer("/params/item/type").and_then(Value::as_str) == Some("fileChange")
+                && v.pointer("/params/item/id").and_then(Value::as_str)
+                    == request["params"]["itemId"].as_str()
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no item/started for this fileChange item reached the subscribed leg before \
+                 its approval. That ordering is the ONLY source of the content this family's \
+                 card describes, and without it the observer refuses to card rather than ask \
+                 a person about \"some files\". methods: {:?}",
+                sub.methods()
+            )
+        });
+
+    assert!(
+        request["params"]["availableDecisions"].is_null(),
+        "0.153 started sending availableDecisions on a fileChange. The pane-measured \
+         label table in `Family::labels` is this family's only option set precisely \
+         because the wire had none; if the wire now has one, read IT and delete the \
+         table's set half. Got: {}",
+        request["params"]["availableDecisions"]
+    );
+
+    let approval = crate::codex_approval::Approval::read(
+        crate::codex_approval::Family::FileChange,
+        &request["params"],
+        started.pointer("/params/item"),
+    )
+    .expect("the production parser must read a live 0.153 file-change approval");
+    let request_id = approval
+        .request_id("01K1B3XQ8ZC0DE5FGH7JKMNPCX", 1)
+        .expect("a live item id must fit the composite id's bounds");
+    let card = approval.card(request_id, 1);
+    println!(
+        "MEASURED the card this build raises from that frame:\n{}",
+        serde_json::to_string_pretty(&card).expect("pretty")
+    );
+
+    let wire = serde_json::to_value(&card).expect("the card must serialize");
+    for required in [
+        "request_id",
+        "payload_hash",
+        "tool_name",
+        "tool_input",
+        "display_text",
+    ] {
+        assert!(
+            wire.get(required).is_some_and(|value| !value.is_null()),
+            "the phone cannot decode a card without a non-null {required}: {wire}"
+        );
+    }
+    assert_eq!(
+        card.payload_hash,
+        protocol::hash::sha256_hex(card.display_text.as_bytes()),
+        "a card built from the live wire must still hash to its own display text"
+    );
+    assert_eq!(
+        card.display_text,
+        format!("{}\n{}", card.tool_name, card.tool_input),
+        "and must still re-render as the app re-renders it"
+    );
+    // The content really came off the preceding `item/started`, and the option
+    // set is this family's own — not the command family's.
+    assert_eq!(
+        card.tool_input["changes"], started["params"]["item"]["changes"],
+        "the changes on the card are the ones the item/started carried"
+    );
+    assert_eq!(
+        card.tool_input["options"][1]["id"],
+        serde_json::json!("acceptForSession")
+    );
+    println!("GATE PASS — the live 0.153 file-change approval became a card the phone can verify");
+
+    sb.send_keys(&["Enter"]);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    println!(
+        "MEASURED methods after the keyboard answer: {:?}",
+        sub.methods()
+    );
+    println!("pane after the answer:\n{}", sb.capture_pane());
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&target);
 }

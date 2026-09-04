@@ -37,8 +37,8 @@ use protocol::pairing::DeviceSummary;
 use protocol::ws::AnswerOutcome;
 
 use crate::store::{
-    AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    PrunedSession, SessionRow, Store, TailCursor, TextClaim,
+    AnswerClaim, CodexPendingApprovalRow, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume,
+    PendingApprovalRow, PrunedSession, SessionRow, Store, TailCursor, TextClaim,
 };
 
 #[derive(Clone)]
@@ -118,6 +118,15 @@ db_ops! {
     fn list_sessions() -> Vec<SessionRow>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
     fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
+    /// File one Codex approval card **and** the `ApprovalRequest` it stands
+    /// behind, in one commit. Idempotent on the item, so a re-delivered request
+    /// rebinds the card it already raised instead of minting a second.
+    fn raise_codex_pending_approval(
+        row: CodexPendingApprovalRow,
+        pending: PendingEvent,
+    ) -> crate::store::CodexCardRaise;
+    /// Every open Codex card for one run, with the identity retirement queries.
+    fn codex_pending_approvals(session_uid: String) -> Vec<CodexPendingApprovalRow>;
     fn name_is_tombstoned(session_id: String) -> bool;
     fn clear_name_tombstone(session_id: String) -> ();
     fn claim_answer(claim: AnswerClaim) -> ();
@@ -269,6 +278,22 @@ impl Db {
     ) -> Result<()> {
         self.run(move |store| store.delete_pending_approval(&session_uid, &request_id))
             .await
+    }
+
+    /// Delete one Codex card **and** file its resolution, in one commit. The
+    /// pair is the terminal: a card whose row outlived its own resolution is
+    /// restored by recovery, and a resolution with no delete is a card that
+    /// comes back.
+    pub async fn retire_codex_pending_approval(
+        &self,
+        session_uid: String,
+        request_id: String,
+        pending: PendingEvent,
+    ) -> Result<Option<Event>> {
+        self.run(move |store| {
+            store.retire_codex_pending_approval(&session_uid, &request_id, &pending)
+        })
+        .await
     }
 
     pub async fn claim_text_mutation(

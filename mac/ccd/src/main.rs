@@ -10,6 +10,7 @@ mod apns;
 mod apns_sender;
 mod catalog;
 mod codex_adapter;
+mod codex_approval;
 mod codex_link;
 /// The gated live gate for the control link — a real codex, a real coordinator, a
 /// real broker. Test-only, and never built into the daemon.

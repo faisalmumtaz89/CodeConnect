@@ -1803,6 +1803,13 @@ async fn serve_connection(
         carried_target: carried_adopted,
         carried: Arc::clone(carried),
         adopted_thread: None,
+        // Empty on purpose, and it is the point rather than an omission: the ids
+        // this map is keyed by are meaningful only on the socket that issued
+        // them, so a fresh connection knows nothing about the previous one's
+        // requests. A card that outlived that connection is rebound from the
+        // store, which is keyed by the item.
+        outstanding: std::collections::BTreeMap::new(),
+        swept_generation: None,
     };
 
     // The handshake can bind (a `thread/started` may arrive before the `initialize`
@@ -2036,6 +2043,11 @@ async fn serve_connection(
         // on the wire. A reader asking now gets a settled state rather than a
         // half-applied one — see [`LinkPresence::publish`].
         presence.publish(conn.addressee());
+        // The same moment, for the same reason: every visit movement the last
+        // frame caused has landed, so this is where a card belonging to a visit
+        // the link has left is retired. Guarded on the generation, so it reads
+        // the store only when the visit actually moved.
+        conn.retire_superseded_cards().await;
 
         let deadline = match &attach {
             Attach::Awaiting { deadline, .. } | Attach::Recovering { deadline, .. } => {
@@ -2456,6 +2468,30 @@ struct Connection<'a> {
     /// The thread whose resume this connection ACCEPTED. Only an adopted thread is
     /// published outward for the next connection to inherit (round-2 P6a).
     adopted_thread: Option<String>,
+    /// **Approvals this connection raised a card for and has not seen retired,
+    /// keyed by the id the app-server called the request on THIS socket.**
+    ///
+    /// A Codex `serverRequest` id is a per-connection integer from zero, shared
+    /// across families: two unrelated approvals on two connections both call
+    /// themselves `0`, and a re-delivery after a reconnect arrives as `0` again.
+    /// So it identifies a request in exactly one place — the connection that was
+    /// handed it — which is why this map lives on `Connection` and dies with it
+    /// rather than in [`Carried`]. `serverRequest/resolved` names that id and
+    /// nothing else, so this is the only thing that can say which card it
+    /// settled.
+    ///
+    /// The value is the card's own durable id, derived from
+    /// `(thread_id, item_id)`. The retirements that sweep by item, by turn or by
+    /// visit read the store instead — a card raised before a reconnect is still
+    /// on somebody's phone and this map never saw it — and use this map only to
+    /// forget what they cleared.
+    outstanding: std::collections::BTreeMap<i64, String>,
+    /// The visit generation the superseded sweep last ran at.
+    ///
+    /// `None` until the first idle moment, so a connection that comes up on a
+    /// generation later than the one a surviving card was raised under clears it
+    /// rather than leaving a decision on the phone that no screen still holds.
+    swept_generation: Option<u64>,
 }
 
 /// Where one turn stands in the follow-up settlement.
@@ -3248,7 +3284,365 @@ impl Connection<'_> {
             );
             return;
         }
+        self.observe_approval(frame).await;
         self.ingest_frame(frame).await;
+    }
+
+    /// **The approval seam: raise a card, or retire one.**
+    ///
+    /// Placed after the D4 filter and before the adapter, and both halves of
+    /// that are load-bearing. After the filter, because an approval naming a
+    /// thread this link is not visiting is exactly as much "not this session's
+    /// fact" as any other frame, and a card raised from one would be a decision
+    /// about somebody else's run. Before the adapter, because the adapter
+    /// deliberately mints nothing for any of these methods — an approval is a
+    /// *question*, not a timeline fact, and it has never been part of the
+    /// neutral event model.
+    ///
+    /// A `*/requestApproval` reaches here at all because [`frame_kind`] reads
+    /// `method` and not `id`: a server→client request carries both, so it is a
+    /// method-bearing frame and routes exactly as a notification does. That is
+    /// the right answer for this build, which observes these requests and does
+    /// not answer them — the one thing an `id` would buy is the ability to reply
+    /// on it, and replying is Phase 4's.
+    async fn observe_approval(&mut self, frame: &Value) {
+        let Some(method) = frame.get("method").and_then(Value::as_str) else {
+            return;
+        };
+        let params = frame.get("params").unwrap_or(&Value::Null);
+        match method {
+            "serverRequest/resolved" => self.note_approval_resolved(params).await,
+            "item/completed" => self.note_approval_item_completed(params).await,
+            "turn/completed" => self.note_approval_turn_terminal(params).await,
+            _ => {
+                if let Some(family) = crate::codex_approval::Family::of_method(method) {
+                    self.note_approval_request(family, frame, params).await;
+                }
+            }
+        }
+    }
+
+    /// One request the operator is being asked at the keyboard, mirrored to the
+    /// fleet as a card.
+    async fn note_approval_request(
+        &mut self,
+        family: crate::codex_approval::Family,
+        frame: &Value,
+        params: &Value,
+    ) {
+        // The `item/started` that carries a file change's content, joined on the
+        // item id. Measured in `fixtures/codex/file-change.jsonl`: the snapshot
+        // is frame 17 and its request is frame 19, so on a connection that
+        // watched the item begin it is always already open. The command family
+        // never consults it — its request carries its own content — so a rebind
+        // that missed every `item/started` still cards a command.
+        let started = match (
+            params.get("threadId").and_then(Value::as_str),
+            params.get("turnId").and_then(Value::as_str),
+            params.get("itemId").and_then(Value::as_str),
+        ) {
+            (Some(thread), Some(turn), Some(item)) => self.adapter.open_item(thread, turn, item),
+            _ => None,
+        };
+        let approval = match crate::codex_approval::Approval::read(family, params, started) {
+            Ok(approval) => approval,
+            Err(why) => {
+                // Refused, never guessed. A card built from a request this
+                // daemon could not read would ask a person to decide about
+                // something it cannot name.
+                crate::log_warn!(
+                    "codex link for {}: not raising a card for a {} approval: {why}",
+                    self.session.name,
+                    family.as_str()
+                );
+                return;
+            }
+        };
+
+        let request_id = match approval.request_id(&self.session.uid, self.visit.generation) {
+            Ok(id) => id,
+            Err(why) => {
+                crate::log_warn!(
+                    "codex link for {}: a {} approval could not be given a wire id: {why}",
+                    self.session.name,
+                    family.as_str()
+                );
+                return;
+            }
+        };
+        let card = approval.card(request_id.clone(), self.visit.generation);
+        if !self
+            .daemon
+            .raise_codex_approval(
+                self.session,
+                card,
+                &approval.thread_id,
+                &approval.turn_id,
+                &approval.item_id,
+                family.as_str(),
+            )
+            .await
+        {
+            return;
+        }
+
+        // Remembered under the id THIS socket was handed, because that is the
+        // only thing `serverRequest/resolved` will name. A re-delivery on a
+        // reconnect gets a new wire id for the same derived request id, and the
+        // card it points at is the one already raised.
+        if let Some(wire_id) = frame.get("id").and_then(Value::as_i64) {
+            self.outstanding.insert(wire_id, request_id);
+        }
+    }
+
+    /// **The answer, which carries no answer.**
+    ///
+    /// `serverRequest/resolved` says `{threadId, requestId}` and nothing else —
+    /// no decision, no provenance, the same frame however it was settled. What
+    /// is known is that this daemon did not settle it, because this build cannot:
+    /// so the honest reading is `answered{by: local}` with the decision absent,
+    /// which is exactly the shape [`protocol::ws::CodexResolution::Answered`]
+    /// was given for it.
+    async fn note_approval_resolved(&mut self, params: &Value) {
+        let Some(wire_id) = params.get("requestId").and_then(Value::as_i64) else {
+            return;
+        };
+        let Some(request_id) = self.outstanding.remove(&wire_id) else {
+            // Not one of ours: an approval this connection never carded, a
+            // family it does not raise cards for, or one already retired by a
+            // turn terminal that beat this frame. All three are no-ops, and the
+            // third is the ordering the wire actually produces.
+            return;
+        };
+        // **The mapping is spent here whatever happens, and that is correct
+        // rather than careless.** It exists to turn one wire id into one request
+        // id for one frame, and this frame is broadcast once and never replayed —
+        // so there is no second `resolved` for a restored mapping to serve. A
+        // retirement that fails here is retried by the terminals that read the
+        // store instead ([`Connection::retire_codex_cards`], reached from the
+        // item's own terminal, the turn's, and the `/new` sweep), and those need
+        // no mapping at all. Putting it back would be a guard for an arrival the
+        // wire cannot produce, which is the kind of thing this build deletes
+        // rather than keeps.
+        self.daemon
+            .retire_codex_approval(
+                self.session,
+                &request_id,
+                protocol::ws::CodexResolution::Answered {
+                    by: protocol::ws::ResolutionActor::Local,
+                    decision: None,
+                },
+            )
+            .await;
+    }
+
+    /// **The item finished and no answer to it was ever observed.**
+    ///
+    /// The retirement a link that missed the resolution still sees.
+    /// `serverRequest/resolved` is broadcast once and never replayed, so a link
+    /// that dropped between the request and its resolution comes back to a card
+    /// whose question was settled at the keyboard — and the item's own
+    /// `item/completed`, which a resumed link does receive, is the only frame
+    /// left that says so.
+    ///
+    /// **The item TYPE is read first, and it is what keeps this off the hot
+    /// path.** A card is only ever raised for the two answerable families, so an
+    /// `item/completed` for a `reasoning`, an `agentMessage` or a `userMessage`
+    /// can retire nothing — and those are the great majority of the frames a
+    /// turn produces. Deciding that from the frame in hand costs a string
+    /// compare; deciding it from the store would cost a query on every item of
+    /// every turn.
+    async fn note_approval_item_completed(&mut self, params: &Value) {
+        let carded = params
+            .pointer("/item/type")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_approval::Family::of_item_type)
+            .is_some();
+        if !carded {
+            return;
+        }
+        let (Some(thread_id), Some(item_id)) = (
+            params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            params
+                .pointer("/item/id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        ) else {
+            return;
+        };
+        let cleared = protocol::ws::CodexResolution::Cleared {
+            cause: protocol::ws::ClearCause::ItemCompleted,
+        };
+        self.retire_codex_cards(cleared, |row| {
+            row.thread_id == thread_id && row.item_id == item_id
+        })
+        .await;
+    }
+
+    /// **A turn ended, and no card can outlive the turn that raised it.**
+    ///
+    /// An interrupt is the case that needs this. Measured in
+    /// `fixtures/codex/interrupt.jsonl`: `turn/completed` reports
+    /// `{status: "interrupted", items: []}` at frame 33, the in-flight
+    /// `commandExecution` never gets an `item/completed` at all, and the
+    /// `serverRequest/resolved` that follows at frame 34 carries no decision. So
+    /// the turn terminal is the first and the only honest witness, and it says
+    /// the question was withdrawn rather than answered.
+    ///
+    /// A turn that ends `completed` normally has already had its card retired by
+    /// the item's own terminal, and this sweep finds nothing. It is not dead
+    /// code: a link that reconnects between an `item/completed` and its
+    /// `turn/completed` sees only the second, which is precisely the window the
+    /// two causes exist to tell apart.
+    async fn note_approval_turn_terminal(&mut self, params: &Value) {
+        let (Some(thread_id), Some(turn_id)) = (
+            params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            params
+                .pointer("/turn/id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        ) else {
+            return;
+        };
+        // `status` is required by the bundle in both releases, so a terminal
+        // without one is malformed — the same reading `CodexAdapter::on_turn_completed`
+        // takes of the same field, rather than a second opinion about it.
+        let Some(status) = params.pointer("/turn/status").and_then(Value::as_str) else {
+            return;
+        };
+        let cause = match status {
+            "completed" => protocol::ws::ClearCause::TurnCompleted,
+            _ => protocol::ws::ClearCause::TurnAborted,
+        };
+        self.retire_codex_cards(protocol::ws::CodexResolution::Cleared { cause }, |row| {
+            row.thread_id == thread_id && row.turn_id == turn_id
+        })
+        .await;
+    }
+
+    /// **Retire every card the visit has moved away from.**
+    ///
+    /// One rule rather than a clear at each of the three places the visit moves
+    /// — the `/new` switch, the fallback revert, and the first bind — because
+    /// three call sites are three chances for the fourth one to be forgotten.
+    /// The rule is D4's own definition: a card is raised at the visit generation
+    /// it was seen under, and a generation *is* a visit, so a card carrying any
+    /// other generation belongs to a visit this link has left. Its question is
+    /// on a screen the operator has moved on from, and nothing will ever
+    /// resolve it.
+    ///
+    /// Called from the loop's idle moment, where every movement the last frame
+    /// caused has already been applied, and guarded so it reads the store only
+    /// when the visit has actually moved.
+    /// **Marked swept only once it has actually swept.** The guard exists to
+    /// stop the store being read on every idle tick, not to make one failed read
+    /// permanent: setting it first meant a single `database is locked` left every
+    /// card of every abandoned visit open for the life of the connection, with
+    /// nothing that would ever look again. Now a failed read leaves the
+    /// generation unmarked and the next idle moment retries it.
+    async fn retire_superseded_cards(&mut self) {
+        if self.swept_generation == Some(self.visit.generation) {
+            return;
+        }
+        let visiting = self.visit.generation;
+        if self
+            .retire_codex_cards(
+                protocol::ws::CodexResolution::Cleared {
+                    cause: protocol::ws::ClearCause::Superseded,
+                },
+                |row| row.generation != visiting,
+            )
+            .await
+        {
+            self.swept_generation = Some(visiting);
+        }
+    }
+
+    /// Retire every open Codex card of this run the predicate names.
+    ///
+    /// **Asked of the store, not of [`Connection::outstanding`]**, because the
+    /// question is about the fleet's open cards and not about what this socket
+    /// happened to see. A card raised before a reconnect is still on somebody's
+    /// phone, and the connection that raised it is gone; the store is what
+    /// remembers it, and the four identity columns are there so this read can
+    /// ask by turn, by thread or by item without parsing the serialised card.
+    ///
+    /// # Every terminal names the whole identity the row is keyed by
+    ///
+    /// The read is scoped to the run, and a run outlives a thread: cards raised
+    /// on the thread a `/new` left are still rows here until the superseded
+    /// sweep takes them. So a predicate naming only `item_id` or only `turn_id`
+    /// is asking a question narrower than the identity it is matching against,
+    /// and an id reused on another thread would retire the wrong card. Item-bound
+    /// terminals name `(thread_id, item_id)`; turn-bound ones name
+    /// `(thread_id, turn_id)`.
+    ///
+    /// **This does not rest on how unique an item id is.** Measured across every
+    /// committed capture — six sessions, four sandboxes, two codex releases — the
+    /// ids of both carded families are `exec-<UUIDv4>`: ten distinct ones, all
+    /// RFC-4122 version 4, so 122 random bits rather than a per-thread or
+    /// per-process counter. That makes an accidental collision vanishingly
+    /// unlikely and it is still not a protocol contract, which is exactly why the
+    /// predicate names the identity the row is stored under instead of relying on
+    /// it.
+    /// Returns whether every card this terminal names is now settled — which is
+    /// **not** the same question as whether the store could be read.
+    ///
+    /// Both halves of that were wrong and each was load-bearing. Reading the
+    /// rows and then ignoring what each retirement answered meant
+    /// [`Connection::retire_superseded_cards`] recorded a sweep that had failed,
+    /// so the cards of an abandoned visit stayed open for the life of the
+    /// connection with nothing that would look again. And dropping the wire
+    /// mapping regardless meant that in the **measured** interrupt ordering —
+    /// `turn/completed{interrupted}` at frame 33, `serverRequest/resolved` at
+    /// frame 34 — a failed turn-terminal retirement put the claim back but threw
+    /// away the mapping, so the `resolved` one frame later found nothing to
+    /// retire and the restored card stayed open for ever. The claim being
+    /// retryable is worth nothing if the routes a retry could arrive by are
+    /// spent.
+    ///
+    /// So a mapping is released and a sweep is recorded only for a card that is
+    /// genuinely settled, and a card whose transaction failed keeps both.
+    async fn retire_codex_cards(
+        &mut self,
+        resolution: protocol::ws::CodexResolution,
+        names: impl Fn(&crate::store::CodexPendingApprovalRow) -> bool,
+    ) -> bool {
+        let rows = match self
+            .daemon
+            .db
+            .codex_pending_approvals(self.session.uid.clone())
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not read the open cards to retire them: {err:#}",
+                    self.session.name
+                );
+                return false;
+            }
+        };
+        let mut all_settled = true;
+        for row in rows.into_iter().filter(&names) {
+            if self
+                .daemon
+                .retire_codex_approval(self.session, &row.request_id, resolution.clone())
+                .await
+                .is_settled()
+            {
+                self.outstanding.retain(|_, held| *held != row.request_id);
+            } else {
+                all_settled = false;
+            }
+        }
+        all_settled
     }
 
     /// **A turn beginning on this thread, which is the run moving.**
@@ -7714,6 +8108,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // The healthy answer first, so the failure below is plainly the write and not the
@@ -7751,6 +8147,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
         assert!(
             !conn.recover_from(&answer, LIFECYCLE_THREAD).await,
@@ -8664,6 +9062,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
         // The SAME turn id, owed on two different threads.
         let turn = "01a0-turn".to_string();
@@ -8734,6 +9134,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
         let first: Value = serde_json::from_str(&announce(LIFECYCLE_THREAD)).unwrap();
         conn.note_switch_candidate(&first);
@@ -9430,6 +9832,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // A turn ended a moment ago; its doorbell is waiting out the grace.
@@ -9559,6 +9963,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // A re-announcement of the thread this connection is on. Nobody moved.
@@ -9654,6 +10060,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // The premise: one `/new`, which really does cancel.
@@ -9765,6 +10173,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // Another process takes the write lock and keeps it. The daemon's own writer
@@ -9875,6 +10285,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // **The wire's own frame must still cancel.** This is the half that makes the
@@ -10031,6 +10443,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         // **QUIET.** An answer describing a finished thread is a re-attach, not news.
@@ -10206,6 +10620,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         let ticket = daemon.push_gate.admit_turn_end(&session.uid);
@@ -10372,6 +10788,8 @@ mod tests {
             carried_target: None,
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: Some(LIFECYCLE_THREAD.to_string()),
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
         let subscribed_to_a = CodexAddressee::Subscribed {
             thread_id: LIFECYCLE_THREAD.to_string(),
@@ -10472,6 +10890,8 @@ mod tests {
             carried_target: Some(LIFECYCLE_THREAD.to_string()),
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
         };
 
         assert_eq!(
@@ -10872,5 +11292,1452 @@ mod tests {
         // — and the shapeless ones.
         assert!(!is_measured_not_ready(&json!({"id": 1}), T));
         assert!(!is_measured_not_ready(&json!({"id": 1, "error": {}}), T));
+    }
+
+    // ================================================ the approval observer
+    //
+    // The seam that turns a `*/requestApproval` on the subscribed leg into a
+    // card, and the four terminals that retire one. Every frame below is the
+    // real 0.153 shape — `fixtures/codex/command-execution.jsonl`,
+    // `file-change.jsonl` and `interrupt.jsonl` are where they came from, and
+    // the live measurement probes in `codex_link_live.rs` are where the 0.153
+    // additions (`reason`, `availableDecisions` on the stable wire) came from.
+
+    const APPROVAL_TURN: &str = "01a01282-c951-76c1-84d1-6e33d6fdb219";
+    const APPROVAL_ITEM: &str = "exec-cf7b67c7-3a19-4dd8-a9a6-6f243db33bd4";
+    const FILE_CHANGE_ITEM: &str = "exec-7c581ae8-64a3-49b1-9157-a98fbb2af3e0";
+
+    /// The verbatim 0.153 command request, on `thread` — the fixture frame plus
+    /// the `reason` 0.153 populates and 0.147 did not.
+    fn command_approval(thread: &str, wire_id: i64) -> Value {
+        json!({
+            "id": wire_id,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": thread,
+                "turnId": APPROVAL_TURN,
+                "itemId": APPROVAL_ITEM,
+                "startedAtMs": 1787016966352i64,
+                "environmentId": "local",
+                "kind": "command",
+                "command": "/bin/zsh -lc 'touch marker.txt'",
+                "cwd": "/work/p-accept",
+                "commandActions": [{"type": "unknown", "command": "touch marker.txt"}],
+                "proposedExecpolicyAmendment": ["touch", "marker.txt"],
+                "reason": "the sandbox is read-only",
+                "availableDecisions": [
+                    "accept",
+                    {"acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": ["touch", "marker.txt"]}},
+                    "cancel"
+                ]
+            }
+        })
+    }
+
+    fn file_change_started(thread: &str) -> Value {
+        json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "id": FILE_CHANGE_ITEM,
+                    "changes": [{
+                        "path": "/work/hello.txt",
+                        "kind": {"type": "update", "move_path": Value::Null},
+                        "diff": "@@ -1 +1 @@\n-hello\n+goodbye\n"
+                    }],
+                    "status": "inProgress"
+                },
+                "threadId": thread,
+                "turnId": APPROVAL_TURN,
+                "startedAtMs": 1787017695911i64
+            }
+        })
+    }
+
+    fn file_change_approval(thread: &str, wire_id: i64) -> Value {
+        json!({
+            "id": wire_id,
+            "method": "item/fileChange/requestApproval",
+            "params": {
+                "threadId": thread,
+                "turnId": APPROVAL_TURN,
+                "itemId": FILE_CHANGE_ITEM,
+                "startedAtMs": 1787017695911i64,
+                "reason": Value::Null,
+                "grantRoot": Value::Null
+            }
+        })
+    }
+
+    fn resolved(thread: &str, wire_id: i64) -> Value {
+        json!({
+            "method": "serverRequest/resolved",
+            "params": {"threadId": thread, "requestId": wire_id},
+            "emittedAtMs": 1787016966872i64
+        })
+    }
+
+    fn approval_turn_terminal(thread: &str, status: &str) -> Value {
+        json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": thread,
+                "turn": {
+                    "id": APPROVAL_TURN,
+                    "items": [],
+                    "itemsView": "notLoaded",
+                    "status": status,
+                    "error": Value::Null,
+                    "startedAt": 1787019001,
+                    "completedAt": 1787019012,
+                    "durationMs": 10513
+                }
+            }
+        })
+    }
+
+    fn item_completed(thread: &str, item: &str) -> Value {
+        json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "commandExecution",
+                    "id": item,
+                    "command": "/bin/zsh -lc 'touch marker.txt'",
+                    "cwd": "/work/p-accept",
+                    "status": "completed",
+                    "exitCode": 0
+                },
+                "threadId": thread,
+                "turnId": APPROVAL_TURN,
+                "completedAtMs": 1787016966985i64
+            }
+        })
+    }
+
+    /// The open Codex cards this run's store holds, newest last.
+    fn open_cards(daemon: &Arc<Daemon>, uid: &str) -> Vec<crate::store::CodexPendingApprovalRow> {
+        daemon.store.codex_pending_approvals(uid).unwrap()
+    }
+
+    /// Every `approval_resolved` payload this run filed, in order.
+    fn resolutions(daemon: &Arc<Daemon>, uid: &str) -> Vec<protocol::ws::CodexResolution> {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == protocol::event::EventKind::ApprovalResolved)
+            .map(|e| serde_json::from_value(e.payload).expect("a CodexResolution payload"))
+            .collect()
+    }
+
+    fn approval_requests(daemon: &Arc<Daemon>, uid: &str) -> Vec<Value> {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == protocol::event::EventKind::ApprovalRequest)
+            .map(|e| e.payload)
+            .collect()
+    }
+
+    /// A connection subscribed to `thread` at `generation`, which is the
+    /// position every approval frame below arrives at.
+    fn visiting<'a>(
+        daemon: &'a Arc<Daemon>,
+        session: &'a SessionKey,
+        adapter: &'a mut CodexAdapter,
+        amend: &'a mut AmendThrottle,
+        thread: &str,
+        generation: u64,
+    ) -> Connection<'a> {
+        Connection {
+            daemon,
+            session,
+            adapter,
+            visit: Visit {
+                generation,
+                upstream_epoch: 1,
+                thread_id: Some(thread.to_string()),
+            },
+            filtered: 0,
+            next_id: 1,
+            amend,
+            debts: std::collections::BTreeMap::new(),
+            unadopted_retries: 0,
+            fallback_due: false,
+            switch_candidate: None,
+            carried_target: None,
+            carried: Arc::new(Mutex::new(Carried::default())),
+            adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            swept_generation: None,
+        }
+    }
+
+    /// **One command approval becomes one card the phone can verify.**
+    ///
+    /// The whole seam in one pass: the frame arrives on the subscribed leg, the
+    /// D4 filter admits it, the typed read succeeds, a card is raised through
+    /// the same `PendingApproval` machinery Claude's cards use, and the row
+    /// lands in `codex_pending_approvals` with the four identity columns
+    /// retirement queries.
+    ///
+    /// The card assertions are the phone's own checks, not this daemon's
+    /// opinion of them: `ios/CodeConnect/Model/CardVerification.swift`
+    /// recomputes `SHA-256(display_text)` against `payload_hash` and replaces
+    /// the card with a banner when they disagree, and decoding fails outright
+    /// if any of the five required keys is missing.
+    ///
+    /// **Mutation:** move `observe_approval` above the `visit.admits` check in
+    /// `observe_notification` and this still passes — which is why the
+    /// filtered-thread test below exists. Delete the `observe_approval` call
+    /// and every assertion here goes red.
+    #[tokio::test]
+    async fn a_command_approval_on_the_visited_thread_becomes_a_verifiable_card() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A01".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db, push) = linked_daemon_watching_pushes(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            4,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+
+        let cards = open_cards(&daemon, &session.uid);
+        assert_eq!(cards.len(), 1, "one request, one card");
+        let row = &cards[0];
+        assert_eq!(row.thread_id, LIFECYCLE_THREAD);
+        assert_eq!(row.turn_id, APPROVAL_TURN);
+        assert_eq!(row.item_id, APPROVAL_ITEM);
+        assert_eq!(row.family, "commandExecution");
+        assert_eq!(
+            row.generation, 4,
+            "the card is raised at the visit it was seen under, which is what the \
+             superseded sweep reads"
+        );
+
+        // The card, exactly as the phone will decode and check it.
+        let card: protocol::ws::ApprovalCard =
+            serde_json::from_str(&row.card).expect("the phone must be able to decode this");
+        assert_eq!(
+            card.payload_hash,
+            protocol::hash::sha256_hex(card.display_text.as_bytes()),
+            "a card whose hash does not cover its own display text is a banner on \
+             the phone, not a card"
+        );
+        assert_eq!(card.tool_name, "command");
+        assert_eq!(
+            card.tool_input["command"],
+            json!("/bin/zsh -lc 'touch marker.txt'")
+        );
+        assert_eq!(card.tool_input["cwd"], json!("/work/p-accept"));
+        assert_eq!(card.tool_input["reason"], json!("the sandbox is read-only"));
+        assert_eq!(
+            card.tool_input["options"][1]["payload"],
+            json!({"execpolicy_amendment": ["touch", "marker.txt"]}),
+            "the amendment the server proposed rides the card opaquely, so an \
+             answer names one the server offered and a human can see what it grants"
+        );
+        assert!(!card.identity_bound, "there is no pane prompt to bind");
+        assert_eq!(card.request_id, row.request_id);
+
+        // And the fact is in the log, once.
+        let requests = approval_requests(&daemon, &session.uid);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["card"]["request_id"], json!(row.request_id));
+
+        // **The doorbell is the ringing run's own agent.** `describing` keeps
+        // it, `blocked_runs` counts only cards of it, and `recipients`
+        // authorizes against it — one agent through all three.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let hint = push.last().expect("an approval doorbell");
+        assert_eq!(hint.kind, crate::apns::PushKind::Approval);
+        assert_eq!(hint.agent, protocol::agent::AgentKind::Codex);
+        assert_eq!(hint.blocked_sessions, 1);
+    }
+
+    /// **And that doorbell reaches no device, which is the honest state of this
+    /// chunk rather than an oversight.**
+    ///
+    /// `push_queue::recipients` narrows by what a device advertised, and nothing
+    /// writes the `devices.features` column yet — so every row decodes as the
+    /// Claude floor and a Codex-agent push is filtered out at delivery. The card
+    /// is real, durable and rebindable; what it is not yet is deliverable. That
+    /// is the failure direction the agent-scoped doorbell was built for: silence
+    /// to a phone that could not render it, never a Codex decision offered to
+    /// one that cannot.
+    #[test]
+    fn a_codex_doorbell_is_authorized_to_no_device_this_build_can_produce() {
+        let codex = protocol::agent::AgentKind::Codex;
+        assert!(
+            !crate::store::DeviceFeatures::default().supports(&codex),
+            "the NULL features row every real device has is the Claude floor"
+        );
+        assert!(
+            !crate::store::DeviceFeatures::Unconfirmable.supports(&codex),
+            "and a set this run cannot vouch for is not an advertisement"
+        );
+        assert!(
+            crate::store::DeviceFeatures::default().supports(&protocol::agent::AgentKind::Claude),
+            "the floor is Claude, or this assertion would pass for the wrong reason"
+        );
+    }
+
+    /// **An approval for a thread this link is not visiting is filtered like any
+    /// other frame** (D4).
+    ///
+    /// The observer sits *behind* `Visit::admits`, which is what makes this
+    /// true without a second rule. A card raised from another thread's request
+    /// would be a decision about somebody else's run, filed under this session
+    /// and rung to this session's phones.
+    ///
+    /// **Mutation:** move the `observe_approval` call above the `admits` check
+    /// and a card appears for a thread this session is not on.
+    #[tokio::test]
+    async fn an_approval_naming_another_thread_raises_no_card() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A02".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        const ELSEWHERE: &str = "01a03a55-0000-7000-8000-0000000000aa";
+        conn.observe_notification(&command_approval(ELSEWHERE, 0))
+            .await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "another thread's decision is not this session's"
+        );
+        assert_eq!(conn.filtered, 1, "and it was counted as the filter's work");
+
+        // The same frame on the visited thread does card, so the absence above
+        // is the filter's doing and not the parser's.
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 1))
+            .await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 1);
+    }
+
+    /// **A file change is carded from the `item/started` two frames earlier.**
+    ///
+    /// Its request carries no content at all — `reason: null`, `grantRoot:
+    /// null`, and nothing else — while the `item/started` carries
+    /// `changes[].{path, kind, diff}`. Measured in
+    /// `fixtures/codex/file-change.jsonl`, frames 17 and 19.
+    ///
+    /// **Mutation:** drop the `item/started` and no card is raised, which is the
+    /// second half of this test and the honest answer to an ordering the wire
+    /// can produce on a rebind: refuse rather than ask a person about "some
+    /// files".
+    #[tokio::test]
+    async fn a_file_change_is_carded_from_the_started_snapshot_or_not_at_all() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A03".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // Without the snapshot: nothing to describe, so nothing is asked.
+        conn.observe_notification(&file_change_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "a card that could only say \"some files will change\" is not a question"
+        );
+
+        // With it: the paths and the diff are on the card.
+        conn.observe_notification(&file_change_started(LIFECYCLE_THREAD))
+            .await;
+        conn.observe_notification(&file_change_approval(LIFECYCLE_THREAD, 1))
+            .await;
+        let cards = open_cards(&daemon, &session.uid);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].family, "fileChange");
+        let card: protocol::ws::ApprovalCard = serde_json::from_str(&cards[0].card).unwrap();
+        assert_eq!(card.tool_name, "file change");
+        assert_eq!(card.tool_input["path"], json!("/work/hello.txt"));
+        assert_eq!(
+            card.tool_input["changes"][0]["diff"],
+            json!("@@ -1 +1 @@\n-hello\n+goodbye\n")
+        );
+        assert_eq!(
+            card.tool_input["options"][1]["id"],
+            json!("acceptForSession"),
+            "this family's table, not the command family's"
+        );
+        assert_eq!(
+            card.payload_hash,
+            protocol::hash::sha256_hex(card.display_text.as_bytes())
+        );
+    }
+
+    /// **A re-delivery rebinds the card it already raised.**
+    ///
+    /// A reconnecting link is handed the outstanding request again, with a
+    /// per-connection wire id back at zero and a byte-identical `itemId`. The
+    /// derived request id follows the item, so the second sighting conflicts
+    /// onto the first row instead of minting a second card — and the doorbell
+    /// hangs off a filed event, so it does not ring twice for one question.
+    ///
+    /// **Mutation:** derive the request id from the wire `id` and the two
+    /// sightings below produce one card only by coincidence of both being `0`;
+    /// give the second a different wire id and a second card appears on the
+    /// phone for a question that was only ever asked once.
+    #[tokio::test]
+    async fn a_redelivered_approval_rebinds_one_card_and_rings_once() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A04".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        // The same item, a different connection's idea of its id.
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 7))
+            .await;
+
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "one wire item is one card, whatever the connection called the request"
+        );
+        assert_eq!(
+            approval_requests(&daemon, &session.uid).len(),
+            1,
+            "and one question is one fact, so the doorbell rings once"
+        );
+    }
+
+    /// **The keyboard answered, and the wire will not say what it said.**
+    ///
+    /// `serverRequest/resolved` carries `{threadId, requestId}` and nothing
+    /// else — no decision, no provenance, the same frame however it was
+    /// settled. What is certain is that this daemon did not settle it, because
+    /// this build cannot. `answered{by: local}` with the decision absent is
+    /// exactly that much and no more.
+    ///
+    /// **Mutation:** key `outstanding` by the item id instead of the wire id
+    /// and the resolution finds nothing to retire, because `resolved` names
+    /// only the wire id.
+    #[tokio::test]
+    async fn a_keyboard_answer_retires_the_card_as_answered_by_local() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A05".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 1);
+
+        conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
+            .await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "an answered card is not still waiting"
+        );
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Local,
+                decision: None,
+            }],
+            "the decision is absent because the wire does not carry one"
+        );
+
+        // A second resolution for the same id settles nothing twice.
+        conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(resolutions(&daemon, &session.uid).len(), 1);
+    }
+
+    /// **An interrupt clears the card, and the resolution that follows is a
+    /// no-op.**
+    ///
+    /// The ordering is the wire's, not a hypothesis:
+    /// `fixtures/codex/interrupt.jsonl` has `turn/completed{status:
+    /// "interrupted", items: []}` at frame 33 and `serverRequest/resolved` at
+    /// frame 34, and the in-flight `commandExecution` never gets an
+    /// `item/completed` at all. So the turn terminal is the first witness and
+    /// says the question was withdrawn; the resolution behind it must not
+    /// overwrite that with "answered".
+    ///
+    /// **Mutation:** the property is guarded three times over and no single
+    /// removal reaches it — measured, not assumed. Drop the claim-by-removal in
+    /// `retire_codex_approval` and the link's `outstanding` map has already
+    /// forgotten the request; drop that too and the `resolved:{request_id}`
+    /// source id makes the second event a duplicate the log declines. Remove all
+    /// three together and this goes red with two resolutions filed, the later of
+    /// which tells a reader their card was answered at a keyboard nobody
+    /// touched. The one that survives a reconnect is the dedup key, because the
+    /// other two die with the connection and the process.
+    #[tokio::test]
+    async fn an_interrupt_clears_the_card_and_the_resolution_behind_it_changes_nothing() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A06".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        assert!(open_cards(&daemon, &session.uid).is_empty());
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::TurnAborted
+            }]
+        );
+
+        conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(
+            resolutions(&daemon, &session.uid).len(),
+            1,
+            "first terminal wins; a later frame about a settled card settles nothing"
+        );
+    }
+
+    /// **The item finished and this link never saw the answer.**
+    ///
+    /// `serverRequest/resolved` is broadcast once and never replayed, so a link
+    /// that dropped between the request and its resolution comes back to a card
+    /// whose question was settled at the keyboard. The item's own
+    /// `item/completed` — which a resumed link does receive — is the only frame
+    /// left that says so, and it is deliberately not reported as the *turn*
+    /// completing: measured in `fixtures/codex/file-change.jsonl`, the approved
+    /// item completes at frame 22 and its turn does not terminalize until frame
+    /// 43.
+    ///
+    /// **Mutation:** report `ClearCause::TurnCompleted` here and a reader is
+    /// told a turn ended that is demonstrably still running.
+    #[tokio::test]
+    async fn an_item_terminal_clears_a_card_whose_answer_this_link_missed() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A07".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        conn.observe_notification(&item_completed(LIFECYCLE_THREAD, APPROVAL_ITEM))
+            .await;
+        assert!(open_cards(&daemon, &session.uid).is_empty());
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::ItemCompleted
+            }]
+        );
+
+        // Another item's terminal is another item's business.
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 1))
+            .await;
+        conn.observe_notification(&item_completed(LIFECYCLE_THREAD, "exec-somebody-else"))
+            .await;
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "a card is cleared by its own item, not by any item"
+        );
+
+        // **And BOTH families, because the item type is read before anything
+        // else.** That read is there to keep a `reasoning` or an `agentMessage`
+        // terminal — most of the frames a turn produces — from costing a store
+        // query, and a prefilter that named only one family would silently make
+        // a `fileChange` card unretirable: its item completes, the frame is
+        // dropped as uninteresting, and the question stays on the phone for ever.
+        //
+        // **Mutation:** narrow `Family::of_item_type` to `commandExecution` and
+        // this last assertion goes red.
+        conn.observe_notification(&file_change_started(LIFECYCLE_THREAD))
+            .await;
+        conn.observe_notification(&file_change_approval(LIFECYCLE_THREAD, 2))
+            .await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 2);
+        let fc_done = json!({
+            "method": "item/completed",
+            "params": {
+                "item": {"type": "fileChange", "id": FILE_CHANGE_ITEM, "status": "completed"},
+                "threadId": LIFECYCLE_THREAD,
+                "turnId": APPROVAL_TURN,
+                "completedAtMs": 1787017695959i64
+            }
+        });
+        conn.observe_notification(&fc_done).await;
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "a fileChange card is retired by its own item terminal too"
+        );
+    }
+
+    /// **A `/new` retires every card of the visit it left.**
+    ///
+    /// The operator pressed `/new`: the screen holding the decision is gone and
+    /// nothing will ever resolve it. The sweep is stated as D4's own rule — a
+    /// generation is a visit, and a card carrying another generation belongs to
+    /// a visit this link has left — so it covers the switch, the fallback
+    /// revert and the first bind without three separate clears.
+    ///
+    /// **Mutation:** guard the sweep on the thread rather than the generation
+    /// and an A→B→A revisit leaves gen-1 cards standing on the second visit of
+    /// A, answerable against a screen that has moved on twice.
+    #[tokio::test]
+    async fn a_thread_switch_supersedes_the_cards_of_the_visit_it_left() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A08".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        // The first sweep runs at the generation the card was raised under and
+        // must leave it alone, or every card would be cleared the moment it
+        // appeared.
+        conn.retire_superseded_cards().await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 1);
+
+        // `/new`: the visit moves, exactly as `apply_switch_candidate` moves it.
+        conn.switch_candidate = Some(SWITCHED_THREAD.to_string());
+        assert_eq!(
+            conn.apply_switch_candidate().as_deref(),
+            Some(LIFECYCLE_THREAD)
+        );
+        conn.retire_superseded_cards().await;
+
+        assert!(open_cards(&daemon, &session.uid).is_empty());
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::Superseded
+            }]
+        );
+
+        // **The A→B→A leg, on a FRESH connection, which is what makes the rule
+        // the generation and not the thread.** The link reconnects and comes up
+        // resumed to A again at a later visit; a card raised on A at generation
+        // 1 is still in the store, and its thread matches the one being visited.
+        // A thread-shaped sweep leaves it standing — a decision answerable
+        // against a screen the operator left two visits ago — and only the
+        // generation says it belongs to a visit that is over.
+        drop(conn);
+        let mut earlier = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        earlier
+            .observe_notification(&file_change_started(LIFECYCLE_THREAD))
+            .await;
+        earlier
+            .observe_notification(&file_change_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(
+            open_cards(&daemon, &session.uid)[0].generation,
+            1,
+            "the premise: a card raised on thread A at visit 1"
+        );
+        drop(earlier);
+
+        // A later connection, resumed to the SAME thread at a later visit — the
+        // shape a reconnect after an A→B→A round trip leaves behind.
+        let mut later = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            3,
+        );
+        later.retire_superseded_cards().await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "a card from an earlier visit of the SAME thread is still a card from a \
+             visit this link has left, and only the generation says so"
+        );
+    }
+
+    /// **A terminal names the whole identity, so another thread's cannot clear
+    /// this card.**
+    ///
+    /// The store read is scoped to the *run*, and a run outlives a thread: a
+    /// card raised before a `/new` is still a row until the superseded sweep
+    /// takes it. A predicate naming only `item_id` — or only `turn_id` — is
+    /// therefore matching on less than the identity the row is keyed by, and an
+    /// id reused on another thread retires the wrong card: the phone's question
+    /// disappears while the decision behind it is still on the screen.
+    ///
+    /// Both carded families mint `exec-<UUIDv4>` — measured across every
+    /// committed capture, ten distinct ids, all RFC-4122 version 4 — so this is
+    /// not a collision anyone expects to see. It is the difference between a
+    /// guarantee and a probability, and it costs one string compare.
+    ///
+    /// **Mutations:** drop `row.thread_id == thread_id` from either predicate
+    /// and the corresponding half goes red.
+    #[tokio::test]
+    async fn a_terminal_on_another_thread_does_not_retire_this_threads_card() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A10".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 1);
+
+        // The same item id and the same turn id, on the thread the operator
+        // switched to. The visit filter admits these because this connection is
+        // now visiting that thread; the card belongs to the one it left.
+        drop(conn);
+        let mut switched = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            SWITCHED_THREAD,
+            2,
+        );
+        switched
+            .observe_notification(&item_completed(SWITCHED_THREAD, APPROVAL_ITEM))
+            .await;
+        switched
+            .observe_notification(&approval_turn_terminal(SWITCHED_THREAD, "completed"))
+            .await;
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "an item and a turn on another thread settle nothing about this card"
+        );
+        assert!(resolutions(&daemon, &session.uid).is_empty());
+
+        // And the terminal that really is this card's still retires it.
+        drop(switched);
+        let mut back = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        back.observe_notification(&item_completed(LIFECYCLE_THREAD, APPROVAL_ITEM))
+            .await;
+        assert!(open_cards(&daemon, &session.uid).is_empty());
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::ItemCompleted
+            }]
+        );
+    }
+
+    /// **A failed turn terminal does not spend the `resolved` that follows it.**
+    ///
+    /// This is the measured interrupt ordering — `fixtures/codex/interrupt.jsonl`
+    /// frame 33 is `turn/completed{interrupted}` and frame 34 is
+    /// `serverRequest/resolved` — with the first retirement's transaction
+    /// failing. Putting the claim back made that retirement retryable *in
+    /// principle*; it was not retryable in fact, because the sweep dropped the
+    /// wire mapping regardless, and the `resolved` one frame later then found
+    /// nothing in `outstanding` and returned as a no-op. No item terminal
+    /// follows an interrupted item — measured: the in-flight `commandExecution`
+    /// never gets an `item/completed` at all — so the restored card stayed open
+    /// for ever, on a phone, for a question that was already settled.
+    ///
+    /// A card is only forgotten once something has actually settled it.
+    ///
+    /// **Mutations:** ignore the boolean from `retire_codex_approval` in
+    /// `retire_codex_cards`, or drop the `outstanding` mapping on a failure in
+    /// either that or `note_approval_resolved`, and the card is still open at
+    /// the end.
+    #[tokio::test]
+    async fn a_failed_turn_terminal_leaves_the_resolved_that_follows_it_able_to_retire() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A12".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        assert_eq!(open_cards(&daemon, &session.uid).len(), 1);
+
+        // Frame 33, with its transaction unable to commit. **The append is what
+        // is broken, not the cards table**: a retirement reads the open cards and
+        // then commits, so breaking the read makes `retire_codex_cards` return
+        // before it ever decides what to do with a failed retirement — the arm
+        // this test exists for. Breaking only the append lets the read succeed
+        // and the transaction fail, which is the shape that reaches it.
+        daemon.store.break_event_appends_for_tests(true);
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        daemon.store.break_event_appends_for_tests(false);
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "the premise: the turn terminal did not retire the card"
+        );
+        assert!(resolutions(&daemon, &session.uid).is_empty());
+
+        // Frame 34. The mapping the failed sweep must not have spent is the only
+        // thing that lets this frame reach the card.
+        conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
+            .await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "the resolved one frame later must still be able to retire the card the \
+             failed turn terminal left open — nothing else ever will"
+        );
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Local,
+                decision: None,
+            }],
+            "and it retires it as what it is: answered at the keyboard"
+        );
+    }
+
+    /// **A `serverRequest/resolved` whose retirement fails leaves the card
+    /// reachable by the terminals that read the store.**
+    ///
+    /// `resolved` is broadcast once and never replayed, so its wire mapping is
+    /// spent whatever happens — there is no second one for a restored mapping to
+    /// serve. What must survive is the *card*: the claim goes back, the row is
+    /// untouched, and the item's own terminal finds it through the store, which
+    /// needs no mapping at all. That is the retry route on this path, and this
+    /// is the assertion that it is open.
+    ///
+    /// **Mutation:** drop the `pending.insert(id, claimed)` from
+    /// `retire_codex_approval`'s error arm and the second terminal reports
+    /// `AlreadyGone` while the row stays in the store for ever.
+    #[tokio::test]
+    async fn a_failed_resolved_leaves_the_card_for_a_store_read_terminal() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A13".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+
+        daemon.store.break_event_appends_for_tests(true);
+        conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
+            .await;
+        daemon.store.break_event_appends_for_tests(false);
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "the premise: the resolved did not retire the card"
+        );
+        assert!(resolutions(&daemon, &session.uid).is_empty());
+
+        // The item's own terminal, which asks the store rather than the mapping.
+        conn.observe_notification(&item_completed(LIFECYCLE_THREAD, APPROVAL_ITEM))
+            .await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "a later terminal must still find the card the failed resolved left open"
+        );
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::ItemCompleted
+            }]
+        );
+    }
+
+    /// **A sweep that could not read the store has not swept, and says so.**
+    ///
+    /// The guard exists to keep the store off every idle tick, not to make one
+    /// failed read permanent. Marking the generation swept *before* the read
+    /// meant a single `database is locked` left every card of every abandoned
+    /// visit standing for the life of the connection, with nothing that would
+    /// ever look again — and those cards are precisely the ones nothing else
+    /// will retire, because the screen they belong to is gone.
+    ///
+    /// **Mutation:** set `swept_generation` ahead of the read again and the
+    /// retry leaves the card open.
+    #[tokio::test]
+    async fn a_superseded_sweep_that_could_not_read_the_store_tries_again() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A09".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        conn.switch_candidate = Some(SWITCHED_THREAD.to_string());
+        assert_eq!(
+            conn.apply_switch_candidate().as_deref(),
+            Some(LIFECYCLE_THREAD)
+        );
+
+        // **Two ways a sweep fails, and both must leave it unswept.**
+        //
+        // First the read: `codex_pending_approvals` cannot answer, so the sweep
+        // never learns what it was meant to retire.
+        daemon.store.hide_codex_cards_for_tests(true);
+        conn.retire_superseded_cards().await;
+        daemon.store.hide_codex_cards_for_tests(false);
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "the premise: the failed read retired nothing"
+        );
+
+        // Then the retirement itself: the read succeeds and names the card, and
+        // the transaction that would retire it cannot commit. This is the arm a
+        // read-failure alone can never reach — `retire_codex_cards` returns
+        // before the loop — and it is where "swept" used to be recorded for a
+        // sweep that retired nothing.
+        daemon.store.break_event_appends_for_tests(true);
+        conn.retire_superseded_cards().await;
+        daemon.store.break_event_appends_for_tests(false);
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "the premise: the failed retirement retired nothing either"
+        );
+        assert!(resolutions(&daemon, &session.uid).is_empty());
+
+        // The same idle moment coming round again, on a store that can answer.
+        conn.retire_superseded_cards().await;
+        assert!(
+            open_cards(&daemon, &session.uid).is_empty(),
+            "a sweep that could not read the store must not have counted as a sweep: \
+             these cards belong to a screen the operator has left, and nothing else \
+             will ever retire them"
+        );
+        assert_eq!(
+            resolutions(&daemon, &session.uid),
+            vec![protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::Superseded
+            }]
+        );
+    }
+
+    /// **The permissions family is observed and never carded.**
+    ///
+    /// `item/permissions/requestApproval` answers with a permission *profile*,
+    /// not a yes/no about one action, so there is no decision for a phone to
+    /// render and no card to raise. It reaches this leg and mints nothing —
+    /// which is what "observed" means here, and is different from a frame the
+    /// link never sees.
+    #[tokio::test]
+    async fn a_permissions_request_is_observed_and_never_carded() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A09".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        let profile = json!({
+            "id": 0,
+            "method": "item/permissions/requestApproval",
+            "params": {
+                "threadId": LIFECYCLE_THREAD,
+                "turnId": APPROVAL_TURN,
+                "itemId": "perm-1",
+                "startedAtMs": 1787016966352i64
+            }
+        });
+        conn.observe_notification(&profile).await;
+        assert!(open_cards(&daemon, &session.uid).is_empty());
+        assert!(approval_requests(&daemon, &session.uid).is_empty());
+        assert_eq!(
+            conn.filtered, 0,
+            "it was admitted by the filter and then declined by the observer, which \
+             is a different thing from never arriving"
+        );
+    }
+
+    /// **A card the observer really raised is still not one the phone can
+    /// answer.**
+    ///
+    /// The three `shared_ledgers_admit` refusals used to be proved against a
+    /// Codex card placed in memory by hand, because no producer could raise
+    /// one. There is a producer now, and the honest form of the question is to
+    /// ask it of that producer's own card: the observer raises it through the
+    /// link, and `Daemon::answer` — the gate behind the hook gate — must still
+    /// refuse, before it claims anything in the shared ledgers.
+    ///
+    /// This is the whole answering surface for this chunk. The card is a
+    /// mirror: a human is told what a Codex run is waiting on, and answers it at
+    /// the keyboard. Typing it from a phone is Phase 4, and the refusal is what
+    /// makes that a decision somebody has to make rather than something that
+    /// quietly already works.
+    ///
+    /// **Mutation:** widen `shared_ledgers_admit` to admit Codex and this goes
+    /// red at the `AnswerResult::Rejected` match — the answer path would then
+    /// write `answer_claims` and `answers` for a run a rolled-back v0.6.0
+    /// daemon rewrites globally, and would try to type into a pane that holds no
+    /// Claude prompt.
+    #[tokio::test]
+    async fn a_card_the_observer_raised_is_still_refused_by_the_answer_path() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A10".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        conn.observe_notification(&command_approval(LIFECYCLE_THREAD, 0))
+            .await;
+        let cards = open_cards(&daemon, &session.uid);
+        assert_eq!(
+            cards.len(),
+            1,
+            "the premise: a real card, from the observer"
+        );
+        let card: protocol::ws::ApprovalCard = serde_json::from_str(&cards[0].card).unwrap();
+
+        // Answered exactly as a phone would: the card's own two identity fields,
+        // and the opaque option id this card actually offers.
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(&session.uid),
+            )
+            .await;
+        match &result {
+            protocol::ws::AnswerResult::Rejected { reason } => assert!(
+                reason.contains("codex session") && reason.contains("nothing was typed"),
+                "the refusal must name the agent it refused, before the claim: {reason}"
+            ),
+            other => panic!("a Codex card must not be answerable: {other:?}"),
+        }
+
+        // And the refusal happened before the claim: the card is still open and
+        // no shared ledger holds a row for this run.
+        assert_eq!(
+            open_cards(&daemon, &session.uid).len(),
+            1,
+            "a refused answer must leave the question standing"
+        );
+        // Asked of SQLite on a connection of our own, for the reason
+        // `state::tests::ledger_rows` gives: the store's own readers are the
+        // thing under test.
+        let probe = rusqlite::Connection::open(db.path()).expect("the daemon's own database file");
+        for table in [
+            "answers",
+            "answer_claims",
+            "text_mutations",
+            "pending_approvals",
+        ] {
+            let count: i64 = probe
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                    rusqlite::params![session.uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "{table} must hold no row for a Codex run: it is one of the tables a \
+                 rolled-back v0.6.0 daemon rewrites globally"
+            );
+        }
+    }
+
+    /// **A daemon bounce rebinds ONE card, from the store.**
+    ///
+    /// `serverRequest/resolved` is broadcast once and never replayed, and the
+    /// wire request id restarts from zero on every connection, so a link that
+    /// comes back after a restart can learn nothing about a card it raised
+    /// before it. The store is the only witness, and `recover()` is what reads
+    /// it: `list_pending_approvals` goes through `all_pending_approvals`, so a
+    /// Codex card is exactly as recoverable as a Claude one, and `get_session`
+    /// goes through `all_sessions`, so the recovered card knows it is Codex's —
+    /// which is what keeps it out of the Claude pane sweep and out of a Claude
+    /// doorbell's count.
+    ///
+    /// Then the app-server re-delivers the outstanding request to the resumed
+    /// connection, with a fresh per-connection id and a byte-identical `itemId`.
+    /// The derived request id follows the item, so that is a rebind and not a
+    /// second card.
+    ///
+    /// # The frames are the real ones, and so is the re-delivery
+    ///
+    /// This used to hand-build the request and *assume* a re-delivery, which is
+    /// the shape of a test that installs the answer it wants. The bounce is now
+    /// driven live — `codex_link_live::a_card_raised_before_a_daemon_bounce_rebinds_onto_one_card`
+    /// parks a real turn on a real approval, closes the subscribed leg outright,
+    /// resumes a replacement one, and pins what the wire does. **Measured on
+    /// 0.153.2: the app-server re-delivers the outstanding `requestApproval` to
+    /// the replacement connection — with a fresh per-connection wire id that is
+    /// `0` again and a byte-identical `itemId` — and the resume answer does NOT
+    /// describe the pending item.** So the re-delivery is the only witness a
+    /// rebound link gets, deduping on the item is the correct rule rather than a
+    /// defensive one, and the wire id is provably useless across a bounce.
+    ///
+    /// `fixtures/codex/approval-rebind-0.153.jsonl` is that run, both legs, and
+    /// this test replays it: the frames below are read out of the capture rather
+    /// than written here, so a codex release that stops re-delivering fails the
+    /// live gate *and* leaves this one replaying a capture that no longer
+    /// matches the wire.
+    ///
+    /// **Mutation:** point `list_pending_approvals` back at `pending_approvals`
+    /// and the restart recovers nothing — the re-delivery then mints a card
+    /// whose store row conflicts with the one already there. Drop the `agents`
+    /// lookup in `recover` and the card is dropped instead, because a Codex run
+    /// has no row in `sessions`.
+    #[tokio::test]
+    async fn a_daemon_bounce_rebinds_one_card_and_a_redelivery_does_not_add_a_second() {
+        // The live bounce, both legs, in arrival order.
+        const CAPTURE: &str = include_str!("../../../fixtures/codex/approval-rebind-0.153.jsonl");
+        let captured: Vec<Value> = CAPTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one captured frame"))
+            .collect();
+        // The notification frames one leg was handed. The capture also holds the
+        // `thread/resume` request and its response — see the resume-answer
+        // assertion below — and a response has no `method`, so it is not
+        // something `observe_notification` is ever given.
+        let leg = |name: &str| -> Vec<Value> {
+            captured
+                .iter()
+                .filter(|row| row["conn"] == name && row["dir"] == "s2c")
+                .map(|row| row["frame"].clone())
+                .filter(|frame| frame.get("method").is_some())
+                .collect()
+        };
+        let (before_frames, after_frames) = (leg("ccd-before-bounce"), leg("ccd-after-bounce"));
+        let captured_thread = before_frames
+            .iter()
+            .find_map(|f| f.pointer("/params/threadId").and_then(Value::as_str))
+            .expect("the capture names its thread")
+            .to_string();
+        // The premise the whole gate rests on, read off the capture rather than
+        // asserted about a frame this file wrote.
+        let redelivered: Vec<&Value> = after_frames
+            .iter()
+            .filter(|f| {
+                f.get("method")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.ends_with("/requestApproval"))
+            })
+            .collect();
+        assert_eq!(
+            redelivered.len(),
+            1,
+            "the capture must hold the re-delivery this test is about"
+        );
+        let asked = before_frames
+            .iter()
+            .find(|f| {
+                f.get("method")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.ends_with("/requestApproval"))
+            })
+            .expect("and the original request");
+        assert_eq!(
+            redelivered[0]["params"]["itemId"], asked["params"]["itemId"],
+            "the item id is byte-identical across the bounce, which is what the \
+             derived request id follows"
+        );
+        assert_eq!(
+            redelivered[0]["id"], asked["id"],
+            "and the WIRE id is `0` on both, which is what it is worth across a \
+             reconnect: nothing"
+        );
+
+        // **The resume answer, witnessed rather than taken on trust.** The live
+        // gate asserts that the replacement leg's `thread/resume` response does
+        // not describe the pending item, which is what makes the re-delivery the
+        // only witness a rebound link gets. The capture now carries that
+        // response, so this replay can check the same thing the gate did instead
+        // of believing a constant in a file it never reads.
+        let resume_answer = captured
+            .iter()
+            .find(|row| {
+                row["conn"] == "ccd-after-bounce"
+                    && row["dir"] == "s2c"
+                    && row["frame"].get("method").is_none()
+                    && row["frame"]["result"]["thread"].is_object()
+            })
+            .map(|row| row["frame"].clone())
+            .expect("the capture holds the replacement leg's thread/resume response");
+        let item = redelivered[0]["params"]["itemId"]
+            .as_str()
+            .expect("an item");
+        assert!(
+            !resume_answer["result"]["thread"]["turns"]
+                .to_string()
+                .contains(item),
+            "the resume answer must NOT name the pending item — if it ever does, the \
+             rebind gains a second witness and the rule that the re-delivery is the \
+             only one has to be re-derived"
+        );
+        assert!(
+            resume_answer["result"]["thread"]["turns"]
+                .as_array()
+                .is_some_and(|turns| !turns.is_empty()),
+            "and it must be a populated answer, or the assertion above is vacuous"
+        );
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A11".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        {
+            let mut conn = visiting(
+                &daemon,
+                &session,
+                &mut adapter,
+                &mut amend,
+                &captured_thread,
+                1,
+            );
+            for frame in &before_frames {
+                conn.observe_notification(frame).await;
+            }
+        }
+        let before = open_cards(&daemon, &session.uid);
+        assert_eq!(before.len(), 1, "the premise: one card, on disk");
+
+        // **The bounce.** A second daemon over the same database file, which is
+        // what a restart is: no shared memory, no connection, nothing carried
+        // but the store.
+        let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
+        let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(tail_rx));
+        let rebound = Daemon::new(
+            protocol::config::Config::default(),
+            store,
+            Arc::new(crate::apns::LoggingPushSender::new()) as Arc<dyn crate::apns::PushSender>,
+            crate::state::Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tail_tx,
+        );
+        rebound.recover().await;
+
+        // One card, and it came back knowing whose it is.
+        let recovered = rebound
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_uid == session.uid)
+            .expect("the run is still in the fleet");
+        assert_eq!(
+            recovered.blocked_on,
+            vec![before[0].request_id.clone()],
+            "a Codex card is exactly as recoverable as a Claude one"
+        );
+
+        // The re-delivery, on a fresh connection whose wire ids start again at
+        // zero. Same item, same derived id, same card.
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &rebound,
+            &session,
+            &mut adapter,
+            &mut amend,
+            &captured_thread,
+            1,
+        );
+        for frame in after_frames.iter().take_while(|f| {
+            f.get("method").and_then(Value::as_str) != Some("serverRequest/resolved")
+        }) {
+            conn.observe_notification(frame).await;
+        }
+
+        let after = open_cards(&rebound, &session.uid);
+        assert_eq!(
+            after.len(),
+            1,
+            "a re-delivered request rebinds the card the store already held"
+        );
+        assert_eq!(after[0].request_id, before[0].request_id);
+        assert_eq!(
+            approval_requests(&rebound, &session.uid).len(),
+            1,
+            "and one question stays one fact across the bounce"
+        );
+
+        // And the rebound card is retired by the terminal the REPLACEMENT leg was
+        // actually handed — the `serverRequest/resolved` the operator's keyboard
+        // answer produced after the bounce, from the same capture.
+        let settled = after_frames
+            .iter()
+            .find(|f| f.get("method").and_then(Value::as_str) == Some("serverRequest/resolved"))
+            .expect("the capture holds the terminal that arrived after the bounce");
+        conn.observe_notification(settled).await;
+        assert!(
+            open_cards(&rebound, &session.uid).is_empty(),
+            "a rebound card is a live card, not a stranded row"
+        );
+        assert_eq!(
+            resolutions(&rebound, &session.uid),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Local,
+                decision: None,
+            }],
+            "answered at the keyboard, decision unknown — which is all the frame says"
+        );
     }
 }
