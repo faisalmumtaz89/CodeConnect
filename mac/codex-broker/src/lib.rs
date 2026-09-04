@@ -36,6 +36,8 @@
 
 pub mod allowlist;
 pub mod fingerprint;
+pub mod frame_tee;
+pub mod guarded_surface;
 pub mod message;
 pub mod redact;
 pub mod refusal;
@@ -47,11 +49,18 @@ pub mod upstream;
 
 pub use allowlist::{disposition, Disposition, JsonRpcKind, RefuseReason, Role};
 pub use fingerprint::LaunchFingerprint;
+pub use frame_tee::{FrameTee, FRAME_TEE_ENV};
+pub use guarded_surface::{
+    admissible_argv, admissible_wire, diff_argv, diff_wire, guarded_result_types, is_guarded,
+    parse_schema, project_argv, project_bundle, ArgvSurface, BundleDocs, GuardedSurface,
+    ProjectionError, SurfaceChange,
+};
 pub use message::WsPayload;
 pub use refusal::{classify, Env, RelayAction};
 pub use response_capability::{
     LegCapabilities, NoCapabilities, ResponseArbiter, ResponseCapabilityRegistry,
-    COMMAND_EXEC_APPROVAL, FILE_CHANGE_APPROVAL, GENERATION_UNSTAMPED,
+    ADMITTED_TOOL_NAMESPACE, COMMAND_EXEC_APPROVAL, DYNAMIC_TOOL_CALL, FILE_CHANGE_APPROVAL,
+    GENERATION_UNSTAMPED,
 };
 pub use session::{
     ConnId, IdAdmission, IdLedgerCounts, PrefixAdmission, SessionThreads, ThreadBinding,

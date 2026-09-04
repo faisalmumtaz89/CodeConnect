@@ -189,6 +189,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
+ "codex-broker",
  "futures-util",
  "h2",
  "http",
@@ -277,6 +278,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

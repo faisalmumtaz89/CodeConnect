@@ -1941,7 +1941,29 @@ async fn drive(
         args.fingerprint.clone(),
         factory,
     )
-    .with_event_sink(Arc::clone(&session.log));
+    .with_event_sink(Arc::clone(&session.log))
+    // The measurement instrument, off unless a live harness asked for it by setting
+    // `CC_CODEX_FRAME_TEE`, and — the containment that matters — not COMPILED unless
+    // this crate was built with its own `frame-tee` feature.
+    //
+    // Gated on CodeConnect's feature rather than only on the broker's, and the
+    // difference is not cosmetic: cargo unifies features across a dependency graph, so
+    // some other crate in a future build could turn on `codex-broker/frame-tee` while
+    // CodeConnect's own feature stays off. `FrameTee::from_env` would then read the
+    // environment even though nothing in this crate asked it to. Gating the CALL here
+    // makes the invariant local to the binary a user runs: no feature, no call, no read.
+    //
+    // A named path that will not open is fatal rather than silently off: a harness that
+    // asked for a capture and got an empty file would draw conclusions from frames
+    // nobody recorded. See `codex_broker::frame_tee`.
+    .with_frame_tee(if cfg!(feature = "frame-tee") {
+        match codex_broker::FrameTee::from_env() {
+            Ok(tee) => tee,
+            Err(why) => return Ok(Outcome::Fatal(why)),
+        }
+    } else {
+        codex_broker::FrameTee::off()
+    });
     session.broker = Some(tokio::spawn(broker.serve()));
 
     // Wait until BOTH legs are bound (or the serve task ended early — a bind
@@ -1999,11 +2021,19 @@ async fn drive(
         verified = verify => verified
             .context("the codex identity check panicked before the TUI spawn")??,
     };
+    // **The `--` fence, applied at the exec that actually runs.** Not in the coordinator
+    // and not at parse time: the process whose spawn this is, is the one that has to be
+    // sure — the same reason this function re-validates the passthrough rather than
+    // trusting its parent. See `codex::fence_positionals` for the measurement that makes
+    // a positional unable to dispatch, and for why the refusal table is no longer what
+    // the safety rests on.
+    let fenced = crate::codex::fence_positionals(&args.tui_args)
+        .map_err(|refusal| anyhow!("refused passthrough TUI argument: {refusal}"))?;
     let mut tui_cmd = Command::new(&args.codex);
     tui_cmd
         .arg("--remote")
         .arg(format!("unix://{}", paths.tui_sock.display()))
-        .args(&args.tui_args)
+        .args(&fenced)
         .env("CODEX_HOME", &args.codex_home)
         // Inherit stdio (the pane's tty) so this IS the session the user drives —
         // and, deliberately, inherit the host's PROCESS GROUP too.
@@ -2874,6 +2904,31 @@ mod tests {
         // Benign passthrough still rides through untouched.
         let ok = parse_host_args(&complete(&["--", "--search", "--model", "gpt-5"])).unwrap();
         assert_eq!(ok.tui_args, vec!["--search", "--model", "gpt-5"]);
+    }
+
+    /// **The TUI is spawned with the FENCED argv, never the raw passthrough.**
+    ///
+    /// `codex::fence_positionals` is what makes a bare token unable to dispatch
+    /// (measured on both binaries; see its docs), and it only does that if this spawn
+    /// actually uses it. What has to be proven is the absence of the raw form at that
+    /// call site, which no unit test reaches by calling anything — the same reason
+    /// `codex::the_version_string_is_recorded_and_never_gates` reads its own source.
+    #[test]
+    fn the_tui_is_spawned_with_the_fenced_argv() {
+        let src = include_str!("codex_host.rs");
+        let spawn = src
+            .split("let mut tui_cmd = Command::new(&args.codex);")
+            .nth(1)
+            .expect("the TUI spawn is in this file");
+        let spawn = &spawn[..spawn.find("CODEX_HOME").unwrap_or(spawn.len())];
+        assert!(
+            spawn.contains(".args(&fenced)"),
+            "the TUI spawn must pass the fenced argv: {spawn}"
+        );
+        assert!(
+            !spawn.contains("args.tui_args"),
+            "the raw passthrough must not reach the TUI spawn: {spawn}"
+        );
     }
 
     /// The main race polls the broker's `JoinHandle` to completion on its

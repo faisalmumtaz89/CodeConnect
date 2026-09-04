@@ -230,7 +230,7 @@ fn parse_no_dup(s: &str) -> Result<Value, ParseError> {
 /// trailing garbage, so an observer that consumes it fails closed (skips registration).
 /// The c2s path keeps [`classify_shape`]'s richer `Malformed` reasons; observers only need
 /// the trust/don't-trust bit.
-pub(crate) fn parse_no_dup_value(s: &str) -> Option<Value> {
+pub fn parse_no_dup_value(s: &str) -> Option<Value> {
     parse_no_dup(s).ok()
 }
 

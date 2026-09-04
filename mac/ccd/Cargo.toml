@@ -35,3 +35,7 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
+# TEST-ONLY. `codex_link_live`'s premise asks whether the installed codex is one this
+# build is grounded against, and that question has exactly one answer — the broker's
+# guarded-surface projection. A second copy of it here would be a second answer.
+codex-broker = { path = "../codex-broker" }

@@ -470,6 +470,20 @@ fn classify_request_disposition(
                         // so it can never bind — which is why both guards above run here,
                         // ahead of it, rather than anywhere later.
                     }
+                    // **Record that this session was handed the tool bundle.** Only here,
+                    // on the forward path of a creation the fingerprint admitted — so the
+                    // flag means "the exact captured `codex_tui` bundle was admitted on
+                    // this session", never "some frame mentioned tools".
+                    //
+                    // [`crate::response_capability`] reads it to decide whether an
+                    // `item/tool/call` is answerable at all: a session created with
+                    // `dynamicTools: null` handed the model nothing, so a dispatch arriving
+                    // in one is not a tool the model could have called.
+                    if method == "thread/start"
+                        && crate::fingerprint::declares_admitted_tool_bundle(params)
+                    {
+                        env.threads.note_tool_bundle_admitted();
+                    }
                     RelayAction::Forward {
                         note: "ownership request: fingerprint asserted",
                     }
@@ -685,6 +699,21 @@ fn classify_request_disposition(
         // the head would refuse the second ordering while proving nothing extra — an
         // unsubscribe carries no ownership fields, cannot start or steer anything, and was
         // measured to affect only the calling connection's own subscription.
+        Disposition::ReadSessionThread => {
+            // The thread-scoped READS. See [`Disposition::ReadSessionThread`] for the
+            // measured cross-session leak this closes.
+            if let Err(detail) = check_read_binding(env, method, params) {
+                return refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    "read refused: it does not name a thread of this session",
+                    format!("{}: {detail}", redact::method(method)),
+                );
+            }
+            RelayAction::Forward {
+                note: "thread-scoped read on a session thread",
+            }
+        }
         Disposition::UnsubscribeSessionThread => {
             // P10 — the params shape is PINNED to the capture: exactly `{threadId}`, a
             // string, and nothing else. Every measured `thread/unsubscribe` (four of them,
@@ -731,8 +760,36 @@ fn classify_request_disposition(
                        admission decides whether it begins a switch",
             }
         }
+        // The session's one STOP control. See [`Disposition::InterruptActiveTurn`] for why
+        // this is no longer deferred: refusing every interrupt is not a safe terminal
+        // state, it is a session with no way out of work the user needs to stop.
+        Disposition::InterruptActiveTurn => {
+            if let Err(detail) = check_interrupt_binding(env, params) {
+                return refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    "interrupt refused: it does not name a running turn of this session",
+                    format!("{}: {detail}", redact::method(method)),
+                );
+            }
+            RelayAction::Forward {
+                note: "turn/interrupt: names this session's running turn",
+            }
+        }
         // Deferred dispositions fail closed until their machinery (and, for D2/D3, their
         // subject) lands in Phase 3.
+        //
+        // **`turn/interrupt` used to be one of these, and it is not any more.** Driven live
+        // on 0.153 with it deferred, Ctrl-C 5.4 s into a long turn sent
+        // `turn/interrupt{threadId,turnId}`, this arm refused it, the TUI printed a banner
+        // naming the broker, and the turn ran to its own end. That is tolerable only while
+        // turns end on their own — it left a hung command, or work the user needed to
+        // stop, with no way out but killing the session. Refusing the one stop control is
+        // a safety decision, not a deferral, so it is now
+        // `Disposition::InterruptActiveTurn`, bound to this session's RUNNING turn.
+        //
+        // `turn/steer` stays here: it INJECTS content into a running turn, which is the
+        // vector actuation D2 exists to fence.
         Disposition::HeadCheck | Disposition::ConsumeLocally => refuse_request(
             id,
             E_METHOD_UNAVAILABLE,
@@ -786,6 +843,344 @@ fn check_resume_binding(env: &Env, params: &serde_json::Value) -> Result<(), Str
         Some(id) => Err(format!(
             "thread {} was not observed as a session thread",
             redact::thread_id(id)
+        )),
+    }
+}
+
+/// The exact top-level parameter key set each thread-scoped read was MEASURED carrying.
+///
+/// Refuse-by-default applies to params, not only to methods — the same rule
+/// [`check_unsubscribe_shape`] enforces, and for the same reason: these three moved from
+/// "unscoped forward" to "forwarded when bound", so their params became a surface. The
+/// sets are the union of every captured frame: `thread/read` from the 0.153 tee runs
+/// (five frames, all `{threadId}`), `thread/turns/list` from the 0.153 tee
+/// (`fixtures/codex/session-0.153.jsonl`'s sibling captures), `thread/items/list` from
+/// `fixtures/codex/thread-switch.jsonl`.
+///
+/// The 0.153 app-server was measured to IGNORE unknown params on all three, so an extra
+/// key is inert today. That is a fact about today's server on a binary that ships weekly,
+/// and it is not the reason the set exists: an unmeasured key on a method that names a
+/// thread is an unmeasured way to name one.
+///
+/// Two of the three sets are the whole schema property set. `thread/read`'s is not: its
+/// schema also carries an optional `includeTurns`, which no capture has ever exercised in
+/// either direction, so it is refused — the same call the `thread/start` boundary makes
+/// about the three properties its captures never carried. A schema property is not a
+/// measurement.
+fn read_captured_params(method: &str) -> &'static [(&'static str, ReadParam)] {
+    use ReadParam::*;
+    match method {
+        "thread/read" => &[("threadId", ThreadId)],
+        "thread/turns/list" => &[
+            ("cursor", Cursor),
+            ("itemsView", Enum(&["notLoaded", "summary", "full"])),
+            ("limit", NullableUint32),
+            ("sortDirection", Enum(&["asc", "desc"])),
+            ("threadId", ThreadId),
+        ],
+        "thread/items/list" => &[
+            ("cursor", Cursor),
+            ("limit", NullableUint32),
+            ("sortDirection", Enum(&["asc", "desc"])),
+            ("threadId", ThreadId),
+            ("turnId", NullableString),
+        ],
+        // Unreachable while `Disposition::ReadSessionThread` names exactly those three —
+        // `the_read_binding_covers_every_read_session_thread_method` proves it — and an
+        // empty set refuses everything if a fourth is ever added without a capture.
+        _ => &[],
+    }
+}
+
+/// The measured value rule for one captured read parameter.
+///
+/// A key set alone was not enough. `params` is client-chosen, the positional-array
+/// surprise showed that "the shape is obviously an object" is not something to assume, and
+/// every one of these fields reaches the app-server unexamined once the frame forwards.
+/// So each captured key carries what its value may BE, not only that it may be present.
+#[derive(Debug, Clone, Copy)]
+enum ReadParam {
+    /// The thread selector: required, a non-empty string, and a thread of this session.
+    ThreadId,
+    /// Absent, null, or the measured cursor structure — see [`check_cursor_thread`].
+    Cursor,
+    /// Absent, null, or a string. `turnId` is this: MEASURED not to be a thread selector
+    /// (a foreign turn id on a session thread returns an empty page; alone it is
+    /// `missing field threadId`), so its content is bound by the server to the thread the
+    /// binding already proved, and its TYPE is what is left to pin.
+    NullableString,
+    /// Absent, null, or an integer in the schema's `uint32` range.
+    NullableUint32,
+    /// Absent, null, or one of these strings.
+    ///
+    /// The members are the schema's, not merely the ones a capture happened to show, and
+    /// that is deliberate rather than lax: `SortDirection` and `TurnItemsView` are inside
+    /// the guarded projection, so a build that grew a fourth member could not be launched
+    /// without adjudicating it. The value space is gated, so admitting it is bounded.
+    /// (Captures show `sortDirection: "desc"` and `itemsView: "full"|"notLoaded"`; the
+    /// schema's spare members are `"asc"` and `"summary"`.)
+    Enum(&'static [&'static str]),
+}
+
+/// The exact members a measured cursor carries, and nothing else.
+///
+/// Verbatim from the wire on both releases:
+/// `{"requestedThreadId":"…","rolloutOrdinal":29,"includeAnchor":false,"scope":{"kind":"turns"}}`
+/// (`scope.kind` was also seen as `"itemsByCreatedAtOrdinal"`). A cursor is the second
+/// place a thread is NAMED, so an unmeasured member in one is an unmeasured way to name
+/// one — checking only `requestedThreadId` and passing the rest through was accepting the
+/// structure wholesale.
+const CURSOR_MEMBERS: [&str; 4] = [
+    "includeAnchor",
+    "requestedThreadId",
+    "rolloutOrdinal",
+    "scope",
+];
+
+/// Check one captured parameter's value against its measured rule.
+fn check_read_param(
+    env: &Env,
+    key: &str,
+    rule: ReadParam,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let shape = || redact::value_shape(Some(value));
+    match rule {
+        ReadParam::ThreadId => match value.as_str() {
+            Some(id) if env.threads.is_session_thread(id) => Ok(()),
+            Some(id) => Err(format!(
+                "thread {} was not observed as a session thread",
+                redact::thread_id(id)
+            )),
+            None => Err(format!(
+                "params.{key} is a {}; it must be a string",
+                shape()
+            )),
+        },
+        ReadParam::Cursor => match value {
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::String(cursor) => check_cursor_thread(env, cursor),
+            _ => Err(format!(
+                "params.{key} is a {}; the measured cursor is a string",
+                shape()
+            )),
+        },
+        ReadParam::NullableString => match value {
+            serde_json::Value::Null | serde_json::Value::String(_) => Ok(()),
+            _ => Err(format!(
+                "params.{key} is a {}; the measured value is a string or null",
+                shape()
+            )),
+        },
+        ReadParam::NullableUint32 => match value {
+            serde_json::Value::Null => Ok(()),
+            v => match v.as_u64() {
+                Some(n) if n <= u64::from(u32::MAX) => Ok(()),
+                _ => Err(format!(
+                    "params.{key} is a {}; the measured value is a uint32 or null",
+                    shape()
+                )),
+            },
+        },
+        ReadParam::Enum(members) => match value {
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::String(s) if members.contains(&s.as_str()) => Ok(()),
+            _ => Err(format!(
+                "params.{key} is a {}; the measured values are {members:?} or null",
+                shape()
+            )),
+        },
+    }
+}
+
+/// A thread-scoped READ may only target a thread bound to this session, and may carry
+/// nothing but the parameters it was measured carrying.
+///
+/// # What the 0.153 app-server was measured to honour as a thread selector
+///
+/// | parameter | measured behaviour |
+/// |---|---|
+/// | `params.threadId` (object) | **the selector.** Required; absent ⇒ `missing field threadId`. |
+/// | `params[0]` (positional array) | **also a selector** — the same id, in a form no key-based check can read. Refused here by requiring an object. |
+/// | `cursor` | **not** a selector: the server rejects a cursor whose `requestedThreadId` differs from `threadId` with `-32600 invalid cursor`, and a cursor alone is `missing field threadId`. |
+/// | `turnId` (`thread/items/list`) | **not** a selector: an intra-thread filter applied after `threadId` picks the rollout. A foreign turn id returns `{"data":[]}`; alone it is `missing field threadId`. Bound by the server, so nothing to bind here. |
+/// | unknown keys | ignored (no `deny_unknown_fields`) — inert, and refused anyway by the captured set. |
+///
+/// The cursor is still checked, and that is deliberate rather than superstitious: it is a
+/// second place a thread is NAMED, the server enforcing the match is a fact about today's
+/// server, and the check costs one parse. It is parsed **structurally** — the measured
+/// encoding is a JSON object inside a JSON string, verbatim off the 0.153 wire:
+/// `{"requestedThreadId":"…","rolloutOrdinal":18,"includeAnchor":false,"scope":{…}}`. A
+/// cursor that is not that is an encoding nobody has measured on a method that names
+/// threads, and it refuses rather than being scanned for a substring.
+fn check_read_binding(env: &Env, method: &str, params: &serde_json::Value) -> Result<(), String> {
+    // Positional params are not a hypothetical: MEASURED, the 0.153 app-server answers
+    // `{"method":"thread/read","params":["<any thread id>"]}` with that thread. Every rule
+    // below reads named keys, and an array has none — it would pass by finding no
+    // violation rather than by proving none.
+    let Some(obj) = params.as_object() else {
+        return Err(format!(
+            "params is a {}; the measured value is an object, and positional params name a \
+             thread in a form this binding cannot read",
+            redact::value_shape(Some(params))
+        ));
+    };
+    let captured = read_captured_params(method);
+    let unknown = obj
+        .keys()
+        .filter(|k| !captured.iter().any(|(name, _)| name == k))
+        .count();
+    if unknown > 0 {
+        let names: Vec<&str> = captured.iter().map(|(n, _)| *n).collect();
+        return Err(format!(
+            "params carries {unknown} key(s) of {} outside the measured set for this read; \
+             the captured frames carry exactly {names:?}",
+            obj.len()
+        ));
+    }
+
+    // `threadId` is REQUIRED, whatever else is present: a read that names no thread has
+    // nothing to bind, and the server answers `missing field threadId` anyway.
+    if !obj.contains_key("threadId") {
+        return Err("a thread-scoped read without a threadId".to_string());
+    }
+    // Every captured key that IS present is checked against its measured value rule. An
+    // absent optional key is the measured "I am naming nothing" and passes.
+    for (key, rule) in captured {
+        if let Some(value) = obj.get(*key) {
+            check_read_param(env, key, *rule, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// A `turn/interrupt` may only stop THIS session's RUNNING turn.
+///
+/// The params are pinned to the capture, exactly as `thread/unsubscribe`'s are: MEASURED
+/// off a real 0.153 Ctrl-C, the frame is `{"threadId": …, "turnId": …}` and nothing else.
+/// This method moved from "deferred, refuses everything" to "forwarded when bound", so its
+/// params became a surface for the first time and refuse-by-default applies to them.
+///
+/// Two bindings, and each closes a different thing:
+///
+/// * `threadId` must be the session's — an interrupt naming another session's thread is
+///   the same cross-session reach the reads were bound for.
+/// * `turnId` must be an **active** turn of it — one this broker admitted, whose
+///   `turn/start` the server answered with that id, and whose terminal has not arrived.
+///   Without this an interrupt could name any string and be forwarded; with it, the only
+///   turn stoppable is the one this session is actually running.
+///
+/// The interrupt carries no ownership fields, starts nothing, and steers nothing, so
+/// there is no fingerprint to assert and no vector to fence — which is why this is
+/// admissible while `turn/steer`, which injects content, stays deferred to D2.
+fn check_interrupt_binding(env: &Env, params: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Err(format!(
+            "params is a {}; the measured value is an object",
+            redact::value_shape(Some(params))
+        ));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != ["threadId", "turnId"] {
+        return Err(format!(
+            "params key set is {keys:?}; the measured frame carries exactly \
+             [\"threadId\", \"turnId\"]"
+        ));
+    }
+    let (Some(thread), Some(turn)) = (
+        obj.get("threadId").and_then(|v| v.as_str()),
+        obj.get("turnId").and_then(|v| v.as_str()),
+    ) else {
+        return Err("params.threadId or params.turnId is not a string".to_string());
+    };
+    if !env.threads.is_session_thread(thread) {
+        return Err(format!(
+            "thread {} was not observed as a session thread",
+            redact::thread_id(thread)
+        ));
+    }
+    if !env.threads.is_active_turn(thread, turn) {
+        return Err(format!(
+            "turn {} is not a running turn of thread {} — only the turn this session is \
+             currently running can be interrupted",
+            redact::thread_id(turn),
+            redact::thread_id(thread)
+        ));
+    }
+    Ok(())
+}
+
+/// A cursor names a thread, and it may only name this session's.
+///
+/// Parsed rather than searched. The previous check split on the literal
+/// `"requestedThreadId":"` and was defeated by anything else — whitespace after the
+/// colon, an escaped id, a different key order putting the session's own id elsewhere in
+/// the string. A parse has no such prefix to miss.
+fn check_cursor_thread(env: &Env, cursor: &str) -> Result<(), String> {
+    let Ok(serde_json::Value::Object(decoded)) = serde_json::from_str::<serde_json::Value>(cursor)
+    else {
+        return Err(
+            "params.cursor is not the measured encoding (a JSON object serialized into a \
+             string), so the thread it names cannot be read"
+                .to_string(),
+        );
+    };
+    // The COMPLETE structure, not just the selector. A cursor is the second place a thread
+    // is named, so an unmeasured member in one is an unmeasured way to name one — reading
+    // `requestedThreadId` and forwarding the rest untouched was accepting the structure
+    // wholesale.
+    let mut members: Vec<&str> = decoded.keys().map(String::as_str).collect();
+    members.sort_unstable();
+    if members != CURSOR_MEMBERS {
+        return Err(format!(
+            "the cursor's member set is {members:?}; every measured cursor carries exactly \
+             {CURSOR_MEMBERS:?}"
+        ));
+    }
+    // `requestedThreadId` is REQUIRED at the top level and must be this session's. Absent,
+    // it was previously accepted — a cursor with no top-level selector went through
+    // unexamined while its other members did whatever they do.
+    match decoded.get("requestedThreadId") {
+        Some(serde_json::Value::String(named)) if env.threads.is_session_thread(named) => {}
+        Some(serde_json::Value::String(named)) => {
+            return Err(format!(
+                "the cursor names thread {}, which was not observed as a session thread",
+                redact::thread_id(named)
+            ))
+        }
+        other => {
+            return Err(format!(
+                "the cursor's requestedThreadId is a {}, not a session thread's id",
+                redact::value_shape(other)
+            ))
+        }
+    }
+    if !decoded
+        .get("rolloutOrdinal")
+        .is_some_and(|v| v.as_u64().is_some_and(|n| n <= u64::from(u32::MAX)))
+    {
+        return Err("the cursor's rolloutOrdinal is not a uint32".to_string());
+    }
+    if !decoded
+        .get("includeAnchor")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("the cursor's includeAnchor is not a boolean".to_string());
+    }
+    // `scope` is the one nested object, and it carries exactly one member — the measured
+    // values are `{"kind":"turns"}` and `{"kind":"itemsByCreatedAtOrdinal"}`. Anything
+    // nested beyond that is a place a selector could hide.
+    match decoded.get("scope") {
+        Some(serde_json::Value::Object(scope))
+            if scope.len() == 1 && scope.get("kind").is_some_and(serde_json::Value::is_string) =>
+        {
+            Ok(())
+        }
+        other => Err(format!(
+            "the cursor's scope is a {}; every measured scope is an object carrying exactly \
+             a string `kind`",
+            redact::value_shape(other)
         )),
     }
 }
@@ -908,6 +1303,40 @@ fn classify_response(
 /// Refuse a request: a usable id gets a synthetic error frame; an unusable id gets a
 /// silent zero-byte drop. Either way the leg stays open (a policy/unknown refusal is not
 /// hostile on its own).
+/// # A refused **tool-invoked** method used to hang the turn. It does not any more, and
+/// the cause was not this frame
+///
+/// Measured on codex 0.153. Its TUI declares a `dynamicTools` bundle
+/// ([`crate::fingerprint`]) that lets the MODEL call `list_threads`, `read_thread`,
+/// `wait_threads` and friends; each is implemented as an ordinary app-server request
+/// underneath. Refusing one of those used to stall the turn at "Working…" — the model
+/// reported *"The thread listing call is taking unusually long to return"*, the TUI
+/// re-sent `thread/list` two or three times, and — because `turn/interrupt` was a deferred
+/// disposition that refused everything at the time — Ctrl-C could not end it either: the
+/// session had to be killed. Both halves are now closed: the dispatch is answerable, and
+/// the interrupt is bound rather than refused.
+///
+/// **The synthetic error frame below was never the cause, and that was measured rather
+/// than assumed.** It is shape-identical to the app-server's own errors: a real server
+/// error captured on the same wire is `{"id": …, "error": {"code": -32600, "message":
+/// "thread not loaded: …"}}` — exactly the keys this function emits, and neither frame
+/// carries a `jsonrpc` member (codex omits it in both directions).
+///
+/// The cause was one leg further on. The server dispatches the tool as an
+/// [`crate::response_capability::DYNAMIC_TOOL_CALL`] server→client REQUEST; the TUI
+/// receives this refusal, and turns it into a well-formed
+/// `{"success":false,"contentItems":[…]}` answer to that request — and the capability
+/// observer tombstoned the id, because the only answerable family it knew was
+/// `*/requestApproval`. So the answer was dropped, the app-server never learned the tool
+/// call had finished, and the exchange the SERVER opened was left stranded mid-protocol.
+///
+/// Refusing the method is right; swallowing the answer to a request the server asked is
+/// not. The tool dispatch is answerable now (TUI only — see
+/// [`crate::response_capability::ADMITTED_TOOL_NAMESPACE`]), so the failure reaches the
+/// model as a tool failure, which is the outcome codex's own tool descriptions
+/// anticipate. `a_refused_tool_call_still_returns_its_failure_so_the_turn_completes`
+/// holds both halves: zero upstream bytes for the refused method, byte-exact forwarding
+/// for the answer.
 fn refuse_request(id: Option<RequestId>, code: i64, message: &str, note: String) -> RelayAction {
     match id {
         Some(id) => {
@@ -1335,6 +1764,527 @@ mod tests {
             );
             assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{method}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The thread-scoped reads (the 0.153 cross-session leak).
+    // -----------------------------------------------------------------
+
+    /// The measured leak, closed: a read naming a thread this session never bound is
+    /// refused on BOTH legs.
+    ///
+    /// This is the regression guard for a real, proven exposure — not a hypothetical.
+    /// The 0.153 TUI hands the model a `read_thread` tool; the model called it on a
+    /// foreign thread id; the TUI issued `thread/read` then `thread/turns/list`; both
+    /// forwarded; and the other session's prompt text and turn items came back and were
+    /// given to the model. All three methods carry a caller-chosen `threadId` and every
+    /// CodeConnect session on a machine shares one `~/.codex` thread store.
+    #[test]
+    fn a_thread_scoped_read_naming_a_foreign_thread_is_refused_on_both_legs() {
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            for role in [Role::Tui, Role::Ccd] {
+                let threads = bound_session("01a0-head");
+                let a = go_env(
+                    role,
+                    &threads,
+                    &json!({"method":method,"id":format!("{method}-{role:?}"),
+                            "params":{"threadId":"01a0-a-stranger-s-thread"}})
+                    .to_string(),
+                );
+                assert_eq!(
+                    refused_code(&a),
+                    E_POLICY_REFUSED,
+                    "{role:?} {method} must refuse a foreign thread"
+                );
+                assert!(
+                    refused_note(&a).contains("not observed as a session thread"),
+                    "{}",
+                    refused_note(&a)
+                );
+            }
+        }
+    }
+
+    /// …and the session's OWN thread still reads, or the fix would have broken the
+    /// picker and the resume path it exists to serve.
+    #[test]
+    fn a_thread_scoped_read_on_the_sessions_own_thread_forwards() {
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            for role in [Role::Tui, Role::Ccd] {
+                let threads = bound_session("01a0-head");
+                let a = go_env(
+                    role,
+                    &threads,
+                    &json!({"method":method,"id":format!("ok-{method}-{role:?}"),
+                            "params":{"threadId":"01a0-head"}})
+                    .to_string(),
+                );
+                assert!(
+                    matches!(a, RelayAction::Forward { .. }),
+                    "{role:?} {method} on the bound thread must forward: {a:?}"
+                );
+            }
+        }
+    }
+
+    /// One cursor in the MEASURED structure, naming `thread`.
+    ///
+    /// Verbatim off both releases' wire; the tests build from this rather than from an
+    /// abbreviation so a structural rule cannot be satisfied by a shape codex never sent.
+    fn cursor_for(thread: &str) -> String {
+        json!({"requestedThreadId": thread, "rolloutOrdinal": 29,
+               "includeAnchor": false, "scope": {"kind": "turns"}})
+        .to_string()
+    }
+
+    /// The cursor is a SECOND place a thread can be named. The 0.153 app-server was
+    /// measured to ignore it (a bogus `threadId` with a real thread's cursor answered
+    /// "thread not loaded: <the bogus id>"), but that is a fact about today's server on a
+    /// binary that changes weekly, so a cursor naming a foreign thread is refused too.
+    #[test]
+    fn a_cursor_naming_a_foreign_thread_is_refused() {
+        let threads = bound_session("01a0-head");
+        let cursor = cursor_for("01a0-a-stranger");
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/turns/list","id":"c1",
+                    "params":{"threadId":"01a0-head","cursor":cursor}})
+            .to_string(),
+        );
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+        assert!(
+            refused_note(&a).contains("cursor names thread"),
+            "{}",
+            refused_note(&a)
+        );
+    }
+
+    /// The TUI's own paging cursor — which names the thread it is paging — still works.
+    #[test]
+    fn the_tuis_own_cursor_on_its_own_thread_forwards() {
+        let threads = bound_session("01a0-head");
+        let cursor = cursor_for("01a0-head");
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/items/list","id":"c2",
+                    "params":{"threadId":"01a0-head","cursor":cursor,"limit":100}})
+            .to_string(),
+        );
+        assert!(matches!(a, RelayAction::Forward { .. }), "{a:?}");
+    }
+
+    /// **Positional params.** MEASURED on a real 0.153 app-server:
+    /// `{"method":"thread/read","params":["<any thread id>"]}` is answered with that
+    /// thread, and all three reads accept an array with the id at index 0. A binding that
+    /// reads `params.threadId` sees nothing in one, so an array has to refuse outright.
+    #[test]
+    fn a_positional_params_array_is_refused_on_every_thread_scoped_read() {
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            for role in [Role::Tui, Role::Ccd] {
+                let threads = bound_session("01a0-head");
+                let a = go_env(
+                    role,
+                    &threads,
+                    &json!({"method":method,"id":format!("arr-{method}-{role:?}"),
+                            "params":["01a0-a-stranger", null, null, 5, "desc"]})
+                    .to_string(),
+                );
+                assert_eq!(
+                    refused_code(&a),
+                    E_POLICY_REFUSED,
+                    "{role:?} {method}: {a:?}"
+                );
+                assert!(
+                    refused_note(&a).contains("positional params"),
+                    "{}",
+                    refused_note(&a)
+                );
+            }
+        }
+    }
+
+    /// Refuse-by-default applies to a read's params. An unmeasured key is refused even
+    /// though the 0.153 server was measured to ignore it — "inert today" is a fact about
+    /// today's server, and the audit detail names no client text.
+    #[test]
+    fn a_read_carrying_an_unmeasured_param_is_refused_without_naming_it() {
+        let threads = bound_session("01a0-head");
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/read","id":"x1",
+                    "params":{"threadId":"01a0-head","path":"/etc/passwd"}})
+            .to_string(),
+        );
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+        assert!(
+            refused_note(&a).contains("outside the measured set"),
+            "{}",
+            refused_note(&a)
+        );
+        assert!(
+            !refused_note(&a).contains("passwd"),
+            "the audit detail must not carry the client's own text: {}",
+            refused_note(&a)
+        );
+        // …and a key that IS measured on one read but not another does not leak sideways:
+        // `turnId` is `thread/items/list`'s alone.
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/turns/list","id":"x2",
+                    "params":{"threadId":"01a0-head","turnId":"01a0-t"}})
+            .to_string(),
+        );
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+    }
+
+    /// The measured frames themselves, key for key, must still forward — or the captured
+    /// set would be refusing the TUI it was taken from.
+    #[test]
+    fn the_measured_read_frames_forward_unchanged() {
+        let threads = bound_session("01a0-head");
+        let cursor = json!({"requestedThreadId":"01a0-head","rolloutOrdinal":18,
+                            "includeAnchor":false,"scope":{"kind":"turns"}})
+        .to_string();
+        for params in [
+            json!({"threadId":"01a0-head"}),
+            json!({"cursor":null,"itemsView":"full","limit":1,"sortDirection":"desc",
+                   "threadId":"01a0-head"}),
+            json!({"cursor":cursor,"limit":100,"sortDirection":"desc",
+                   "threadId":"01a0-head","turnId":null}),
+        ]
+        .into_iter()
+        .zip(["thread/read", "thread/turns/list", "thread/items/list"])
+        {
+            let (params, method) = params;
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":method,"id":format!("m-{method}"),"params":params}).to_string(),
+            );
+            assert!(
+                matches!(a, RelayAction::Forward { .. }),
+                "{method}: the captured frame must forward: {a:?}"
+            );
+        }
+    }
+
+    /// **The cursor is parsed, not searched.** The old check split on the literal
+    /// `"requestedThreadId":"`, which a single space after the colon walks straight past.
+    /// A parse has no prefix to miss.
+    #[test]
+    fn a_foreign_cursor_is_refused_however_it_is_spelled() {
+        let threads = bound_session("01a0-head");
+        for cursor in [
+            // The measured spelling.
+            cursor_for("01a0-a-stranger"),
+            // One space after the colon, which the old substring scan did not survive.
+            cursor_for("01a0-a-stranger").replace("\":\"01a0", "\": \"01a0"),
+            // Reordered, with the session's own id present elsewhere in the string — the
+            // shape the old `cursor.contains(id)` short-circuit waved through entirely.
+            json!({"scope":{"kind":"turns"},"includeAnchor":true,"rolloutOrdinal":1,
+                   "requestedThreadId":"01a0-a-stranger"})
+            .to_string(),
+        ] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/turns/list","id":"c1",
+                        "params":{"threadId":"01a0-head","cursor":cursor}})
+                .to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{cursor}");
+            assert!(
+                refused_note(&a).contains("cursor names thread"),
+                "{}",
+                refused_note(&a)
+            );
+        }
+    }
+
+    /// **Every captured field is type-checked, not merely named.**
+    ///
+    /// A key set alone let `itemsView`, `limit`, `sortDirection` and `turnId` carry any
+    /// JSON at all — an object, an array, a nested selector — as long as the KEY was one
+    /// the captures had shown. Given the positional-array surprise, "the value is
+    /// obviously the kind of thing the schema says" is not something to assume about a
+    /// client-chosen frame.
+    #[test]
+    fn every_captured_read_field_is_type_checked() {
+        let threads = bound_session("01a0-head");
+        // A fresh id per frame: a FORWARDED request occupies its id on the connection, so
+        // reusing one would trip the in-flight ledger rather than the rule under test.
+        let seq = std::cell::Cell::new(0u32);
+        let drive = |method: &str, params: &serde_json::Value| {
+            seq.set(seq.get() + 1);
+            go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method": method, "id": format!("tc-{}", seq.get()), "params": params})
+                    .to_string(),
+            )
+        };
+        let refuse = |method: &str, params: serde_json::Value| {
+            let a = drive(method, &params);
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{method} {params}");
+        };
+        let ok = |method: &str, params: serde_json::Value| {
+            let a = drive(method, &params);
+            assert!(
+                matches!(a, RelayAction::Forward { .. }),
+                "{method} {params}: {a:?}"
+            );
+        };
+
+        // An enum outside its measured member set, and one that is not a string at all.
+        refuse(
+            "thread/turns/list",
+            json!({"threadId": "01a0-head", "itemsView": "everything"}),
+        );
+        refuse(
+            "thread/turns/list",
+            json!({"threadId": "01a0-head", "itemsView": {"kind": "full"}}),
+        );
+        refuse(
+            "thread/turns/list",
+            json!({"threadId": "01a0-head", "sortDirection": "sideways"}),
+        );
+        // …and the schema's members, which the projection bounds, still forward.
+        for view in ["notLoaded", "summary", "full"] {
+            ok(
+                "thread/turns/list",
+                json!({"threadId": "01a0-head", "itemsView": view}),
+            );
+        }
+        for dir in ["asc", "desc"] {
+            ok(
+                "thread/turns/list",
+                json!({"threadId": "01a0-head", "sortDirection": dir}),
+            );
+        }
+
+        // `limit` is a uint32: not a string, not negative, not fractional, not oversized.
+        for bad in [
+            json!("10"),
+            json!(-1),
+            json!(1.5),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            refuse(
+                "thread/items/list",
+                json!({"threadId": "01a0-head", "limit": bad}),
+            );
+        }
+        ok(
+            "thread/items/list",
+            json!({"threadId": "01a0-head", "limit": 100}),
+        );
+
+        // `turnId` is a string or null — MEASURED not to be a thread selector, so its
+        // type is what is left to pin.
+        refuse(
+            "thread/items/list",
+            json!({"threadId": "01a0-head", "turnId": {"threadId": "01a0-a-stranger"}}),
+        );
+        ok(
+            "thread/items/list",
+            json!({"threadId": "01a0-head", "turnId": "01a0-t"}),
+        );
+
+        // `threadId` itself must be a string, not an object that happens to contain one.
+        refuse("thread/read", json!({"threadId": {"id": "01a0-head"}}));
+    }
+
+    /// **The cursor's COMPLETE structure, not just its selector.**
+    ///
+    /// A cursor is the second place a thread is named, so reading `requestedThreadId` and
+    /// forwarding the rest untouched was accepting the structure wholesale — including a
+    /// cursor carrying no top-level selector at all, which used to pass.
+    #[test]
+    fn a_cursor_must_carry_the_whole_measured_structure() {
+        let threads = bound_session("01a0-head");
+        let seq = std::cell::Cell::new(0u32);
+        let refuse = |cursor: serde_json::Value| {
+            seq.set(seq.get() + 1);
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/items/list","id":format!("cs-{}", seq.get()),
+                        "params":{"threadId":"01a0-head","cursor":cursor.to_string()}})
+                .to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{cursor}");
+        };
+        // No top-level selector: previously accepted wholesale.
+        refuse(json!({"rolloutOrdinal": 1, "includeAnchor": true, "scope": {"kind": "turns"}}));
+        // A member nobody measured — a place a selector could hide.
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": 1,
+                      "includeAnchor": true, "scope": {"kind": "turns"},
+                      "alsoRead": "01a0-a-stranger"}),
+        );
+        // A missing member.
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": 1,
+                      "includeAnchor": true}),
+        );
+        // Wrong types for the members that are not the selector.
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": "1",
+                      "includeAnchor": true, "scope": {"kind": "turns"}}),
+        );
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": 1,
+                      "includeAnchor": "yes", "scope": {"kind": "turns"}}),
+        );
+        // A `scope` with anything nested beyond the measured single string `kind`.
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": 1,
+                      "includeAnchor": true,
+                      "scope": {"kind": "turns", "thread": "01a0-a-stranger"}}),
+        );
+        refuse(
+            json!({"requestedThreadId": "01a0-head", "rolloutOrdinal": 1,
+                      "includeAnchor": true, "scope": {"kind": {"of": "turns"}}}),
+        );
+        // …and the measured cursor still forwards, or this would pass by refusing all.
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/items/list","id":"cs-ok",
+                    "params":{"threadId":"01a0-head","cursor":cursor_for("01a0-head")}})
+            .to_string(),
+        );
+        assert!(matches!(a, RelayAction::Forward { .. }), "{a:?}");
+    }
+
+    /// A cursor in an encoding nobody has measured refuses, rather than being scanned.
+    #[test]
+    fn a_cursor_that_is_not_the_measured_encoding_is_refused() {
+        let threads = bound_session("01a0-head");
+        for cursor in ["eyJyZXF1ZXN0ZWRUaHJlYWRJZCI6IngifQ==", "opaque", ""] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/items/list","id":"c2",
+                        "params":{"threadId":"01a0-head","cursor":cursor}})
+                .to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{cursor:?}");
+            assert!(
+                refused_note(&a).contains("not the measured encoding"),
+                "{}",
+                refused_note(&a)
+            );
+        }
+    }
+
+    /// `turnId` is NOT a second thread selector, and that is measured rather than assumed:
+    /// against a real 0.153 app-server a foreign turn id on a session thread returns
+    /// `{"data":[]}`, and a turn id with no `threadId` is `missing field threadId`. So it
+    /// is admitted as the intra-thread filter it is, with the thread binding doing the
+    /// scoping — there is nothing here for a binding to add.
+    #[test]
+    fn a_turn_id_is_an_intra_thread_filter_and_needs_no_binding() {
+        let threads = bound_session("01a0-head");
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/items/list","id":"t1",
+                    "params":{"threadId":"01a0-head","turnId":"01a0-a-strangers-turn"}})
+            .to_string(),
+        );
+        assert!(matches!(a, RelayAction::Forward { .. }), "{a:?}");
+        // …and it cannot stand in for the thread it does not name.
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            &json!({"method":"thread/items/list","id":"t2",
+                    "params":{"turnId":"01a0-a-strangers-turn"}})
+            .to_string(),
+        );
+        assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+    }
+
+    /// **A top-level JSON-RPC batch cannot bypass classification.** An array carries no
+    /// method, so no allowlist cell would ever be consulted for what is inside it; the
+    /// relay drops the leg with zero bytes forwarded. (The 0.153 app-server was separately
+    /// measured to ignore batches entirely, but a shape the broker cannot classify must
+    /// not depend on the server declining it.)
+    #[test]
+    fn a_top_level_batch_forwards_zero_bytes_and_closes_the_leg() {
+        let threads = bound_session("01a0-head");
+        let batch = json!([
+            {"id":1,"method":"thread/read","params":{"threadId":"01a0-a-stranger"}},
+            {"id":2,"method":"turn/start","params":{"threadId":"01a0-head"}}
+        ])
+        .to_string();
+        for role in [Role::Tui, Role::Ccd] {
+            let a = go_env(role, &threads, &batch);
+            assert!(
+                matches!(a, RelayAction::DropCloseLeg { .. }),
+                "{role:?}: a batch must close the leg, not be walked into: {a:?}"
+            );
+        }
+    }
+
+    /// The captured-parameter table must cover every method the allowlist binds this way,
+    /// or a fourth `ReadSessionThread` method would silently get the empty set.
+    #[test]
+    fn the_read_binding_covers_every_read_session_thread_method() {
+        let census: Vec<String> = ["stable", "experimental"]
+            .iter()
+            .flat_map(|b| {
+                let raw = match *b {
+                    "stable" => include_str!("../schema-0.147/methods-stable.json"),
+                    _ => include_str!("../schema-0.147/methods-experimental.json"),
+                };
+                let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+                v["client_requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m.as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut bound = 0;
+        for method in &census {
+            for role in [Role::Tui, Role::Ccd] {
+                if disposition(role, JsonRpcKind::Request, method) == Disposition::ReadSessionThread
+                {
+                    assert!(
+                        !read_captured_params(method).is_empty(),
+                        "{method} is bound as a thread-scoped read but has no captured \
+                         parameter set, so every frame of it would refuse"
+                    );
+                    bound += 1;
+                }
+            }
+        }
+        assert!(bound >= 3, "the census found only {bound} bound reads");
+    }
+
+    /// `thread/loaded/list` stays an unscoped forward — not because it names no thread,
+    /// but because of what it was measured to return, and the scope is the HOST PROCESS
+    /// rather than the calling connection. See
+    /// [`crate::allowlist::Disposition::ReadSessionThread`] for the two-session canary and
+    /// for the principal stated exactly: the broker accepts many legs into one thread
+    /// domain by design, and what bounds that domain is the per-session host, broker and
+    /// app-server. The real TUI also sends it at startup, so refusing it would refuse the
+    /// boot.
+    #[test]
+    fn thread_loaded_list_carries_no_thread_and_stays_unscoped() {
+        let threads = bound_session("01a0-head");
+        let a = go_env(
+            Role::Tui,
+            &threads,
+            r#"{"method":"thread/loaded/list","id":"l1","params":{"limit":20}}"#,
+        );
+        assert!(matches!(a, RelayAction::Forward { .. }), "{a:?}");
     }
 
     // -----------------------------------------------------------------
@@ -2792,23 +3742,101 @@ mod tests {
         );
     }
 
-    /// The deferred cells that REMAIN deferred still fail closed with the
-    /// method-unavailable code — `turn/steer` and `turn/interrupt`, whose D2 head-check
-    /// machinery is Phase 3's.
+    /// The deferred cell that REMAINS deferred still fails closed with the
+    /// method-unavailable code.
+    ///
+    /// `turn/steer` only. It INJECTS content into a running turn, which is the vector
+    /// actuation D2 exists to fence, so it stays Phase 3's.
+    /// `turn/interrupt` left this set deliberately — see
+    /// [`the_interrupt_is_bound_to_the_running_turn`] and
+    /// [`crate::allowlist::Disposition::InterruptActiveTurn`].
     #[test]
-    fn the_still_deferred_actuations_fail_closed() {
-        for method in ["turn/steer", "turn/interrupt"] {
-            let a = go(
-                Role::Tui,
-                &json!({"method":method,"id":3,"params":{"threadId":"01a0-head"}}).to_string(),
-            );
-            match a {
-                RelayAction::SyntheticError { frame, .. } => {
-                    let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                    assert_eq!(v["error"]["code"], E_METHOD_UNAVAILABLE, "{method}");
-                }
-                other => panic!("{method}: {other:?}"),
+    fn the_still_deferred_actuation_fails_closed() {
+        let a = go(
+            Role::Tui,
+            &json!({"method":"turn/steer","id":3,"params":{"threadId":"01a0-head"}}).to_string(),
+        );
+        match a {
+            RelayAction::SyntheticError { frame, .. } => {
+                let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(v["error"]["code"], E_METHOD_UNAVAILABLE);
             }
+            other => panic!("{other:?}"),
         }
+    }
+
+    /// **The session's stop control is bound to the turn it is running, and to nothing
+    /// else.**
+    ///
+    /// Refusing every interrupt was not a safe terminal state — it left a session with no
+    /// way out of a hung command or work the user needed to stop. Admitting one is only
+    /// safe if it can reach exactly one turn: this session's running one.
+    #[test]
+    fn the_interrupt_is_bound_to_the_running_turn() {
+        let threads = bound_session("01a0-head");
+        let seq = std::cell::Cell::new(0u32);
+        let drive = |params: serde_json::Value| {
+            seq.set(seq.get() + 1);
+            go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"turn/interrupt","id":format!("i-{}", seq.get()),
+                        "params":params})
+                .to_string(),
+            )
+        };
+
+        // No turn has been admitted yet, so there is nothing running to interrupt.
+        assert_eq!(
+            refused_code(&drive(json!({"threadId":"01a0-head","turnId":"01a0-turn"}))),
+            E_POLICY_REFUSED
+        );
+
+        // Run a turn and let the server answer it: NOW there is an active turn.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        assert!(matches!(
+            drive(json!({"threadId":"01a0-head","turnId":"01a0-turn"})),
+            RelayAction::Forward { .. }
+        ));
+
+        // A turn that is not the running one, and a thread that is not this session's.
+        for params in [
+            json!({"threadId":"01a0-head","turnId":"01a0-some-other-turn"}),
+            json!({"threadId":"01a0-a-stranger","turnId":"01a0-turn"}),
+        ] {
+            assert_eq!(refused_code(&drive(params)), E_POLICY_REFUSED);
+        }
+        // The params are pinned to the capture: exactly the two keys, both strings.
+        for params in [
+            json!({"threadId":"01a0-head"}),
+            json!({"turnId":"01a0-turn"}),
+            json!({"threadId":"01a0-head","turnId":"01a0-turn","force":true}),
+            json!({"threadId":"01a0-head","turnId":{"id":"01a0-turn"}}),
+            json!(["01a0-head", "01a0-turn"]),
+        ] {
+            assert_eq!(
+                refused_code(&drive(params.clone())),
+                E_POLICY_REFUSED,
+                "{params}"
+            );
+        }
+        // …and the phone may not interrupt at all: that stays Phase 4's.
+        assert_eq!(
+            refused_code(&go_env(
+                Role::Ccd,
+                &threads,
+                &json!({"method":"turn/interrupt","id":"ccd-1",
+                        "params":{"threadId":"01a0-head","turnId":"01a0-turn"}})
+                .to_string()
+            )),
+            E_POLICY_REFUSED
+        );
     }
 }

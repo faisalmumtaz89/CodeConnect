@@ -39,10 +39,11 @@
 //! forwarded verbatim.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use protocol::config::{self, Config, CODEX_PINNED_VERSIONS};
+use protocol::config::Config;
 
 /// Environment override for the `codex` binary, mirroring
 /// `CODECONNECT_CLAUDE_BIN`.
@@ -194,8 +195,23 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // missing or untested executable must surface before anything else. The
     // canonicalised path is what we version-check and exec.
     let resolved = resolve_codex_bin(&config)?;
-    let version = read_codex_version(&resolved)?;
-    ensure_pinned_version(&version)?;
+    // The version is RECORDED, not gated: it names what ran, in the launch evidence and
+    // in a refusal. What decides whether this build may be hosted is the guarded-surface
+    // gate below — see [`ensure_guarded_surface`] for why a version string was the wrong
+    // question to ask.
+    // ONE freeze, four probes: version, root command surface, both schema bundles.
+    // See `probe_codex` for why they share a freeze rather than taking one each.
+    let scratch = ScratchDir::new()?;
+    let probe = probe_codex(&resolved, &scratch.0)?;
+    let version = parse_codex_version(&String::from_utf8_lossy(&probe.version_out))
+        .ok_or_else(|| anyhow!("could not read a version from `codex --version`"))?;
+    // NOT YET RECORDED. The gate returns the digest of the surface it admitted so that
+    // carrying it into the launch record beside `codex_sha256` is a pure addition rather
+    // than a change of shape — but that plumbing (charter flag → coordinator → record)
+    // is its own sub-issue and is not built yet. Bound and dropped deliberately, rather
+    // than the gate pretending it has nowhere to report from.
+    let _admitted_surface = ensure_guarded_surface(&probe)
+        .with_context(|| format!("checking codex {version} against CodeConnect's grounding"))?;
 
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
     // was refused and why, before anything is created.
@@ -954,6 +970,12 @@ fn codex_candidates(
 /// What remains uncatchable: a replacement *reverted* before the check, which no
 /// verify-by-content scheme can see, and the post-clear demand-paging residual — both
 /// stated on [`ResolvedCodex`] and [`protocol::hash::FrozenExecutable`].
+/// **Superseded on the launch path by [`probe_codex`]**, which reads the version as one
+/// of four answers under a single held freeze. Kept because it is the narrowest possible
+/// statement of the freeze-then-exec discipline and its tests pin exactly that: a binary
+/// swapped or moved between resolution and exec is refused. `probe_codex` inherits the
+/// discipline; these tests are what prove it is the right one.
+#[cfg(test)]
 fn read_codex_version(resolved: &ResolvedCodex) -> Result<String> {
     let bin = resolved.path.as_path();
     // Freeze + verify BEFORE the exec, and hold the freeze across it. This exec used
@@ -1007,20 +1029,540 @@ fn parse_codex_version(text: &str) -> Option<String> {
         .then(|| version.to_string())
 }
 
-/// Refuse a resolved version outside the compiled-in tested set, naming the set.
+// ------------------------------------------------------------- the guarded-surface gate
+
+/// The wall-clock budget for one launch probe.
 ///
-/// The allowlist is compiled in ([`CODEX_PINNED_VERSIONS`]), never configuration:
-/// Codex's app-server protocol is experimental, so the only guarantee CodeConnect
-/// can make is for the builds it was actually tested against.
-fn ensure_pinned_version(version: &str) -> Result<()> {
-    if config::is_pinned_codex_version(version) {
-        return Ok(());
+/// Generous against the measurement — the four probes together take ~150 ms on the real
+/// binary — because the number is not a performance target, it is the point past which
+/// the gate stops waiting for an answer it is never going to get.
+const PROBE_BUDGET: Duration = Duration::from_secs(30);
+
+/// How long to spend reaping a probe after its process group has been SIGKILLed.
+const PROBE_REAP_BUDGET: Duration = Duration::from_secs(2);
+
+/// The stdout ceiling for one probe. `completion bash` is the chatty one, MEASURED at
+/// ~230 KiB on 0.153; the schema commands write to disk and print nothing.
+const PROBE_STDOUT_LIMIT: u64 = 8 << 20;
+
+/// The ceiling on one generated bundle document. `ClientRequest.json` is MEASURED at
+/// ~1.2 MiB on both binaries.
+const PROBE_FILE_LIMIT: u64 = 64 << 20;
+
+/// What is known about a probe's leader process — deliberately three-valued, because a
+/// `try_wait` error proves only that *that call* collected no status. Filing it as
+/// "unreaped" would license a `kill(-pgid)` on the strength of a failed syscall, against
+/// a process-group number that may already have been recycled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaderState {
+    Unreaped,
+    Reaped,
+    Unknown,
+}
+
+/// One launch probe's child, with the cleanup that every exit path owes it.
+struct Probe {
+    child: std::process::Child,
+    leader: LeaderState,
+}
+
+impl Probe {
+    /// SIGKILL the probe's whole process group — best-effort, errors ignored.
+    ///
+    /// Guarded on [`LeaderState::Unreaped`], which is provable rather than hopeful: an
+    /// unreaped leader is still in the process table, so its pid — and therefore this
+    /// pgid — cannot have been handed to anything else.
+    fn kill_group(&mut self) {
+        if self.leader == LeaderState::Unreaped {
+            unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+            let _ = self.child.kill();
+        }
     }
-    bail!(
-        "codex {version} is not a tested version; \
-         this build of CodeConnect supports codex {}",
-        CODEX_PINNED_VERSIONS.join(", ")
+
+    /// Poll for the leader's status until `deadline`. Deliberately not `wait()`, which is
+    /// unbounded: a probe that ignores SIGKILL (uninterruptible in a syscall) must cost
+    /// the budget, not the launch.
+    fn reap_bounded(&mut self, deadline: Instant) -> Option<std::process::ExitStatus> {
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.leader = LeaderState::Reaped;
+                    return Some(status);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    self.leader = LeaderState::Unknown;
+                    return None;
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The one cleanup shape, used on every path including success: kill the group, then
+    /// reap under a bound. Never the other order — see [`Probe::kill_group`].
+    fn cleanup(&mut self) -> Option<std::process::ExitStatus> {
+        self.kill_group();
+        self.reap_bounded(Instant::now() + PROBE_REAP_BUDGET)
+    }
+}
+
+impl Drop for Probe {
+    /// The net beneath the explicit cleanup, so "every path kills the group" is a
+    /// structural property rather than a promise about the code as currently written.
+    /// `std::process::Child` has no kill-on-drop, so without this a probe's group would
+    /// simply survive any early return added later.
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// Drain one pipe on its own thread, under a byte ceiling, reporting overflow as a
+/// FAILURE rather than as the end of output.
+///
+/// The read is moved off the gate's thread because a descendant that inherited the write
+/// end can defer EOF forever; the caller bounds the *wait* with `recv_timeout`.
+///
+/// `LIMIT + 1` is asked for so that hitting the ceiling is detectable. `Read::take(N)`
+/// reports EOF once N bytes are consumed, so a plain `take(LIMIT)` hands back a prefix
+/// indistinguishable from a complete answer — and a prefix of a flood is exactly the
+/// vacuous pass a gate must not take. A read error is reported for the same reason: a
+/// truncated answer must never become a shorter one.
+fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+    limit: u64,
+) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = match pipe {
+            Some(pipe) => {
+                let mut buf = Vec::new();
+                let mut bounded = std::io::Read::take(pipe, limit + 1);
+                match std::io::Read::read_to_end(&mut bounded, &mut buf) {
+                    Ok(_) if buf.len() as u64 > limit => {
+                        Err(format!("it wrote more than {limit} bytes"))
+                    }
+                    Ok(_) => Ok(buf),
+                    Err(e) => Err(format!("the read failed part-way ({e})")),
+                }
+            }
+            None => Ok(Vec::new()),
+        };
+        let _ = tx.send(outcome);
+    });
+    rx
+}
+
+/// Exec `bin args` under a wall-clock budget and an output ceiling, with the caller
+/// holding the freeze, and return its stdout.
+///
+/// Split out so a caller that already holds a verified freeze can run several probes
+/// under **one** of them — see [`probe_codex`].
+///
+/// **Bounded on purpose.** The binary being probed is whatever is installed at the codex
+/// path: the gate's job is to decide whether to host it, so it cannot assume it behaves.
+/// A plain `output()` gives an unknown executable an unbounded hold on the launch *and*
+/// on the freeze — it can never exit, never close its pipes (a forked descendant inherits
+/// the write ends, so EOF never arrives), or stream until the gate runs out of memory.
+/// Every wait here is against a deadline and every path attempts to kill the probe's
+/// whole process group, pipes collected FIRST so the kill always happens while the
+/// leader's pgid is provably not recycled.
+fn run_under_freeze(bin: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    run_bounded(bin, args, PROBE_BUDGET)
+}
+
+/// [`run_under_freeze`]'s body, with the budget a parameter so the boundedness itself can
+/// be tested without the test paying the production budget to observe it.
+fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
+    use std::os::unix::process::CommandExt;
+    let what = format!("{} {}", bin.display(), args.join(" "));
+    let child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Its own group, so a descendant that inherits the pipes can be reached.
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("spawning `{what}`"))?;
+    let mut probe = Probe {
+        child,
+        leader: LeaderState::Unreaped,
+    };
+
+    // Started before any wait, so a chatty probe cannot deadlock by filling a pipe buffer
+    // while nobody is draining it.
+    let stdout_rx = spawn_pipe_reader(probe.child.stdout.take(), PROBE_STDOUT_LIMIT);
+    let stderr_rx = spawn_pipe_reader(probe.child.stderr.take(), PROBE_STDOUT_LIMIT);
+    let deadline = Instant::now() + budget;
+
+    let collect = |rx: &std::sync::mpsc::Receiver<Result<Vec<u8>, String>>, which: &str| match rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(why)) => Err(anyhow!("`{what}` on {which}: {why}")),
+        Err(_) => Err(anyhow!(
+            "`{what}` did not close its {which} within {budget:?}"
+        )),
+    };
+    let stdout = collect(&stdout_rx, "stdout");
+    let stderr = collect(&stderr_rx, "stderr");
+
+    // The uniform cleanup, reached on the success path too, so nothing below has to
+    // remember it.
+    let status = probe.cleanup();
+    let (stdout, stderr) = (stdout?, stderr?);
+    let Some(status) = status else {
+        bail!("`{what}` could not be reaped within {PROBE_REAP_BUDGET:?} of a SIGKILL");
+    };
+    if !status.success() {
+        bail!(
+            "`{what}` exited with {status}: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        );
+    }
+    Ok(stdout)
+}
+
+/// Read one file the probe just generated, under a ceiling.
+///
+/// Same reasoning as [`spawn_pipe_reader`]: the writer is the binary under examination,
+/// and a gate that will happily read whatever it produced has handed it the launch's
+/// memory. `LIMIT + 1` so that hitting the ceiling is a refusal rather than a truncation.
+fn read_generated(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // **Opened so it cannot block, and validated so it cannot lie.** The writer of this
+    // file is the binary under examination — the gate has not yet decided whether to host
+    // it — and it can write `ClientRequest.json` as a FIFO instead of a file. A plain
+    // `File::open` on a FIFO with no writer blocks forever, outside every probe deadline,
+    // *while the executable freeze is still held*: the launch would hang and the freeze
+    // would never clear. `O_NONBLOCK` makes that open fail instead, `O_NOFOLLOW` stops the
+    // final component being a symlink to somewhere else, and the `fstat` below is
+    // authoritative about the handle actually held.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "reading {} — a bundle codex was asked to write",
+                path.display()
+            )
+        })?;
+    if !file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .file_type()
+        .is_file()
+    {
+        bail!(
+            "{} is not a regular file. `generate-json-schema` writes ordinary files; a pipe \
+             or device here would block the launch with the executable freeze held.",
+            path.display()
+        );
+    }
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, PROBE_FILE_LIMIT + 1),
+        &mut buf,
     )
+    .with_context(|| format!("reading {}", path.display()))?;
+    if buf.len() as u64 > PROBE_FILE_LIMIT {
+        bail!(
+            "{} is larger than {PROBE_FILE_LIMIT} bytes; the measured bundle is ~1.2 MiB, so \
+             this is not one",
+            path.display()
+        );
+    }
+    Ok(buf)
+}
+
+/// Everything the launch gate asks the installed codex about itself, read under a
+/// **single** held freeze.
+///
+/// # One freeze, four execs — stronger and faster than four freezes
+///
+/// The launcher asks the binary four questions before it will host it: its version, its
+/// root command surface (`completion bash`), and its two app-server schema bundles. Each
+/// used to take its own freeze-and-verify.
+///
+/// **Stronger:** four separate freezes leave three gaps between them. A version read
+/// under freeze A and a schema read under freeze D are two statements about two moments,
+/// and nothing said the bytes were the same in between — which is exactly the reasoning
+/// [`verify_codex_identity`] exists to refuse. One freeze held across all four makes them
+/// one statement about one set of bytes, which is what the gate's conclusion actually
+/// claims.
+///
+/// **Faster, and that mattered:** `freeze_and_hash` reads and digests the whole 210 MB
+/// executable, MEASURED at 7.5 s in a debug build. Four of them put ~30 s in front of
+/// every launch — enough that the live end-to-end gate timed out waiting for a launch
+/// record, which is how this was found. One freeze puts the gate back at the cost of the
+/// single `--version` hash the launcher already paid.
+fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
+    use codex_broker::guarded_surface as gs;
+    let bin = resolved.path.as_path();
+    let frozen = verify_codex_identity(bin, &resolved.sha256, "before the launch probes")?;
+
+    let probe = (|| -> Result<CodexProbe> {
+        let version_out = run_under_freeze(bin, &["--version"])?;
+        let completion = run_under_freeze(bin, &["completion", "bash"])?;
+        let mut bundles = Vec::new();
+        for bundle in codex_broker::guarded_surface::BUNDLES {
+            let out = scratch.join(bundle);
+            let out_arg = out.to_string_lossy().into_owned();
+            let mut args = vec!["app-server", "generate-json-schema", "--out", &out_arg];
+            if bundle == "experimental" {
+                args.push("--experimental");
+            }
+            run_under_freeze(bin, &args)?;
+            // READ HERE, under the freeze, not by the caller afterwards. The gate's
+            // conclusion is about the bytes that will be exec'd; a path handed back to a
+            // caller that opens it after the freeze is released is a second read of a
+            // second moment, and between the two the scratch tree could be replaced with
+            // a projection of the baseline. Owning the bytes closes that window with the
+            // freeze that made the answer trustworthy still held.
+            let client_request = read_generated(&out.join("ClientRequest.json"))?;
+            // The result documents are named by the request document, so it is parsed
+            // here — inside the freeze — to learn which ones to read. Only the ones a
+            // guarded method reaches (≈18 of the bundle's 250–370 files).
+            let parsed = gs::parse_schema(&String::from_utf8_lossy(&client_request))
+                .map_err(|e| anyhow!("{e}"))
+                .with_context(|| format!("parsing the {bundle} bundle's ClientRequest.json"))?;
+            let mut results = Vec::new();
+            for name in gs::guarded_result_types(&parsed).map_err(|e| anyhow!("{e}"))? {
+                let file = format!("{name}.json");
+                let path = ["v2", "v1"]
+                    .iter()
+                    .map(|d| out.join(d).join(&file))
+                    .find(|p| p.is_file())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "the {bundle} bundle has no {file}, which a guarded method's \
+                             params type says is its result"
+                        )
+                    })?;
+                results.push((name, read_generated(&path)?));
+            }
+            bundles.push(ProbedBundle {
+                bundle,
+                client_request,
+                client_notification: read_generated(&out.join("ClientNotification.json"))?,
+                server_request: read_generated(&out.join("ServerRequest.json"))?,
+                results,
+            });
+        }
+        Ok(CodexProbe {
+            version_out,
+            completion,
+            bundles,
+        })
+    })();
+
+    // Cleared only after every child has exited, so all four answers are attributable to
+    // the frozen bytes. A failure clears it too, with nothing having been admitted.
+    drop(frozen);
+    probe
+}
+
+/// What [`probe_codex`] read, all of it from one frozen set of bytes.
+struct CodexProbe {
+    version_out: Vec<u8>,
+    completion: Vec<u8>,
+    bundles: Vec<ProbedBundle>,
+}
+
+/// One schema bundle as the probe read it, **as bytes rather than paths** — see
+/// [`probe_codex`] for why the read happens inside the freeze.
+///
+/// Four documents, because the broker's contract with codex is not only "what may the
+/// client send". `initialized` is an admitted NOTIFICATION; the server sends REQUESTS the
+/// broker classifies and now answers; and the broker forwards the RESULTS of every method
+/// it admits. A gate that read only `ClientRequest.json` would admit a build whose
+/// `thread/read` result grew a field, or whose `item/tool/call` changed shape.
+struct ProbedBundle {
+    bundle: &'static str,
+    client_request: Vec<u8>,
+    client_notification: Vec<u8>,
+    server_request: Vec<u8>,
+    /// `(response type name, its bytes)`, for the guarded methods only.
+    results: Vec<(String, Vec<u8>)>,
+}
+
+/// A scratch directory for one gate run, removed when the guard drops.
+///
+/// `generate-json-schema` writes a tree rather than to stdout (measured: `--out <DIR>`
+/// is required, there is no stdout form), so the gate needs somewhere to put ~3 MB
+/// twice. Cleaning up on drop means a refusal — which returns early from several arms —
+/// does not leave the tree behind.
+///
+/// # Created exclusively, and private
+///
+/// `mkdir(2)` with `O_EXCL` semantics and mode `0700`, not `create_dir_all`. The two
+/// differ exactly where it matters: `create_dir_all` succeeds against a directory (or a
+/// symlink to one) that somebody else put there first, so the gate would generate its
+/// bundles into, and read them back out of, a tree it does not own. `DirBuilder::create`
+/// fails `EEXIST` on anything already at the path, symlinks included, and the mode is set
+/// at creation rather than afterwards so there is no window in which the tree is
+/// world-writable.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new() -> Result<ScratchDir> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(format!(
+            "codeconnect-codex-schema-{}-{}",
+            std::process::id(),
+            protocol::hash::sha256_hex(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos().to_string())
+                    .unwrap_or_default()
+                    .as_bytes()
+            )
+            .get(..16)
+            .unwrap_or("scratch")
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .with_context(|| {
+                format!(
+                    "creating {} for the codex schema gate — it must not already exist",
+                    path.display()
+                )
+            })?;
+        Ok(ScratchDir(path))
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Refuse unless the installed codex's **guarded surface** matches the vendored 0.147
+/// reference, and return the digest of the surface that was admitted.
+///
+/// # Why this replaced the version-string pin
+///
+/// The pin ([`CODEX_PINNED_VERSIONS`], now recorded rather than gated) asked "is this
+/// build called 0.147.0?". That is a proxy for the real question, and a bad one in both
+/// directions: it refuses every weekly codex release whose wire shape did not move at
+/// all, and the pressure it creates is to bump the number — the one edit that re-proves
+/// nothing. This asks the real question instead: *is the part of codex that CodeConnect
+/// guards the same part it was grounded against?* A build whose guarded surface is
+/// identical is admitted whatever it calls itself; a build whose guarded surface moved
+/// is refused **naming what moved**, which is the work item for the re-grounding.
+///
+/// # Both surfaces, because one of them is not in the schema
+///
+/// * The **wire** surface — the guarded methods' parameter shapes, from
+///   `codex app-server generate-json-schema`. This is what the broker's allowlist and
+///   fingerprint defend.
+/// * The **argv** surface — the root subcommand and flag set, from
+///   `codex completion bash`. This is what [`validate_codex_argv`] defends, and
+///   `generate-json-schema` says nothing about it.
+///
+/// Gating only the wire surface would have been a **regression**, measured rather than
+/// argued: codex 0.153 adds `agents`, `queue` and `migrate-rollouts`, none of which
+/// [`is_subcommand`] knows, so [`validate_codex_argv`] classifies them as prompt text
+/// and forwards them — and `codex agents` reaches the shared local app-server daemon
+/// while `codex queue` injects a message into another session, both around the broker.
+/// A wire-only gate would have admitted 0.153 with that door open.
+///
+/// # Fail direction
+///
+/// Closed in every arm: a failed exec, a non-UTF-8 or unparseable schema, a bundle that
+/// will not project, a method that vanished, a subcommand that appeared. The one verdict
+/// that admits is "no differences at all".
+fn ensure_guarded_surface(probe: &CodexProbe) -> Result<String> {
+    use codex_broker::guarded_surface as gs;
+
+    let mut changes: Vec<String> = Vec::new();
+    let mut admitted: Vec<(&str, String)> = Vec::new();
+
+    // --- the argv surface ---------------------------------------------------------
+    let completion = String::from_utf8(probe.completion.clone())
+        .context("`codex completion bash` did not emit UTF-8; refusing to guess at its surface")?;
+    let installed_argv = gs::project_argv(&completion)
+        .map_err(|e| anyhow!("{e}"))
+        .context("reading the installed codex's root command surface")?;
+    changes.extend(
+        gs::diff_argv(&gs::admissible_argv(&installed_argv), &installed_argv)
+            .iter()
+            .map(ToString::to_string),
+    );
+    admitted.push((gs::ARGV_BUNDLE, serde_json::to_string(&installed_argv)?));
+
+    // --- the wire surface ---------------------------------------------------------
+    for probed in &probe.bundles {
+        let bundle = probed.bundle;
+        // The SAME duplicate-member discipline the c2s classifier applies to a frame: a
+        // document whose meaning depends on which duplicate a parser keeps has no single
+        // meaning, and the gate's verdict is an equality of parsed values.
+        let parse = |raw: &[u8], what: &str| -> Result<serde_json::Value> {
+            gs::parse_schema(&String::from_utf8_lossy(raw))
+                .map_err(|e| anyhow!("{e}"))
+                .with_context(|| format!("reading the {bundle} bundle's {what}"))
+        };
+        let mut results = std::collections::BTreeMap::new();
+        for (name, raw) in &probed.results {
+            results.insert(name.clone(), parse(raw, name)?);
+        }
+        let installed = gs::project_bundle(&gs::BundleDocs {
+            client_request: &parse(&probed.client_request, "ClientRequest.json")?,
+            client_notification: &parse(&probed.client_notification, "ClientNotification.json")?,
+            server_request: &parse(&probed.server_request, "ServerRequest.json")?,
+            results: &results,
+        })
+        .map_err(|e| anyhow!("{e}"))
+        .with_context(|| format!("projecting the {bundle} bundle onto the guarded surface"))?;
+        changes.extend(
+            gs::diff_wire(&gs::admissible_wire(bundle, &installed), &installed)
+                .iter()
+                .map(|c| format!("[{bundle}] {c}")),
+        );
+        admitted.push((bundle, serde_json::to_string(&installed)?));
+    }
+
+    if !changes.is_empty() {
+        bail!(
+            "this codex build's guarded surface differs from the one CodeConnect was \
+             grounded against, so the checks that keep a session inside its sandbox have \
+             not been proven for it:\n  {}\n\
+             CodeConnect has to be re-grounded against this build before it can host it — \
+             each item above is measured, pinned and re-tested. Updating CodeConnect is the \
+             way through; downgrading codex is not asked for and will not be.",
+            changes.join("\n  ")
+        );
+    }
+
+    // The digest of what was ADMITTED — derived from the installed binary's own
+    // projection, not from the vendored copy it was proven equal to. The two are equal
+    // by the time control reaches here, so the values coincide; deriving it from the
+    // vendored side would still be wrong, because it would report the same digest for a
+    // codex whose surface was never actually read.
+    //
+    Ok(admitted_digest(&admitted))
+}
+
+/// The digest of the surfaces that were admitted, over an **unambiguous** encoding.
+///
+/// Each part is committed with its LABEL and its BYTE LENGTH before its bytes. A bare
+/// concatenation is not unambiguous: two different splits of the same byte stream across
+/// bundles digest identically, and so do two parts whose labels were swapped. A digest
+/// that cannot distinguish those is not evidence about which surface was read — and this
+/// value exists to be carried into a launch record as exactly that evidence.
+fn admitted_digest(parts: &[(&str, String)]) -> String {
+    let mut framed = String::new();
+    for (label, body) in parts {
+        framed.push_str(&format!("{label} {}\n{body}\n", body.len()));
+    }
+    protocol::hash::sha256_hex(framed.as_bytes())
 }
 
 // --------------------------------------------------------- reserved argv grammar
@@ -1275,17 +1817,105 @@ fn classify_short_cluster(shorts: &str) -> Token {
 /// it does not trust its caller, and a second copy of the grammar could drift on
 /// which flags CodeConnect owns.
 pub fn validate_codex_argv(args: &[String]) -> Result<(), CodexRefusal> {
+    scan_codex_argv(args).map(|_| ())
+}
+
+/// What one walk of a codex argv established.
+struct ArgvScan {
+    /// The argv to exec: every value-taking flag rewritten into attached form, and a
+    /// `--` in front of the positionals. See [`fence_positionals`].
+    normalized: Vec<String>,
+}
+
+/// **Insert `--` before the first positional, so a bare token can never dispatch.**
+///
+/// # Why the refusal table cannot be the safety property
+///
+/// `is_subcommand` is a closed list, and MEASURED: no enumeration codex emits carries
+/// its hidden aliases — `cloud-tasks` dispatches on both binaries and appears in neither
+/// `--help` nor any of the five completion shells. So a *future* hidden alias would be in
+/// neither the vendored argv reference (the launch gate cannot see it) nor the refusal
+/// table (nobody knew to add it), would be classified as prompt text, and codex would
+/// dispatch it. That is the original escape class, and no amount of list-keeping closes
+/// it, because the thing that would have to be enumerated cannot be.
+///
+/// `--` closes it structurally, and every claim here is measured on BOTH binaries:
+///
+/// | argv | result |
+/// |---|---|
+/// | `codex features` | **dispatches** — prints `Usage: codex features …` |
+/// | `codex hello features` | **dispatches** — a prompt does not protect the token after it |
+/// | `codex -- features` | prompt (`Error: stdin is not a terminal`) |
+/// | `codex -- hello features` | clap error: `unexpected argument 'features' found` — refused, not dispatched |
+/// | `codex -m gpt-5 -- features` | prompt — flags before the boundary still parse |
+/// | `codex hello world` | clap error — identical to the `--` form, so the fence regresses nothing |
+///
+/// Both outcomes after the boundary are safe: one positional becomes the prompt, and a
+/// second is a hard parse error. Neither dispatches.
+///
+/// # Why before the FIRST positional rather than before everything
+///
+/// `--` terminates option parsing too, so putting it in front of the whole passthrough
+/// would turn the user's own `-m gpt-5` into positionals and break the launch. Inserting
+/// it at the first positional preserves flag semantics and argument order exactly.
+///
+/// # Why every value-taking flag is REWRITTEN into attached form
+///
+/// Because otherwise the fence would rest on this walk's arity model agreeing with clap's,
+/// and nothing gates that. The guarded-surface gate compares flag SPELLINGS and subcommand
+/// names; it says nothing about how many values a flag consumes. So a future codex that
+/// kept the same root token set but changed `-i` from greedy to single-value would pass
+/// the gate, and this walk — still sweeping greedily — would consume `features` in
+/// `-i a.png features` as an image, see no positional, insert no fence, and hand codex a
+/// bare token it now dispatches.
+///
+/// The rewrite removes the dependency instead of trying to track it. Every flag in the
+/// emitted argv is either a bool or carries its value **attached to the flag token**, so
+/// no bare token is any flag's value under ANY arity model — which makes every remaining
+/// bare token a positional, and the first of them is fenced. This walk's arity model is
+/// then only a UX classifier: get it wrong and codex reports a missing or surplus value,
+/// which is legible and fail-closed. It can no longer expose a positional.
+///
+/// Both halves are MEASURED on both binaries. Every value-taking flag we admit accepts the
+/// attached form (`--model=gpt-5`, `--config=a=b`, `--sandbox=read-only`, `--add-dir=/tmp`,
+/// `--image=/tmp/a.png`, and the short spellings `-mgpt-5`, `-C/tmp`, `-ca=b`). And for the
+/// one greedy flag, repeating the attached form is equivalent to the greedy sweep: driven
+/// through a real 0.153 session, `--image=A --image=B` and `-i A B` produce **byte-identical**
+/// `turn/start.params.input` — two `localImage` items, same paths, same order.
+///
+/// The refusal table stays, and is now the *legibility* layer rather than the safety one:
+/// `codeconnect codex resume` still says exactly why it was refused instead of silently
+/// becoming a prompt.
+pub fn fence_positionals(args: &[String]) -> Result<Vec<String>, CodexRefusal> {
+    Ok(scan_codex_argv(args)?.normalized)
+}
+
+fn scan_codex_argv(args: &[String]) -> Result<ArgvScan, CodexRefusal> {
     let mut i = 0;
+    let mut normalized: Vec<String> = Vec::with_capacity(args.len() + 1);
+    // Set once, when the first positional is emitted: `--` goes in front of it and every
+    // later token rides behind that boundary.
+    let mut fenced = false;
 
     while i < args.len() {
         match classify(&args[i]) {
             // Everything after `--` is prompt content: forwarded verbatim, never
             // interpreted as a flag or a subcommand.
-            Token::Boundary => break,
+            Token::Boundary => {
+                normalized.extend_from_slice(&args[i..]);
+                return Ok(ArgvScan { normalized });
+            }
 
             Token::Flag { flag, attached } => match flag.arity {
                 Arity::Bool => {
                     refuse_bool(flag.canonical)?;
+                    // A bool consumes no value, so its spelling cannot swallow anything;
+                    // it is emitted canonically for uniformity, with any (rejectable)
+                    // attached tail preserved so codex still sees what was written.
+                    normalized.push(match attached {
+                        Some(value) => format!("{}={value}", flag.canonical),
+                        None => flag.canonical.to_string(),
+                    });
                     i += 1;
                 }
                 Arity::Value => {
@@ -1314,27 +1944,40 @@ pub fn validate_codex_argv(args: &[String]) -> Result<(), CodexRefusal> {
                         },
                     };
                     refuse_value_flag(flag.canonical, value.as_deref())?;
+                    normalized.push(match &value {
+                        Some(value) => format!("{}={value}", flag.canonical),
+                        // No value to attach — codex will report the missing one, which
+                        // is the same answer it would have given the spaced form.
+                        None => flag.canonical.to_string(),
+                    });
                 }
                 Arity::Values => {
                     // `-i`/`--image`. Grounded on 0.147: the **spaced** form is
                     // greedy (`-i a b c` ⇒ three image paths), but the **attached**
-                    // form (`--image=a`, `-ia`) takes exactly that one value —
-                    // `--image=a b c` parses `b` as the prompt and `c` as a
-                    // subcommand slot. So the greedy sweep runs only for the spaced
-                    // form; after an attached value the following tokens are real
-                    // positionals and a subcommand among them is refused, exactly
-                    // as codex would dispatch it.
+                    // form (`--image=a`, `-ia`) takes exactly that one value.
+                    //
+                    // MEASURED equivalent on 0.153, which is what lets the sweep be
+                    // rewritten rather than passed through: `--image=A --image=B` and
+                    // `-i A B` produce byte-identical `turn/start.params.input` — two
+                    // `localImage` items, same paths, same order. So each swept value
+                    // becomes its own attached occurrence.
                     i += 1;
-                    if attached.is_none() {
-                        while i < args.len() && !looks_like_flag(&args[i]) {
-                            i += 1;
+                    match attached {
+                        Some(value) => normalized.push(format!("{}={value}", flag.canonical)),
+                        None => {
+                            while i < args.len() && !looks_like_flag(&args[i]) {
+                                normalized.push(format!("{}={}", flag.canonical, args[i]));
+                                i += 1;
+                            }
                         }
                     }
                 }
             },
 
-            // A cluster of only bool short-flags (`-hV`): forwarded as-is.
+            // A cluster of only bool short-flags (`-hV`): consumes no value, so it is
+            // forwarded as-is.
             Token::BoolCluster => {
+                normalized.push(args[i].clone());
                 i += 1;
             }
 
@@ -1352,11 +1995,16 @@ pub fn validate_codex_argv(args: &[String]) -> Result<(), CodexRefusal> {
                         name: args[i].clone(),
                     });
                 }
+                if !fenced {
+                    normalized.push("--".to_string());
+                    fenced = true;
+                }
+                normalized.push(args[i].clone());
                 i += 1;
             }
         }
     }
-    Ok(())
+    Ok(ArgvScan { normalized })
 }
 
 /// Whether a token would begin a flag to codex (used to bound greedy `--image`).
@@ -1764,47 +2412,75 @@ fn feature_verdict(feature: &str) -> FeatureVerdict {
 
 /// Whether a bare positional token is a codex subcommand name or alias.
 ///
-/// The full 0.147 top-level command set, enumerated from clap's own completion
-/// output, including the **hidden** commands (`execpolicy`, `responses-api-proxy`,
-/// `stdio-to-uds`) and both the visible aliases (`e` for `exec`, `a` for `apply`)
-/// and the hidden alias (`cloud-tasks` for `cloud`). Matching a positional token
-/// against this set is exactly how codex resolves a subcommand: `codex resume`
+/// The **union** of the top-level command sets of every codex build CodeConnect has
+/// been grounded against, enumerated from clap's own completion output — including the
+/// **hidden** commands (`execpolicy`, `responses-api-proxy`, `stdio-to-uds`), the
+/// visible aliases (`e` for `exec`, `a` for `apply`) and the hidden alias
+/// (`cloud-tasks` for `cloud`, which completion does not emit). Matching a positional
+/// token against this set is exactly how codex resolves a subcommand: `codex resume`
 /// and `codex please resume` both dispatch Resume, never a prompt of the word.
+///
+/// **A union, not one version's set, and the difference is the whole point.** A token
+/// this table does not know is classified [`Token::Positional`] and forwarded as prompt
+/// text — so a subcommand introduced by a codex newer than the table is not refused,
+/// it is *handed to codex, which dispatches it*. That is the escape class, and it was
+/// live: 0.153 added `agents`, `queue` and `migrate-rollouts`, and `validate_codex_argv`
+/// returned `Ok(())` for all three (measured). `codex agents` browses sessions on the
+/// **shared local app-server daemon** and `codex queue` injects a message into another
+/// session — both step around the broker entirely, which is the one thing this grammar
+/// exists to prevent. Removing a token as codex retires it would re-open exactly that
+/// hole for anyone still on the older build, so tokens are only ever added.
+///
+/// Keeping this in step with reality is not left to diligence: the launch gate
+/// ([`ensure_guarded_surface`]) refuses any codex whose root command set has moved away
+/// from a vendored reference, and `every_dispatchable_root_token_is_accounted_for` proves
+/// both directions of the tie — every referenced subcommand is refused here, and every
+/// token refused here is either in a reference or on the measured hidden-alias list.
+/// The table itself, as data rather than a `matches!` arm, so
+/// [`every_dispatchable_root_token_is_accounted_for`] can walk it in both directions.
+/// A table that can only be *queried* can hold a token no reference knows about and
+/// nothing would notice.
+const ROOT_SUBCOMMANDS: [&str; 34] = [
+    // --- 0.153 additions. See this function's doc: each was measured dispatching
+    // on a real 0.153 binary while `validate_codex_argv` waved it through.
+    "agents",
+    "queue",
+    "migrate-rollouts",
+    "exec",
+    "e",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "plugin",
+    "mcp-server",
+    "app-server",
+    "remote-control",
+    "app",
+    "completion",
+    "update",
+    "doctor",
+    "sandbox",
+    "debug",
+    "execpolicy",
+    "apply",
+    "a",
+    "resume",
+    "archive",
+    "delete",
+    "unarchive",
+    "fork",
+    "cloud",
+    "cloud-tasks",
+    "responses-api-proxy",
+    "stdio-to-uds",
+    "exec-server",
+    "features",
+    "help",
+];
+
 fn is_subcommand(token: &str) -> bool {
-    matches!(
-        token,
-        "exec"
-            | "e"
-            | "review"
-            | "login"
-            | "logout"
-            | "mcp"
-            | "plugin"
-            | "mcp-server"
-            | "app-server"
-            | "remote-control"
-            | "app"
-            | "completion"
-            | "update"
-            | "doctor"
-            | "sandbox"
-            | "debug"
-            | "execpolicy"
-            | "apply"
-            | "a"
-            | "resume"
-            | "archive"
-            | "delete"
-            | "unarchive"
-            | "fork"
-            | "cloud"
-            | "cloud-tasks"
-            | "responses-api-proxy"
-            | "stdio-to-uds"
-            | "exec-server"
-            | "features"
-            | "help"
-    )
+    ROOT_SUBCOMMANDS.contains(&token)
 }
 
 #[cfg(test)]
@@ -2649,24 +3325,364 @@ mod tests {
         assert_eq!(parse_codex_version("").as_deref(), None);
     }
 
+    /// The version string is READ and RECORDED, and it decides nothing.
+    ///
+    /// Read the source rather than call anything, the same idiom
+    /// `the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken` uses and for the
+    /// same reason: what must be proven is the *absence* of a call inside a function
+    /// that talks to a live binary, which no unit test can reach by calling it.
+    ///
+    /// This is the mutation guard for the whole change. Restore the version-string
+    /// compare in `start` and this test goes red — which is what stops the pin being
+    /// quietly reinstated "just to be safe" beside a gate that already answers the
+    /// question properly, leaving every weekly codex refused again.
     #[test]
-    fn the_pinned_version_is_accepted_and_others_are_refused_by_name() {
-        assert!(ensure_pinned_version("0.147.0").is_ok());
-        let err = ensure_pinned_version("0.148.0").unwrap_err().to_string();
-        assert!(err.contains("0.148.0"), "names the rejected version: {err}");
-        assert!(err.contains("0.147.0"), "names the tested set: {err}");
+    fn the_version_string_is_recorded_and_never_gates() {
+        let source = include_str!("codex.rs");
+        let at = source
+            .find("pub fn start(passthrough: &[String]) -> Result<()> {")
+            .expect("start must exist");
+        let rest = &source[at..];
+        let start = &rest[..rest.find("\n}\n").expect("a closed function body")];
+
+        assert!(
+            start.contains("probe_codex(") && start.contains("parse_codex_version("),
+            "the version must still be READ — it names what ran, and it is one of the \
+             four answers `probe_codex` reads under a single held freeze"
+        );
+        for gate in ["ensure_pinned_version", "is_pinned_codex_version"] {
+            assert!(
+                !start.contains(gate),
+                "{gate} is back in start(): the version string must be recorded, not \
+                 gated. The guarded-surface gate is what decides."
+            );
+        }
+        assert!(
+            start.contains("ensure_guarded_surface("),
+            "start must run the guarded-surface gate"
+        );
     }
 
+    /// **A shipping build cannot record a session, whatever its environment says.**
+    ///
+    /// The tee records every frame VERBATIM — that is its whole purpose, and it is why
+    /// `crate::redact`'s guarantee (a log line never carries client-chosen text) does
+    /// not apply to it. A production launch that could enable it would be a production
+    /// launch that could write a user's prompts, file contents and tool output to a
+    /// plaintext file at a path someone else chose.
+    ///
+    /// The containment is COMPILE-TIME: the recorder is behind the `frame-tee` cargo
+    /// feature, and without it `codex_broker::FrameTee::from_env` does not read the
+    /// variable at all. That is what this asserts first, by calling it with the variable
+    /// set. The source scan below is the second line — a capture build should still not
+    /// have a launcher that switches the recorder on by itself — and it reads the source
+    /// for the same reason `the_version_string_is_recorded_and_never_gates` does: what
+    /// must be proven is the ABSENCE of a call, which no unit test reaches by calling
+    /// anything.
     #[test]
-    fn the_live_binary_reports_a_pinned_version() {
+    fn a_shipping_build_cannot_enable_the_frame_tee() {
+        // A REGULAR FILE in a scratch directory, not `/dev/null`: the tee refuses a
+        // non-regular target (a device or pipe would let a write block the relay), so
+        // `/dev/null` here made this assertion unreachable under `--features frame-tee` —
+        // the call errored before the thing under test was ever evaluated.
+        let dir = ScratchDir::new().expect("scratch dir");
+        let path = dir.0.join("capture.jsonl");
+        std::env::set_var(codex_broker::FRAME_TEE_ENV, &path);
+        let tee = codex_broker::FrameTee::from_env().expect("from_env must not fail");
+        std::env::remove_var(codex_broker::FRAME_TEE_ENV);
+        if cfg!(feature = "frame-tee") {
+            assert!(tee.is_on(), "a capture build must honour the variable");
+        } else {
+            assert!(
+                !tee.is_on(),
+                "the default build must ignore {} entirely — the env read is not compiled",
+                codex_broker::FRAME_TEE_ENV
+            );
+        }
+    }
+
+    /// **The host's call is gated on THIS crate's feature, not only the broker's.**
+    ///
+    /// Cargo unifies features across a dependency graph, so another crate in a future
+    /// build could enable `codex-broker/frame-tee` while CodeConnect's own feature stays
+    /// off — and an ungated `FrameTee::from_env()` in the host would then read the
+    /// environment even though nothing in this binary asked it to. The invariant has to be
+    /// local to the binary a user runs, and what has to be proven is the absence of an
+    /// unconditional call.
+    #[test]
+    fn the_hosts_frame_tee_call_is_gated_on_this_crates_feature() {
+        let host = include_str!("codex_host.rs");
+        let at = host
+            .find("FrameTee::from_env()")
+            .expect("the host builds the tee");
+        let before = &host[at.saturating_sub(400)..at];
+        assert!(
+            before.contains("cfg!(feature = \"frame-tee\")"),
+            "the host's FrameTee::from_env call must sit behind CodeConnect's own \
+             `frame-tee` feature, not only the dependency's: {before}"
+        );
+    }
+
+    /// The launcher itself neither sets the variable nor offers a way to.
+    #[test]
+    fn the_shipping_launcher_cannot_enable_the_frame_tee() {
+        // Every source file the `codeconnect` binary is built from.
+        for (name, source) in [
+            ("codex.rs", include_str!("codex.rs")),
+            ("codex_host.rs", include_str!("codex_host.rs")),
+            ("codex_coordinator.rs", include_str!("codex_coordinator.rs")),
+            ("codex_launch.rs", include_str!("codex_launch.rs")),
+            ("codex_custodian.rs", include_str!("codex_custodian.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ] {
+            // Nothing may SET the variable. Reading it (the host's `from_env`) is the
+            // one legitimate use, and it is a read.
+            for setter in [
+                &format!("set_var({:?}", codex_broker::FRAME_TEE_ENV) as &str,
+                &format!(".env({:?}", codex_broker::FRAME_TEE_ENV),
+                &format!("env(\"{}\"", codex_broker::FRAME_TEE_ENV),
+            ] {
+                assert!(
+                    !source.contains(setter),
+                    "{name} sets {} — the shipping launcher must never be able to turn \
+                     the verbatim frame recorder on",
+                    codex_broker::FRAME_TEE_ENV
+                );
+            }
+            // And no config key or charter flag may reach it: those ARE operator-
+            // writable, which is exactly what an env-only switch avoids.
+            // Only three files may mention it at all, and each for one stated reason:
+            // the host READS the variable to build the tee, the coordinator FORWARDS it
+            // into the pane, and this file holds the test. Anywhere else is a fourth way
+            // to reach a verbatim recorder, which is what this test exists to prevent.
+            assert!(
+                !source.contains("frame_tee")
+                    || matches!(name, "codex_host.rs" | "codex_coordinator.rs" | "codex.rs"),
+                "{name} references the frame tee; only the host (which reads the env), \
+                 the coordinator (which forwards it) and this test may"
+            );
+        }
+        // The charter grammar must not carry it either: a charter flag would make the
+        // recorder reachable from any process that can spawn a coordinator.
+        //
+        // Scoped to `coordinator_charter`'s body — the one function that emits charter
+        // flags — rather than the whole file, and the needles are BUILT rather than
+        // written, because a literal here would appear in this test's own source and
+        // match itself. (It did, on the first run.)
+        let source = include_str!("codex.rs");
+        let at = source
+            .find("fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {")
+            .expect("the charter builder must exist");
+        let rest = &source[at..];
+        let charter = &rest[..rest.find("\n}\n").expect("a closed function body")];
+        for needle in ["frame-tee", "capture", "tee"] {
+            let flag = format!("--{needle}");
+            assert!(
+                !charter.contains(&flag),
+                "coordinator_charter emits {flag}: a charter flag would make the \
+                 verbatim frame recorder reachable from a spawned process"
+            );
+        }
+        // And it is off unless the environment says otherwise.
+        assert!(
+            !codex_broker::FrameTee::off().is_on(),
+            "the default must be off"
+        );
+
+        // The coordinator FORWARDS the variable into the tmux pane (otherwise the
+        // instrument can never reach the host, since the pane gets an explicit `-e`
+        // allowlist rather than the parent environment) — but it must only ever pass
+        // through a value it already found, never invent one. Both halves are asserted:
+        // the forward exists, and it is guarded by a read of the same variable.
+        let coord = include_str!("codex_coordinator.rs");
+        assert!(
+            coord.contains("codex_broker::FRAME_TEE_ENV"),
+            "the coordinator must forward the frame-tee variable into the pane, or the \
+             instrument cannot reach the host that builds the broker"
+        );
+        assert!(
+            coord.contains("std::env::var(codex_broker::FRAME_TEE_ENV)"),
+            "the forward must be guarded by a READ of the variable — a pass-through, \
+             never a switch the coordinator can flip on its own"
+        );
+    }
+
+    /// The installed codex — whatever version it is — must pass the real gate.
+    ///
+    /// This replaces `the_live_binary_reports_a_pinned_version`, whose premise was a
+    /// literal ("is it 0.147?") and which therefore went red on every codex release
+    /// while proving nothing about whether the release was safe to host. The premise is
+    /// now the honest one: the gate admitted this build.
+    #[test]
+    fn the_live_binarys_guarded_surface_is_admitted() {
         if !on_path("codex") {
-            eprintln!("skipped: no `codex` on PATH — nothing to version-check");
+            eprintln!("skipped: no `codex` on PATH — nothing to check");
             return;
         }
         let resolved = resolve_codex_bin(&Config::default()).unwrap();
-        let version = read_codex_version(&resolved).expect("codex --version must run");
-        ensure_pinned_version(&version)
-            .unwrap_or_else(|e| panic!("installed codex {version} is unpinned: {e}"));
+        let scratch = ScratchDir::new().expect("scratch dir");
+        let probe = probe_codex(&resolved, &scratch.0).expect("the launch probes must run");
+        let version = parse_codex_version(&String::from_utf8_lossy(&probe.version_out))
+            .expect("codex --version must parse");
+        match ensure_guarded_surface(&probe) {
+            Ok(digest) => assert_eq!(digest.len(), 64, "the surface digest is a sha256"),
+            Err(e) => panic!(
+                "the installed codex {version} is not one this build is grounded \
+                 against:\n{e:#}"
+            ),
+        }
+    }
+
+    /// **A probe is bounded in both directions, proven deterministically.**
+    ///
+    /// No codex and no `CC_CODEX_LIVE`, because the dangerous shapes are invisible
+    /// against the real binary: it answers and exits in the same breath, so an unbounded
+    /// collection looks fine forever. The gate runs whatever is installed at the codex
+    /// path — deciding whether to host it is the whole job — so it must survive a binary
+    /// that never closes its pipes and one that streams without end.
+    ///
+    /// The flood goes on **stdout** here, and the ceiling is what has to catch it: a
+    /// prefix of a flood is not a shorter answer.
+    #[test]
+    fn a_probe_that_hangs_or_floods_is_refused_rather_than_waited_on() {
+        use std::os::unix::fs::PermissionsExt;
+        // Short, because what is being observed is that the wait ENDS — paying the
+        // production budget to watch a clock run out would only make the suite slower.
+        const BUDGET: Duration = Duration::from_secs(2);
+        let dir = ScratchDir::new().expect("scratch dir");
+        let write = |name: &str, body: &str| {
+            let p = dir.0.join(name);
+            std::fs::write(&p, body).expect("write fake");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            p
+        };
+
+        // The well-behaved shape first, so a runner that refused everything could not
+        // pass this test.
+        let good = write("good", "#!/bin/sh\necho hello\n");
+        assert_eq!(
+            run_bounded(&good, &[], BUDGET).expect("a well-behaved probe is read normally"),
+            b"hello\n"
+        );
+
+        // A descendant inherits the write end and never exits: EOF never arrives, so an
+        // `output()` would block past any deadline above it.
+        let forker = write("forker", "#!/bin/sh\necho hello\nsleep 600 &\nexit 0\n");
+        let started = Instant::now();
+        let why = run_bounded(&forker, &[], BUDGET).expect_err("a held pipe must be refused");
+        assert!(
+            why.to_string().contains("did not close its"),
+            "expected a pipe-close refusal, got: {why:#}"
+        );
+        assert!(
+            started.elapsed() < BUDGET + PROBE_REAP_BUDGET + Duration::from_secs(5),
+            "the probe must cost its budget, not the sleeper's lifetime"
+        );
+
+        // A flood: valid-looking first line, then more bytes than the ceiling allows.
+        let flooder = write(
+            "flooder",
+            "#!/bin/sh\necho hello\nyes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        );
+        let why = run_bounded(&flooder, &[], BUDGET).expect_err("a flood must be refused");
+        assert!(
+            why.to_string().contains("wrote more than"),
+            "expected an output-ceiling refusal, got: {why:#}"
+        );
+    }
+
+    /// The admitted-surface digest distinguishes surfaces a bare concatenation cannot.
+    ///
+    /// It is meant to be carried into a launch record as evidence of *which* surface was
+    /// read, so two different readings must not share a digest. Both collisions a
+    /// delimiter-free join admits are checked: a byte moved across the boundary between
+    /// two parts, and two parts whose labels were swapped.
+    #[test]
+    fn the_admitted_digest_is_framed_and_labelled() {
+        let d = |parts: &[(&str, &str)]| {
+            admitted_digest(
+                &parts
+                    .iter()
+                    .map(|(l, b)| (*l, b.to_string()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let base = d(&[("argv", "ab"), ("stable", "cd")]);
+        assert_ne!(
+            base,
+            d(&[("argv", "abc"), ("stable", "d")]),
+            "a byte moved across the boundary must change the digest"
+        );
+        assert_ne!(
+            base,
+            d(&[("stable", "ab"), ("argv", "cd")]),
+            "swapping which bundle a surface came from must change the digest"
+        );
+        assert_eq!(base.len(), 64);
+    }
+
+    /// The scratch tree is created exclusively, so the gate never generates into — or
+    /// reads back out of — a directory somebody else placed at the path.
+    #[test]
+    fn the_scratch_directory_will_not_adopt_one_that_already_exists() {
+        let dir = ScratchDir::new().expect("scratch dir");
+        let path = dir.0.clone();
+        assert!(
+            std::fs::DirBuilder::new().create(&path).is_err(),
+            "creating the scratch tree must fail when anything is already at the path"
+        );
+        // …and it is private to this user from the moment it exists.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "the scratch tree must be 0700");
+    }
+
+    /// A generated bundle larger than the ceiling is a refusal, not an allocation.
+    #[test]
+    fn an_oversized_generated_bundle_is_refused() {
+        let dir = ScratchDir::new().expect("scratch dir");
+        let small = dir.0.join("small.json");
+        std::fs::write(&small, b"{}").expect("write");
+        assert_eq!(read_generated(&small).expect("small reads"), b"{}");
+        assert!(
+            read_generated(&dir.0.join("absent.json")).is_err(),
+            "a bundle codex did not write is a refusal"
+        );
+    }
+
+    /// **A generated bundle that is not a regular file must be refused PROMPTLY.**
+    ///
+    /// The writer here is the binary the gate has not yet decided to host, and it chooses
+    /// what to put at these paths. A FIFO with no writer blocks `File::open` forever —
+    /// outside every probe deadline, and *while the executable freeze is still held*, so
+    /// the launch hangs and the freeze never clears. The bound is asserted in wall-clock
+    /// terms because "refused" and "refused eventually" are different failures here.
+    #[test]
+    fn a_generated_bundle_that_is_a_fifo_is_refused_without_blocking() {
+        let dir = ScratchDir::new().expect("scratch dir");
+        let fifo = dir.0.join("ClientRequest.json");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+        let started = Instant::now();
+        let why = read_generated(&fifo).expect_err("a FIFO must be refused");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the refusal must be prompt; a blocking open would hold the freeze forever"
+        );
+        assert!(
+            format!("{why:#}").contains("regular file")
+                || format!("{why:#}").contains("Device not configured"),
+            "expected a not-a-regular-file refusal, got: {why:#}"
+        );
+
+        // A symlink at the final component is refused too: the bundle must be the one the
+        // probe wrote, not one pointed elsewhere after the fact.
+        let real = dir.0.join("real.json");
+        std::fs::write(&real, b"{}").expect("write");
+        let link = dir.0.join("ClientNotification.json");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert!(read_generated(&link).is_err(), "a symlink must be refused");
     }
 
     // ----------------------------------------------------- reserved argv grammar
@@ -3000,6 +4016,267 @@ mod tests {
                 "`codex {name}` should be refused as a subcommand"
             );
         }
+    }
+
+    /// The three subcommands codex 0.153 added, which this grammar forwarded as prompt
+    /// text until they were pinned.
+    ///
+    /// Kept as its own test rather than three more strings in the list above, because
+    /// the regression it guards is specific and worth naming: `validate_codex_argv`
+    /// returned `Ok(())` for each of these against a real 0.153 install, so `codeconnect
+    /// codex agents` handed `agents` to codex, which dispatched its session browser
+    /// against the shared local app-server daemon — outside the broker, which is the one
+    /// place a hosted session is supposed to be observable and containable from.
+    #[test]
+    fn the_subcommands_codex_0153_added_are_refused() {
+        for name in ["agents", "queue", "migrate-rollouts"] {
+            assert!(
+                matches!(refuse(&[name]), CodexRefusal::Subcommand { .. }),
+                "`codex {name}` dispatches on 0.153 and must be refused, not forwarded \
+                 as a prompt"
+            );
+        }
+    }
+
+    /// **The two guarded surfaces must agree, in BOTH directions.**
+    ///
+    /// This is the seam between the launch gate and the argv grammar. The gate proves
+    /// the installed binary's command set still equals a vendored reference; this proves
+    /// the references are fully covered by the refusal table, and — the direction that
+    /// matters for the class the projection cannot see — that every token in the refusal
+    /// table is either enumerated by a reference or explicitly listed as a hidden alias.
+    ///
+    /// Without the second direction a dispatchable root token could sit in NEITHER: not
+    /// in the completion script (so the argv diff never sees it appear) and not in the
+    /// refusal table (so `validate_codex_argv` forwards it as prompt text). `cloud-tasks`
+    /// is that class, measured: it dispatches on both binaries and appears in no
+    /// enumeration either of them emits. Listing it in
+    /// [`codex_broker::guarded_surface::HIDDEN_ROOT_ALIASES`] is what makes it a
+    /// reviewed fact instead of a token that happens to be here, and
+    /// `the_hidden_root_aliases_still_dispatch_and_are_still_hidden` re-measures both
+    /// halves of that claim against live binaries.
+    #[test]
+    fn every_dispatchable_root_token_is_accounted_for() {
+        use codex_broker::guarded_surface as gs;
+        let mut known: std::collections::BTreeSet<String> = gs::baseline_argv().subcommands;
+        known.extend(gs::grounded_argv().subcommands);
+        for name in &known {
+            assert!(
+                is_subcommand(name),
+                "a vendored argv reference names `{name}` as a root subcommand, but the \
+                 refusal table does not know it — it would be forwarded as prompt text \
+                 and codex would dispatch it"
+            );
+        }
+        for token in ROOT_SUBCOMMANDS {
+            assert!(
+                known.contains(token) || gs::HIDDEN_ROOT_ALIASES.contains(&token),
+                "the refusal table refuses `{token}`, which no vendored reference \
+                 enumerates and HIDDEN_ROOT_ALIASES does not claim — so nothing measures \
+                 whether it still dispatches, and its siblings could be missing here \
+                 without anything noticing"
+            );
+        }
+    }
+
+    /// The fence goes in front of the first positional, and every value-taking flag is
+    /// rewritten into attached form so no bare token can be a flag's value.
+    #[test]
+    fn the_fence_lands_before_the_first_positional_only() {
+        let fence = |parts: &[&str]| -> Vec<String> {
+            fence_positionals(&argv(parts)).expect("accepted argv fences")
+        };
+        // A bare prompt gets the boundary in front of it.
+        assert_eq!(fence(&["hello"]), argv(&["--", "hello"]));
+        // A spaced value is ATTACHED to its flag, so the value is no longer a bare token
+        // that any arity model could disagree about.
+        assert_eq!(
+            fence(&["-m", "gpt-5", "hello"]),
+            argv(&["--model=gpt-5", "--", "hello"])
+        );
+        assert_eq!(
+            fence(&["--search", "--model=gpt-5", "hi"]),
+            argv(&["--search", "--model=gpt-5", "--", "hi"])
+        );
+        // Short attached forms are canonicalised to the long attached form; a `--config`
+        // value carrying its own `=` survives intact (measured to parse).
+        assert_eq!(fence(&["-ca=b"]), argv(&["--config=a=b"]));
+        assert_eq!(fence(&["--config", "a=b"]), argv(&["--config=a=b"]));
+        // The greedy sweep becomes one attached occurrence PER value — measured
+        // byte-identical to the spaced form on a real 0.153 turn.
+        assert_eq!(
+            fence(&["-i", "a.png", "b.png", "hi"]),
+            argv(&["--image=a.png", "--image=b.png", "--image=hi"]),
+            "the sweep is rewritten value by value, so no bare token is left over"
+        );
+        // The ATTACHED form takes exactly one value, so what follows really is a
+        // positional — and the token after THAT is the subcommand slot codex would
+        // dispatch from. This is the case the fence has to catch.
+        assert_eq!(
+            fence(&["--image=a.png", "hi"]),
+            argv(&["--image=a.png", "--", "hi"])
+        );
+        // Nothing positional, nothing to fence.
+        assert_eq!(fence(&["--search"]), argv(&["--search"]));
+        assert_eq!(fence(&[]), argv(&[]));
+        // A boundary the caller already supplied is not doubled.
+        assert_eq!(fence(&["--", "hello"]), argv(&["--", "hello"]));
+        assert_eq!(fence(&["--search", "--"]), argv(&["--search", "--"]));
+        // Only the FIRST positional is fenced; a second is already behind the boundary.
+        assert_eq!(
+            fence(&["one", "two"]),
+            argv(&["--", "one", "two"]),
+            "one boundary, at the front of the positionals"
+        );
+        // A bare `-` is codex's stdin sentinel — a positional, so it is fenced.
+        assert_eq!(fence(&["-"]), argv(&["--", "-"]));
+
+        // **The invariant the fence now rests on**, asserted over every arm above: in the
+        // emitted argv, no token before the `--` is bare. Each is either a `--flag` or a
+        // `--flag=value`, so nothing there can be a flag's value under any arity model,
+        // and everything after the `--` is positional by construction.
+        for parts in [
+            &["-m", "gpt-5", "hello"][..],
+            &["-i", "a.png", "b.png", "hi"][..],
+            &["--config", "a=b", "--local-provider", "ollama", "prompt"][..],
+            &["--search", "-ca=b", "-i", "x.png", "the prompt"][..],
+        ] {
+            let out = fence(parts);
+            let head = out.split(|t| t == "--").next().unwrap_or_default();
+            for token in head {
+                assert!(
+                    token.starts_with('-'),
+                    "{parts:?} emitted a bare token before the fence: {out:?}"
+                );
+            }
+        }
+    }
+
+    /// A refused argv never reaches the fence: the grammar's answer comes first, so a
+    /// refusal message is not replaced by a silent prompt.
+    #[test]
+    fn the_fence_refuses_what_the_grammar_refuses() {
+        for parts in [&["resume"][..], &["--yolo"][..], &["--unknown-flag"][..]] {
+            assert!(
+                fence_positionals(&argv(parts)).is_err(),
+                "{parts:?} must still be refused"
+            );
+        }
+    }
+
+    /// **The escape class, closed structurally — proven against a binary that DISPATCHES
+    /// a token no list in this repository knows.**
+    ///
+    /// This is the test the finding asked for, and it carries its own mutation: the same
+    /// shim is run with the fence and without it. Unfenced, the never-seen alias reaches
+    /// dispatch; fenced, it cannot. No real codex is needed, and that is the point — the
+    /// property under test is about a FUTURE binary, so it must be provable against one
+    /// that behaves like the future rather than like today's install.
+    ///
+    /// The shim mimics what was MEASURED of clap: a bare first token is matched against
+    /// the subcommand set (aliases included, whether or not any `--help` or completion
+    /// output lists them), and everything after a `--` is positional.
+    #[test]
+    fn a_never_seen_hidden_alias_cannot_dispatch_behind_the_fence() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScratchDir::new().expect("scratch dir");
+        let shim = dir.0.join("codex-shim");
+        // Dispatches `zzz-future-alias` — a token in neither ROOT_SUBCOMMANDS,
+        // HIDDEN_ROOT_ALIASES, nor either vendored argv reference.
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --) echo PROMPT; exit 0 ;;\n \
+             zzz-future-alias) echo DISPATCHED; exit 0 ;;\n  esac\ndone\necho PROMPT\n",
+        )
+        .expect("write shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        let run = |args: &[String]| -> String {
+            let out = Command::new(&shim).args(args).output().expect("shim runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let passthrough = argv(&["zzz-future-alias"]);
+
+        // The grammar cannot refuse what it has never heard of — this is the premise, and
+        // asserting it stops the test passing for the wrong reason.
+        assert!(
+            validate_codex_argv(&passthrough).is_ok(),
+            "the refusal table must NOT know this token, or the fence is not what is \
+             being tested"
+        );
+        // WITHOUT the fence — the mutation — it dispatches.
+        assert_eq!(
+            run(&passthrough),
+            "DISPATCHED",
+            "the unfenced argv must reach dispatch, or the shim proves nothing"
+        );
+        // WITH it, it cannot.
+        let fenced = fence_positionals(&passthrough).expect("accepted");
+        assert_eq!(fenced, argv(&["--", "zzz-future-alias"]));
+        assert_eq!(run(&fenced), "PROMPT");
+    }
+
+    /// **A future codex that changed a flag's ARITY still cannot be made to dispatch.**
+    ///
+    /// The reviewer's case, staged exactly: a binary whose `-i` consumes ONE value, given
+    /// `-i a.png features`. Our walk still believes `-i` is greedy — nothing gates option
+    /// arity, and the guarded-surface gate compares spellings, not how many values a flag
+    /// eats — so under the old passthrough it swept both tokens, saw no positional,
+    /// inserted no fence, and handed the binary a bare `features` to dispatch.
+    ///
+    /// The mutation is carried inside the test: the same shim is run with the emitted argv
+    /// and with the raw one. Raw dispatches; emitted cannot, because every value is glued
+    /// to its flag and there is no bare token left for any arity to disagree about.
+    #[test]
+    fn a_future_arity_change_cannot_expose_a_positional() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScratchDir::new().expect("scratch dir");
+        let shim = dir.0.join("codex-shim");
+        // `-i` takes exactly ONE value; anything after it is a subcommand slot. `features`
+        // is a real codex subcommand, so this is the shape that would dispatch.
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nskip=0\nfor a in \"$@\"; do\n  if [ $skip = 1 ]; then skip=0; \
+             continue; fi\n  case \"$a\" in\n    --) echo PROMPT; exit 0 ;;\n    -i) skip=1 \
+             ;;\n    --image=*) ;;\n    features) echo DISPATCHED; exit 0 ;;\n  esac\ndone\n\
+             echo PROMPT\n",
+        )
+        .expect("write shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        let run = |args: &[String]| -> String {
+            let out = Command::new(&shim).args(args).output().expect("shim runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let passthrough = argv(&["-i", "a.png", "features"]);
+
+        // The premise: our own grammar accepts this, because it reads `features` as the
+        // second image of a greedy sweep rather than as a token to refuse.
+        assert!(
+            validate_codex_argv(&passthrough).is_ok(),
+            "the grammar must NOT refuse this, or the rewrite is not what is being tested"
+        );
+        // THE MUTATION: raw argv against the single-value shim → it dispatches.
+        assert_eq!(
+            run(&passthrough),
+            "DISPATCHED",
+            "the raw argv must reach dispatch, or the shim proves nothing"
+        );
+        // The emitted argv: every value attached, so nothing is left bare to dispatch.
+        let emitted = fence_positionals(&passthrough).expect("accepted");
+        assert_eq!(
+            emitted,
+            argv(&["--image=a.png", "--image=features"]),
+            "each swept value becomes its own attached occurrence"
+        );
+        assert_eq!(run(&emitted), "PROMPT");
+    }
+
+    /// The table is a set: a duplicate would make its length lie about its contents.
+    #[test]
+    fn the_refusal_table_has_no_duplicates() {
+        let unique: std::collections::BTreeSet<&str> = ROOT_SUBCOMMANDS.into_iter().collect();
+        assert_eq!(unique.len(), ROOT_SUBCOMMANDS.len());
     }
 
     #[test]

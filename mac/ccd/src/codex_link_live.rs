@@ -155,10 +155,6 @@ use crate::codex_link::{ControlLink, TempDb};
 /// Per-sandbox sequence, so two live sandboxes can never derive the same run dir.
 static SANDBOX_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// The codex series this gate is grounded against — the series `codeconnect`'s own
-/// launcher pins.
-const LIVE_CODEX_VERSION_PREFIX: &str = "0.147.";
-
 const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(20);
 const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 
@@ -433,12 +429,22 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    assert!(
-        version.starts_with(LIVE_CODEX_VERSION_PREFIX),
-        "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, but this gate is grounded \
-         against {LIVE_CODEX_VERSION_PREFIX}x.",
-        codex.display()
-    );
+    // The premise is the gate's own verdict, not a version literal: `codeconnect`'s
+    // launcher no longer pins a version, it pins the guarded surface. See
+    // `codeconnect/tests/live_codex_host.rs` for the full reasoning.
+    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
+        Ok(changes) if changes.is_empty() => {}
+        Ok(changes) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
+             CodeConnect is NOT grounded against:\n  {}",
+            codex.display(),
+            changes.join("\n  ")
+        ),
+        Err(why) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}.",
+            codex.display()
+        ),
+    }
     assert!(
         tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found."

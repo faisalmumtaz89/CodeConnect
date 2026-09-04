@@ -95,10 +95,6 @@ fn codex_sha256(path: &Path) -> String {
 /// threads here — the collision class already fixed in the lifecycle harness.
 static SANDBOX_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// The codex series this live gate is grounded against, matching the compiled-in
-/// pin `protocol::config::CODEX_PINNED_VERSIONS` that `src/codex.rs` enforces.
-const LIVE_CODEX_VERSION_PREFIX: &str = "0.147.";
-
 /// Bounded budget for `codex --version`. A binary that does not answer promptly
 /// is not the standalone native CLI, and the gate must not hang on it.
 const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(20);
@@ -287,12 +283,22 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    assert!(
-        version.starts_with(LIVE_CODEX_VERSION_PREFIX),
-        "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, but this gate is grounded \
-         against {LIVE_CODEX_VERSION_PREFIX}x (the series `src/codex.rs` pins).",
-        codex.display()
-    );
+    // The premise is the gate's own verdict, not a version literal — see the same
+    // change in `live_codex_host.rs` for why a literal here was the launcher's defect
+    // reproduced in the suite.
+    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
+        Ok(changes) if changes.is_empty() => {}
+        Ok(changes) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
+             CodeConnect is NOT grounded against:\n  {}",
+            codex.display(),
+            changes.join("\n  ")
+        ),
+        Err(why) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}.",
+            codex.display()
+        ),
+    }
     assert!(
         tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found; the coordinator puts the host in a \

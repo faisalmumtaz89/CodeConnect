@@ -403,9 +403,9 @@ Tui	Request	thread/inject_items	Refuse(NotAllowlisted)
 Tui	Notification	thread/inject_items	Refuse(NotAllowlisted)
 Ccd	Request	thread/inject_items	Refuse(NotAllowlisted)
 Ccd	Notification	thread/inject_items	Refuse(NotAllowlisted)
-Tui	Request	thread/items/list	Forward
+Tui	Request	thread/items/list	ReadSessionThread
 Tui	Notification	thread/items/list	Refuse(NotAllowlisted)
-Ccd	Request	thread/items/list	Forward
+Ccd	Request	thread/items/list	ReadSessionThread
 Ccd	Notification	thread/items/list	Refuse(NotAllowlisted)
 Tui	Request	thread/list	Refuse(NotAllowlisted)
 Tui	Notification	thread/list	Refuse(NotAllowlisted)
@@ -427,9 +427,9 @@ Tui	Request	thread/name/set	Refuse(NotAllowlisted)
 Tui	Notification	thread/name/set	Refuse(NotAllowlisted)
 Ccd	Request	thread/name/set	Refuse(NotAllowlisted)
 Ccd	Notification	thread/name/set	Refuse(NotAllowlisted)
-Tui	Request	thread/read	Forward
+Tui	Request	thread/read	ReadSessionThread
 Tui	Notification	thread/read	Refuse(NotAllowlisted)
-Ccd	Request	thread/read	Forward
+Ccd	Request	thread/read	ReadSessionThread
 Ccd	Notification	thread/read	Refuse(NotAllowlisted)
 Tui	Request	thread/realtime/appendAudio	Refuse(NotAllowlisted)
 Tui	Notification	thread/realtime/appendAudio	Refuse(NotAllowlisted)
@@ -487,9 +487,9 @@ Tui	Request	thread/start	FingerprintAssert
 Tui	Notification	thread/start	Refuse(NotAllowlisted)
 Ccd	Request	thread/start	Refuse(RoleNotPermitted)
 Ccd	Notification	thread/start	Refuse(NotAllowlisted)
-Tui	Request	thread/turns/list	Forward
+Tui	Request	thread/turns/list	ReadSessionThread
 Tui	Notification	thread/turns/list	Refuse(NotAllowlisted)
-Ccd	Request	thread/turns/list	Forward
+Ccd	Request	thread/turns/list	ReadSessionThread
 Ccd	Notification	thread/turns/list	Refuse(NotAllowlisted)
 Tui	Request	thread/unarchive	Refuse(NotAllowlisted)
 Tui	Notification	thread/unarchive	Refuse(NotAllowlisted)
@@ -515,7 +515,7 @@ Tui	Request	threadSection/update	Refuse(NotAllowlisted)
 Tui	Notification	threadSection/update	Refuse(NotAllowlisted)
 Ccd	Request	threadSection/update	Refuse(NotAllowlisted)
 Ccd	Notification	threadSection/update	Refuse(NotAllowlisted)
-Tui	Request	turn/interrupt	HeadCheck
+Tui	Request	turn/interrupt	InterruptActiveTurn
 Tui	Notification	turn/interrupt	Refuse(NotAllowlisted)
 Ccd	Request	turn/interrupt	Refuse(NotAllowlisted)
 Ccd	Notification	turn/interrupt	Refuse(NotAllowlisted)

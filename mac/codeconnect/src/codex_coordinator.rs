@@ -1135,6 +1135,27 @@ impl RealCoordinatorDeps {
             "CODECONNECT_HOME={}",
             protocol::root_dir().display()
         ));
+        // The frame tee, FORWARDED and never originated.
+        //
+        // `tmux new-session` gives the pane an explicit `-e` allowlist rather than this
+        // process's whole environment, so without this the measurement instrument
+        // (`codex_broker::frame_tee`) can never reach the host that builds the broker —
+        // which made it unusable for the live harnesses it exists to serve.
+        //
+        // Forwarded only when it is ALREADY set here: this is a pass-through, not a
+        // switch. The shipping launcher never sets it and offers no way to — no config
+        // key, no charter flag, no CLI option — which is what
+        // `the_shipping_launcher_cannot_enable_the_frame_tee` proves.
+        //
+        // Forwarding it is safe even from a hostile parent environment, and that is a
+        // COMPILE-TIME fact rather than an argument about who sets variables: the host at
+        // the other end only reads this one if it was built with the `frame-tee` feature,
+        // which the shipping build is not. A capture build gets a capture; the binary a
+        // user runs gets nothing from it.
+        if let Ok(path) = std::env::var(codex_broker::FRAME_TEE_ENV) {
+            argv.push("-e".into());
+            argv.push(format!("{}={path}", codex_broker::FRAME_TEE_ENV));
+        }
         argv.push("--".into());
         argv.extend(self.host_argv());
         argv

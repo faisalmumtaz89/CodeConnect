@@ -142,9 +142,83 @@ pub enum Disposition {
     /// and the honest disposition is the one the wire supports: a scoped, read-only-ish
     /// forward that fails closed on any thread this session does not own.
     UnsubscribeSessionThread,
+    /// Forward iff `params.threadId` names a thread of THIS session — the thread-scoped
+    /// READS (`thread/read`, `thread/turns/list`, `thread/items/list`).
+    ///
+    /// **These were plain [`Disposition::Forward`] until the 0.153 re-grounding, and that
+    /// was a live cross-session read.** All three take a caller-chosen `threadId`, the
+    /// forward path validates no params, and `codex_home()` is the operator's own
+    /// `~/.codex` — so every CodeConnect session on a machine shares one thread store and
+    /// any leg could read any other session's conversation out of it.
+    ///
+    /// It was not theoretical. MEASURED end to end: the 0.153 TUI declares a
+    /// `dynamicTools` bundle giving the MODEL a `read_thread` tool; the model called it on
+    /// a foreign thread id; the TUI implemented that as `thread/read` followed by
+    /// `thread/turns/list`; both forwarded; and the other session's prompt text, its turn
+    /// items and its rollout file path came back and were handed to the model.
+    ///
+    /// `thread/loaded/list` is deliberately NOT here, and "it carries no `threadId`" is
+    /// not the reason — a global read with no selector is less bindable, not automatically
+    /// scoped. What it returns was MEASURED with a two-session canary against one real
+    /// 0.153 app-server: three connections, two of which started a thread and one of which
+    /// started none, and **every one of them got both thread ids back**. It enumerates the
+    /// app-server PROCESS's in-memory set, not the calling connection's — two app-server
+    /// processes sharing one `CODEX_HOME` see nothing of each other's. The response was
+    /// measured to carry thread IDS ONLY: no title, preview, cwd or rollout path. It is
+    /// also not optional — the real 0.153 TUI sends it once at startup, immediately after
+    /// the handshake, so refusing it would refuse the boot.
+    ///
+    /// # The principal this is scoped to is the HOST PROCESS, not a connection
+    ///
+    /// Stated precisely, because the weaker-sounding version is the true one and the
+    /// stronger one would be a claim this broker does not enforce. `Broker::serve` accepts
+    /// **many** connections on `tui.sock` — it must, because the TUI's own `/resume`
+    /// picker legitimately opens a second — and [`crate::session::SessionThreads`] is
+    /// constructed once per broker and shared by every leg. So there is no per-connection
+    /// ownership here and none is claimed: any connection the broker accepts joins one
+    /// thread domain, and a thread one leg creates is visible to another through this
+    /// method and readable through the bound reads.
+    ///
+    /// That domain is bounded by the process, and the bound is what makes this safe:
+    /// CodeConnect gives each session its own host, its own broker and its own app-server
+    /// under an isolated `CODEX_HOME`, and every method that could load a thread into that
+    /// app-server is either slot-claimed (`thread/start`), bound (`thread/resume` and the
+    /// three reads) or refused (`thread/list`, `thread/fork`). So what it enumerates is
+    /// this host's own session, whichever of its legs asks.
+    ///
+    /// What that leaves is a **same-uid process connecting to the run directory's socket**,
+    /// which is the accepted boundary the launch path states once
+    /// (`codeconnect::codex::start`, A22): a process already running as the user can ptrace
+    /// this one, so a socket it can reach is not a boundary this broker can defend. It is
+    /// named here rather than left implied, because "one session per process" reads like a
+    /// connection-level guarantee and is not one.
+    ReadSessionThread,
     /// DEFERRED: the D2 vector acceptance barrier for a thread-scoped actuation
-    /// (`turn/steer`, `turn/interrupt`).
+    /// (`turn/steer`).
     HeadCheck,
+    /// Forward iff `params.threadId` is this session's bound thread AND `params.turnId` is
+    /// a turn this broker admitted, the server answered, and no terminal has cleared —
+    /// i.e. the turn that is actually RUNNING.
+    ///
+    /// **This was `HeadCheck` (deferred, refuse-always), and that was not a safe terminal
+    /// state.** Measured: with it deferred, Ctrl-C in a hosted session sends
+    /// `turn/interrupt{threadId,turnId}`, the broker refuses it, the TUI prints a banner
+    /// naming the broker, and the turn runs to its own end. That is tolerable for a turn
+    /// that ends on its own and is not tolerable otherwise — a hung command, an
+    /// unanswerable server request, or work the user needs to stop leaves the session with
+    /// no way out but killing it. Refusing the only stop control is a safety decision, not
+    /// a deferral.
+    ///
+    /// It is admissible without D2 because an interrupt is not a vector actuation: it
+    /// carries no ownership fields, starts nothing, and names a turn rather than steering
+    /// one. The two things it must not be able to do — reach another session's thread, or
+    /// name a turn this session is not running — are exactly what
+    /// [`crate::session::SessionThreads::is_active_turn`] already decides, and that
+    /// predicate is the same one the turn ledger keeps for its own fencing.
+    ///
+    /// `turn/steer` deliberately stays [`Disposition::HeadCheck`]: it INJECTS content into
+    /// a running turn, which is the vector actuation D2 exists for.
+    InterruptActiveTurn,
     /// DEFERRED: consume as a one-use response capability and fan out the winner
     /// (method-less approval answers).
     ConsumeLocally,
@@ -228,14 +302,21 @@ fn tui_request(method: &str) -> Disposition {
         | "plugin/list"
         | "app/list" => Forward,
 
-        // Observation reads used by the picker / resume path (read-only).
-        "thread/read" | "thread/loaded/list" | "thread/turns/list" | "thread/items/list" => Forward,
+        // Observation reads used by the picker / resume path. Read-only, but NOT
+        // unscoped: the three that name a thread are bound to this session's own
+        // threads (see [`Disposition::ReadSessionThread`]). `thread/loaded/list` names
+        // none and stays a plain forward.
+        "thread/read" | "thread/turns/list" | "thread/items/list" => ReadSessionThread,
+        "thread/loaded/list" => Forward,
 
         // The measured `/new` switch marker: scoped to a session thread (2e-4c).
         "thread/unsubscribe" => UnsubscribeSessionThread,
         // Thread-scoped actuations — final dispositions whose machinery is deferred
         // (fail closed here).
-        "turn/steer" | "turn/interrupt" => HeadCheck,
+        "turn/steer" => HeadCheck,
+        // The session's one stop control — bound to the running turn, not deferred. See
+        // [`Disposition::InterruptActiveTurn`].
+        "turn/interrupt" => InterruptActiveTurn,
 
         // Everything else on the TUI leg: refuse-by-default.
         _ => Refuse(NotAllowlisted),
@@ -255,7 +336,8 @@ fn ccd_request(method: &str) -> Disposition {
         "thread/start" | "thread/fork" | "turn/start" => Refuse(RoleNotPermitted),
 
         "initialize" => Forward,
-        "thread/read" | "thread/loaded/list" | "thread/turns/list" | "thread/items/list" => Forward,
+        "thread/read" | "thread/turns/list" | "thread/items/list" => ReadSessionThread,
+        "thread/loaded/list" => Forward,
         _ => Refuse(NotAllowlisted),
     }
 }

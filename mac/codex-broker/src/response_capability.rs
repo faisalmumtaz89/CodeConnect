@@ -159,6 +159,7 @@ use std::sync::{Arc, Mutex};
 use crate::allowlist::Role;
 use crate::message::RequestId;
 use crate::relay::EventSink;
+use crate::session::ThreadBinding;
 
 /// The two phone-supported approval `serverRequest` methods (server→client requests),
 /// confirmed against the captured 0.147 frames in `fixtures/codex/` (see this module's
@@ -166,6 +167,33 @@ use crate::relay::EventSink;
 pub const COMMAND_EXEC_APPROVAL: &str = "item/commandExecution/requestApproval";
 /// File-change approval — the second phone-supported family (see [`COMMAND_EXEC_APPROVAL`]).
 pub const FILE_CHANGE_APPROVAL: &str = "item/fileChange/requestApproval";
+
+/// The dispatch of one tool from an admitted `dynamicTools` bundle — the one answerable
+/// server→client request that is not an approval.
+///
+/// It is in the pinned `ServerRequest` census of **both** bundles on **both** releases, so
+/// it is not a 0.153 novelty; what 0.153 changed is that its TUI populates `dynamicTools`,
+/// so the server now actually sends it.
+pub const DYNAMIC_TOOL_CALL: &str = "item/tool/call";
+
+/// The one tool namespace CodeConnect admits: the `codex_tui` bundle that
+/// [`crate::fingerprint`] pins byte for byte on `thread/start`.
+///
+/// Pinning the NAMESPACE rather than the six tool names is deliberate and it is not a
+/// looser check. Which tools may exist inside `codex_tui` is decided upstream, at
+/// `thread/start`, where the bundle is admitted only as an exact captured value — a
+/// seventh tool refuses the creation and the session never starts. What this constant has
+/// to decide is a different question: whether the dispatch belongs to the bundle this
+/// broker admitted at all. A namespace that is anything else (including absent or null,
+/// which is how a non-bundle tool call is spelled) was never measured and is tombstoned.
+pub const ADMITTED_TOOL_NAMESPACE: &str = "codex_tui";
+
+/// The one turn TERMINAL the wire produces, whatever its status.
+///
+/// A3 measured exactly one per turn (7/7), with the vocabulary
+/// `completed | interrupted | failed`. [`crate::session`] releases its busy mark on the
+/// same frame and by the same reasoning.
+const TURN_TERMINAL: &str = "turn/completed";
 
 /// The visit generation until Phase 2e stamps a live connection/delivery epoch. Exactly
 /// one generation exists in this sub-chunk, so this constant is the seam D4 replaces.
@@ -237,25 +265,135 @@ impl ResponseCapabilityRegistry for NoCapabilities {
     }
 }
 
+/// What the relay must do with one observed server→client frame.
+///
+/// # Why an unanswerable request must not be DELIVERED
+///
+/// The broker used to relay every s2c frame and, separately, decide whether the client's
+/// answer to it could ever forward. When those two disagreed the protocol was stranded
+/// mid-exchange: the client received a request, answered it correctly, and the answer was
+/// dropped — so the app-server never learned the request had finished. Measured on 0.153,
+/// that is exactly what hung a turn at "Working…" with no way out (see
+/// [`crate::refusal`]'s `refuse_request`), and it was not specific to the tool dispatch:
+/// **every** id-bearing non-approval server request has the same shape, so
+/// `item/tool/requestUserInput` and whatever codex adds next would strand identically.
+///
+/// So the decision is made once, in one place. A request this broker will not let the
+/// client answer is answered by the BROKER, upstream, with a JSON-RPC error — the
+/// app-server closes the exchange cleanly, the turn proceeds or fails cleanly, and the
+/// client is never handed something it cannot reply to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S2cDisposition {
+    /// Relay it to the client unchanged. Everything that is not an unanswerable
+    /// id-bearing request: notifications, responses, and the requests this broker binds.
+    Deliver,
+    /// Do NOT deliver. Send these bytes to the APP-SERVER instead, closing the request it
+    /// opened.
+    AnswerUpstream(String),
+    /// **The leg can service nothing further: close it.**
+    ///
+    /// Reached when an s2c frame could not be classified at all — oversized, or rejected
+    /// for a duplicate member — which POISONS the leg: it may have been an id-bearing
+    /// request whose id we could not occupy, so from that moment [`LegCapabilities::authorize`]
+    /// fails closed for every id here.
+    ///
+    /// Continuing to deliver on a poisoned leg is the hang again, one step removed. A
+    /// later clean approval or tool call still registers `Bound`, so it would be
+    /// delivered — and then its answer would forward zero bytes, because the poison gate
+    /// runs first. The client would be handed an exchange whose answer is guaranteed to be
+    /// discarded, which is exactly the shape `AnswerUpstream` exists to prevent.
+    ///
+    /// Answering the poisoning frame upstream is not available: we could not read its id,
+    /// so there is nothing to answer. Closing is the only fail-closed move left, and it is
+    /// honest — the leg reconnects, and a leg that reconnects has an empty, unpoisoned
+    /// view.
+    CloseLeg(&'static str),
+}
+
+/// The error frame the broker answers an unadmitted server request with.
+///
+/// `-32601` (method not available) rather than a policy refusal: from the app-server's
+/// point of view the accurate statement is that this client cannot service the method, and
+/// the code it already understands for that is the method-unavailable one. The detail
+/// carries no client- or server-chosen text — only the fixed sentence and the id it
+/// answers — for the same reason [`crate::redact`] governs the audit log.
+fn unanswerable_error(id: &RequestId) -> String {
+    serde_json::json!({
+        "id": id.to_value(),
+        "error": {
+            "code": -32601,
+            "message": "request not serviceable through the CodeConnect broker"
+        }
+    })
+    .to_string()
+}
+
+/// Is this `item/tool/call` a dispatch from the bundle THIS SESSION admitted, for a tool
+/// that bundle declares, naming this session's bound thread and its active turn?
+///
+/// Every clause is load-bearing, and each closes a different way the previous check —
+/// "the method is `item/tool/call` and the namespace says `codex_tui`" — was satisfiable
+/// without the model ever having been handed the tools it claims:
+///
+/// * **the session declared the bundle.** A session created with `dynamicTools: null` gave
+///   the model no tools at all; a dispatch arriving in one is not a tool the model could
+///   have called.
+/// * **the tool is one the bundle declares.** Derived from the captured fixture
+///   ([`crate::fingerprint::admitted_tool_names`]), so an undeclared seventh name is
+///   unanswerable even though its namespace matches.
+/// * **the thread is this session's, and the turn is ACTIVE.** A dispatch is part of a
+///   running turn on the thread the broker bound; one naming another thread, or a turn
+///   that has already ended, is not a tool call this session is in the middle of.
+fn tool_call_is_from_the_admitted_bundle(
+    v: &serde_json::Value,
+    threads: &crate::session::SessionThreads,
+) -> bool {
+    let Some(params) = v.get("params") else {
+        return false;
+    };
+    let str_of = |k: &str| params.get(k).and_then(serde_json::Value::as_str);
+    if str_of("namespace") != Some(ADMITTED_TOOL_NAMESPACE) {
+        return false;
+    }
+    if !threads.admitted_tool_bundle() {
+        return false;
+    }
+    if !str_of("tool").is_some_and(|t| crate::fingerprint::admitted_tool_names().contains(t)) {
+        return false;
+    }
+    let (Some(thread), Some(turn)) = (str_of("threadId"), str_of("turnId")) else {
+        return false;
+    };
+    threads.is_session_thread(thread) && threads.is_active_turn(thread, turn)
+}
+
 /// Which endpoint roles an observed `serverRequest` grants a one-use response capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Grant {
     /// A phone-supported family (command execution, file change): both the ccd phone
     /// answer and the TUI keyboard answer are granted.
     CcdAndTui,
-    /// A non-phone approval family (`item/permissions/requestApproval`) and the fail-closed
-    /// default for any other/unknown `*/requestApproval`: only the TUI may answer. (Non-
-    /// approval id-bearing requests — e.g. `requestUserInput`/elicitation — are not bound at
-    /// all; the observer tombstones them, so they never reach `Grant`.)
+    /// A non-phone approval family (`item/permissions/requestApproval`), the fail-closed
+    /// default for any other/unknown `*/requestApproval`, and [`DYNAMIC_TOOL_CALL`]: only
+    /// the TUI may answer. (Other non-approval id-bearing requests — `item/tool/requestUserInput`,
+    /// elicitation — are not bound at all; the observer tombstones them, so they never
+    /// reach `Grant`.)
     TuiOnly,
 }
 
 impl Grant {
-    /// Classify an approval `serverRequest` method into its grant. Invoked only for
-    /// `*/requestApproval` methods (the observer tombstones every other id-bearing request).
-    /// Fail-closed: only the two confirmed phone-supported methods grant ccd; every other
+    /// Classify an answerable `serverRequest` method into its grant. Invoked only for the
+    /// families [`LegCapabilities::classify_request`] binds.
+    ///
+    /// Fail-closed: only the two confirmed phone-supported approvals grant ccd; every other
     /// approval is TUI-only, so an unknown/future approval can never wrongly hand the phone a
     /// capability.
+    ///
+    /// **A tool call is TUI-only, and that is the load-bearing half of admitting it.** Its
+    /// answer is not a user decision, it is the TUI's own report of what running the tool
+    /// did — and that report is handed straight to the MODEL as tool output. Granting the
+    /// phone here would let a phone fabricate a tool result and inject arbitrary text into
+    /// the model's context, which is a strictly larger capability than any approval answer.
     fn for_method(method: &str) -> Grant {
         match method {
             COMMAND_EXEC_APPROVAL | FILE_CHANGE_APPROVAL => Grant::CcdAndTui,
@@ -353,6 +491,13 @@ struct LegEntry {
     thread_id: String,
     grant: Grant,
     generation: u64,
+    /// The turn this capability belongs to, for a dynamic-tool dispatch.
+    ///
+    /// `None` for an approval: an approval is a USER decision about one action and its
+    /// one-use slot is the arbiter's, so it does not end when a turn does. A tool
+    /// dispatch is different — it is a step INSIDE a turn, admitted only because that turn
+    /// was running ([`tool_call_is_from_the_admitted_bundle`]), so it must not outlive it.
+    turn: Option<String>,
 }
 
 /// The per-leg lifecycle of one bare server-request id. A bare Response frame carries only
@@ -379,7 +524,12 @@ enum IdState {
 /// family — in which case it still occupies the id so a later/earlier `Bound` at the same id
 /// can never be aliased through it.
 enum Occupancy {
-    Bind { thread_id: String, grant: Grant },
+    Bind {
+        thread_id: String,
+        grant: Grant,
+        /// See [`LegEntry::turn`].
+        turn: Option<String>,
+    },
     Tombstone,
 }
 
@@ -447,15 +597,23 @@ impl LegCapabilities {
     /// pinned codex 0.147 app-server never emits, and is a SAFE over-refusal if it fires.
     ///
     /// [`authorize`]: LegCapabilities::authorize
-    pub fn observe_server_frame(&mut self, text: &str) {
+    pub fn observe_server_frame(
+        &mut self,
+        threads: &crate::session::SessionThreads,
+        text: &str,
+    ) -> S2cDisposition {
         // Size gate, checked before any parse: it bounds worst-case parse+alloc AND marks the
         // frame unclassifiable. The cap sits above the largest legit s2c frame, so a frame over
         // it cannot be parsed to learn whether it is a request or which bare id it occupies —
         // it might be an id-bearing request we then fail to occupy, so poison the leg (fail
         // closed leg-wide) rather than silently skip. Forwarding is unaffected.
+        // A poisoned leg is already closing; nothing more may cross it.
+        if self.poisoned {
+            return S2cDisposition::CloseLeg("the capability leg is poisoned");
+        }
         if text.len() > MAX_OBSERVE_FRAME_BYTES {
             self.poison("oversized s2c frame (> MAX_OBSERVE_FRAME_BYTES)");
-            return;
+            return S2cDisposition::CloseLeg("an oversized s2c frame could not be classified");
         }
         // Parse with the same duplicate-member discipline the c2s classifier uses: a frame
         // with a duplicate member (at any nesting) is ambiguous between our parse and the
@@ -463,47 +621,104 @@ impl LegCapabilities {
         // request we cannot occupy precisely, so poison the leg rather than silently skip.
         let Some(v) = crate::message::parse_no_dup_value(text) else {
             self.poison("NoDup-rejected s2c frame (unparseable / duplicate member)");
-            return;
+            return S2cDisposition::CloseLeg(
+                "an unparseable or duplicate-member s2c frame could not be classified",
+            );
         };
         // Only a frame that occupies a bare RESPONSE id concerns us: it must carry a usable
         // top-level `id`. No top-level id ⇒ a notification (method-only ⇒ no client response)
         // or a non-id-bearing frame ⇒ occupies nothing ⇒ ignore.
+        // **A turn TERMINAL revokes the dispatches that belonged to it**, before anything
+        // else is decided about this frame. See [`Self::revoke_turn`].
+        if v.get("method").and_then(|m| m.as_str()) == Some(TURN_TERMINAL) {
+            if let (Some(thread), Some(turn)) = (
+                v.pointer("/params/threadId").and_then(|t| t.as_str()),
+                v.pointer("/params/turn/id").and_then(|t| t.as_str()),
+            ) {
+                self.revoke_turn(thread, turn);
+            }
+        }
         let Some(id) = v.get("id").and_then(RequestId::from_value) else {
-            return;
+            return S2cDisposition::Deliver;
         };
         // id-bearing, but only a frame that ALSO carries a `method` is a server→client
         // request (or an id-bearing hybrid). A method-less `{id, result|error}` is a plain
         // response (the server answering a client request) — it does not occupy the
         // server-request id space and c2s responses go through `authorize`, so ignore it.
         let Some(method) = v.get("method").and_then(|m| m.as_str()) else {
-            return;
+            return S2cDisposition::Deliver;
         };
         // From here the frame OCCUPIES bare id `id`: it MUST be registered — `Bind` if it is
         // a clean answerable family, else `Tombstone` — never silently skipped.
-        let occupancy = Self::classify_request(&v, method);
-        self.register(id, occupancy, method);
+        let occupancy = Self::classify_request(&v, method, threads);
+        let bound = matches!(occupancy, Occupancy::Bind { .. });
+        self.register(id.clone(), occupancy, method);
+        // **Do not DELIVER a request the client will never be allowed to answer.** See
+        // [`S2cDisposition`]: an unanswerable request that reaches the client strands the
+        // exchange the SERVER opened, which is the hang C7 was.
+        //
+        // `bound` is not enough on its own: `register` tombstones a SECOND occupant of an
+        // id even when this frame classified cleanly, so the view is what decides.
+        if bound && matches!(self.view.get(&id), Some(IdState::Bound(_))) {
+            S2cDisposition::Deliver
+        } else {
+            S2cDisposition::AnswerUpstream(unanswerable_error(&id))
+        }
     }
 
     /// Classify a method-bearing, id-bearing s2c frame into how it occupies its bare id.
     /// Every such frame occupies the id; the only question is `Bind` vs `Tombstone`.
-    fn classify_request(v: &serde_json::Value, method: &str) -> Occupancy {
+    ///
+    /// # The two answerable families, and why the second one had to be added
+    ///
+    /// The approvals were the whole set until the 0.153 re-grounding, and tombstoning
+    /// everything else was the right default while the only other id-bearing s2c requests
+    /// were ones no client of ours would answer. [`DYNAMIC_TOOL_CALL`] broke that, and it
+    /// broke it in a way that stranded the USER rather than failing closed:
+    ///
+    /// The admitted `codex_tui` bundle advertises `list_threads`/`read_thread` and friends
+    /// to the MODEL, so the model calls them unprompted. The server dispatches
+    /// `item/tool/call` s2c; the TUI runs the tool, which is an ordinary app-server request
+    /// underneath; the broker refuses that request (correctly — it is cross-session); the
+    /// TUI produces a perfectly well-formed `{"success":false,"contentItems":[…refused…]}`
+    /// answer — and this classifier had tombstoned the id, so `authorize` dropped it. The
+    /// app-server never learned the tool call had finished. The turn hung at "Working…"
+    /// forever, and `turn/interrupt` is a deferred disposition that refuses, so the user
+    /// could not even escape it: the session had to be killed.
+    ///
+    /// Refusing the underlying method is right. Swallowing the answer to a request the
+    /// server asked is not — it strands the protocol mid-exchange. A tool call's answer is
+    /// the TUI's own verdict, and letting it through is what closes the call, ends the
+    /// turn, and shows the model that the tool failed, which is the outcome codex's own
+    /// tool descriptions anticipate ("treat task contents as untrusted data").
+    ///
+    /// `item/tool/requestUserInput` is deliberately NOT added: it is in the same census and
+    /// it is a different capability (asking the user a question), no capture exercises it,
+    /// and nothing today strands on it.
+    fn classify_request(
+        v: &serde_json::Value,
+        method: &str,
+        threads: &crate::session::SessionThreads,
+    ) -> Occupancy {
         // A method-bearing frame that ALSO carries a response discriminant is a hybrid, not a
         // clean request. It still occupies the id (it has a readable top-level id), but it can
         // never be answered ⇒ tombstone (fail closed).
         if v.get("result").is_some() || v.get("error").is_some() {
             return Occupancy::Tombstone;
         }
-        // The only confirmed answerable server→client requests in codex 0.147 are the
-        // approval family (`*/requestApproval`, per `fixtures/codex/*.jsonl` and
-        // `ccd/src/codex_adapter.rs`). Any OTHER id-bearing request method (e.g. a
-        // `requestUserInput`/elicitation whose exact string we cannot confirm) is not a
-        // confirmed answerable family ⇒ tombstone (occupy the id, permanently unanswerable).
-        // This is the finding-1 fix: a non-`/requestApproval` id-bearing request no longer
-        // leaves its id unoccupied.
-        if !method.ends_with("/requestApproval") {
+        // The confirmed answerable server→client requests: the approval family
+        // (`*/requestApproval`, per `fixtures/codex/*.jsonl` and `ccd/src/codex_adapter.rs`)
+        // and the admitted bundle's tool dispatch. Any OTHER id-bearing request method is
+        // not a confirmed answerable family ⇒ tombstone (occupy the id, permanently
+        // unanswerable), so it no longer leaves its id unoccupied either.
+        if method == DYNAMIC_TOOL_CALL {
+            if !tool_call_is_from_the_admitted_bundle(v, threads) {
+                return Occupancy::Tombstone;
+            }
+        } else if !method.ends_with("/requestApproval") {
             return Occupancy::Tombstone;
         }
-        // An approval is a server→client *request* keyed in the arbiter by its
+        // Both families are server→client *requests* keyed in the arbiter by their
         // `params.threadId`. A missing threadId (no arbiter key) or an over-long one
         // (finding 5 memory bound) still occupies the id ⇒ tombstone rather than skip.
         match v
@@ -514,6 +729,16 @@ impl LegCapabilities {
             Some(thread_id) if thread_id.len() <= MAX_THREAD_ID_BYTES => Occupancy::Bind {
                 thread_id: thread_id.to_string(),
                 grant: Grant::for_method(method),
+                // Only a tool dispatch is turn-scoped, and it always carries its turn:
+                // `tool_call_is_from_the_admitted_bundle` refused it otherwise.
+                turn: (method == DYNAMIC_TOOL_CALL)
+                    .then(|| {
+                        v.get("params")
+                            .and_then(|p| p.get("turnId"))
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string)
+                    })
+                    .flatten(),
             },
             _ => Occupancy::Tombstone,
         }
@@ -542,13 +767,18 @@ impl LegCapabilities {
             return;
         }
         match occupancy {
-            Occupancy::Bind { thread_id, grant } => {
+            Occupancy::Bind {
+                thread_id,
+                grant,
+                turn,
+            } => {
                 self.view.insert(
                     id,
                     IdState::Bound(LegEntry {
                         thread_id,
                         grant,
                         generation: GENERATION_UNSTAMPED,
+                        turn,
                     }),
                 );
             }
@@ -577,6 +807,49 @@ impl LegCapabilities {
         (self.log)(&format!(
             "capability {reason}: id={id:?} method={method:?}{suffix}"
         ));
+    }
+
+    /// **Revoke every dynamic-tool capability that belonged to a turn that has ended.**
+    ///
+    /// A tool dispatch is admitted only because its turn was RUNNING — the bundle was
+    /// declared, the thread is the session's, and the turn is active. That check happens
+    /// once, when the request is observed. Without this, the binding outlives the check:
+    /// bind a dispatch, interrupt the turn, and a late TUI result still authorizes and
+    /// forwards, handing the model tool output for a turn that is over. Repeated
+    /// interrupted calls also accumulate entries toward [`MAX_TRACKED_IDS`].
+    ///
+    /// Fired on `turn/completed` of **any** status. A3 measured exactly one terminal per
+    /// turn (7/7) with the vocabulary `completed | interrupted | failed`, and all three end
+    /// the turn — reading the status and revoking only on `completed` would leave an
+    /// interrupted turn's dispatches live, which is the case this exists for.
+    ///
+    /// The entry is REMOVED rather than tombstoned, and that is not the "never rebind"
+    /// rule being bent. Tombstoning is for an id whose provenance became AMBIGUOUS while
+    /// both claimants might still be live; here the server has authoritatively said the
+    /// turn is over, so a later dispatch at the same bare id belongs to a new turn and
+    /// nothing about it is ambiguous. Tombstoning would instead poison that id for the
+    /// rest of the session and break every subsequent tool call on it.
+    ///
+    /// Approvals are deliberately untouched: an approval is a USER decision about one
+    /// action, its one-use slot lives in the shared arbiter, and it is not a step inside a
+    /// turn. See [`LegEntry::turn`].
+    fn revoke_turn(&mut self, thread: &str, turn: &str) {
+        let doomed: Vec<RequestId> = self
+            .view
+            .iter()
+            .filter_map(|(id, state)| match state {
+                IdState::Bound(e) if e.thread_id == thread && e.turn.as_deref() == Some(turn) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for id in doomed {
+            self.view.remove(&id);
+            (self.log)(&format!(
+                "capability revoked (its turn ended): id={id:?} thread={thread:?}"
+            ));
+        }
     }
 
     /// Poison the whole leg: an UNCLASSIFIABLE s2c frame (oversized, or NoDup-rejected) was
@@ -614,6 +887,14 @@ impl LegCapabilities {
     #[cfg(test)]
     fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+
+    /// How many bare ids this leg is still tracking — the quantity
+    /// [`MAX_TRACKED_IDS`] bounds, and the one a capability that outlived its turn would
+    /// grow without limit.
+    #[cfg(test)]
+    fn tracked_ids(&self) -> usize {
+        self.view.len()
     }
 }
 
@@ -673,6 +954,61 @@ mod tests {
 
     fn silent() -> EventSink {
         Arc::new(|_: &str| {})
+    }
+
+    /// A session with nothing bound: no thread, no turn, no admitted bundle. What every
+    /// approval test wants, because an approval's answerability does not depend on any of
+    /// them.
+    fn no_session() -> crate::session::SessionThreads {
+        crate::session::SessionThreads::new("/work")
+    }
+
+    const TOOL_THREAD: &str = "01a0-head";
+    const TOOL_TURN: &str = "01a0-turn";
+
+    /// A session in the state a real tool dispatch arrives in: the captured bundle
+    /// admitted at creation, a bound thread, and one ACTIVE turn.
+    ///
+    /// Driven through the production paths — the creation response installs the binding,
+    /// `try_admit_turn` marks the turn, and the turn response answers it — so the state
+    /// this asserts against is the state a live session reaches, not one assembled by
+    /// hand.
+    fn tool_session() -> crate::session::SessionThreads {
+        use crate::session::{ConnId, ThreadBinding, TurnAdmission};
+        let threads = crate::session::SessionThreads::new("/work");
+        crate::session::ThreadBinding::note_tool_bundle_admitted(&threads);
+        let conn = ConnId(1);
+        // The creation claim, then its correlated response — the same two steps the relay
+        // takes, so the binding this installs is the one production installs.
+        assert_eq!(
+            threads.try_admit_request(conn, &RequestId::Str("start-1".into()), "thread/start"),
+            crate::session::IdAdmission::Admitted
+        );
+        threads.observe_server_frame(
+            conn,
+            &serde_json::json!({"id": "start-1",
+                "result": {"thread": {"id": TOOL_THREAD}, "cwd": "/work",
+                           "runtimeWorkspaceRoots": ["/work"]}})
+            .to_string(),
+        );
+        let id = RequestId::Str("turn-1".into());
+        assert_eq!(
+            threads.try_admit_turn(
+                conn,
+                &id,
+                TOOL_THREAD,
+                Some(&serde_json::json!("/work")),
+                Some(&serde_json::json!(["/work"])),
+            ),
+            TurnAdmission::Admitted,
+            "the turn must be admitted for the dispatch to belong to one"
+        );
+        threads.observe_server_frame(
+            conn,
+            &serde_json::json!({"id": "turn-1", "result": {"turn": {"id": TOOL_TURN}}}).to_string(),
+        );
+        assert!(threads.is_active_turn(TOOL_THREAD, TOOL_TURN));
+        threads
     }
 
     // --- Family classifier -------------------------------------------------
@@ -765,8 +1101,8 @@ mod tests {
         // The same approval fans out to both legs (each observes its own upstream copy —
         // once per leg, so each leg holds a clean Bound, not a tombstone).
         let frame = approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0);
-        ccd.observe_server_frame(&frame);
-        tui.observe_server_frame(&frame);
+        ccd.observe_server_frame(&no_session(), &frame);
+        tui.observe_server_frame(&no_session(), &frame);
 
         // ccd answers first → authorized; the TUI sibling then loses (revoked), zero bytes.
         assert!(ccd.authorize(Role::Ccd, &RequestId::Int(0), false));
@@ -784,12 +1120,442 @@ mod tests {
         let mut ccd = LegCapabilities::new(Arc::clone(&arb), silent());
         let mut tui = LegCapabilities::new(Arc::clone(&arb), silent());
         let frame = approval_frame("item/permissions/requestApproval", "thread-P", 0);
-        ccd.observe_server_frame(&frame);
-        tui.observe_server_frame(&frame);
+        ccd.observe_server_frame(&no_session(), &frame);
+        tui.observe_server_frame(&no_session(), &frame);
 
         // ccd can never answer an observe-only family (zero bytes); the TUI still can.
         assert!(!ccd.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(tui.authorize(Role::Tui, &RequestId::Int(0), false));
+    }
+
+    /// One `item/tool/call` s2c frame, in the shape MEASURED off a real 0.153 session.
+    fn tool_call_frame(namespace: &str, thread: &str, id: i64) -> String {
+        tool_call_with(namespace, thread, TOOL_TURN, "list_threads", id)
+    }
+
+    /// One `item/tool/call`, with every field the finding-4 rules read made explicit.
+    fn tool_call_with(namespace: &str, thread: &str, turn: &str, tool: &str, id: i64) -> String {
+        let ns = if namespace == "null" {
+            "null".to_string()
+        } else {
+            format!("\"{namespace}\"")
+        };
+        format!(
+            r#"{{"id":{id},"method":"item/tool/call","params":{{"arguments":{{"limit":5}},"callId":"exec-1","namespace":{ns},"threadId":"{thread}","tool":"{tool}","turnId":"{turn}"}}}}"#
+        )
+    }
+
+    /// **The TUI's answer to an admitted bundle's tool call must reach the app-server.**
+    ///
+    /// This is the hang: the model calls a bundle tool, the broker refuses the method
+    /// underneath (correctly), the TUI produces a well-formed failure result — and if this
+    /// id is tombstoned, that result is dropped, the app-server never learns the call
+    /// finished, and the turn hangs forever with `turn/interrupt` refused. Answerability
+    /// is what ends the turn.
+    #[test]
+    fn an_admitted_bundles_tool_call_is_answerable_by_the_tui() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut tui = LegCapabilities::new(Arc::clone(&arb), silent());
+        let session = tool_session();
+        assert_eq!(
+            tui.observe_server_frame(
+                &session,
+                &tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0),
+            ),
+            S2cDisposition::Deliver,
+            "a dispatch the client MAY answer must reach it"
+        );
+        assert!(
+            tui.authorize(Role::Tui, &RequestId::Int(0), false),
+            "the TUI's tool result must forward, or the turn never completes"
+        );
+        // One-use, exactly like an approval: a second answer to the same call is a
+        // duplicate and forwards zero bytes.
+        assert!(!tui.authorize(Role::Tui, &RequestId::Int(0), false));
+    }
+
+    /// **The phone may never answer a tool call.** A tool result is handed straight to the
+    /// model as tool output, so granting ccd here would let a phone inject arbitrary text
+    /// into the model's context — a strictly larger capability than any approval answer.
+    #[test]
+    fn a_tool_call_is_never_answerable_by_the_phone() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut ccd = LegCapabilities::new(Arc::clone(&arb), silent());
+        let mut tui = LegCapabilities::new(Arc::clone(&arb), silent());
+        let session = tool_session();
+        let frame = tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0);
+        ccd.observe_server_frame(&session, &frame);
+        tui.observe_server_frame(&session, &frame);
+        assert!(!ccd.authorize(Role::Ccd, &RequestId::Int(0), false));
+        // …and refusing the phone did not consume the slot the TUI still needs.
+        assert!(tui.authorize(Role::Tui, &RequestId::Int(0), false));
+    }
+
+    /// Only the bundle this broker admitted. A tool call from any other namespace — or
+    /// one with no namespace at all, which is how a non-bundle tool call is spelled — is
+    /// a dispatch nobody measured, and it stays unanswerable.
+    #[test]
+    fn a_tool_call_outside_the_admitted_namespace_is_tombstoned() {
+        for namespace in ["some_other_bundle", "null", "", "codex_tui "] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut tui = LegCapabilities::new(arb, silent());
+            tui.observe_server_frame(&tool_session(), &tool_call_frame(namespace, TOOL_THREAD, 0));
+            assert!(
+                !tui.authorize(Role::Tui, &RequestId::Int(0), false),
+                "namespace {namespace:?} must not be answerable"
+            );
+        }
+        // A tool call with no `threadId` has no arbiter key, so it is tombstoned too.
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut tui = LegCapabilities::new(arb, silent());
+        tui.observe_server_frame(&no_session(), r#"{"id":0,"method":"item/tool/call","params":{"namespace":"codex_tui","tool":"list_threads"}}"#,
+        );
+        assert!(!tui.authorize(Role::Tui, &RequestId::Int(0), false));
+    }
+
+    /// **The dispatch must belong to the bundle THIS session admitted, to a tool that
+    /// bundle declares, and to the running turn on the bound thread.**
+    ///
+    /// The namespace alone was satisfiable without any of that: a `codex_tui` call could
+    /// name an undeclared seventh tool, arrive in a session created with
+    /// `dynamicTools: null` where the model was handed nothing, or name a thread or a turn
+    /// that is not the one running. Each arm below is one of those.
+    #[test]
+    fn a_tool_call_must_belong_to_the_admitted_bundle_and_the_active_turn() {
+        let unanswerable = |session: &crate::session::SessionThreads, frame: &str| {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut tui = LegCapabilities::new(arb, silent());
+            assert!(
+                matches!(
+                    tui.observe_server_frame(session, frame),
+                    S2cDisposition::AnswerUpstream(_)
+                ),
+                "must not be delivered: {frame}"
+            );
+            assert!(!tui.authorize(Role::Tui, &RequestId::Int(0), false));
+        };
+        let session = tool_session();
+
+        // A SEVENTH tool the captured bundle never declared.
+        unanswerable(
+            &session,
+            &tool_call_with(
+                ADMITTED_TOOL_NAMESPACE,
+                TOOL_THREAD,
+                TOOL_TURN,
+                "exfiltrate_everything",
+                0,
+            ),
+        );
+        // A session whose creation declared NO bundle: the model was handed no tools, so
+        // there is no dispatch of theirs to answer.
+        let no_bundle = {
+            use crate::session::{ConnId, IdAdmission, ThreadBinding, TurnAdmission};
+            let t = crate::session::SessionThreads::new("/work");
+            let conn = ConnId(1);
+            assert_eq!(
+                t.try_admit_request(conn, &RequestId::Str("start-1".into()), "thread/start"),
+                IdAdmission::Admitted
+            );
+            t.observe_server_frame(
+                conn,
+                &serde_json::json!({"id": "start-1",
+                    "result": {"thread": {"id": TOOL_THREAD}, "cwd": "/work",
+                               "runtimeWorkspaceRoots": ["/work"]}})
+                .to_string(),
+            );
+            let id = RequestId::Str("turn-1".into());
+            assert_eq!(
+                t.try_admit_turn(
+                    conn,
+                    &id,
+                    TOOL_THREAD,
+                    Some(&serde_json::json!("/work")),
+                    Some(&serde_json::json!(["/work"])),
+                ),
+                TurnAdmission::Admitted
+            );
+            t.observe_server_frame(
+                conn,
+                &serde_json::json!({"id": "turn-1", "result": {"turn": {"id": TOOL_TURN}}})
+                    .to_string(),
+            );
+            t
+        };
+        unanswerable(
+            &no_bundle,
+            &tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0),
+        );
+        // A thread this session does not own.
+        unanswerable(
+            &session,
+            &tool_call_frame(ADMITTED_TOOL_NAMESPACE, "01a0-a-stranger", 0),
+        );
+        // A turn that is not the active one — an ended turn, or one invented.
+        unanswerable(
+            &session,
+            &tool_call_with(
+                ADMITTED_TOOL_NAMESPACE,
+                TOOL_THREAD,
+                "01a0-some-other-turn",
+                "list_threads",
+                0,
+            ),
+        );
+    }
+
+    /// **An unanswerable server request is ANSWERED UPSTREAM, not delivered.**
+    ///
+    /// The C7 hang was not specific to the tool dispatch: every id-bearing non-approval
+    /// s2c request has the same shape — delivered to the client, tombstoned here, answer
+    /// dropped, exchange stranded. The fix is structural, so it is asserted over the whole
+    /// class rather than over the one method that happened to fire.
+    #[test]
+    fn an_unanswerable_server_request_is_answered_upstream_instead_of_delivered() {
+        for method in [
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+            "attestation/generate",
+            "some/future/serverRequest",
+        ] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut tui = LegCapabilities::new(arb, silent());
+            let frame = format!(
+                r#"{{"id":0,"method":"{method}","params":{{"threadId":"{TOOL_THREAD}"}}}}"#
+            );
+            match tui.observe_server_frame(&tool_session(), &frame) {
+                S2cDisposition::AnswerUpstream(answer) => {
+                    let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
+                    assert_eq!(v["id"], 0, "the answer must close the id the server opened");
+                    assert_eq!(v["error"]["code"], -32601);
+                    // Fixed vocabulary only — no client- or server-chosen text.
+                    assert!(!answer.contains(method), "{answer}");
+                }
+                other => panic!("{method} must not be delivered: {other:?}"),
+            }
+        }
+        // …and a NOTIFICATION, a response, and an admitted approval are all still
+        // delivered, or this would be a rule that swallows the wire.
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut tui = LegCapabilities::new(arb, silent());
+        for deliverable in [
+            r#"{"method":"thread/started","params":{"thread":{"id":"x"}}}"#.to_string(),
+            r#"{"id":9,"result":{"ok":true}}"#.to_string(),
+            approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        ] {
+            assert_eq!(
+                tui.observe_server_frame(&no_session(), &deliverable),
+                S2cDisposition::Deliver,
+                "{deliverable}"
+            );
+        }
+    }
+
+    /// **A late answer to an id that has since been reused must not consume the new
+    /// capability.**
+    ///
+    /// The existing tests cover an unsolicited answer and an immediate duplicate. This is
+    /// the sequential case: request A takes id 0, a NEW request takes id 0 later, and A's
+    /// answer arrives after that. A bare response carries no provenance, so neither can be
+    /// safely matched — and the collision tombstones the id, which is what makes both
+    /// unanswerable rather than letting the stale one consume the live one.
+    #[test]
+    fn a_late_answer_to_a_reused_id_consumes_nothing() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut tui = LegCapabilities::new(Arc::clone(&arb), silent());
+        let session = tool_session();
+        // A: bound, and answerable while it stands alone.
+        assert_eq!(
+            tui.observe_server_frame(
+                &session,
+                &tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0)
+            ),
+            S2cDisposition::Deliver
+        );
+        // B: the SAME bare id, later. The collision tombstones it — and, now, B is not
+        // delivered either, because the client could never answer it.
+        assert!(matches!(
+            tui.observe_server_frame(
+                &session,
+                &tool_call_with(
+                    ADMITTED_TOOL_NAMESPACE,
+                    TOOL_THREAD,
+                    TOOL_TURN,
+                    "read_thread",
+                    0
+                )
+            ),
+            S2cDisposition::AnswerUpstream(_)
+        ));
+        // A's answer, arriving late: it consumes nothing, so B's slot cannot be spent by
+        // a response that belonged to A.
+        assert!(
+            !tui.authorize(Role::Tui, &RequestId::Int(0), false),
+            "a late answer to a reused id must forward zero bytes"
+        );
+    }
+
+    /// **A poisoned leg CLOSES; it does not go on delivering.**
+    ///
+    /// Poisoning makes `authorize` fail closed for every id here — so a later clean
+    /// approval or tool call would still register `Bound`, still be delivered, and then
+    /// have its answer discarded. That is the delivered-then-unanswerable hang again, one
+    /// step removed from the one C7 fixed. There is nothing to answer upstream either: the
+    /// poisoning frame's id is precisely what could not be read.
+    #[test]
+    fn a_poisoned_leg_closes_instead_of_delivering_what_it_cannot_service() {
+        for poisoning in [
+            // Oversized: unclassifiable, so it may have been an id-bearing request.
+            format!(r#"{{"method":"x/notify","params":{{"blob":"{}"}}}}"#, "a".repeat(
+                MAX_OBSERVE_FRAME_BYTES
+            )),
+            // A duplicate member at any depth: ambiguous between our parse and the
+            // server's, so it yields no trustworthy id either.
+            r#"{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-A","threadId":"th-B"}}"#
+                .to_string(),
+        ] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut leg = LegCapabilities::new(arb, silent());
+            assert!(
+                matches!(
+                    leg.observe_server_frame(&no_session(), &poisoning),
+                    S2cDisposition::CloseLeg(_)
+                ),
+                "an unclassifiable frame must close the leg"
+            );
+            assert!(leg.is_poisoned());
+
+            // The frame that used to recreate the hang: a perfectly clean approval,
+            // arriving after the poison. It must NOT be delivered.
+            let clean = approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0);
+            assert!(
+                matches!(
+                    leg.observe_server_frame(&no_session(), &clean),
+                    S2cDisposition::CloseLeg(_)
+                ),
+                "a poisoned leg must not deliver an exchange whose answer it will discard"
+            );
+            // …and its answer would indeed have been discarded, which is the whole point.
+            assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
+        }
+    }
+
+    /// **A dispatch does not outlive its turn.**
+    ///
+    /// Answerability is checked once, when the request is observed — the bundle was
+    /// declared, the thread is the session's, the turn is running. Without revocation the
+    /// BINDING outlives that check: bind a dispatch, interrupt the turn, and a late TUI
+    /// result still authorizes and forwards, handing the model tool output for a turn that
+    /// is over.
+    #[test]
+    fn a_tool_capability_is_revoked_when_its_turn_ends() {
+        // Every terminal status, because an interrupted turn is exactly the case that
+        // motivated this and the one a status-reading revoke would have missed.
+        for status in ["completed", "interrupted", "failed"] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut tui = LegCapabilities::new(arb, silent());
+            let session = tool_session();
+            assert_eq!(
+                tui.observe_server_frame(
+                    &session,
+                    &tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0)
+                ),
+                S2cDisposition::Deliver,
+                "{status}: the dispatch binds while its turn runs"
+            );
+
+            let terminal = serde_json::json!({
+                "method": "turn/completed",
+                "params": {"threadId": TOOL_THREAD,
+                           "turn": {"id": TOOL_TURN, "status": status}}
+            })
+            .to_string();
+            assert_eq!(
+                tui.observe_server_frame(&session, &terminal),
+                S2cDisposition::Deliver,
+                "{status}: the terminal itself is a notification and still reaches the client"
+            );
+
+            assert!(
+                !tui.authorize(Role::Tui, &RequestId::Int(0), false),
+                "{status}: a late tool result must forward zero bytes once the turn is over"
+            );
+            // The entry is GONE, not tombstoned: repeated interrupted calls must not
+            // accumulate toward the per-leg id cap, and the next turn's dispatch at the
+            // same bare id must still be able to bind.
+            assert_eq!(tui.tracked_ids(), 0, "{status}: the entry is not retained");
+        }
+    }
+
+    /// Revocation is scoped: another turn's dispatch, and an approval, are untouched.
+    #[test]
+    fn revoking_a_turn_leaves_other_capabilities_alone() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut tui = LegCapabilities::new(arb, silent());
+        let session = tool_session();
+        tui.observe_server_frame(
+            &session,
+            &tool_call_frame(ADMITTED_TOOL_NAMESPACE, TOOL_THREAD, 0),
+        );
+        // An approval on the same thread: a USER decision, not a step inside the turn.
+        tui.observe_server_frame(
+            &session,
+            &approval_frame(COMMAND_EXEC_APPROVAL, TOOL_THREAD, 1),
+        );
+
+        // A terminal for a DIFFERENT turn revokes nothing.
+        let other = serde_json::json!({
+            "method": "turn/completed",
+            "params": {"threadId": TOOL_THREAD,
+                       "turn": {"id": "01a0-a-different-turn", "status": "completed"}}
+        })
+        .to_string();
+        tui.observe_server_frame(&session, &other);
+        assert_eq!(
+            tui.tracked_ids(),
+            2,
+            "a different turn's terminal revokes nothing"
+        );
+
+        // This turn's terminal takes the dispatch and leaves the approval.
+        let mine = serde_json::json!({
+            "method": "turn/completed",
+            "params": {"threadId": TOOL_THREAD, "turn": {"id": TOOL_TURN, "status": "interrupted"}}
+        })
+        .to_string();
+        tui.observe_server_frame(&session, &mine);
+        assert_eq!(
+            tui.tracked_ids(),
+            1,
+            "the approval survives its turn's terminal"
+        );
+        assert!(
+            tui.authorize(Role::Tui, &RequestId::Int(1), false),
+            "the approval is still answerable"
+        );
+    }
+
+    /// The sibling census entry stays closed. `item/tool/requestUserInput` is an s2c
+    /// request in the same pinned census and is a DIFFERENT capability (asking the user a
+    /// question); no capture exercises it and nothing strands on it, so admitting the tool
+    /// dispatch must not have admitted it by accident.
+    #[test]
+    fn the_other_non_approval_server_requests_are_still_tombstoned() {
+        for method in [
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+            "attestation/generate",
+        ] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut tui = LegCapabilities::new(arb, silent());
+            tui.observe_server_frame(&no_session(), &format!(
+                r#"{{"id":0,"method":"{method}","params":{{"threadId":"thread-A","namespace":"codex_tui"}}}}"#
+            ));
+            assert!(
+                !tui.authorize(Role::Tui, &RequestId::Int(0), false),
+                "{method} must stay unanswerable"
+            );
+        }
     }
 
     #[test]
@@ -804,7 +1570,10 @@ mod tests {
     fn duplicate_on_the_same_leg_is_one_use() {
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         assert!(
             leg.authorize(Role::Ccd, &RequestId::Int(0), false),
             "first wins"
@@ -826,12 +1595,14 @@ mod tests {
         // prove it belongs to A rather than B.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
-        leg.observe_server_frame(&approval_frame(
-            "item/permissions/requestApproval",
-            "thread-B",
-            0,
-        ));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame("item/permissions/requestApproval", "thread-B", 0),
+        );
         assert!(
             leg.is_tombstoned(&RequestId::Int(0)),
             "collision tombstones"
@@ -850,8 +1621,8 @@ mod tests {
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
         let frame = approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0);
-        leg.observe_server_frame(&frame);
-        leg.observe_server_frame(&frame); // duplicate observation ⇒ collision
+        leg.observe_server_frame(&no_session(), &frame);
+        leg.observe_server_frame(&no_session(), &frame); // duplicate observation ⇒ collision
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(
             !leg.authorize(Role::Ccd, &RequestId::Int(0), false),
@@ -866,13 +1637,19 @@ mod tests {
         // a post-consume duplicate AND any later same-id response fail closed.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         assert!(
             leg.authorize(Role::Ccd, &RequestId::Int(0), false),
             "clean Bound authorizes once"
         );
         // A later same-id observation tombstones the (already-consumed) id.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-B", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-B", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         // A post-consume duplicate response fails closed (tombstoned AND already spent).
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
@@ -889,12 +1666,14 @@ mod tests {
         // fail closed (no phone upgrade AND no original tui answer).
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
-        leg.observe_server_frame(&approval_frame(
-            "item/permissions/requestApproval",
-            "th-P",
-            0,
-        ));
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame("item/permissions/requestApproval", "th-P", 0),
+        );
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(
             !leg.authorize(Role::Ccd, &RequestId::Int(0), false),
@@ -914,14 +1693,20 @@ mod tests {
         // (was: original stayed answerable), so the tui answer is also closed afterward.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
-        leg.observe_server_frame(&approval_frame("some/future/requestApproval", "th-U", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame("some/future/requestApproval", "th-U", 0),
+        );
         assert_eq!(
             leg.bound_entry(&RequestId::Int(0)).unwrap().grant,
             Grant::TuiOnly,
             "unknown approval registers as the fail-closed TUI-only default"
         );
         // A phone-family reuse of id=0 tombstones it rather than upgrading or preserving.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), false));
@@ -941,7 +1726,7 @@ mod tests {
             !frame.contains("requestApproval"),
             "the raw bytes do NOT contain the literal marker (the escape attack)"
         );
-        leg.observe_server_frame(&frame);
+        leg.observe_server_frame(&no_session(), &frame);
         // It was decoded to the phone family and bound (treated as an approval).
         assert_eq!(
             leg.bound_entry(&RequestId::Int(0)).unwrap().grant,
@@ -959,8 +1744,11 @@ mod tests {
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
         let escaped = escaped_approval_frame("th-A", 0);
         assert!(!escaped.contains("requestApproval"));
-        leg.observe_server_frame(&escaped);
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0));
+        leg.observe_server_frame(&no_session(), &escaped);
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0),
+        );
         assert!(
             leg.is_tombstoned(&RequestId::Int(0)),
             "the escaped approval participates in collision detection"
@@ -977,21 +1765,29 @@ mod tests {
         // leave a same-id `Bound` aliasable.
         let mut leg = LegCapabilities::new(Arc::new(ResponseArbiter::new()), silent());
         // Duplicate top-level `id` — ambiguous between our parse and the app-server's.
-        leg.observe_server_frame(&format!(
+        leg.observe_server_frame(&no_session(), &format!(
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"id":1,"params":{{"threadId":"th-A"}}}}"#
         ));
         assert!(leg.is_poisoned(), "a NoDup-rejected frame poisons the leg");
         // Duplicate `method` also fails NoDup (idempotent poison, still registers nothing).
-        leg.observe_server_frame(&format!(
+        leg.observe_server_frame(&no_session(), &format!(
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","method":"x/requestApproval","id":2,"params":{{"threadId":"th-A"}}}}"#
         ));
         assert!(
             leg.view.is_empty(),
             "a duplicate-member frame must not register (malformed s2c)"
         );
-        // A later CLEAN approval is unanswerable — the leg is fail closed leg-wide.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-clean", 9));
-        assert!(leg.bound_entry(&RequestId::Int(9)).is_some());
+        // A later CLEAN approval is not even DELIVERED: the leg closes. It used to bind in
+        // the view and be relayed, and only its ANSWER was refused — which handed the
+        // client an exchange whose reply was guaranteed to be discarded.
+        assert!(matches!(
+            leg.observe_server_frame(
+                &no_session(),
+                &approval_frame(COMMAND_EXEC_APPROVAL, "th-clean", 9),
+            ),
+            S2cDisposition::CloseLeg(_)
+        ));
+        assert!(leg.bound_entry(&RequestId::Int(9)).is_none());
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(9), false));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(9), false));
     }
@@ -1012,14 +1808,17 @@ mod tests {
                 && big_notification.len() < MAX_OBSERVE_FRAME_BYTES,
             "the frame is over the OLD 1 MiB cap but under the NEW 8 MiB cap"
         );
-        leg.observe_server_frame(&big_notification);
+        leg.observe_server_frame(&no_session(), &big_notification);
         assert!(
             !leg.is_poisoned(),
             "a large but in-cap notification parses and occupies nothing — no poison"
         );
         assert!(leg.view.is_empty(), "a notification occupies no id");
         // A later CLEAN phone approval is therefore still answerable (real traffic works).
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        );
         assert!(leg.bound_entry(&RequestId::Int(0)).is_some());
         assert!(
             leg.authorize(Role::Ccd, &RequestId::Int(0), false),
@@ -1034,14 +1833,17 @@ mod tests {
         // FIRST — before the view lookup — the previously-Bound id's response now forwards ZERO
         // bytes. Poison overrides an existing clean Bound.
         let mut leg = LegCapabilities::new(Arc::new(ResponseArbiter::new()), silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        );
         assert!(
             leg.bound_entry(&RequestId::Int(0)).is_some(),
             "id=0 binds cleanly first"
         );
         // Now poison via an oversized (unclassifiable) frame.
         let pad = "Z".repeat(MAX_OBSERVE_FRAME_BYTES + 1);
-        leg.observe_server_frame(&format!(
+        leg.observe_server_frame(&no_session(), &format!(
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":1,"params":{{"threadId":"th-B","pad":"{pad}"}}}}"#
         ));
         assert!(leg.is_poisoned());
@@ -1066,10 +1868,10 @@ mod tests {
         // capability, and a later same-id approval can never alias through it.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&format!(
+        leg.observe_server_frame(&no_session(), &format!(
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"params":{{"threadId":"th-A"}},"result":{{}}}}"#
         ));
-        leg.observe_server_frame(&format!(
+        leg.observe_server_frame(&no_session(), &format!(
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":1,"params":{{"threadId":"th-A"}},"error":{{"code":-1}}}}"#
         ));
         assert!(
@@ -1084,7 +1886,10 @@ mod tests {
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), true));
         // A later clean approval reusing id=0 stays tombstoned (second occupant) —
         // unanswerable, so it can never alias through the hybrid.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
     }
@@ -1102,15 +1907,22 @@ mod tests {
             r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"params":{{"threadId":"th-A","pad":"{pad}"}}}}"#
         );
         assert!(big.len() > MAX_OBSERVE_FRAME_BYTES);
-        leg.observe_server_frame(&big);
+        leg.observe_server_frame(&no_session(), &big);
         assert!(leg.is_poisoned(), "an oversized frame poisons the leg");
         assert!(leg.view.is_empty(), "and still registers nothing");
-        // A subsequently-observed CLEAN phone approval at ANY id is a clean Bound in the view,
-        // yet its response forwards ZERO bytes — the poison is leg-wide, overriding the Bound.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-clean", 7));
+        // A subsequently-observed CLEAN phone approval at ANY id is not delivered at all:
+        // the leg closes. It used to bind and be relayed while its response forwarded ZERO
+        // bytes, which is the delivered-then-unanswerable shape.
+        assert!(matches!(
+            leg.observe_server_frame(
+                &no_session(),
+                &approval_frame(COMMAND_EXEC_APPROVAL, "th-clean", 7),
+            ),
+            S2cDisposition::CloseLeg(_)
+        ));
         assert!(
-            leg.bound_entry(&RequestId::Int(7)).is_some(),
-            "the clean approval binds in the view"
+            leg.bound_entry(&RequestId::Int(7)).is_none(),
+            "nothing binds on a poisoned leg"
         );
         assert!(
             !leg.authorize(Role::Ccd, &RequestId::Int(7), false),
@@ -1123,7 +1935,10 @@ mod tests {
     fn an_error_response_consumes_like_a_result() {
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         // is_error = true still consumes the one-use slot (A4).
         assert!(leg.authorize(Role::Ccd, &RequestId::Int(0), true));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), true));
@@ -1141,7 +1956,7 @@ mod tests {
             r#"{{"method":"app/list/updated","params":{{"pad":"{}"}}}}"#,
             "Z".repeat(4096)
         );
-        leg.observe_server_frame(&frame);
+        leg.observe_server_frame(&no_session(), &frame);
         assert!(leg.view.is_empty());
     }
 
@@ -1151,12 +1966,18 @@ mod tests {
         // not inserted (stays Unseen ⇒ unanswerable), while an EXISTING id still tombstones.
         let mut leg = LegCapabilities::new(Arc::new(ResponseArbiter::new()), silent());
         for i in 0..MAX_TRACKED_IDS as i64 {
-            leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th", i));
+            leg.observe_server_frame(
+                &no_session(),
+                &approval_frame(COMMAND_EXEC_APPROVAL, "th", i),
+            );
         }
         assert_eq!(leg.view.len(), MAX_TRACKED_IDS);
         // A brand-new id past the cap is not tracked → unanswerable (fail closed).
         let over = MAX_TRACKED_IDS as i64;
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th", over));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th", over),
+        );
         assert_eq!(
             leg.view.len(),
             MAX_TRACKED_IDS,
@@ -1164,7 +1985,10 @@ mod tests {
         );
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(over), false));
         // An already-tracked id can still transition to Tombstoned (no growth).
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th2", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th2", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert_eq!(leg.view.len(), MAX_TRACKED_IDS);
     }
@@ -1179,9 +2003,15 @@ mod tests {
             Arc::new(move |l: &str| sink_lines.lock().unwrap().push(l.to_string()));
         let mut leg = LegCapabilities::new(Arc::new(ResponseArbiter::new()), sink);
         // Bind id=0, then collide it far more times than the budget.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        );
         for _ in 0..(AMBIGUITY_LOG_BUDGET as usize + 50) {
-            leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0));
+            leg.observe_server_frame(
+                &no_session(),
+                &approval_frame(COMMAND_EXEC_APPROVAL, "th-B", 0),
+            );
         }
         let logged = lines.lock().unwrap();
         assert_eq!(
@@ -1234,12 +2064,15 @@ mod tests {
         // authorize through A: ZERO bytes.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(Arc::clone(&arb), silent());
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         assert!(
             leg.bound_entry(&RequestId::Int(0)).is_some(),
             "A binds first"
         );
-        leg.observe_server_frame(&request_frame("tool/requestUserInput", 0));
+        leg.observe_server_frame(&no_session(), &request_frame("tool/requestUserInput", 0));
         assert!(
             leg.is_tombstoned(&RequestId::Int(0)),
             "the non-approval request occupies id=0 ⇒ collision ⇒ tombstone"
@@ -1258,12 +2091,15 @@ mod tests {
         // phone answer forwards ZERO bytes.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&request_frame("tool/requestUserInput", 0));
+        leg.observe_server_frame(&no_session(), &request_frame("tool/requestUserInput", 0));
         assert!(
             leg.is_tombstoned(&RequestId::Int(0)),
             "an unconfirmed non-approval request tombstones on first observe"
         );
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), false));
@@ -1275,11 +2111,17 @@ mod tests {
         // Tombstoned (fail-closed default), so a later same-id approval is unanswerable.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&request_frame("some/unknown/serverRequest", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &request_frame("some/unknown/serverRequest", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(leg.bound_entry(&RequestId::Int(0)).is_none());
         // A later phone approval reusing id=0 cannot resurrect it.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-C", 0),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), false));
@@ -1292,9 +2134,10 @@ mod tests {
         // (occupy, permanently unanswerable) rather than being silently skipped.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
-        leg.observe_server_frame(&format!(
-            r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"params":{{"itemId":"x"}}}}"#
-        ));
+        leg.observe_server_frame(
+            &no_session(),
+            &format!(r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"params":{{"itemId":"x"}}}}"#),
+        );
         assert!(leg.is_tombstoned(&RequestId::Int(0)));
         assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), false));
@@ -1310,14 +2153,19 @@ mod tests {
         // Real 0.147 notifications: one plain, one whose params carry a NESTED requestId (not
         // a top-level id) — neither must occupy a bare id.
         leg.observe_server_frame(
+            &no_session(),
             r#"{"method":"thread/status/changed","params":{"threadId":"th-A"}}"#,
         );
         leg.observe_server_frame(
+            &no_session(),
             r#"{"method":"serverRequest/resolved","params":{"threadId":"th-A","requestId":0}}"#,
         );
         assert!(leg.view.is_empty(), "notifications occupy no id");
         // A later approval at id=0 is a clean Bound and authorizes (not spuriously tombstoned).
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        );
         assert!(leg.bound_entry(&RequestId::Int(0)).is_some());
         assert!(leg.authorize(Role::Ccd, &RequestId::Int(0), false));
     }
@@ -1330,7 +2178,10 @@ mod tests {
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
         let long = "t".repeat(MAX_THREAD_ID_BYTES + 1);
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, &long, 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, &long, 0),
+        );
         assert!(
             leg.is_tombstoned(&RequestId::Int(0)),
             "over-long threadId tombstones"
@@ -1342,7 +2193,10 @@ mod tests {
         assert!(!leg.authorize(Role::Tui, &RequestId::Int(0), false));
         // A threadId exactly at the cap is still a clean Bound (boundary is inclusive).
         let at_cap = "t".repeat(MAX_THREAD_ID_BYTES);
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, &at_cap, 1));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, &at_cap, 1),
+        );
         assert!(leg.bound_entry(&RequestId::Int(1)).is_some());
     }
 
@@ -1355,14 +2209,20 @@ mod tests {
         let sink: EventSink = Arc::new(|_: &str| panic!("event sink panicked"));
         let mut leg = LegCapabilities::new(Arc::new(ResponseArbiter::new()), sink);
         // First observe is a clean Bound — no ambiguity log fires, so the sink is not called.
-        leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0));
+        leg.observe_server_frame(
+            &no_session(),
+            &approval_frame(COMMAND_EXEC_APPROVAL, "thread-A", 0),
+        );
         assert!(
             leg.bound_entry(&RequestId::Int(0)).is_some(),
             "first observe binds"
         );
         // Second observe collides ⇒ register installs Tombstoned, THEN logs (which panics).
         let result = catch_unwind(AssertUnwindSafe(|| {
-            leg.observe_server_frame(&approval_frame(COMMAND_EXEC_APPROVAL, "thread-B", 0));
+            leg.observe_server_frame(
+                &no_session(),
+                &approval_frame(COMMAND_EXEC_APPROVAL, "thread-B", 0),
+            );
         }));
         assert!(result.is_err(), "the panicking sink unwinds");
         assert!(

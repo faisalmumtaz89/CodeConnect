@@ -801,6 +801,34 @@ pub trait ThreadBinding: Send + Sync {
     /// connection wedged, or a client could lift it by asking and being told no.
     fn note_resubscribe_attempt(&self, _conn: ConnId, _thread: &str, _id: &RequestId) {}
 
+    /// Record that this session's creation declared the **admitted** `dynamicTools`
+    /// bundle.
+    ///
+    /// Called once, from the forward path of a `thread/start` the fingerprint let through
+    /// — so it means "the exact captured bundle was admitted on this session", not "some
+    /// creation mentioned tools". [`crate::response_capability`] reads it: a tool dispatch
+    /// is only answerable in a session that actually declared the bundle it claims to come
+    /// from.
+    ///
+    /// The default is a no-op, so a binding that does not track it records no bundle and
+    /// therefore answers no tool call — fail closed, like every other default here.
+    fn note_tool_bundle_admitted(&self) {}
+
+    /// Is `turn` an **active** turn of `thread` — one this broker admitted, whose
+    /// `turn/start` the server answered with that id, and whose terminal has not arrived?
+    ///
+    /// The predicate a real interrupt needs, and the one a tool dispatch is checked
+    /// against. Deliberately narrower than "a turn id we have seen": an entry still
+    /// `Unanswered` has no id yet, and one whose terminal has been acted on is gone from
+    /// the ledger — so a turn that has already ended cannot be interrupted, and a phantom
+    /// id cannot name one.
+    ///
+    /// The default is FALSE, so a binding that does not track turns authorizes no
+    /// interrupt and answers no tool call.
+    fn is_active_turn(&self, _thread: &str, _turn: &str) -> bool {
+        false
+    }
+
     /// The running counts of protocol-hostile id events (round-3 P1/P6). See
     /// [`IdLedgerCounts`] for the failure-containment seam these feed.
     fn id_ledger_counts(&self) -> IdLedgerCounts {
@@ -1314,6 +1342,14 @@ struct Binding {
     /// with it; the thread they belong to is recorded once because they can only ever
     /// belong to the active head.
     active_turns: TurnActivity,
+    /// **Did this session's creation declare the admitted `dynamicTools` bundle?**
+    ///
+    /// Set from the `thread/start` the fingerprint admitted, and read by
+    /// [`crate::response_capability`]: a tool dispatch claiming the `codex_tui` namespace
+    /// is only answerable in a session that actually declared that bundle. Without it, a
+    /// session created with `dynamicTools: null` — one where the model was handed no tools
+    /// at all — would still answer a tool call the app-server sent.
+    tool_bundle_admitted: bool,
     /// **A switch reserved by one connection** (round-2 P3). Held from the moment its
     /// `thread/unsubscribe` prefix is admitted until its `thread/start` is decided, the
     /// connection closes, or [`SWITCH_RESERVATION_TTL`] elapses. While it is held, a turn
@@ -1419,6 +1455,7 @@ impl SessionThreads {
             inner: Arc::new(Mutex::new(Binding {
                 creation: Creation::Open,
                 active_turns: TurnActivity::default(),
+                tool_bundle_admitted: false,
                 switch_reservation: None,
                 unsubscribed: HashMap::new(),
                 wedge_seq: 0,
@@ -2542,9 +2579,44 @@ impl ThreadBinding for SessionThreads {
             _ => None,
         }
     }
+
+    fn note_tool_bundle_admitted(&self) {
+        self.enter().tool_bundle_admitted = true;
+    }
+
+    fn is_active_turn(&self, thread: &str, turn: &str) -> bool {
+        let g = self.enter();
+        g.active_turns.thread.as_deref() == Some(thread)
+            && g.active_turns
+                .admitted
+                .values()
+                .any(|e| matches!(e, TurnEntry::Answered { turn: Some(id) } if id == turn))
+    }
 }
 
 impl SessionThreads {
+    /// Did this session's creation declare the admitted `dynamicTools` bundle?
+    pub fn admitted_tool_bundle(&self) -> bool {
+        self.enter().tool_bundle_admitted
+    }
+
+    /// Is `turn` an **active** turn of `thread` — one this broker admitted, whose
+    /// `turn/start` the server answered with that id, and whose terminal has not arrived?
+    ///
+    /// This is the predicate a real interrupt needs and a tool dispatch is checked
+    /// against. It is deliberately narrower than "a turn id we have seen": an entry that
+    /// is still `Unanswered` has no id yet, and one whose terminal has been acted on is
+    /// gone from `admitted`, so a turn that has already ended cannot be interrupted and a
+    /// phantom id cannot name one.
+    pub fn is_active_turn(&self, thread: &str, turn: &str) -> bool {
+        let g = self.enter();
+        g.active_turns.thread.as_deref() == Some(thread)
+            && g.active_turns
+                .admitted
+                .values()
+                .any(|e| matches!(e, TurnEntry::Answered { turn: Some(id) } if id == turn))
+    }
+
     /// **Would the switch behind a prefix be admitted RIGHT NOW?** — the pure predicate, on
     /// its own lock.
     ///

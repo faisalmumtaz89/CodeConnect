@@ -1449,9 +1449,15 @@ async fn every_forward_note_is_scoped_to_its_connection() {
         creation_response("01a0-ours"),
     )]);
     // Leg 1: a plain allowlisted read and an allowlisted notification on the ccd leg.
+    //
+    // `thread/loaded/list` rather than `thread/read`: this test only needs SOME
+    // unscoped forward on the ccd leg to prove the note is per-connection, and the
+    // thread-scoped reads are no longer unscoped — they bind to a session thread
+    // (`Disposition::ReadSessionThread`). `thread/loaded/list` carries no threadId at
+    // all, so it is the honest "plain allowlisted read" the comment describes.
     let mut ccd = connect(&h.ccd_sock).await;
     ccd.send(Message::Text(
-        r#"{"method":"thread/read","id":1,"params":{}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{}}"#.into(),
     ))
     .await
     .unwrap();
@@ -1633,7 +1639,238 @@ async fn drain_approval(ws: &mut WebSocketStream<UnixStream>) {
     );
 }
 
+/// A COLLIDING second request at an id that is already occupied is **not delivered**: the
+/// broker answers it upstream instead, because the client could never answer it.
+///
+/// Before the interception, both frames reached the client and neither was answerable —
+/// which left the user looking at an approval prompt whose answer went nowhere, and the
+/// app-server waiting on a request that would never be resolved. This waits for the
+/// upstream answer, which is what now marks the collision as processed.
+async fn drain_collided(h: &Harness, before: usize) {
+    let rec = recorded_after(&h.state, before + 1).await;
+    let answered: serde_json::Value = serde_json::from_str(rec.last().unwrap()).unwrap();
+    assert_eq!(answered["id"], 0, "the collision is answered upstream");
+    assert_eq!(answered["error"]["code"], -32601);
+}
+
 const PERMISSIONS_APPROVAL: &str = "item/permissions/requestApproval";
+
+/// One `item/tool/call` s2c frame, in the shape MEASURED off a real 0.153 session.
+fn tool_call(namespace: &str, thread: &str, id: i64) -> Message {
+    Message::Text(format!(
+        r#"{{"id":{id},"method":"item/tool/call","params":{{"arguments":{{"limit":5}},"callId":"exec-1","namespace":"{namespace}","threadId":"{thread}","tool":"list_threads","turnId":"{TOOL_TURN}"}}}}"#
+    ))
+}
+
+/// The turn id the fake app-server answers the scripted `turn/start` with.
+const TOOL_TURN: &str = "01a0-turn";
+
+/// A creation carrying the ADMITTED `codex_tui` bundle, read from the same fixture the
+/// fingerprint pins — so the session this opens is one where the model really was handed
+/// the tools a dispatch will claim to come from.
+fn creation_request_with_tools() -> String {
+    let bundle: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/codex/dynamic-tools-0.153.json"
+    ))
+    .expect("the captured bundle parses");
+    serde_json::json!({
+        "method": "thread/start",
+        "id": "start-1",
+        "params": {"approvalPolicy": "untrusted", "approvalsReviewer": "user",
+                   "sandbox": "read-only", "dynamicTools": bundle}
+    })
+    .to_string()
+}
+
+/// Open the session an `item/tool/call` arrives in: the bundle admitted at creation, a
+/// bound thread, and one ACTIVE turn.
+///
+/// Driven entirely through the relay, so the state under test is the state a live session
+/// reaches rather than one assembled beside it.
+async fn tool_session(h: &Harness, thread: &str, dispatch: Message) -> WebSocketStream<UnixStream> {
+    // The fake answers one scripted frame per c2s message it admits, so the ORDER is
+    // driven from the client side: the creation binds, the turn goes active, and only then
+    // is the dispatch released — by the harmless `thread/loaded/list` the pump sends. That
+    // ordering is the point: a dispatch arriving before its turn exists is exactly what
+    // must NOT be answerable, so a test of the admitted path has to reach the admitted
+    // state first.
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response(thread)),
+        (
+            "turn/start".into(),
+            Message::Text(
+                serde_json::json!({"id": 3, "result": {"turn": {"id": TOOL_TURN}}}).to_string(),
+            ),
+        ),
+        ("thread/loaded/list".into(), dispatch),
+    ]);
+    let mut ws = connect(&h.tui_sock).await;
+    ws.send(Message::Text(creation_request_with_tools()))
+        .await
+        .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(v["result"]["thread"]["id"], thread, "the creation binds");
+    ws.send(Message::Text(turn_frame(thread))).await.unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(
+        v["result"]["turn"]["id"], TOOL_TURN,
+        "the turn is active; got {v}"
+    );
+    ws
+}
+
+/// Release the scripted dispatch: one allowlisted, thread-free read whose only job is to
+/// give the fake upstream a message to answer with.
+///
+/// Returns the upstream byte count once the pump's OWN forward has landed, so a test
+/// counts only what the dispatch causes.
+async fn pump_dispatch(h: &Harness, ws: &mut WebSocketStream<UnixStream>) -> usize {
+    ws.send(Message::Text(
+        r#"{"id":"pump","method":"thread/loaded/list","params":{"limit":1}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    settle().await;
+    h.state.recorded.lock().unwrap().len()
+}
+
+/// The TUI's answer to a tool call whose underlying method the broker refused: a
+/// well-formed FAILURE result, which is exactly what the real TUI produces.
+fn tool_result(id: i64, success: bool) -> Message {
+    Message::Text(format!(
+        r#"{{"id":{id},"result":{{"contentItems":[{{"text":"thread/list failed: method refused","type":"inputText"}}],"success":{success}}}}}"#
+    ))
+}
+
+/// **The hang, closed at the root, over the real relay.**
+///
+/// The admitted `codex_tui` bundle advertises tools to the MODEL, so it calls them
+/// unprompted. The broker refuses the cross-session method underneath — correctly — and
+/// the TUI turns that refusal into a well-formed `success:false` tool result. If that
+/// result does not reach the app-server, the tool call never closes: the turn hangs at
+/// "Working…" and `turn/interrupt` is a deferred disposition that refuses, so the user
+/// cannot escape and has to kill the session.
+///
+/// Both halves are asserted here: the refusal still forwards zero bytes, and the ANSWER
+/// forwards byte-exact so the exchange completes.
+#[tokio::test]
+async fn a_refused_tool_call_still_returns_its_failure_so_the_turn_completes() {
+    let h = start_broker_with_events();
+    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
+    let before = pump_dispatch(&h, &mut tui).await;
+    let f = tui.next().await.unwrap().unwrap();
+    assert!(f.to_text().unwrap().contains("item/tool/call"));
+
+    // The tool's underlying method is refused: zero upstream bytes, leg stays usable.
+    tui.send(Message::Text(
+        r#"{"id":"t1","method":"thread/list","params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        before,
+        "the cross-session read must still forward zero bytes"
+    );
+
+    // …and the TUI's failure result for the tool call DOES forward, byte-exact, so the
+    // app-server learns the call finished and the turn ends.
+    let answer = tool_result(0, false);
+    tui.send(answer.clone()).await.unwrap();
+    let rec = recorded_after(&h.state, before + 1).await;
+    assert_eq!(
+        rec.last().unwrap(),
+        answer.to_text().unwrap(),
+        "the tool result must reach the app-server, byte-exact"
+    );
+    assert!(
+        h.events()
+            .iter()
+            .any(|e| e.contains("capability won: winner=Tui")),
+        "events: {:?}",
+        h.events()
+    );
+}
+
+/// The legitimate half: a tool the model uses INSIDE its own session succeeds, and its
+/// success result flows back the same way. Admitting the answer must not depend on the
+/// answer being a failure.
+#[tokio::test]
+async fn a_successful_tool_call_returns_its_result_too() {
+    let h = start_broker_with_events();
+    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
+    let before = pump_dispatch(&h, &mut tui).await;
+    let _ = tui.next().await.unwrap().unwrap();
+    let answer = tool_result(0, true);
+    tui.send(answer.clone()).await.unwrap();
+    let rec = recorded_after(&h.state, before + 1).await;
+    assert_eq!(rec.last().unwrap(), answer.to_text().unwrap());
+}
+
+/// A tool call from a namespace this broker never admitted stays unanswerable, so its
+/// answer forwards zero bytes.
+#[tokio::test]
+async fn a_tool_call_from_an_unadmitted_namespace_cannot_be_answered() {
+    let h = start_broker_with_events();
+    let mut tui = tool_session(
+        &h,
+        "01a0-ours",
+        tool_call("some_other_bundle", "01a0-ours", 0),
+    )
+    .await;
+    let before = h.state.recorded.lock().unwrap().len();
+    pump_dispatch(&h, &mut tui).await;
+    // It is not DELIVERED at all — the broker answers it upstream instead, which is what
+    // stops an unanswerable request stranding the exchange.
+    settle().await;
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(
+        rec.len(),
+        before + 2,
+        "the pump forwarded, and the broker answered the dispatch upstream"
+    );
+    let answered: serde_json::Value = serde_json::from_str(rec.last().unwrap()).unwrap();
+    assert_eq!(answered["id"], 0);
+    assert_eq!(answered["error"]["code"], -32601);
+
+    // …and a client answer to it forwards zero bytes, because it was never bound.
+    tui.send(tool_result(0, true)).await.unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        before + 2,
+        "an unadmitted namespace's tool result must forward zero bytes"
+    );
+}
+
+/// The phone is never granted a tool call's answer — a tool result is handed to the MODEL
+/// as tool output, so answering one is a text-injection capability, not an approval.
+#[tokio::test]
+async fn the_phone_cannot_answer_a_tool_call_but_the_tui_still_can() {
+    let h = start_broker_with_events();
+    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
+    let before = pump_dispatch(&h, &mut tui).await;
+    let _ = tui.next().await.unwrap().unwrap();
+    // Scripted AFTER the TUI leg exists, so it lands on the ccd upstream and not the one
+    // the session was opened on.
+    h.push_script(vec![tool_call("codex_tui", "01a0-ours", 0)]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    let _ = ccd.next().await.unwrap().unwrap();
+
+    ccd.send(tool_result(0, true)).await.unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        before,
+        "ccd must not be able to answer a tool call"
+    );
+    // …and the phone's refused attempt did not consume the slot the TUI needs.
+    let answer = tool_result(0, false);
+    tui.send(answer.clone()).await.unwrap();
+    let rec = recorded_after(&h.state, before + 1).await;
+    assert_eq!(rec.last().unwrap(), answer.to_text().unwrap());
+}
 
 #[tokio::test]
 async fn fanout_phone_family_ccd_wins_tui_sibling_revoked() {
@@ -1805,13 +2042,16 @@ async fn reverse_alias_original_unanswerable_after_collision() {
     ]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await; // th-A binds id=0
-    drain_approval(&mut ccd).await; // th-B reuses id=0 ⇒ collision ⇒ tombstone
+    drain_collided(&h, 0).await; // th-B reuses id=0 ⇒ collision ⇒ tombstone
 
     ccd.send(answer(0, "would-be-A")).await.unwrap();
     settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "after a collision the original binding is unanswerable (zero bytes)",
+    let rec = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(
+        rec.len(),
+        1,
+        "after a collision the original binding is unanswerable; the only upstream byte \
+         is the broker's own refusal of the colliding request, got {rec:?}"
     );
 }
 
@@ -1828,15 +2068,17 @@ async fn late_duplicate_after_same_id_reuse_forwards_zero_bytes() {
     ]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await; // th-A
-    drain_approval(&mut ccd).await; // th-B reuse ⇒ tombstone
+    drain_collided(&h, 0).await; // th-B reuse ⇒ tombstone, answered upstream
 
     ccd.send(answer(0, "first")).await.unwrap();
     ccd.send(answer(0, "stale")).await.unwrap();
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
-    assert!(
-        rec.is_empty(),
-        "every id=0 answer after a collision forwards zero bytes, got {rec:?}"
+    assert_eq!(
+        rec.len(),
+        1,
+        "every id=0 ANSWER after a collision forwards zero bytes; the only upstream byte \
+         is the broker's own refusal of the colliding request, got {rec:?}"
     );
 }
 
@@ -1856,18 +2098,20 @@ async fn losing_sibling_after_same_id_reuse_forwards_zero_bytes() {
     ]);
     let mut tui = connect(&h.tui_sock).await;
     drain_approval(&mut tui).await;
-    drain_approval(&mut tui).await;
+    drain_collided(&h, 0).await;
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
-    drain_approval(&mut ccd).await;
+    drain_collided(&h, 1).await;
 
     ccd.send(answer(0, "ccd")).await.unwrap();
     tui.send(answer(0, "tui")).await.unwrap();
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
-    assert!(
-        rec.is_empty(),
-        "both legs tombstoned id=0; no sibling forwards, got {rec:?}"
+    assert_eq!(
+        rec.len(),
+        2,
+        "both legs tombstoned id=0; no sibling ANSWER forwards — the two upstream bytes \
+         are the broker's own refusals of the two colliding requests, got {rec:?}"
     );
 }
 
@@ -1887,16 +2131,17 @@ async fn observe_only_then_phone_same_bare_id_tombstones_both_legs() {
     ]);
     let mut tui = connect(&h.tui_sock).await;
     drain_approval(&mut tui).await;
-    drain_approval(&mut tui).await;
+    drain_collided(&h, 0).await;
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
-    drain_approval(&mut ccd).await;
+    drain_collided(&h, 1).await;
 
     ccd.send(answer(0, "ccd")).await.unwrap();
     tui.send(answer(0, "tui")).await.unwrap();
     settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        2,
         "a collision tombstones id=0 on both legs — no answer forwards",
     );
 }
@@ -1964,22 +2209,33 @@ async fn escaped_request_approval_method_is_observed_end_to_end() {
 }
 
 #[tokio::test]
-async fn duplicate_member_approval_frame_registers_no_capability() {
-    // An s2c approval frame with a duplicate `id` member is ambiguous (parser-differential)
-    // — it must not register a capability, so a response for it forwards zero bytes.
+async fn a_duplicate_member_approval_frame_closes_the_leg() {
+    // An s2c approval frame with a duplicate `id` member is ambiguous
+    // (parser-differential): it registers no capability, so any answer to it would forward
+    // zero bytes. It used to be relayed anyway, byte-exact — which handed the client an
+    // approval prompt whose answer was guaranteed to be discarded, and poisoned the leg so
+    // that every LATER clean approval had the same fate.
+    //
+    // The leg closes instead. There is nothing to answer upstream either: the id is
+    // exactly what could not be read.
     let h = start_broker();
     h.push_script(vec![Message::Text(format!(
         r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"id":1,"params":{{"threadId":"th-A","itemId":"x"}}}}"#
     ))]);
     let mut ccd = connect(&h.ccd_sock).await;
-    drain_approval(&mut ccd).await; // byte-exact passthrough still delivers the frame
 
-    ccd.send(answer(0, "dup")).await.unwrap();
-    ccd.send(answer(1, "dup")).await.unwrap();
+    // The leg ends without the frame being delivered. The relay closes a leg by ending
+    // its loop and dropping the socket — the same shape every other `DropCloseLeg` takes
+    // — so the client sees EOF or a reset, never the frame.
+    match ccd.next().await {
+        None | Some(Err(_)) => {}
+        Some(Ok(Message::Close(_))) => {}
+        Some(Ok(other)) => panic!("the leg must close, not deliver: {other:?}"),
+    }
     settle().await;
     assert!(
         h.state.recorded.lock().unwrap().is_empty(),
-        "a duplicate-member approval frame registers no capability",
+        "a duplicate-member approval frame forwards nothing upstream either",
     );
 }
 

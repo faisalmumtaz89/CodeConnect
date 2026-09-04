@@ -52,13 +52,21 @@
 //! coverage that executed, against the wrong thing.
 //!
 //! What that premise check actually establishes, stated at its real strength: the
-//! resolved file **is a native Mach-O executable** (a filesystem fact) and it
-//! **reports** `0.147.x` when asked for its version (its own claim about itself).
+//! resolved file **is a native Mach-O executable** (a filesystem fact), it **reports**
+//! a version (its own claim about itself), and its **guarded surface** — the app-server
+//! parameter shapes the broker defends plus the root CLI command set — matches the
+//! vendored baseline, or differs from it only where
+//! `codex_broker::guarded_surface`'s adjudicated delta tables say a measurement was taken.
 //! It is not a proof that the binary is genuinely upstream codex — nothing short of
 //! a signature check would be, and a binary that lies about `--version` would pass.
-//! Both halves are still worth having, because the failures they actually catch are
-//! the common ones: an `npm` shim or shell wrapper on PATH, and a stale or
-//! newer-series install.
+//! All three are still worth having, because the failures they actually catch are the
+//! common ones: an `npm` shim or shell wrapper on PATH, and an install whose wire or
+//! command surface this harness was never grounded against.
+//!
+//! The version is **recorded, never gated** — this used to assert a `0.147.` prefix,
+//! matching the launcher's compiled-in pin. Both are gone for the same reason: a
+//! version literal refuses every weekly codex release while proving nothing about
+//! whether that release is safe to host.
 //!
 //! Run it deliberately:
 //! ```text
@@ -232,13 +240,10 @@ fn resolve_codex() -> Option<PathBuf> {
 // names what was found.
 //
 // The check is deliberately described at its real strength throughout: it
-// establishes that the file IS a native executable, and that it REPORTS the pinned
-// series. "Is genuinely codex 0.147" is a stronger claim than either check makes,
-// and is not asserted anywhere below.
-
-/// The codex series this live gate is grounded against, matching the compiled-in
-/// pin `protocol::config::CODEX_PINNED_VERSIONS` that `src/codex.rs` enforces.
-const LIVE_CODEX_VERSION_PREFIX: &str = "0.147.";
+// establishes that the file IS a native executable, that it REPORTS a version, and
+// that its GUARDED SURFACE is one CodeConnect is grounded against. "Is genuinely the
+// codex it claims to be" is a stronger claim than any of those, and is not asserted
+// anywhere below.
 
 /// Bounded budget for `codex --version`. A binary that does not answer promptly is
 /// not the standalone native CLI, and the gate must not hang on it.
@@ -761,7 +766,8 @@ fn is_alive(pid: i32) -> bool {
 /// reports coverage that never executed or that proved something else.
 ///
 /// The two premises it establishes, at their real strength: the resolved file is a
-/// **native** Mach-O executable, and it **reports** [`LIVE_CODEX_VERSION_PREFIX`]`x`
+/// **native** Mach-O executable, it **reports** a version, and its **guarded surface**
+/// is one this build is grounded against
 /// when asked. Neither is a proof that the binary is genuinely upstream codex.
 fn live_gate() -> Option<PathBuf> {
     if std::env::var("CC_CODEX_LIVE").as_deref() != Ok("1") {
@@ -802,16 +808,37 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    assert!(
-        version.starts_with(LIVE_CODEX_VERSION_PREFIX),
-        "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, but this gate is grounded \
-         against {LIVE_CODEX_VERSION_PREFIX}x (the same series `src/codex.rs` pins). \
-         Running it against a different codex would validate the host against the wrong \
-         thing — install {LIVE_CODEX_VERSION_PREFIX}x or unset CC_CODEX_LIVE.",
-        codex.display()
-    );
+    // THE PREMISE IS THE GATE'S OWN VERDICT, NOT A VERSION LITERAL.
+    //
+    // This used to assert `version.starts_with("0.147.")`, mirroring the compiled-in
+    // version pin `src/codex.rs` then enforced. That pin is gone: what decides whether
+    // a codex may be hosted is now whether its **guarded surface** matches the vendored
+    // baseline (`codex::ensure_guarded_surface`). A literal here would have gone red on
+    // every weekly codex release while proving nothing about whether that release was
+    // safe to host — the same defect, in the test suite instead of the launcher.
+    //
+    // So the premise asks the real question, through the same projection the gate runs.
+    // A build the gate would admit is a build this harness may validate against; one it
+    // would refuse is refused here too, naming what moved.
+    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
+        Ok(changes) if changes.is_empty() => {}
+        Ok(changes) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
+             CodeConnect is NOT grounded against:\n  {}\nValidating the host against it \
+             would prove the wrong thing. Adjudicate these in \
+             `codex_broker::guarded_surface`'s delta tables, or unset CC_CODEX_LIVE.",
+            codex.display(),
+            changes.join("\n  ")
+        ),
+        Err(why) => panic!(
+            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}. \
+             A live run whose premise is unverified must FAIL.",
+            codex.display()
+        ),
+    }
     eprintln!(
-        "live gate premise verified: {} is a native executable reporting codex {version}",
+        "live gate premise verified: {} is a native executable reporting codex {version}, \
+         and its guarded surface is one this build is grounded against",
         codex.display()
     );
     Some(codex)

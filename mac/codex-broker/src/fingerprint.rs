@@ -203,13 +203,23 @@
 //! the opposite of [`TURN_START_CAPTURED_NULL_PARAMS`], where the measured TUI sends every key
 //! on every turn and a missing one really is an unmeasured client.)
 //!
-//! **Deliberately NOT an exhaustive top-level `thread/start` allowlist**, unlike `turn/start`
-//! and unlike `thread/resume` below. The corpus holds exactly ONE captured creation frame; the
-//! real 0.147 `ThreadStartParams` carries three properties that frame never exercised in
-//! either direction (`serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents`), and
-//! pinning a 22-key set off a single sample would refuse a legitimate TUI build on no evidence.
-//! Closing that gap is a CAPTURE problem, not an argument — it needs a corpus of real
-//! creations the size of the eleven-frame `turn/start` one.
+//! **An exhaustive top-level `thread/start` allowlist, as of the 0.153 re-grounding**
+//! ([`THREAD_START_CAPTURED_PARAMS`]), like `turn/start` and like `thread/resume` below.
+//!
+//! It was deliberately absent before, and the reasoning was that the corpus held exactly ONE
+//! captured creation frame, so pinning a 22-key set off a single sample would refuse a
+//! legitimate TUI build on no evidence. Two things closed that: the corpus is no longer one
+//! frame (the 0.153 re-grounding captured nine more, from real TUI launches, and every one
+//! carries the same key set plus `projectId`), and the alternative was measured to be unsafe.
+//! The 0.153 TUI sends `cyberAccessProgram` on the STABLE wire while the stable schema does
+//! not describe it at all — so "the launch gate will show us a new key" is false, and on the
+//! request that establishes the session's sandbox, workspace and tool runtime an undescribed
+//! key would have forwarded unexamined.
+//!
+//! The real 0.147 `ThreadStartParams` carries three properties no capture has ever exercised
+//! (`serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents`); they are refused,
+//! which is the same call every other captured boundary here makes — a schema property is not
+//! a measurement.
 //!
 //! ## The `thread/resume` captured boundary (round-5 finding 6)
 //!
@@ -494,6 +504,23 @@ pub fn assert_fingerprint(
     method: &str,
     params: &Value,
 ) -> Result<FpVerdict, FingerprintRefusal> {
+    // 0!) **Every ownership-carrying request's params is an OBJECT.** Not a tidy-up: the
+    //     0.153 app-server was MEASURED honouring POSITIONAL params (a JSON array, thread
+    //     id at index 0) on `thread/read`, `thread/turns/list` and `thread/items/list`, so
+    //     "the server only reads named params" is false. Every rule below this line is
+    //     key-based, and a key-based rule reads NOTHING from an array — it would pass by
+    //     finding no violation rather than by proving none. This runs before all of them.
+    let Some(named_params) = params.as_object() else {
+        return Err(refusal(
+            FpRefuseKind::Unprovable,
+            format!(
+                "{method} params: the captured shape is an object, never a {}. Positional \
+                 params carry the same fields in a form no key-based proof can inspect.",
+                shape_class(params)
+            ),
+        ));
+    };
+
     // 0a) `turn/start` only: the captured boundary (P4). Six authorization-adjacent params
     //     were measured PRESENT and exactly JSON null on every real turn, and
     //     `collaborationMode` was measured as null-or-object; any divergence — including a
@@ -580,7 +607,7 @@ pub fn assert_fingerprint(
     //    every earlier, more specific rule keeps its own refusal — a top-level `sandbox`
     //    key is still the sandbox boundary's refusal (P6), not a generic "unknown param".
     if method == "turn/start" {
-        check_turn_start_top_level_allowlist(params)?;
+        check_turn_start_top_level_allowlist(named_params)?;
     }
 
     // 5b) `thread/resume` only: the EXHAUSTIVE top-level allowlist (round-5 finding 6), for
@@ -588,7 +615,15 @@ pub fn assert_fingerprint(
     //      `history`, `notify`, `permissions` and every ownership dimension keep their own,
     //      more specific refusal instead of collapsing into "unknown param".
     if method == "thread/resume" {
-        check_thread_resume_top_level_allowlist(params)?;
+        check_thread_resume_top_level_allowlist(named_params)?;
+    }
+
+    // 5c) `thread/start` only: the EXHAUSTIVE top-level allowlist (0.153 re-grounding), in
+    //      the same last position and for the same reason — the capability channels, the
+    //      workspace anchor and the config rules all keep their own, more specific refusal
+    //      instead of collapsing into "unknown param".
+    if method == "thread/start" {
+        check_thread_start_top_level_allowlist(named_params)?;
     }
 
     if sandbox_deferred {
@@ -638,6 +673,7 @@ fn check_turn_start_captured_shape(params: &Value) -> Result<(), FingerprintRefu
             }
         }
     }
+    check_turn_start_0153_shape(params)?;
     check_collaboration_mode(params)
 }
 
@@ -647,17 +683,262 @@ fn check_turn_start_captured_shape(params: &Value) -> Result<(), FingerprintRefu
 /// (`environments` carries its own `cwd`/`runtimeWorkspaceRoots`; `selectedCapabilityRoots`
 /// carries absolute paths "for the root in the selected environment"; `dynamicTools` injects
 /// tool definitions) and for the live probe results.
-const THREAD_START_CAPTURED_NULL_PARAMS: [&str; 3] =
-    ["environments", "selectedCapabilityRoots", "dynamicTools"];
+const THREAD_START_CAPTURED_NULL_PARAMS: [&str; 2] = ["environments", "selectedCapabilityRoots"];
+
+/// The `thread/start` params codex 0.153 added, pinned absent-or-null.
+///
+/// `projectId` binds a thread to a project. MEASURED `null` on the real 0.153 TUI's
+/// creation, and absent on 0.147. Admitting the NAME in
+/// [`THREAD_START_CAPTURED_PARAMS`] must not admit a VALUE, which is what this pin says.
+const THREAD_START_0153_NULL_PARAMS: [&str; 1] = ["projectId"];
+
+/// The **exhaustive** top-level `thread/start` parameter set — the union of every
+/// creation this broker has captured from a real TUI.
+///
+/// MEASURED, not read off the schema: the 0.147 capture
+/// (`fixtures/codex/thread-switch.jsonl`) carries 22 keys and the 0.153 capture
+/// (`fixtures/codex/session-0.153.jsonl`, plus every `thread/start` in the re-grounding
+/// tee runs) carries the same 22 plus `projectId`. The union is therefore exactly the
+/// 0.153 set, and `the_thread_start_allowlist_is_the_captured_union` holds it to that.
+///
+/// # Why this exists now
+///
+/// It did not, and that was the hole. `thread/start` used to pin only the capability
+/// channels it knew about, on the reasoning that the schema would reveal a new one. It
+/// does not always: codex 0.153's TUI sends `cyberAccessProgram` on the STABLE wire while
+/// the stable schema does not describe it at all. A key the schema does not carry cannot
+/// be caught by the launch gate, so on `thread/start` — the request that establishes the
+/// session's sandbox, workspace and tool runtime — it would have forwarded unexamined.
+/// `turn/start` has had this discipline since 2e-7c; this is the same rule on the other
+/// ownership-carrying request.
+const THREAD_START_CAPTURED_PARAMS: [&str; 23] = [
+    "approvalPolicy",
+    "approvalsReviewer",
+    "baseInstructions",
+    "config",
+    "cwd",
+    "developerInstructions",
+    "dynamicTools",
+    "environments",
+    "ephemeral",
+    "historyMode",
+    "mockExperimentalField",
+    "model",
+    "modelProvider",
+    "multiAgentMode",
+    "permissions",
+    "personality",
+    "projectId",
+    "runtimeWorkspaceRoots",
+    "sandbox",
+    "selectedCapabilityRoots",
+    "serviceName",
+    "sessionStartSource",
+    "threadSource",
+];
+
+/// Refuse any top-level `thread/start` param outside the captured set.
+///
+/// The same rule, and the same audit-log discipline, as
+/// [`check_turn_start_top_level_allowlist`]: the offending key is by definition one this
+/// broker has no vocabulary for, so the detail carries fixed vocabulary and counts only
+/// and never the client's own text.
+fn check_thread_start_top_level_allowlist(
+    map: &serde_json::Map<String, Value>,
+) -> Result<(), FingerprintRefusal> {
+    let unknown = map
+        .keys()
+        .filter(|k| !THREAD_START_CAPTURED_PARAMS.contains(&k.as_str()))
+        .count();
+    if unknown > 0 {
+        return Err(refusal(
+            FpRefuseKind::Unprovable,
+            format!(
+                "thread/start params: unknown top-level parameter ({unknown} of {}) — captured \
+                 boundary: a top-level param outside the measured thread/start set establishes \
+                 part of the session's sandbox, workspace or tool runtime in a way that was \
+                 never observed and cannot be proven (widening requires a NEW capture, not an \
+                 argument). Key names are withheld from the audit log.",
+                map.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// codex 0.153's `codex_tui` dynamic-tool bundle, verbatim — the ONE populated
+/// `dynamicTools` value this broker admits.
+///
+/// # Why a populated capability channel is admitted at all
+///
+/// `dynamicTools` injects tool definitions into the model's runtime, and until 0.153
+/// every measured creation sent it as `null`, so it was pinned null with the other two
+/// capability channels. The 0.153 TUI populates it on every launch: one bundle,
+/// `codex_tui`, declaring six tools for working with **other** Codex tasks. Refusing it
+/// refuses every 0.153 session at `thread/start`; admitting it by shape ("an array of
+/// bundles") would admit any tool bundle at all, which is precisely the grant this
+/// boundary exists to withhold.
+///
+/// So it is admitted **as an exact value and nothing else**, and the safety argument is
+/// not "these tools look harmless" — it is that every one of them is neutralised
+/// downstream, on the wire, by the broker (each verdict MEASURED against a real 0.153
+/// session, not read off the schema):
+///
+/// | tool | wire method | broker verdict |
+/// |---|---|---|
+/// | `list_threads` | `thread/list` | `Refuse(NotAllowlisted)` |
+/// | `list_archived_threads` | `thread/list` (archived) | `Refuse(NotAllowlisted)` |
+/// | `read_thread` | `thread/read` + `thread/turns/list` | bound to a session thread ([`crate::allowlist::Disposition::ReadSessionThread`]) |
+/// | `set_thread_title` | `thread/name/set` | `Refuse(NotAllowlisted)` |
+/// | `wait_threads` | `thread/read` per target | bound — MEASURED refused on a foreign target |
+/// | `set_thread_archived` | `thread/archive` / `thread/unarchive` | `Refuse(NotAllowlisted)` |
+///
+/// All six are traced on the wire. `set_thread_archived` was the last, and it was driven
+/// FIRST in a fresh turn — before any tool that could fail — precisely because the earlier
+/// attempt reached it only after `wait_threads` had already hung the turn, so nothing was
+/// observed and the verdict rested on an exhaustiveness argument instead of a trace.
+///
+/// What the trace shows is that the tool is executed by the **TUI**, not the app-server:
+/// the app-server sends `item/tool/call` s2c, and the TUI's handler turns it back into an
+/// ordinary client→server request on the very same brokered connection (the `conn` id is
+/// unchanged across the whole capture; there is no second connection and no daemon hop).
+/// Measured, with a canary thread whose archived state was read out of
+/// `$CODEX_HOME/state_5.sqlite` and whose rollout file's directory was checked before and
+/// after each attempt:
+///
+/// * `{threadId: <foreign>, archived: true}` → `thread/archive` → refused
+///   (`NotAllowlisted`, `-32001`); canary `archived` stayed 0 and its rollout stayed in
+///   `sessions/`.
+/// * `{threadId: <foreign>, archived: false}` on a canary pre-archived out of band →
+///   `thread/unarchive` → refused; canary stayed `archived=1` in `archived_sessions/`.
+/// * `{archived: false}` with `threadId` omitted → the TUI substitutes the CALLING
+///   thread's id → `thread/unarchive` → refused.
+/// * `{archived: true}` with `threadId` omitted → codex's own TUI refuses it locally
+///   ("cannot archive the calling task"); **no frame is emitted at all**.
+///
+/// So the exhaustiveness argument held, and it now holds for a measured reason: the two
+/// methods the tool reaches for are in the pinned census and both are
+/// `Refuse(NotAllowlisted)` on every `(role, kind)` cell, and nothing about the effect is
+/// out of band.
+///
+/// That is the broker's whole design working as intended: the model's runtime may be
+/// handed a capability, and the capability is worth nothing because the wire beneath it
+/// refuses. `read_thread` is the one that had teeth — MEASURED leaking another session's
+/// conversation to the model — and it is the reason
+/// [`crate::allowlist::Disposition::ReadSessionThread`] exists.
+///
+/// **Refusing the wire beneath a tool is only half of it, and the other half stranded the
+/// user.** Because these tools are advertised to the MODEL, it calls them unprompted;
+/// each refusal used to leave the server's `item/tool/call` request unanswered, hanging
+/// the turn at "Working…" — and `turn/interrupt` was refused at the time, so the session
+/// had to be killed.
+/// The dispatch is answerable now ([`crate::response_capability::DYNAMIC_TOOL_CALL`],
+/// TUI only), so a refused tool fails AS A TOOL: the call closes, the turn completes, and
+/// the model is told the tool failed — which is what admitting this bundle has to mean if
+/// it is to mean anything.
+///
+/// Compared by [`Value`] equality rather than raw bytes: `serde_json`'s map is sorted,
+/// so this is the same relation as canonical-byte equality, without being defeated by a
+/// client that reorders keys. Canonical form is 2728 bytes, sha256
+/// `7c9625092939acae77a432dd9c5e70382219a06826eac1727276be0336a7a49f`.
+fn captured_dynamic_tools_0153() -> &'static Value {
+    static ONCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/codex/dynamic-tools-0.153.json"
+        ))
+        .expect("the captured 0.153 dynamicTools bundle parses")
+    })
+}
+
+/// The tool NAMES the admitted bundle declares, derived from the bundle itself.
+///
+/// Not a second list: a seventh tool could only appear here by appearing in the captured
+/// fixture, which `thread/start` pins byte for byte — so this cannot drift from what the
+/// model was actually handed. [`crate::response_capability`] checks a dispatch's `tool`
+/// against it, so a call naming something the bundle never declared is unanswerable.
+pub fn admitted_tool_names() -> &'static std::collections::BTreeSet<String> {
+    static ONCE: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        captured_dynamic_tools_0153()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|ns| ns.get("tools")?.as_array())
+            .flatten()
+            .filter_map(|t| Some(t.get("name")?.as_str()?.to_string()))
+            .collect()
+    })
+}
+
+/// Did this admitted `thread/start` declare the captured tool bundle?
+///
+/// Called on the forward path, so the answer is only ever recorded for a creation the
+/// fingerprint already admitted — which is what makes the session flag mean "the exact
+/// captured bundle", not "some creation mentioned tools".
+pub fn declares_admitted_tool_bundle(params: &Value) -> bool {
+    params
+        .get("dynamicTools")
+        .is_some_and(|v| v == captured_dynamic_tools_0153())
+}
+
+/// `dynamicTools`: absent or null (0.147), or exactly the captured 0.153 bundle.
+///
+/// Anything else — a bundle with one extra tool, one renamed tool, one widened input
+/// schema — is refused. See [`captured_dynamic_tools_0153`].
+fn check_thread_start_dynamic_tools(params: &Value) -> Result<(), FingerprintRefusal> {
+    match params.get("dynamicTools") {
+        None | Some(Value::Null) => Ok(()),
+        Some(v) if v == captured_dynamic_tools_0153() => Ok(()),
+        Some(v) => Err(refusal(
+            FpRefuseKind::Unprovable,
+            format!(
+                "params.dynamicTools: thread/start capability boundary — this injects tool \
+                 definitions into the model's runtime. Exactly two values are grounded: \
+                 absent/null (codex 0.147) and the captured codex 0.153 `codex_tui` bundle, \
+                 whose every tool was measured to be refused or thread-bound at the broker. \
+                 A {} that is neither is an unmeasured capability grant and cannot be \
+                 proven. Widening requires a NEW capture, not an argument.",
+                shape_class(v)
+            ),
+        )),
+    }
+}
 
 /// Enforce the captured `thread/start` capability boundary: each of
 /// [`THREAD_START_CAPTURED_NULL_PARAMS`] must be **absent or exactly JSON null**.
 ///
-/// Absence is accepted here, unlike on a turn — measured, not inferred: the schema makes all
-/// three optional, `environments`' own description says an omitted value selects the same
+/// Absence is accepted here, unlike on a turn — measured, not inferred: the schema makes
+/// them optional, `environments`' own description says an omitted value selects the same
 /// default a null does, and a live creation that omitted all three and one that sent all three
 /// as null produced identical results. See the module header.
+///
+/// `dynamicTools` used to be one of these and no longer is: codex 0.153 populates it on
+/// every launch, so it has its own grounded-values rule
+/// ([`check_thread_start_dynamic_tools`]) instead of a flat null pin.
 fn check_thread_start_captured_shape(params: &Value) -> Result<(), FingerprintRefusal> {
+    check_thread_start_dynamic_tools(params)?;
+    // codex 0.153's `projectId`, MEASURED null on the real TUI's creation. `thread/start`
+    // deliberately has no exhaustive top-level allowlist, so without this pin a populated
+    // `projectId` would forward unexamined — and it binds the thread to a project, which
+    // is a workspace-adjacent dimension this broker anchors everywhere else.
+    for key in THREAD_START_0153_NULL_PARAMS {
+        match params.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                return Err(refusal(
+                    FpRefuseKind::Unprovable,
+                    format!(
+                        "params.{key}: thread/start capability boundary — codex 0.153 added \
+                         this key and the measured TUI sends it as JSON null (0.147 omits \
+                         it); a {} was never captured and cannot be proven",
+                        shape_class(v)
+                    ),
+                ))
+            }
+        }
+    }
     for key in THREAD_START_CAPTURED_NULL_PARAMS {
         match params.get(key) {
             None | Some(Value::Null) => {}
@@ -761,16 +1042,9 @@ const THREAD_RESUME_CAPTURED_PARAMS: [&str; 17] = [
 /// so the detail carries a COUNT and nothing else — a key like
 /// `"x\n2026-01-01 broker: forward (request allowlisted)"` would otherwise forge a line in the
 /// file the live gates grep.
-fn check_thread_resume_top_level_allowlist(params: &Value) -> Result<(), FingerprintRefusal> {
-    let Some(map) = params.as_object() else {
-        return Err(refusal(
-            FpRefuseKind::Unprovable,
-            format!(
-                "thread/resume params: the captured shape is an object, never a {}",
-                shape_class(params)
-            ),
-        ));
-    };
+fn check_thread_resume_top_level_allowlist(
+    map: &serde_json::Map<String, Value>,
+) -> Result<(), FingerprintRefusal> {
     let unknown = map
         .keys()
         .filter(|k| !THREAD_RESUME_CAPTURED_PARAMS.contains(&k.as_str()))
@@ -799,7 +1073,54 @@ fn check_thread_resume_top_level_allowlist(params: &Value) -> Result<(), Fingerp
 /// captured turn/start set (the bundled 0.147 schema does not give `turn/start` a `config`
 /// param either — see `method_carries_config`). A `config` object on a `turn/start` now
 /// refuses outright, where before it was merely scanned for ownership conflicts.
-const TURN_START_CAPTURED_PARAMS: [&str; 19] = [
+/// The four params codex 0.153 added to `turn/start` and its TUI sends on every turn.
+///
+/// **Absent-or-null, never populated** ([`check_turn_start_0153_shape`]). Both halves are
+/// measured, and both matter:
+///
+/// * **Null** is what the real 0.153 TUI emits — all four present, all four exactly
+///   `null`, captured through the frame tee off a live session
+///   (`fixtures/codex/turn-start-0.153.jsonl`). Without admitting that, the exhaustive
+///   allowlist below counts them as unknown keys **regardless of value**, and every 0.153
+///   session is refused at its first turn. That was measured, not predicted.
+/// * **Absent** is what 0.147 emits: these keys did not exist. Requiring presence — the
+///   rule [`TURN_START_CAPTURED_NULL_PARAMS`] applies to the 0.147 six — would refuse
+///   every 0.147 turn instead, trading one broken version for the other.
+///
+/// A POPULATED value is refused on all four, because none was ever observed carrying one
+/// and each is authorization-adjacent: `serviceTierForTurn` selects a service tier,
+/// `toolOutput` injects tool results into the turn, `turnTrigger` states what caused it,
+/// and `cyberAccessProgram` is unmeasured entirely. Widening any of them needs a new
+/// capture, not an argument — the 2e-7c rule.
+const TURN_START_0153_NULL_PARAMS: [&str; 4] = [
+    "serviceTierForTurn",
+    "toolOutput",
+    "turnTrigger",
+    "cyberAccessProgram",
+];
+
+/// Enforce the 0.153 `turn/start` additions: each is absent, or exactly JSON null.
+fn check_turn_start_0153_shape(params: &Value) -> Result<(), FingerprintRefusal> {
+    for key in TURN_START_0153_NULL_PARAMS {
+        match params.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                return Err(refusal(
+                    FpRefuseKind::Unprovable,
+                    format!(
+                        "params.{key}: captured boundary — codex 0.153 added this key and \
+                         every measured turn sent it as JSON null (0.147 omits it); a {} \
+                         was never captured and cannot be proven",
+                        shape_class(v)
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+const TURN_START_CAPTURED_PARAMS: [&str; 23] = [
     "threadId",
     "clientUserMessageId",
     "input",
@@ -819,6 +1140,13 @@ const TURN_START_CAPTURED_PARAMS: [&str; 19] = [
     "outputSchema",
     "collaborationMode",
     "multiAgentMode",
+    // The 0.153 additions. Listed here so they are not "unknown" keys, and
+    // separately shape-pinned by [`check_turn_start_0153_shape`] so admitting the
+    // NAME does not admit a VALUE.
+    "serviceTierForTurn",
+    "toolOutput",
+    "turnTrigger",
+    "cyberAccessProgram",
 ];
 
 /// Refuse any top-level `turn/start` param outside the captured set.
@@ -837,17 +1165,9 @@ const TURN_START_CAPTURED_PARAMS: [&str; 19] = [
 /// were unknown, out of how many the frame carried. That is everything an operator can act
 /// on — the remedy is always "re-ground against a fresh capture", never "read the key" — and
 /// it cannot forge a log line.
-fn check_turn_start_top_level_allowlist(params: &Value) -> Result<(), FingerprintRefusal> {
-    let Some(map) = params.as_object() else {
-        // A non-object params on turn/start is not the captured shape at all.
-        return Err(refusal(
-            FpRefuseKind::Unprovable,
-            format!(
-                "turn/start params: the captured shape is an object, never a {}",
-                shape_class(params)
-            ),
-        ));
-    };
+fn check_turn_start_top_level_allowlist(
+    map: &serde_json::Map<String, Value>,
+) -> Result<(), FingerprintRefusal> {
     let unknown = map
         .keys()
         .filter(|k| !TURN_START_CAPTURED_PARAMS.contains(&k.as_str()))
@@ -886,6 +1206,38 @@ fn captured_collaboration_mode() -> &'static Value {
         );
         cm
     })
+}
+
+/// codex 0.153's `developer_instructions`, verbatim (1288 bytes, sha256
+/// `1042cc643eb0147ca1039b19287c7462ceb297502f7f310d9664ac323a12feca`).
+///
+/// Captured off a live 0.153 session through the frame tee. It is codex's own static
+/// mode text — audited before committing: no paths, no identifiers, no credentials.
+const DEVELOPER_INSTRUCTIONS_0153: &str =
+    include_str!("../../../fixtures/codex/developer-instructions-0.153.txt");
+
+/// Every `developer_instructions` blob this build is grounded against.
+///
+/// # Why this is a LIST, and why it is bytes rather than a shape
+///
+/// This field is an instruction channel: whatever text sits here is prepended to the
+/// model's developer instructions for the turn. A shape check proves nothing about it,
+/// so it is pinned byte-for-byte — and that means one entry per codex build actually
+/// measured, because the bytes legitimately differ between them.
+///
+/// **This is the schema gate's blind spot, made visible.** 0.147 → 0.153 changed this
+/// text from 925 to 1288 bytes (new `request_user_input` guidance) while the *schema*
+/// for `collaborationMode` stayed byte-identical. The launch gate compares shapes and
+/// could not have seen it; a real 0.153 session was refused here until this entry was
+/// added. Content drift is caught by capture and pinned here — the two halves of
+/// re-grounding, and the reason both exist.
+///
+/// Adding an entry means a new capture was taken and reviewed. Nothing else may.
+fn grounded_developer_instructions() -> [&'static str; 2] {
+    [
+        captured_developer_instructions(),
+        DEVELOPER_INSTRUCTIONS_0153,
+    ]
 }
 
 /// The captured `collaborationMode.settings.developer_instructions` — the instruction
@@ -1050,7 +1402,7 @@ fn check_collaboration_mode(params: &Value) -> Result<(), FingerprintRefusal> {
         .get("developer_instructions")
         .and_then(Value::as_str)
     {
-        Some(di) if di == captured_developer_instructions() => {}
+        Some(di) if grounded_developer_instructions().contains(&di) => {}
         _ => {
             return Err(collab_refusal(
                 "settings.developer_instructions differs from the capture. It is an \
@@ -2669,21 +3021,202 @@ mod tests {
     // ROUND-2 P5 — the EXHAUSTIVE top-level allowlist. An unknown param refuses, and the
     // enumerated set is exactly the capture's (asserted against the fixture, so the constant
     // cannot drift from the frame it claims to enumerate).
+    /// The allowlist is exactly the 0.147 capture's keys PLUS the four 0.153 additions,
+    /// and not one name more.
+    ///
+    /// It used to assert equality with the 0.147 fixture alone. Two codex versions are
+    /// grounded now, so the honest statement is the union — but it is still an exact
+    /// one: every name is attributable to a capture, the two sets may not overlap (an
+    /// overlap would mean a "0.153 addition" that 0.147 already sent, i.e. a
+    /// mis-measurement), and a name belonging to neither fails here.
     #[test]
-    fn the_captured_param_set_matches_the_fixture_exactly() {
+    fn the_captured_param_set_is_exactly_the_two_grounded_captures() {
         let captured = captured_turn_start_params();
-        let mut from_fixture: Vec<&str> = captured
+        let from_fixture: Vec<&str> = captured
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect();
-        from_fixture.sort_unstable();
+
+        for added in TURN_START_0153_NULL_PARAMS {
+            assert!(
+                !from_fixture.contains(&added),
+                "{added} is listed as a 0.153 addition but the 0.147 capture already \
+                 carries it — one of the two measurements is wrong"
+            );
+        }
+
+        let mut expected: Vec<&str> = from_fixture;
+        expected.extend(TURN_START_0153_NULL_PARAMS);
+        expected.sort_unstable();
         let mut allowlisted: Vec<&str> = TURN_START_CAPTURED_PARAMS.to_vec();
         allowlisted.sort_unstable();
         assert_eq!(
-            allowlisted, from_fixture,
-            "the allowlist must enumerate the captured turn/start params exactly"
+            allowlisted, expected,
+            "the allowlist must enumerate exactly the 0.147 capture plus the four \
+             measured 0.153 additions"
+        );
+    }
+
+    /// `dynamicTools`: null (0.147) and the captured 0.153 bundle pass; a bundle with
+    /// ONE extra tool does not.
+    ///
+    /// The C2 mutation. `dynamicTools` injects tool definitions into the model's
+    /// runtime, so the pin has to be an exact value: a shape check ("an array of
+    /// bundles") would admit any toolset a client cared to declare, which is the whole
+    /// grant this boundary withholds. The extra-tool case is the one that matters —
+    /// it is what a widened bundle from a future codex, or a hostile client, looks like.
+    #[test]
+    fn dynamic_tools_admits_only_null_and_the_captured_0153_bundle() {
+        let start = |dt: Value| {
+            json!({
+                "approvalPolicy": "untrusted",
+                "approvalsReviewer": "user",
+                "sandbox": "read-only",
+                "dynamicTools": dt,
+            })
+        };
+
+        // 0.147: absent or null.
+        assert!(assert_fingerprint(&fp(), "thread/start", &start(json!(null))).is_ok());
+        let bare = json!({
+            "approvalPolicy": "untrusted", "approvalsReviewer": "user", "sandbox": "read-only"
+        });
+        assert!(assert_fingerprint(&fp(), "thread/start", &bare).is_ok());
+
+        // 0.153: the captured bundle, exactly.
+        let captured = captured_dynamic_tools_0153().clone();
+        assert!(
+            assert_fingerprint(&fp(), "thread/start", &start(captured.clone())).is_ok(),
+            "the captured 0.153 bundle must be admitted or no 0.153 session can start"
+        );
+
+        // …and it really is the six measured tools, so the pin is over what was reviewed.
+        let tools = captured[0]["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 6, "the reviewed bundle declares six tools");
+        assert_eq!(captured[0]["name"], "codex_tui");
+
+        // ONE EXTRA TOOL — refused.
+        let mut widened = captured.clone();
+        widened[0]["tools"].as_array_mut().unwrap().push(json!({
+            "name": "exfiltrate",
+            "type": "function",
+            "deferLoading": true,
+            "description": "anything at all",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
+        }));
+        let e = assert_fingerprint(&fp(), "thread/start", &start(widened))
+            .expect_err("a bundle with an extra tool must refuse");
+        assert_eq!(e.kind, FpRefuseKind::Unprovable);
+
+        // One RENAMED tool — refused.
+        let mut renamed = captured.clone();
+        renamed[0]["tools"][0]["name"] = json!("list_everything");
+        assert!(assert_fingerprint(&fp(), "thread/start", &start(renamed)).is_err());
+
+        // One WIDENED input schema — refused (same name, more reach).
+        let mut widened_schema = captured.clone();
+        widened_schema[0]["tools"][2]["inputSchema"]["additionalProperties"] = json!(true);
+        assert!(assert_fingerprint(&fp(), "thread/start", &start(widened_schema)).is_err());
+
+        // An empty bundle list is not the captured value either.
+        assert!(assert_fingerprint(&fp(), "thread/start", &start(json!([]))).is_err());
+    }
+
+    /// Both grounded `developer_instructions` blobs are admitted; anything else refuses.
+    ///
+    /// The C4 mutation. This is the content-drift half of re-grounding: 0.153 changed
+    /// these bytes (925 → 1288) with **no schema change at all**, so the launch gate
+    /// could not see it and a real 0.153 session was refused here until the blob was
+    /// captured and pinned. The test asserts the two measured blobs pass and that a
+    /// ONE-BYTE change to either does not — because a near-miss on an instruction
+    /// channel is exactly what a byte pin exists to catch.
+    #[test]
+    fn only_the_grounded_developer_instructions_are_admitted() {
+        let blobs = grounded_developer_instructions();
+        assert_eq!(blobs[0].len(), 925, "the 0.147 capture is 925 bytes");
+        assert_eq!(blobs[1].len(), 1288, "the 0.153 capture is 1288 bytes");
+        assert_ne!(blobs[0], blobs[1], "two distinct grounded blobs");
+
+        for blob in blobs {
+            let p = full_turn(json!({
+                "model": "gpt-5.6-luna",
+                "effort": null,
+                "collaborationMode": {
+                    "mode": captured_mode(),
+                    "settings": {
+                        "developer_instructions": blob,
+                        "model": "gpt-5.6-luna",
+                        "reasoning_effort": null,
+                    }
+                }
+            }));
+            if let Err(e) = assert_fingerprint(&fp(), "turn/start", &p) {
+                panic!(
+                    "a grounded developer_instructions blob ({} bytes) must be admitted, \
+                     got: {}",
+                    blob.len(),
+                    e.detail
+                );
+            }
+
+            // One byte changed — at the end, and at the start — refuses.
+            for mutated in [format!("{blob}."), format!(".{blob}")] {
+                let p = full_turn(json!({
+                    "model": "gpt-5.6-luna",
+                    "effort": null,
+                    "collaborationMode": {
+                        "mode": captured_mode(),
+                        "settings": {
+                            "developer_instructions": mutated,
+                            "model": "gpt-5.6-luna",
+                            "reasoning_effort": null,
+                        }
+                    }
+                }));
+                let e = assert_fingerprint(&fp(), "turn/start", &p)
+                    .expect_err("a one-byte change to the instruction channel must refuse");
+                assert_eq!(e.kind, FpRefuseKind::Unprovable);
+                // The refusal must not echo the instruction text into the audit log.
+                assert!(
+                    !e.detail.contains("Collaboration Mode"),
+                    "the instruction text leaked into the refusal detail"
+                );
+            }
+        }
+    }
+
+    /// The 0.153 additions: absent (0.147) or null (0.153) pass; POPULATED refuses.
+    ///
+    /// The mutation for C3, one assertion per field. The "populated" half is the pin;
+    /// the "null" half is what keeps every 0.153 session from being refused at its first
+    /// turn (measured: the real TUI sends all four, present and null); the "absent" half
+    /// is what keeps 0.147 working.
+    #[test]
+    fn the_0153_turn_start_additions_are_pinned_absent_or_null() {
+        for key in TURN_START_0153_NULL_PARAMS {
+            // null — the measured 0.153 TUI shape.
+            let p = full_turn(json!({ key: json!(null) }));
+            assert!(
+                assert_fingerprint(&fp(), "turn/start", &p).is_ok(),
+                "{key}: null is the measured 0.153 shape and must be admitted"
+            );
+
+            // populated — refused, in every shape class a caller could reach for.
+            for populated in [json!("x"), json!(1), json!(true), json!({}), json!([])] {
+                let p = full_turn(json!({ key: populated.clone() }));
+                let e = assert_fingerprint(&fp(), "turn/start", &p)
+                    .expect_err(&format!("{key}={populated} must refuse"));
+                assert_eq!(e.kind, FpRefuseKind::Unprovable, "{key}={populated}");
+            }
+        }
+
+        // absent — the 0.147 shape, which is the base fixture with nothing added.
+        let p = full_turn(json!({}));
+        assert!(
+            assert_fingerprint(&fp(), "turn/start", &p).is_ok(),
+            "0.147 omits all four; that must keep working"
         );
     }
 
@@ -3000,8 +3533,9 @@ mod tests {
     ///
     /// 22 of the real 0.147 `ThreadStartParams`' 25 properties. The three the TUI never sent
     /// — `serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents` — are named here
-    /// so the gap is a recorded fact rather than an omission; see the module header for why
-    /// `thread/start` deliberately has no exhaustive top-level allowlist.
+    /// so the gap is a recorded fact rather than an omission, and
+    /// [`THREAD_START_CAPTURED_PARAMS`] refuses all three: a schema property no capture ever
+    /// carried is not an admitted param.
     #[test]
     fn the_captured_thread_start_census_is_pinned() {
         let p = captured_thread_start();
@@ -3039,6 +3573,92 @@ mod tests {
         // `check_thread_start_captured_shape`, asserted rather than asserted-about.
         for key in THREAD_START_CAPTURED_NULL_PARAMS {
             assert_eq!(p[key], Value::Null, "captured {key} must be JSON null");
+        }
+    }
+
+    /// **The drift guard.** The exhaustive allowlist must be exactly the captured 0.147
+    /// key set plus the one key 0.153 adds — no more, no less.
+    ///
+    /// Asserted against the fixture rather than restated as a literal, so a re-capture
+    /// that adds or drops a creation param fails here instead of quietly widening what a
+    /// `thread/start` may carry.
+    #[test]
+    fn the_thread_start_allowlist_is_the_captured_union() {
+        let creation = captured_thread_start();
+        let captured: std::collections::BTreeSet<&str> = creation
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut expected = captured.clone();
+        expected.extend(THREAD_START_0153_NULL_PARAMS);
+        let allowlisted: std::collections::BTreeSet<&str> =
+            THREAD_START_CAPTURED_PARAMS.into_iter().collect();
+        assert_eq!(
+            allowlisted, expected,
+            "THREAD_START_CAPTURED_PARAMS must be the 0.147 capture ∪ the measured 0.153 \
+             additions, and nothing else"
+        );
+        // The 0.153 additions must be ADDITIONS: a key already in the 0.147 capture that
+        // was also listed as new would make the union look wider than it is.
+        for key in THREAD_START_0153_NULL_PARAMS {
+            assert!(
+                !captured.contains(key),
+                "{key} is already in the 0.147 capture; it is not a 0.153 addition"
+            );
+        }
+        // The schema properties no capture ever exercised stay refused.
+        for never_sent in [
+            "serviceTier",
+            "allowProviderModelFallback",
+            "experimentalRawEvents",
+        ] {
+            assert!(
+                !allowlisted.contains(never_sent),
+                "{never_sent} is a schema property no capture carried; it must not be \
+                 admitted by name"
+            );
+        }
+    }
+
+    /// An unknown top-level key on a creation is refused, and the refusal names no key.
+    #[test]
+    fn an_unknown_thread_start_param_is_refused_without_naming_it() {
+        let mut params = captured_thread_start();
+        params["someFutureChannel"] = json!({"grant": "everything"});
+        let e = assert_fingerprint(&captured_start_fp(), "thread/start", &params)
+            .expect_err("an unknown creation param must refuse");
+        assert!(
+            e.detail.contains("unknown top-level parameter"),
+            "{}",
+            e.detail
+        );
+        assert!(
+            !e.detail.contains("someFutureChannel") && !e.detail.contains("grant"),
+            "the audit detail must not carry the client's own text: {}",
+            e.detail
+        );
+    }
+
+    /// **Positional params.** The 0.153 app-server was MEASURED honouring a JSON array for
+    /// several methods, with the thread id at index 0 and no `threadId` key anywhere in the
+    /// frame. Every key-based rule here would read nothing from one, so a non-object
+    /// `params` has to be refused outright rather than walked.
+    #[test]
+    fn a_positional_params_array_is_refused_on_the_ownership_methods() {
+        for method in ["thread/start", "turn/start"] {
+            let e = assert_fingerprint(
+                &captured_start_fp(),
+                method,
+                &json!(["01a0-somebody-elses-thread", null, null]),
+            )
+            .unwrap_err();
+            assert!(
+                e.detail.contains("the captured shape is an object"),
+                "{method}: {}",
+                e.detail
+            );
         }
     }
 

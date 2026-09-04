@@ -32,8 +32,10 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::allowlist::Role;
 use crate::fingerprint::LaunchFingerprint;
+use crate::frame_tee::FrameTee;
 use crate::message::{RequestId, Shape, WsPayload};
 use crate::refusal::{decide, Env, RelayAction};
+use crate::response_capability::S2cDisposition;
 use crate::response_capability::{LegCapabilities, ResponseArbiter};
 use crate::session::{ConnId, SessionThreads, ThreadBinding};
 use crate::upstream::{ws_config, UpstreamFactory};
@@ -91,6 +93,10 @@ struct Ctx<F: UpstreamFactory> {
     /// with no await between lock and unlock.
     head_fanout: std::sync::Mutex<HeadFanout>,
     log: EventSink,
+    /// The measurement instrument. Off in production and unaskable from the shipping
+    /// launcher; see [`crate::frame_tee`]. When off, every `record` below is an
+    /// `Option` discriminant test.
+    tee: FrameTee,
 }
 
 /// The announcement, the legs owed it, and nothing else — **deliberately one
@@ -242,6 +248,7 @@ impl<F: UpstreamFactory> Broker<F> {
                 next_conn: AtomicU64::new(1),
                 head_fanout: std::sync::Mutex::new(HeadFanout::default()),
                 log: Arc::new(|_| {}),
+                tee: FrameTee::off(),
             }),
         }
     }
@@ -249,6 +256,17 @@ impl<F: UpstreamFactory> Broker<F> {
     /// Replace the audit-log sink.
     pub fn with_event_sink(mut self, sink: EventSink) -> Self {
         Arc::get_mut(&mut self.ctx).expect("no clones yet").log = sink;
+        self
+    }
+
+    /// Attach the verbatim frame recorder — the measurement instrument, off unless a
+    /// live harness asked for it.
+    ///
+    /// Production never calls this with an enabled tee: the host builds one from
+    /// [`crate::frame_tee::FrameTee::from_env`], and `codeconnect` never sets that
+    /// variable (`the_shipping_launcher_cannot_enable_the_frame_tee`).
+    pub fn with_frame_tee(mut self, tee: FrameTee) -> Self {
+        Arc::get_mut(&mut self.ctx).expect("no clones yet").tee = tee;
         self
     }
 
@@ -347,10 +365,43 @@ async fn handle_connection<F: UpstreamFactory>(
             // each other's requests.)
             outbound = up.from_upstream.recv() => match outbound {
                 Some(msg) => {
+                    let mut deliver = true;
                     if let Message::Text(t) = &msg {
+                        ctx.tee.record(conn.0, "s2c", t);
                         ctx.threads.observe_server_frame(conn, t);
-                        caps.observe_server_frame(t);
+                        // **An unanswerable server request is answered here, not sent on.**
+                        // Delivering a request the client will never be allowed to reply to
+                        // strands the exchange the SERVER opened — the hang C7 was, and the
+                        // same shape for every id-bearing non-approval s2c request. See
+                        // `S2cDisposition`.
+                        match caps.observe_server_frame(&ctx.threads, t) {
+                            S2cDisposition::Deliver => {}
+                            S2cDisposition::AnswerUpstream(frame) => {
+                                (ctx.log)(&format!(
+                                    "{role:?}: answer upstream (server request not serviceable \
+                                     through this broker; not delivered) (conn {})",
+                                    conn.0
+                                ));
+                                if up.to_upstream.send(Message::Text(frame)).await.is_err() {
+                                    break;
+                                }
+                                deliver = false;
+                            }
+                            // Nothing further may cross a leg whose capability view can no
+                            // longer be trusted — see `S2cDisposition::CloseLeg`.
+                            S2cDisposition::CloseLeg(why) => {
+                                (ctx.log)(&format!(
+                                    "{role:?}: drop, close leg ({why}; s2c frame not delivered) \
+                                     (conn {})",
+                                    conn.0
+                                ));
+                                break;
+                            }
+                        }
                         note_announcement(&ctx, conn, t);
+                    }
+                    if !deliver {
+                        continue;
                     }
                     ws.send(msg).await?;
                     // **Delivery on bind, not only on subscribe.** Either observer
@@ -389,6 +440,10 @@ async fn handle_connection<F: UpstreamFactory>(
                         break;
                     }
                     Message::Text(text) => {
+                        // Recorded BEFORE classification, so a frame the broker refuses
+                        // is captured too. Those are the ones a re-grounding needs most:
+                        // the refusal log cannot name the parameter that caused it.
+                        ctx.tee.record(conn.0, "c2s", &text);
                         if handle_text(
                             role, conn, &ctx, &caps, &mut ws, &up, &mut seen_initialize,
                             &mut head_tx, text,

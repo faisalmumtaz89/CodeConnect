@@ -377,7 +377,12 @@ impl LiveBroker {
         assert_sun_len(&ccd_sock);
 
         let factory = WsUdsUpstreamFactory::new(upstream_sock.to_path_buf());
-        let broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint, factory);
+        // The verbatim frame recorder, off unless `CC_CODEX_FRAME_TEE` names a file.
+        // This harness is the instrument's own ground-truth check: it drives KNOWN
+        // frames through a real app-server, so a capture taken here can be compared
+        // against what was sent.
+        let broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint, factory)
+            .with_frame_tee(codex_broker::FrameTee::from_env().expect("frame tee"));
         let task = tokio::spawn(async move {
             let _ = broker.serve().await;
         });
