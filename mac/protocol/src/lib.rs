@@ -338,7 +338,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     ignores the field entirely. It only ever *withholds* an adoption — there is
 ///     no peer that has to understand it in order to stay correct, which is the
 ///     only thing the minor exists to say.
-pub const PROTOCOL_MINOR: u32 = 15;
+pub const PROTOCOL_MINOR: u32 = 16;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

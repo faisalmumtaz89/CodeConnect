@@ -135,6 +135,10 @@ use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
 use crate::codex_adapter::{CodexAdapter, ResumeSeed};
 use crate::state::Daemon;
+// The two outcomes a settled answer claim records — the ledger's own vocabulary, so
+// they live with the ledger. `store::replayed_answer_sentence` is the one place that
+// turns either of them into words an operator reads.
+use crate::store::{ANSWER_DELIVERED, ANSWER_LOST};
 
 /// How long a dial of `ccd.sock` may take before it counts as a failed attempt.
 const CONNECT_BUDGET: Duration = Duration::from_secs(10);
@@ -1364,6 +1368,534 @@ impl LinkPresence {
     }
 }
 
+/// **The method the broker uses to tell this leg what became of an answer it sent.**
+///
+/// Measured on real 0.153 (`measure_a_ccd_leg_answering_a_command_approval` and
+/// `measure_what_a_losing_ccd_response_is_told`): a `{id, result}` response is the
+/// one frame this leg sends whose fate the wire never reports. The winner's command
+/// runs and the loser is handed nothing at all — the same silence either way — so
+/// the broker, which is the only party that saw the race, says which it was.
+///
+/// **It arrives before `serverRequest/resolved`, and that is true by construction
+/// rather than by luck.** The broker runs one relay task per leg with one `select!`,
+/// and it writes the disposition inside the very arm that forwarded the answer — so
+/// any terminal the answer causes is delivered on a later iteration of that loop, on
+/// the same socket, behind it. The live measurement confirms the construction; it is
+/// not the reason to believe it.
+///
+/// Namespaced so it can never be confused with an app-server method, and the broker
+/// refuses any `codeconnect/` frame arriving FROM the app-server — so this method has
+/// exactly one author.
+const RESPONSE_DISPOSITION: &str = "codeconnect/responseDisposition";
+
+/// **What became of one answer the phone asked this link to write.**
+///
+/// Three endings, and they differ in what they left behind rather than in how they
+/// read. A caller that cannot tell "nothing was written and the question still stands"
+/// from "this may have actuated and nothing can say" cannot tell a card the operator may
+/// answer again from one that must never be answered again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AnswerReport {
+    /// The broker acknowledged an upstream write, and this link has already retired
+    /// the card as [`protocol::ws::ResolutionActor::Phone`] and settled the claim —
+    /// both in one commit, before it read another frame.
+    Delivered,
+    /// **Nothing was applied by THIS answer.** Two shapes reach it and they leave
+    /// different things behind, which is why the doc no longer claims one:
+    ///
+    ///  * refused before the claim — no ledger row exists, the card still stands, and
+    ///    the operator's next tap is a first attempt rather than a duplicate;
+    ///  * a lost race — the claim is terminal `lost` and the card stands for the
+    ///    WINNER's own terminal to retire, so this phone will not answer it again even
+    ///    though nothing it chose was applied.
+    ///
+    /// What is common, and what the sentence must convey, is that this tap changed
+    /// nothing upstream. Whether the card can be answered again is the ledger's
+    /// business, and `Daemon::answer` asks it before the link is ever reached.
+    NotApplied(String),
+    /// The answer may have reached the app-server and nothing that survives can
+    /// say. The claim is terminal and it is never sent again — and where a card was
+    /// still standing for it, the link retired that card saying exactly this.
+    ///
+    /// Reached from four places: the disposition budget expiring, the connection
+    /// ending, the link task being dropped, and the broker saying in
+    /// so many words that it could not account for the write
+    /// (`cause:"write_failed" | "unconfirmed"`), and a `delivered:false` it would not
+    /// attribute. A refused upstream write is in this ending and not in `NotApplied`
+    /// because `write_failed` covers a refusal at the socket as well as one before it,
+    /// and tungstenite's `send` is a feed plus a flush: once the attempt was made, zero
+    /// bytes is not provable from this side.
+    Unknown(String),
+}
+
+impl AnswerReport {
+    /// The sentence the phone is shown, for the two endings that are refusals.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            AnswerReport::Delivered => None,
+            AnswerReport::NotApplied(why) | AnswerReport::Unknown(why) => Some(why),
+        }
+    }
+}
+
+/// One thing the daemon asks the live connection to do on its socket.
+///
+/// A struct rather than a one-variant enum: this is the only verb, and inventing a
+/// vocabulary for verbs that do not exist is the speculative half-surface this build
+/// refuses. Phase 4's steer and interrupt will make it an enum when they are real.
+///
+/// **The durable claim is not taken before this is sent, and that is deliberate.**
+/// Only the connection knows whether it holds a live wire id for this card, on the
+/// thread the card belongs to, with no switch in flight — so only the connection can
+/// say whether the ask is addressable at all. Claiming first would leave an
+/// `applying` row behind for every ask that was never addressable, and recovery
+/// would later retire a perfectly answerable card as `Unknown`. The claim is
+/// therefore taken by the link, at the one moment it knows the answer is about to be
+/// written, and the card stays answerable until then.
+pub(crate) struct AnswerRequest {
+    /// The card's durable, item-derived id — never a wire id. The wire id belongs to
+    /// one socket, and the whole point of asking the connection is that only it
+    /// knows which one it currently holds.
+    pub(crate) request_id: String,
+    /// The decision exactly as the app-server offered it: a bare string, or the
+    /// single-key object whose body the server itself proposed. Composed by
+    /// [`crate::codex_approval`] from the stored card's option table, never from
+    /// anything a phone supplied.
+    pub(crate) decision: Value,
+    /// The immutable material this answer is claimed with. `thread_id` is also the
+    /// gate — an answer is written only on a connection bound to the card's own
+    /// thread — and `route` is the option the phone named, which is what lets a
+    /// recovered terminal say what was attempted.
+    pub(crate) claimed: crate::store::ClaimedMaterial,
+    /// Where the outcome goes.
+    pub(crate) reply: tokio::sync::oneshot::Sender<AnswerReport>,
+}
+
+/// The daemon's end of [`AnswerRequest`]: hand a live connection an answer to send.
+///
+/// Unbounded because it carries at most one entry per open approval card, and a card
+/// exists only because a person is looking at it. Bounding it would add a failure
+/// mode (a full queue) with no arrival that could reach it.
+#[derive(Clone)]
+pub(crate) struct LinkAnswers(tokio::sync::mpsc::UnboundedSender<AnswerRequest>);
+
+/// Mint the daemon's end and the link's end of the answer channel.
+///
+/// Made where the link is installed and split there, so the sender travels on the
+/// handle and dies with it: a registration that has handed the session on takes its
+/// sender out of the map, and an ask made against the survivor cannot reach the task
+/// that is winding down. Same lifetime rule as the presence and carry cells.
+pub(crate) fn answer_channel() -> (
+    LinkAnswers,
+    tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (LinkAnswers(tx), rx)
+}
+
+impl LinkAnswers {
+    /// Ask the link to answer `request_id`, and wait for what became of it.
+    ///
+    /// **The two `Err` arms are the honest half.** A send that fails means the link
+    /// task was already gone, so nothing was claimed and nothing was written — the
+    /// card stays answerable. A receive that fails means the task went away after
+    /// taking the ask, which the link's own teardown normally forestalls by settling
+    /// every open answer; reaching it means the task was aborted mid-answer, and the
+    /// only truthful thing to say then is that nothing here knows what happened.
+    pub(crate) async fn answer(
+        &self,
+        request_id: &str,
+        decision: Value,
+        claimed: crate::store::ClaimedMaterial,
+    ) -> AnswerReport {
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        if self
+            .0
+            .send(AnswerRequest {
+                request_id: request_id.to_string(),
+                decision,
+                claimed,
+                reply,
+            })
+            .is_err()
+        {
+            return AnswerReport::NotApplied(
+                "the link to this Codex session is not running, so nothing was sent; \
+                 answer at the Mac"
+                    .into(),
+            );
+        }
+        outcome.await.unwrap_or_else(|_| {
+            AnswerReport::Unknown(
+                "the link stopped while this answer was being written, so whether it \
+                 reached Codex is not known; it will not be sent again. Check the Mac."
+                    .into(),
+            )
+        })
+    }
+}
+
+/// **Answers written on one connection and not yet reported on, keyed by the wire id
+/// they were written on.**
+///
+/// A map and not a slot: the daemon serialises taps on ONE card, not across cards, so
+/// two different approvals answered together are two asks in flight at once. A single
+/// slot refused the second after the daemon had already committed to it, which is a
+/// refusal the daemon's own concurrency model says cannot be right.
+///
+/// **Shared with [`run`] so that every way a connection can end settles them.** A
+/// claim is durable and an approval card is on somebody's phone; leaving either to be
+/// tidied up by the next daemon restart would leave a question standing that nothing
+/// can answer. `run` drains whatever the connection left, so the reply is always
+/// sent and the ledger always reaches a terminal.
+type OpenAnswers = Arc<Mutex<std::collections::BTreeMap<i64, PendingAnswer>>>;
+
+/// **How long an answer waits to be told what became of it.**
+///
+/// **A missing disposition CAN be a slow peer, and since R5 that is the ordinary case
+/// rather than the impossible one.** The broker still writes the disposition in the arm
+/// that forwarded the response — but it now waits inside that arm for the pump's proof
+/// that `ws.send` completed, so an app-server that has stopped draining its socket holds
+/// the broker, which holds this. That is why the ending here is `Unknown` and never "not
+/// applied": the answer was written, and a deadline is this link running out of patience,
+/// not evidence about the bytes.
+///
+/// The broker bounds its own wait first (`codex_broker::relay::UPSTREAM_WRITE_BUDGET`,
+/// 10 s) and reports `cause:"unconfirmed"` on expiry, so in a healthy pairing this budget
+/// is never what ends the wait — it is the backstop for a broker that is GONE, which
+/// reports nothing at all. Fifteen seconds is deliberately above the broker's ten: the
+/// party that can say something must be the one that gives up first.
+///
+/// Measured on codex 0.153.2 by `measure_a_ccd_leg_answering_a_command_approval`, the
+/// whole round-trip — answer written, upstream write acknowledged, disposition read —
+/// is **103.6 ms**, and that is an upper bound set by the gate's own 100 ms poll. Both
+/// budgets are two orders of magnitude above it.
+///
+/// Either way the wait is bounded, because a claim that waits for ever holds a card on a
+/// phone that can never be answered.
+#[cfg(not(test))]
+const DISPOSITION_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const DISPOSITION_BUDGET: Duration = Duration::from_millis(750);
+
+/// **A winning phone answer's terminal, filed before another frame is read.**
+///
+/// The ledger settle, the card's deletion and the `ApprovalResolved` event are one
+/// commit — see [`crate::store::Store::retire_codex_pending_approval`] — so there is
+/// no state in which the operator can neither answer the card nor see what happened
+/// to it. `AlreadyGone` means a terminal beat this one to the card; the claim is then
+/// settled on its own, because the outcome is still worth recording even when the
+/// card it belonged to is not this call's to retire.
+async fn settle_won_answer(daemon: &Arc<Daemon>, session: &SessionKey, held: PendingAnswer) {
+    let retired = daemon
+        .retire_codex_answered(
+            session,
+            &held.request_id,
+            protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(held.decision),
+            },
+            Some(crate::store::AnswerTerminal::Settled(ANSWER_DELIVERED)),
+        )
+        .await;
+    let report = match retired {
+        crate::state::Retirement::Retired => AnswerReport::Delivered,
+        // The card was retired by a terminal that beat this one; the outcome is still
+        // worth recording, and whether it WAS recorded decides what the phone is told.
+        // An answer reported `Applied` over a ledger that holds nothing is the one claim
+        // this path must never make: recovery will find the claim still `applying` and
+        // file a terminal unknown for a card the operator has been told was applied.
+        crate::state::Retirement::AlreadyGone => {
+            if settle_claim_alone(daemon, session, &held.request_id, ANSWER_DELIVERED).await {
+                AnswerReport::Delivered
+            } else {
+                AnswerReport::Unknown(
+                    "your answer reached Codex but this Mac could not record it, so do not \
+                     answer it again; check the Mac"
+                        .into(),
+                )
+            }
+        }
+        // The write landed; the record of it did not. Reported as an unknown rather
+        // than as an applied answer, because what the operator will see is a card
+        // that is still there.
+        crate::state::Retirement::Failed => AnswerReport::Unknown(
+            "your answer reached Codex but this Mac could not record it, so the card is \
+             still showing; do not answer it again"
+                .into(),
+        ),
+    };
+    let _ = held.reply.send(report);
+}
+
+/// **A losing phone answer: zero bytes, and the card is deliberately left standing.**
+///
+/// Something else answered the request, so its own terminal — the
+/// `serverRequest/resolved` this link is about to be handed — is what retires the
+/// card. Retiring it here would file a resolution naming a decision that was not
+/// applied.
+///
+/// **A named winner is the precondition, not a lookup.** The claim "something else
+/// answered this request" is what leaves the card standing for that other answer's own
+/// terminal, and it is only true when the broker has a CONFIRMED winner to name. A
+/// disposition that names none is a different fact and reaches
+/// [`settle_unattributed_answer`] instead, so `winner` arrives here as a word rather than
+/// as an `Option` — which is what makes the two impossible to confuse.
+///
+/// **The sentence depends on who won, because only the arbiter knows.** A response the
+/// Mac's own Codex TUI beat is the one case that may be described as answered at the Mac;
+/// a `ccd` winner is another CodeConnect daemon. A spelling this build has no sentence
+/// for is still a named winner, so it is described as one, in the only words that remain
+/// true of it — this is a reader's tolerance for a vocabulary that could grow, not a case
+/// the broker produces today.
+async fn settle_lost_answer(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    held: PendingAnswer,
+    winner: &str,
+) {
+    let recorded = settle_claim_alone(daemon, session, &held.request_id, ANSWER_LOST).await;
+    let why = match winner {
+        "tui" => "this card was answered at the Mac first, so nothing you chose was applied",
+        "ccd" => {
+            "this card was answered through another CodeConnect daemon first, so nothing \
+             you chose was applied"
+        }
+        _ => "something else answered this card first, so nothing you chose was applied",
+    };
+    // The loss is proven — zero bytes went out — so it is said either way. What changes
+    // is whether this Mac managed to write it down.
+    let why = if recorded {
+        why.to_string()
+    } else {
+        format!("{why}{LEDGER_NOT_RECORDED}")
+    };
+    let _ = held.reply.send(AnswerReport::NotApplied(why));
+}
+
+/// Record an answer's outcome when its card is not this call's to retire.
+///
+/// **The answer is whether it was recorded, and the caller has to have it.** A standalone
+/// settle is the only durable trace a lost — or an already-retired — answer leaves, and
+/// both ways it can fail leave the ledger saying `applying`: a store error, and an
+/// `Ok(false)` from the `status = 'applying'` guard (something else settled the claim
+/// first). Either way a recovery will make that claim terminal-unknown on the next start,
+/// against a card the operator has already been told the outcome of — so a caller that
+/// discarded this and reported its ordinary outcome was telling the phone a story the
+/// database does not hold.
+///
+/// `true` only for a settle that really wrote one row.
+async fn settle_claim_alone(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    request_id: &str,
+    outcome: &'static str,
+) -> bool {
+    match daemon
+        .db
+        .settle_answer_mutation(
+            session.uid.clone(),
+            request_id.to_string(),
+            outcome,
+            protocol::time::now_rfc3339(),
+        )
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            crate::log_error!(
+                "codex link for {}: the answer claim for {request_id} was already terminal, \
+                 so it was not recorded as {outcome}",
+                session.name
+            );
+            false
+        }
+        Err(err) => {
+            crate::log_error!(
+                "codex link for {}: could not record that the answer to {request_id} was \
+                 {outcome}: {err:#}",
+                session.name
+            );
+            false
+        }
+    }
+}
+
+/// **What the phone is told when the outcome is true but the record of it is not.**
+///
+/// Appended rather than replacing the outcome's own sentence: the outcome really did
+/// happen and the operator needs to know it, and the failure is about what this Mac
+/// managed to write down. Recovery will make the claim terminal on the next start, which
+/// is why "check the Mac" is the useful half.
+const LEDGER_NOT_RECORDED: &str =
+    ", but this Mac could not record that, so check the Mac before answering anything else";
+
+/// **Make every answer this connection was still waiting on terminal.**
+///
+/// Reached two ways, and they are the same fact: the disposition budget ran out, or
+/// the connection ended. Either way the answer was written and nothing left can say
+/// what became of it — so the claim goes terminal, the card is retired saying exactly
+/// that, and the caller is told rather than left holding a sender that will never
+/// fire. The alternative is a card on a phone that no tap can ever answer again.
+async fn settle_open_answers(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    open: &OpenAnswers,
+    cause: &str,
+) {
+    let held: Vec<PendingAnswer> = std::mem::take(&mut *open.lock().expect("open answers"))
+        .into_values()
+        .collect();
+    for answer in held {
+        settle_unknown_answer(daemon, session, answer, cause).await;
+    }
+}
+
+/// **The two `cause` words the broker can put on a `delivered:false`, in this reader's
+/// own vocabulary.**
+///
+/// `codex_broker::relay::CAUSE_WRITE_FAILED` / `CAUSE_UNCONFIRMED` are the wire spellings;
+/// what is stored and shown is the sentence, because a card an operator can never answer
+/// again has to say why in words. An unrecognised word is not guessed at: it is reported
+/// as exactly what it is, an ending this build has no sentence for, and it still reaches
+/// the same terminal — which is the fail-closed direction.
+fn write_cause(wire: &str) -> &'static str {
+    match wire {
+        WIRE_WRITE_FAILED => "this Mac could not put your answer on the Codex socket",
+        WIRE_UNCONFIRMED => "this Mac could not confirm your answer reached Codex",
+        _ => "the broker reported an ending this Mac has no words for",
+    }
+}
+
+/// **The two wire spellings the broker can put on a `delivered:false`.**
+///
+/// Written out here rather than imported, and that is the crate boundary rather than
+/// laziness: `codex-broker` is a *dev*-dependency of `ccd`, so the shipping daemon does
+/// not link it and cannot name its constants — which is right, because this side is a
+/// READER of a wire protocol and a reader that compiled against the writer's internals
+/// would stop being one. `RESPONSE_DISPOSITION` above is spelled twice for exactly the
+/// same reason.
+///
+/// What keeps the two copies honest is a test at the boundary:
+/// `the_wire_causes_this_link_branches_on_are_the_ones_the_broker_composes` compares
+/// these against `codex_broker::relay::CAUSE_*`, which the test build CAN see.
+const WIRE_WRITE_FAILED: &str = "write_failed";
+const WIRE_UNCONFIRMED: &str = "unconfirmed";
+
+/// **One WRITTEN answer made terminal-unknown: the claim, the card and the caller.**
+///
+/// Reached from three places and they are the same fact — the disposition budget ran out,
+/// the connection ended, or the broker said in so many words that it could not account
+/// for the write. In every one of them the answer was ADMITTED and nothing surviving can
+/// say what became of it, so the claim goes terminal, the card is retired saying exactly
+/// that, and the caller is told rather than left holding a sender that will never fire.
+/// The alternative is a card on a phone that no tap can ever answer again.
+///
+/// [`settle_unattributed_answer`] is the sibling for an answer that was NOT written; it
+/// files the same terminal in different words, and both go through
+/// [`retire_answer_as_unknown`].
+async fn settle_unknown_answer(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    answer: PendingAnswer,
+    cause: &str,
+) {
+    let told = format!(
+        "{cause}, so whether your answer reached Codex is not known; it will not be \
+         sent again. Check the Mac."
+    );
+    retire_answer_as_unknown(daemon, session, answer, cause, told).await;
+}
+
+/// **The same terminal for an ending the broker would not attribute.**
+///
+/// `delivered:false` with neither a cause nor a winner: this leg forwarded nothing, so
+/// nothing it wrote can have actuated, and the broker declined to say what settled the
+/// request — because at that instant nothing had. The slot was held by a writer whose
+/// write was not confirmed, and that reservation can still be released or expire.
+///
+/// It gets its own sentence rather than [`settle_unknown_answer`]'s because the unknown
+/// is somewhere else. There the answer was written and its fate is the open question;
+/// here the answer provably was not written, and the open question is what became of the
+/// card. Telling an operator their answer might have reached Codex would be inventing the
+/// one fact this frame rules out.
+///
+/// The terminal is the same, and for the same reason: nothing surviving can say how the
+/// request ends, so the claim goes terminal and the card is retired rather than left
+/// standing for a resolution that may never come. The keyboard in front of the same
+/// prompt can still take it if the reservation goes back, which is what makes retiring
+/// the card here cost the operator nothing.
+async fn settle_unattributed_answer(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    answer: PendingAnswer,
+) {
+    /// Spelled once: the phone reads it inside a longer sentence, and the durable
+    /// resolution records it on its own, and the two must not drift apart.
+    const UNATTRIBUTED: &str =
+        "nothing you chose was sent, and this Mac was not told what settled this card";
+    retire_answer_as_unknown(
+        daemon,
+        session,
+        answer,
+        UNATTRIBUTED,
+        format!(
+            "{UNATTRIBUTED}, so how it ended is not known; it will not be sent again. \
+             Check the Mac."
+        ),
+    )
+    .await;
+}
+
+/// The one terminal both of the above file: the claim, the card and the caller, with the
+/// sentence its caller composed. `recorded` is the fragment the durable resolution keeps;
+/// `told` is what the phone is shown.
+///
+/// A `Failed` retirement is deliberately left alone. The whole transaction rolled back,
+/// so the claim is still `applying` and the card is still there — which is precisely the
+/// state recovery is for, and it will make the same terminal on the next start. Settling
+/// the claim on its own here would instead leave a standing card beside a terminal claim,
+/// which is the ghost every future tap refuses.
+async fn retire_answer_as_unknown(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    answer: PendingAnswer,
+    recorded: &str,
+    told: String,
+) {
+    let retired = daemon
+        .retire_codex_answered(
+            session,
+            &answer.request_id,
+            protocol::ws::CodexResolution::Unknown {
+                attempted_by: protocol::ws::ResolutionActor::Phone,
+                attempted_decision: Some(answer.decision.clone()),
+                write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                cause: recorded.to_string(),
+            },
+            Some(crate::store::AnswerTerminal::Indeterminate),
+        )
+        .await;
+    if matches!(retired, crate::state::Retirement::AlreadyGone) {
+        if let Err(err) = daemon
+            .db
+            .settle_answer_indeterminate(
+                session.uid.clone(),
+                answer.request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            crate::log_error!(
+                "codex link for {}: could not make the answer to {} terminal: {err:#}",
+                session.name,
+                answer.request_id
+            );
+        }
+    }
+    let _ = answer.reply.send(AnswerReport::Unknown(told));
+}
+
 /// **The link's own [`Carried`] state, in a cell the daemon holds** — the second
 /// cell on the handle, and deliberately not the first.
 ///
@@ -1481,6 +2013,7 @@ pub async fn run(
     link: ControlLink,
     presence: LinkPresence,
     carry: LinkCarry,
+    mut answers: tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
 ) {
     let mut adapter = CodexAdapter::new(session.clone());
     // **The chase survives a reconnect** (round-2 P6b) — see [`Carried`] — and, in
@@ -1497,6 +2030,11 @@ pub async fn run(
     // Lives out here rather than inside a connection: the STOP-AND-AMEND branch
     // ends the connection, so the repeat it has to throttle is this very loop.
     let mut amend = AmendThrottle::default();
+    // **Outlives the connection, so every way one ends settles what it was owed.**
+    // A written answer holds a durable claim and an approval card on somebody's
+    // phone; a connection that dies mid-answer must not leave either for the next
+    // restart to tidy up. See [`OpenAnswers`].
+    let open_answers: OpenAnswers = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
 
     crate::log_info!(
         "codex link for {} ({}) attaching to {} at generation {}",
@@ -1521,8 +2059,36 @@ pub async fn run(
             &mut adapter,
             &mut amend,
             &presence,
+            &mut answers,
+            &open_answers,
         )
         .await;
+        // **Whatever the connection was still waiting to hear about is settled
+        // here**, and this is the one place that can promise it: a connection has
+        // many ways to end and only some of them run any code of their own. The
+        // claim goes terminal, the card is retired saying the answer's fate is not
+        // known, and the caller is told — rather than left holding a sender that
+        // will never fire.
+        settle_open_answers(
+            &daemon,
+            &session,
+            &open_answers,
+            "the link's connection to Codex ended while this answer was in flight",
+        )
+        .await;
+        // **Refused, not queued, once there is no connection to write on.** An ask
+        // that never reached a connection was never claimed and never written, so
+        // the card it names is still answerable. Leaving it in the channel would
+        // hand it to the NEXT connection at whatever moment that one came up, which
+        // is a decision nobody is still looking at made against a socket nobody
+        // asked about.
+        while let Ok(ask) = answers.try_recv() {
+            let _ = ask.reply.send(AnswerReport::NotApplied(
+                "the link to this Codex session has no live connection, so nothing was \
+                 sent; answer at the Mac"
+                    .into(),
+            ));
+        }
         // **The connection is over; say so before anything waits.** A resolver that
         // went on reporting the last connection's `Subscribed` across a reconnect
         // would name an addressee that cannot receive anything — the precise error
@@ -1729,6 +2295,8 @@ async fn serve_connection(
     adapter: &mut CodexAdapter,
     amend: &mut AmendThrottle,
     presence: &LinkPresence,
+    answers: &mut tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
+    open_answers: &OpenAnswers,
 ) -> Result<()> {
     let stream = tokio::time::timeout(CONNECT_BUDGET, UnixStream::connect(&link.socket))
         .await
@@ -1809,6 +2377,7 @@ async fn serve_connection(
         // requests. A card that outlived that connection is rebound from the
         // store, which is keyed by the item.
         outstanding: std::collections::BTreeMap::new(),
+        open_answers: Arc::clone(open_answers),
         swept_generation: None,
     };
 
@@ -2049,6 +2618,24 @@ async fn serve_connection(
         // the store only when the visit actually moved.
         conn.retire_superseded_cards().await;
 
+        // **An answer that is never told its fate holds a card nobody can answer.**
+        // The disposition is written by the broker in the same arm that forwards
+        // the response, so one that has not arrived within the budget is not late —
+        // the broker or this link is gone. The connection is dropped so it
+        // reconnects, and `run` settles what it left on the way out.
+        let answer_due = conn
+            .open_answers
+            .lock()
+            .expect("open answers")
+            .values()
+            .map(|held| held.deadline)
+            .min();
+        if answer_due.is_some_and(|at| Instant::now() >= at) {
+            bail!(
+                "no disposition arrived for an answer within {DISPOSITION_BUDGET:?}; \
+                 dropping the ccd leg so it reconnects"
+            );
+        }
         let deadline = match &attach {
             Attach::Awaiting { deadline, .. } | Attach::Recovering { deadline, .. } => {
                 Some(*deadline)
@@ -2056,15 +2643,37 @@ async fn serve_connection(
             Attach::Backoff { until, .. } => Some(*until),
             _ => None,
         };
+        let deadline = match (deadline, answer_due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
+        };
 
-        let next = match deadline {
+        // **The wire first, and the daemon's ask second.** `biased`, because a frame
+        // already on the socket is never stale while an ask can always wait one more
+        // poll — the same ordering rule the broker's own relay applies to its replay
+        // arm. Both branches are cancel-safe: `recv` is by contract, and `next` is
+        // buffered by the frame codec underneath, which is why the relay races it
+        // the same way.
+        //
+        // The `ws` borrow ends with the select, so the ask is answered on the very
+        // socket the read was racing.
+        let next = tokio::select! {
+            biased;
             // A deadline that expires is handled at the top of the next iteration:
             // an owed backoff sends its resume, an elapsed `Awaiting` bails.
-            Some(at) => match tokio::time::timeout_at(at, ws.next()).await {
+            read = async {
+                match deadline {
+                    Some(at) => tokio::time::timeout_at(at, ws.next()).await.map_err(|_| ()),
+                    None => Ok(ws.next().await),
+                }
+            } => match read {
                 Ok(next) => next,
-                Err(_) => continue,
+                Err(()) => continue,
             },
-            None => ws.next().await,
+            Some(ask) = answers.recv() => {
+                conn.answer_approval(&mut ws, ask).await?;
+                continue;
+            }
         };
 
         let msg = match next {
@@ -2486,12 +3095,32 @@ struct Connection<'a> {
     /// on somebody's phone and this map never saw it — and use this map only to
     /// forget what they cleared.
     outstanding: std::collections::BTreeMap<i64, String>,
+    /// **Answers written on this socket and not yet reported on** — see
+    /// [`OpenAnswers`]. Held by handle rather than by value so that a connection
+    /// ending, however it ends, still settles them.
+    open_answers: OpenAnswers,
     /// The visit generation the superseded sweep last ran at.
     ///
     /// `None` until the first idle moment, so a connection that comes up on a
     /// generation later than the one a surviving card was raised under clears it
     /// rather than leaving a decision on the phone that no screen still holds.
     swept_generation: Option<u64>,
+}
+
+/// An answer written on this socket, waiting to be told what became of it.
+struct PendingAnswer {
+    /// The card's durable id, so the terminal this answer earns names the card
+    /// rather than the socket.
+    request_id: String,
+    /// What the phone chose, for the resolution event either ending files.
+    decision: protocol::ws::AnswerDecision,
+    /// The thread the card belongs to. The disposition must name it: the
+    /// `codeconnect/` namespace is the broker's, but a frame carrying only a wire
+    /// id is ambiguous to a reader that files its cards by thread.
+    thread_id: String,
+    /// When this wait stops being a wait and becomes an unknown.
+    deadline: tokio::time::Instant,
+    reply: tokio::sync::oneshot::Sender<AnswerReport>,
 }
 
 /// Where one turn stands in the follow-up settlement.
@@ -3301,16 +3930,17 @@ impl Connection<'_> {
     ///
     /// A `*/requestApproval` reaches here at all because [`frame_kind`] reads
     /// `method` and not `id`: a server→client request carries both, so it is a
-    /// method-bearing frame and routes exactly as a notification does. That is
-    /// the right answer for this build, which observes these requests and does
-    /// not answer them — the one thing an `id` would buy is the ability to reply
-    /// on it, and replying is Phase 4's.
+    /// method-bearing frame and routes exactly as a notification does. The `id`
+    /// is not discarded for that — it is what [`Connection::outstanding`] is
+    /// keyed by, and since the phone learned to answer it is also the id
+    /// [`Connection::answer_approval`] writes the response on.
     async fn observe_approval(&mut self, frame: &Value) {
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
             return;
         };
         let params = frame.get("params").unwrap_or(&Value::Null);
         match method {
+            RESPONSE_DISPOSITION => self.note_response_disposition(params).await,
             "serverRequest/resolved" => self.note_approval_resolved(params).await,
             "item/completed" => self.note_approval_item_completed(params).await,
             "turn/completed" => self.note_approval_turn_terminal(params).await,
@@ -3395,14 +4025,315 @@ impl Connection<'_> {
         }
     }
 
+    /// **Claim one phone answer and write it on the id this socket currently
+    /// holds.**
+    ///
+    /// The card's id is derived from `(thread, item)` and survives a reconnect; the
+    /// id the app-server will accept an answer on does not — it is a per-connection
+    /// integer from zero, and the same approval re-delivered to a replacement leg
+    /// arrives as `0` again (measured, `fixtures/codex/approval-rebind-0.153.jsonl`).
+    /// So the translation can only be made here, by the connection that was handed
+    /// it, and a connection that holds no live id for the card says so rather than
+    /// guessing at one.
+    ///
+    /// **The id space is the server's, not [`Connection::next_id`]'s.** A response
+    /// echoes the id of the request it answers. Drawing one from the counter this
+    /// link numbers its own requests with would collide the two spaces on the very
+    /// first approval.
+    ///
+    /// # The order, and why each refusal is where it is
+    ///
+    /// Every reason an answer might not be written is established **before** the
+    /// durable claim, so a refused ask leaves nothing behind and the card stays
+    /// answerable. The claim is taken **before** the write, so a kill in between
+    /// leaves evidence rather than silence, and the slot is parked before the write
+    /// for the same reason — a write that fails ends the connection, and `run`
+    /// settles what the connection left rather than leaving a caller waiting.
+    ///
+    /// **The thread gate is the quiescence fence this phase has.** Approval
+    /// quiescence across a thread switch is Phase 3c's own chunk; what 3b owes is
+    /// that the window neither hangs nor misfiles. A connection whose visit is not
+    /// bound to the card's thread, or which is holding a switch candidate it has not
+    /// applied yet, refuses the answer outright — nothing is claimed, nothing is
+    /// written, and the card is still there when the switch settles.
+    ///
+    /// **A scan and not a second index.** `outstanding` holds one entry per approval
+    /// this connection has open — a handful at most, and one in practice — and the
+    /// only alternative is a mirrored map that can disagree with it. The retirement
+    /// path already walks it the same way.
+    async fn answer_approval<S>(
+        &mut self,
+        ws: &mut tokio_tungstenite::WebSocketStream<S>,
+        ask: AnswerRequest,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let refuse = |ask: AnswerRequest, why: &str| {
+            let _ = ask.reply.send(AnswerReport::NotApplied(why.to_string()));
+        };
+        if self.visit.thread_id.as_deref() != Some(ask.claimed.thread_id.as_str()) {
+            refuse(
+                ask,
+                "this Codex session is not on the thread that card belongs to, so \
+                 nothing was sent; answer at the Mac",
+            );
+            return Ok(());
+        }
+        if self.switch_candidate.is_some() {
+            refuse(
+                ask,
+                "this Codex session is moving to another thread, so nothing was sent; \
+                 try again once it has settled",
+            );
+            return Ok(());
+        }
+        let held = self
+            .outstanding
+            .iter()
+            .find(|(_, held)| **held == ask.request_id)
+            .map(|(wire_id, _)| *wire_id);
+        let Some(wire_id) = held else {
+            refuse(
+                ask,
+                "this connection holds no live request id for that card, so nothing \
+                 was sent; answer at the Mac",
+            );
+            return Ok(());
+        };
+        // **One answer per wire id.** Two taps on ONE card are already serialised by
+        // the daemon's per-approval gate, so an id that is already awaiting means a
+        // duplicate that gate could not have produced — refused rather than allowed
+        // to overwrite a claim somebody is waiting on.
+        if self
+            .open_answers
+            .lock()
+            .expect("open answers")
+            .contains_key(&wire_id)
+        {
+            refuse(
+                ask,
+                "an answer to that card is already waiting to be confirmed, so nothing \
+                 was sent again",
+            );
+            return Ok(());
+        }
+
+        // The durable claim, taken now that everything that could refuse has been
+        // asked, and before a byte is written.
+        let now = protocol::time::now_rfc3339();
+        let claimed = self
+            .daemon
+            .db
+            .claim_answer_mutation(
+                self.session.uid.clone(),
+                ask.request_id.clone(),
+                ask.claimed.clone(),
+                now,
+            )
+            .await;
+        // **Anything already under this key is the answer, whatever it says**, and
+        // the two shapes are reported differently because they left different
+        // things behind. `Applied` and `Conflict` are statements that this attempt
+        // wrote nothing; `Indeterminate` is a statement that an EARLIER one may
+        // have, and a caller told "not applied" would reasonably try again.
+        match claimed {
+            Ok(crate::store::MutationClaim::Claimed) => {}
+            Ok(crate::store::MutationClaim::Applied { outcome, .. }) => {
+                refuse(ask, &crate::store::replayed_answer_sentence(&outcome));
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
+                let _ = ask.reply.send(AnswerReport::Unknown(
+                    "an answer to this card was already sent and what became of it is not \
+                     known; it will not be sent again. Check the Mac."
+                        .into(),
+                ));
+                return Ok(());
+            }
+            // The same id carrying different material: two different answers, one
+            // request id. Neither is actuated on a guess.
+            Ok(crate::store::MutationClaim::Conflict) => {
+                refuse(
+                    ask,
+                    "this card has changed since it was answered, so nothing was sent",
+                );
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::NoSession) => {
+                refuse(ask, "this run is gone, so its card cannot be answered");
+                return Ok(());
+            }
+            Err(err) => {
+                refuse(
+                    ask,
+                    &format!(
+                        "could not record that this answer is being sent ({err}); nothing \
+                         was sent"
+                    ),
+                );
+                return Ok(());
+            }
+        }
+
+        self.open_answers.lock().expect("open answers").insert(
+            wire_id,
+            PendingAnswer {
+                request_id: ask.request_id.clone(),
+                decision: protocol::ws::AnswerDecision::OptionId {
+                    option_id: ask.claimed.route.clone(),
+                },
+                thread_id: ask.claimed.thread_id.clone(),
+                deadline: tokio::time::Instant::now() + DISPOSITION_BUDGET,
+                reply: ask.reply,
+            },
+        );
+        self.send(
+            ws,
+            json!({"id": wire_id, "result": {"decision": ask.decision}}),
+        )
+        .await
+    }
+
+    /// **What the broker says became of the answer this connection just wrote, and
+    /// the phone-won terminal it earns.**
+    ///
+    /// The wire itself never reports it: `serverRequest/resolved` is the same frame
+    /// however the request was settled, and a losing response is dropped with no
+    /// reply and no close (measured — the losing leg received zero frames and stayed
+    /// open). This is the broker speaking about its own arbiter.
+    ///
+    /// # Why the terminal is filed HERE and not by the waiting caller
+    ///
+    /// The frames that follow a resolved request — `serverRequest/resolved`, the
+    /// item's `item/completed`, the turn's terminal — each retire the card as
+    /// `Local` or `Cleared`, and this loop reads them. Waking a caller on another
+    /// task and letting it file `Phone` afterwards is a race the wire wins about as
+    /// often as not: first terminal wins, so a phone answer would be recorded as a
+    /// keyboard one while the phone was being told otherwise. Settling the ledger
+    /// and retiring the card here, in the same iteration and before another frame is
+    /// read, is what makes the provenance a fact rather than a coin toss. The
+    /// terminals that follow then find the card already gone and file nothing.
+    ///
+    /// # The namespace is the broker's, and the thread is checked anyway
+    ///
+    /// The broker refuses any `codeconnect/` frame arriving from the app-server, so
+    /// this method has exactly one author. The thread check below is the second
+    /// lock, and it is worth being exact about which door it holds, because the two
+    /// guards do not overlap the way they look like they do.
+    ///
+    /// A disposition NAMING a thread this link is not bound to never reaches here at
+    /// all: [`Visit::admits`] drops it upstream, and that is measured rather than
+    /// assumed — the wrong-thread case stays green with this check deleted. What
+    /// reaches here on its own is a disposition carrying **no** `threadId`, which the
+    /// filter admits as connection-scoped, and that is precisely the shape a forged
+    /// one would take: quote the pending wire id, omit the thread, consume the slot,
+    /// and leave the genuine disposition with nothing to settle. Requiring the
+    /// card's own thread is what makes that frame inert.
+    ///
+    /// A disposition for an id this connection is not waiting on is dropped: it is
+    /// for an answer whose caller has already been told, and is nobody's business.
+    async fn note_response_disposition(&mut self, params: &Value) {
+        let Some(wire_id) = params.get("requestId").and_then(Value::as_i64) else {
+            return;
+        };
+        let Some(delivered) = params.get("delivered").and_then(Value::as_bool) else {
+            return;
+        };
+        let thread_id = params.get("threadId").and_then(Value::as_str);
+        // Matched and taken under one lock. Two — a `get` to compare and a `remove`
+        // to take — would be a window that has to be argued about; one is a window
+        // that does not exist.
+        let held = {
+            let mut open = self.open_answers.lock().expect("open answers");
+            match open.get(&wire_id) {
+                Some(held) if Some(held.thread_id.as_str()) == thread_id => {
+                    open.remove(&wire_id).expect("just matched as present")
+                }
+                _ => return,
+            }
+        };
+        if !delivered {
+            // **Three different facts wear one `false`, and they are settled three
+            // different ways.** Two fields separate them, and both have to be read.
+            //
+            // `cause` is present exactly when the leg's OWN write is what did not land,
+            // and the broker never puts it beside a `winner` — so a caused disposition is
+            // an answer nothing overtook. Reading it as a lost race is the stranding
+            // defect: it filed the ledger `lost`, told the phone something else had
+            // answered, and left the card standing for a `serverRequest/resolved` that
+            // cannot come, because nothing answered the request.
+            //
+            // **A `false` with no cause AND no winner is unattributed, not overtaken.**
+            // The broker names a winner when it has one; its silence is what this leg is
+            // told when the slot is held by a writer whose write has not been confirmed.
+            // That reservation can still be released or expire — in which case nothing
+            // answered the request and no terminal is coming — so "lost", which leaves
+            // the card standing for somebody else's terminal, is a claim this frame does
+            // not support. It is settled as unknown instead: the card is retired, the
+            // claim goes terminal, and the phone is told what is known and nothing more.
+            //
+            // **The unattributed arm spends the wire id, and the other two do not.** A
+            // terminal arriving behind this frame is read through that mapping, and what
+            // it would file is `answered{by: local}` — so the question at each arm is
+            // whether that is a fact or a guess.
+            //
+            // Behind an unattributed `false` it is a guess: the slot is held by a writer
+            // the broker would not name, and a terminal that follows may be the Mac's
+            // keyboard or another daemon. This arm has already retired the card saying so,
+            // and if that commit rolled back the card is still standing — which is where
+            // the mapping would otherwise be spent on an invention.
+            //
+            // A named loss leaves it, because the winner's own terminal is what retires
+            // that card. A caused `false` leaves it too: nothing this leg wrote reached
+            // the app-server, the slot may have gone back, and a terminal that arrives
+            // afterwards is a real other answer to a card that is really still there.
+            match (
+                params.get("cause").and_then(Value::as_str),
+                params.get("winner").and_then(Value::as_str),
+            ) {
+                (Some(cause), _) => {
+                    settle_unknown_answer(self.daemon, self.session, held, write_cause(cause)).await
+                }
+                (None, Some(winner)) => {
+                    settle_lost_answer(self.daemon, self.session, held, winner).await
+                }
+                (None, None) => {
+                    self.outstanding.remove(&wire_id);
+                    settle_unattributed_answer(self.daemon, self.session, held).await
+                }
+            }
+            return;
+        }
+        // **The mapping is spent on the delivered path, and that is load-bearing.**
+        //
+        // `settle_won_answer` can come back `Failed` — the one commit rolled back, so the
+        // card goes back into `inner.pending` for a later terminal to retire. The very
+        // next frame is the `serverRequest/resolved` this answer earned, and with the
+        // mapping still here that terminal would file `answered{by: local}` for a
+        // decision the broker had just confirmed the PHONE made, over a claim that is
+        // still `applying`. Spending it leaves that frame nothing to retire, and the card
+        // is recovered as the unknown a failed record deserves.
+        //
+        // Its POSITION relative to the settle is not what matters, and measuring said so:
+        // no frame is read between the two, so moving this line below `settle_won_answer`
+        // changes nothing. Deleting it is the mutation
+        // (`a_delivered_answer_whose_record_failed_is_not_refiled_by_the_terminal_behind_it`).
+        self.outstanding.remove(&wire_id);
+        settle_won_answer(self.daemon, self.session, held).await;
+    }
+
     /// **The answer, which carries no answer.**
     ///
     /// `serverRequest/resolved` says `{threadId, requestId}` and nothing else —
-    /// no decision, no provenance, the same frame however it was settled. What
-    /// is known is that this daemon did not settle it, because this build cannot:
-    /// so the honest reading is `answered{by: local}` with the decision absent,
-    /// which is exactly the shape [`protocol::ws::CodexResolution::Answered`]
-    /// was given for it.
+    /// no decision, no provenance, the same frame however it was settled.
+    ///
+    /// **A phone answer that won has already retired the card by the time this
+    /// arrives**, in the iteration that handled its disposition, so the lookup
+    /// below finds nothing and this files nothing. What reaches here is therefore
+    /// a request this daemon did not settle, and the honest reading of that is
+    /// `answered{by: local}` with the decision absent — exactly the shape
+    /// [`protocol::ws::CodexResolution::Answered`] was given for it.
     async fn note_approval_resolved(&mut self, params: &Value) {
         let Some(wire_id) = params.get("requestId").and_then(Value::as_i64) else {
             return;
@@ -3488,9 +4419,19 @@ impl Connection<'_> {
     /// `fixtures/codex/interrupt.jsonl`: `turn/completed` reports
     /// `{status: "interrupted", items: []}` at frame 33, the in-flight
     /// `commandExecution` never gets an `item/completed` at all, and the
-    /// `serverRequest/resolved` that follows at frame 34 carries no decision. So
-    /// the turn terminal is the first and the only honest witness, and it says
-    /// the question was withdrawn rather than answered.
+    /// `serverRequest/resolved` that follows at frame 34 carries no decision. In
+    /// **that** arc the turn terminal is the first witness and the only honest
+    /// one, and it says the question was withdrawn rather than answered.
+    ///
+    /// **It is not the first witness in general**, and the claim is scoped to the
+    /// interrupt on purpose. A phone answer that WINS also interrupts the turn,
+    /// and there the disposition — which knows who answered — reaches this link
+    /// ahead of both terminals and retires the card itself; the live gate
+    /// `a_winning_cancel_is_recorded_as_the_phones_answer_and_not_a_turn_abort`
+    /// measures that ordering and pins it in a named constant precisely because
+    /// it is a measurement and not a construction. So this sweep is the honest
+    /// witness for a turn that ended with nothing left that knows better, which
+    /// is what "no card can outlive the turn that raised it" is really saying.
     ///
     /// A turn that ends `completed` normally has already had its card retired by
     /// the item's own terminal, and this sweep finds nothing. It is not dead
@@ -5503,6 +6444,69 @@ mod tests {
         /// attach times out, the connection ends, and the reconnect asks under the
         /// announced thread — which is how the redirect is observed.
         AnnounceLate,
+        /// **THE ANSWER PATH, END TO END, AND THE PROVENANCE RACE BEHIND IT.**
+        ///
+        /// The leg subscribes the link, hands it one `commandExecution`
+        /// requestApproval on the thread it just adopted, and then — the instant the
+        /// link's response reaches it — writes the broker's `delivered:true`
+        /// disposition and the app-server's `serverRequest/resolved` for the same
+        /// request **back to back, with no gap**. That ordering is the wire's own
+        /// (`fixtures/codex/approval-0.153.jsonl` resolves the request 85 ms after it
+        /// was raised) and it is the whole hazard: `resolved` files
+        /// `answered{by: local}`, so a link that settled the disposition anywhere but
+        /// inside its own iteration would record the operator's phone answer as a
+        /// keyboard one.
+        ApprovalDeliveredThenResolved,
+        /// The same arc with the request's own `turn/completed` behind the
+        /// disposition instead of `serverRequest/resolved` — the other terminal the
+        /// wire can put there, and the other way a phone answer could be overwritten.
+        ApprovalDeliveredThenTurnCompleted,
+        /// The same arc, reported LOST to the Mac's own TUI: `delivered:false` with
+        /// `winner:"tui"`, and then the `serverRequest/resolved` the winner earned.
+        ApprovalLostToTheTui,
+        /// The same, with **no `winner` at all** — the broker declining to name one,
+        /// which is what a saturated arbiter or a dead socket produces. The sentence
+        /// the phone is shown must not describe that as the Mac having answered.
+        ApprovalLostToNobodyNamed,
+        /// The disposition carries the right `requestId` and a `threadId` that is not
+        /// the card's. Nothing follows it, so the answer runs out its budget.
+        ApprovalDispositionOnAnotherThread,
+        /// The disposition carries the right `requestId` and **no `threadId` at
+        /// all** — the one shape a frame naming another thread cannot reach, because
+        /// the D4 filter takes that one first. See
+        /// `a_disposition_that_names_no_thread_settles_nothing_either`.
+        ApprovalDispositionNamingNoThread,
+        /// The leg takes the response and **says nothing further, for ever**. The
+        /// answer is never told its fate, which is the state the disposition budget
+        /// exists to end.
+        ApprovalNeverTold,
+        /// **TWO approvals on one connection, each on its own wire id**, both
+        /// delivered. The daemon serialises taps on one card and not across cards, so
+        /// two answers really are in flight at once here.
+        TwoApprovalsBothDelivered,
+        /// **A SWITCH ANNOUNCED WHILE THE ATTACH IS STILL OUTSTANDING, with the
+        /// approval behind it.**
+        ///
+        /// The leg answers no `thread/resume` at all: it announces a second thread and
+        /// then sends the requestApproval, in that order. The announcement is held as
+        /// a candidate — the loop declines to apply one while a resume is in flight —
+        /// so the connection is bound to the card's thread, holds a live wire id for
+        /// it, and is moving somewhere else. **The order is what makes the staging
+        /// deterministic rather than raced**: frames are read in the order they were
+        /// written, so a test that has seen the card has necessarily seen the switch.
+        ApprovalUnderAnUnappliedSwitch,
+        /// **The broker's own write was REFUSED**: `delivered:false` with
+        /// `cause:"write_failed"`, no `winner`, and **nothing behind it** — no
+        /// `serverRequest/resolved`, ever, because nothing answered the request.
+        ///
+        /// The shape that was once unstaged and unhandled. Read as an ordinary loss it
+        /// files the ledger `lost`, tells the phone something else answered, and leaves
+        /// the card standing for a terminal the app-server will never send.
+        ApprovalWriteFailed,
+        /// The same with `cause:"unconfirmed"` — the broker cannot say whether the bytes
+        /// went out (a dropped receipt, or its write budget expiring). Also nothing
+        /// behind it.
+        ApprovalWriteUnconfirmed,
     }
 
     /// A stand-in for the broker's ccd leg. Act one announces the thread and
@@ -5524,6 +6528,32 @@ mod tests {
     /// connection re-announced on every reconnect, which both misrepresents the wire and
     /// left the not-ready branch behind the announcement unreachable.
     type AnnouncedOnce = Arc<std::sync::atomic::AtomicBool>;
+
+    /// **A valve on the disposition burst, orthogonal to [`ResumeAnswer`].**
+    ///
+    /// The same shape as `DropAtFrame` and for the same reason: it says *when*, not
+    /// *what*, so any existing script can be held at the one instant that matters without
+    /// a variant of its own.
+    ///
+    /// The instant it holds is the window between the link taking its durable claim (the
+    /// last thing `answer_approval` does before writing) and the broker telling it what
+    /// became of the write. In production that window is microseconds — `relay.rs`
+    /// composes the disposition in the very arm that forwards the answer — and nothing in
+    /// this build may widen it, because a production hook that made the daemon pause
+    /// there would be machinery existing only to be tested. So the LEG holds still
+    /// instead, which is exactly what the live gates' `GatedCcdLeg` does to the real
+    /// broker's replies.
+    ///
+    /// `None` (the ordinary case) means no valve: the burst is written as it always was.
+    /// `Some(allowed)` makes the leg hold each burst frame until `allowed` has reached
+    /// that frame's own index, so a test can put the daemon's store into a chosen state —
+    /// a broken ledger, a broken event log — and only then let the next frame go.
+    ///
+    /// **Frame by frame, not all-or-nothing**, because the two frames of a burst are the
+    /// two halves of the race this whole chunk is about: the broker's disposition and the
+    /// app-server's own terminal behind it. A test that needs the store to fail for the
+    /// FIRST and work for the SECOND has nowhere else to stand.
+    type BurstValve = Option<Arc<std::sync::atomic::AtomicUsize>>;
 
     /// **Close the first connection on its Nth request, whatever that request is** (A16.4).
     ///
@@ -5621,7 +6651,7 @@ mod tests {
     impl ScriptedLeg {
         /// The ordinary leg: every connection served to the end of its script.
         fn start(answer: ResumeAnswer, announce_thread: bool) -> ScriptedLeg {
-            ScriptedLeg::start_dropping_at(answer, announce_thread, None)
+            ScriptedLeg::start_dropping_at(answer, announce_thread, None, None)
         }
 
         /// The same leg, with the FIRST connection cut short at a named frame index —
@@ -5631,6 +6661,7 @@ mod tests {
             answer: ResumeAnswer,
             announce_thread: bool,
             drop_at_frame: DropAtFrame,
+            burst_valve: BurstValve,
         ) -> ScriptedLeg {
             static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             // Short: a unix socket path is capped at SUN_LEN (103), and macOS's
@@ -5666,6 +6697,7 @@ mod tests {
                         }
                         let seen = Arc::clone(&seen);
                         let announced = Arc::clone(&announced);
+                        let burst_valve = burst_valve.clone();
                         tokio::spawn(async move {
                             let _ = serve_scripted(
                                 stream,
@@ -5675,6 +6707,7 @@ mod tests {
                                 seen,
                                 announced,
                                 drop_at_frame,
+                                burst_valve,
                             )
                             .await;
                         });
@@ -5990,6 +7023,7 @@ mod tests {
         *seen == 2
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn serve_scripted(
         stream: tokio::net::UnixStream,
         nth: usize,
@@ -5998,6 +7032,7 @@ mod tests {
         seen: Arc<std::sync::Mutex<Vec<Value>>>,
         announced: AnnouncedOnce,
         drop_at_frame: DropAtFrame,
+        burst_valve: BurstValve,
     ) -> Result<()> {
         let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
         // Which scripts force a reconnect: only the one whose subject IS the reconnect
@@ -6043,6 +7078,15 @@ mod tests {
                 .and_then(Value::as_str)
                 .unwrap_or(LIFECYCLE_THREAD)
                 .to_string();
+            // **A method-less frame carrying an id is the link ANSWERING a
+            // `serverRequest`**, and it is the only such frame the link writes: every
+            // request of its own is method-bearing, and a response echoes the id of
+            // the request it answers. Read before the frame is filed, because filing
+            // takes it by value.
+            let answered = match (frame.get("method"), frame.get("id").and_then(Value::as_i64)) {
+                (None, Some(wire_id)) => Some(wire_id),
+                _ => None,
+            };
             seen.lock().unwrap().push(frame);
             // **The frame-indexed drop** (A16.4). Recorded first and answered by nothing:
             // a test reading `seen` can name the frame that killed the connection, and the
@@ -6052,6 +7096,27 @@ mod tests {
             if nth == 0 && drop_at_frame == Some(frames_seen) {
                 ws.close(None).await?;
                 return Ok(());
+            }
+
+            // **What became of the answer, said by the broker's own voice.** The
+            // app-server never reports it — `serverRequest/resolved` is the same frame
+            // however a request was settled — so the disposition is composed here
+            // exactly as `codex_broker::relay::response_disposition` composes it, and
+            // is followed by whatever terminal the script stages behind it.
+            if let Some(wire_id) = answered {
+                // **Held here, if a test asked for it.** See [`BurstValve`]: the answer
+                // has left the daemon with its claim taken, and nothing has told it what
+                // became of that write yet. Holding the leg rather than the daemon is
+                // what keeps the code under test unmodified.
+                for (i, frame) in disposition_burst(answer, wire_id).into_iter().enumerate() {
+                    if let Some(allowed) = &burst_valve {
+                        while allowed.load(std::sync::atomic::Ordering::SeqCst) < i + 1 {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    }
+                    ws.send(Message::Text(frame.to_string())).await?;
+                }
+                continue;
             }
 
             match method.as_str() {
@@ -6166,6 +7231,36 @@ mod tests {
                         | ResumeAnswer::PopulatedThenGone
                         | ResumeAnswer::PopulatedThenDeaf => {
                             lifecycle_answer(id, &asked_about, |_| {})
+                        }
+                        // **The approval scripts subscribe and then go quiet.** The
+                        // capture is deliberately not replayed: what these are about is
+                        // one request and one answer, and a turn stream beside it would
+                        // only make the leg's `seen` harder to read.
+                        ResumeAnswer::ApprovalDeliveredThenResolved
+                        | ResumeAnswer::ApprovalDeliveredThenTurnCompleted
+                        | ResumeAnswer::ApprovalLostToTheTui
+                        | ResumeAnswer::ApprovalLostToNobodyNamed
+                        | ResumeAnswer::ApprovalDispositionOnAnotherThread
+                        | ResumeAnswer::ApprovalDispositionNamingNoThread
+                        | ResumeAnswer::ApprovalNeverTold
+                        | ResumeAnswer::ApprovalWriteFailed
+                        | ResumeAnswer::ApprovalWriteUnconfirmed
+                        | ResumeAnswer::TwoApprovalsBothDelivered => {
+                            lifecycle_answer(id, &asked_about, |_| {})
+                        }
+                        // **Never answered, so the attach stays outstanding** — which is
+                        // the only state in which the loop declines to apply a candidate.
+                        // The announcement is written FIRST and the request behind it, so
+                        // the connection that has carded the request is, by the order it
+                        // read its frames, already holding the switch.
+                        ResumeAnswer::ApprovalUnderAnUnappliedSwitch => {
+                            ws.send(Message::Text(announce(SWITCHED_THREAD))).await?;
+                            ws.send(Message::Text(
+                                command_approval(LIFECYCLE_THREAD, FIRST_APPROVAL_WIRE_ID)
+                                    .to_string(),
+                            ))
+                            .await?;
+                            continue;
                         }
                         ResumeAnswer::PopulatedInProgress => {
                             lifecycle_answer_in_progress(id, &asked_about)
@@ -7132,6 +8227,19 @@ mod tests {
                             ws.send(Message::Text(line)).await?;
                         }
                     }
+                    // **The approval, handed to a connection that is genuinely
+                    // subscribed.** A `*/requestApproval` is delivered only to a
+                    // connection whose `thread/resume` succeeded — the same rule as the
+                    // turn stream above — so it goes out behind the answer that
+                    // subscribed this one, and only on the first connection: an
+                    // app-server re-delivers an outstanding request to a replacement leg
+                    // (`a_daemon_bounce_rebinds_one_card_and_a_redelivery_does_not_add_a_second`)
+                    // and none of these scripts is about that.
+                    if nth == 0 && resumes_answered == 1 {
+                        for request in staged_approvals(answer) {
+                            ws.send(Message::Text(request.to_string())).await?;
+                        }
+                    }
                     // Act one drops after answering a SECOND resume, so a test sees the
                     // retry on one connection and then the reconnect. Only the scripts
                     // that need a reconnect arc do this; the rest hold the connection so
@@ -7289,6 +8397,7 @@ mod tests {
             },
             presence.clone(),
             LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
         ));
         // Sampled rather than slept through: see the note on this function.
         let mut published: Vec<CodexAddressee> = Vec::new();
@@ -7367,7 +8476,7 @@ mod tests {
     ) -> (Vec<protocol::event::Event>, usize, Vec<String>, Carried) {
         // One scripted leg at a time, process-wide — see [`drive_watching_presence`].
         let _serialized = ONE_LEG_AT_A_TIME.lock().await;
-        let leg = ScriptedLeg::start_dropping_at(answer, true, drop_at_frame);
+        let leg = ScriptedLeg::start_dropping_at(answer, true, drop_at_frame, None);
         let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
         let (daemon, _db) = linked_daemon(&session);
         let uid = session.uid.clone();
@@ -7382,6 +8491,7 @@ mod tests {
             },
             LinkPresence::new(),
             carry.clone(),
+            crate::codex_link::answer_channel().1,
         ));
         tokio::time::sleep(settle).await;
         let out = (
@@ -8109,6 +9219,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -8148,6 +9259,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
         assert!(
@@ -9063,6 +10175,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
         // The SAME turn id, owed on two different threads.
@@ -9135,6 +10248,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
         let first: Value = serde_json::from_str(&announce(LIFECYCLE_THREAD)).unwrap();
@@ -9833,6 +10947,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -9964,6 +11079,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10061,6 +11177,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10174,6 +11291,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10286,6 +11404,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10444,6 +11563,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10621,6 +11741,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -10789,6 +11910,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: Some(LIFECYCLE_THREAD.to_string()),
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
         let subscribed_to_a = CodexAddressee::Subscribed {
@@ -10891,6 +12013,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         };
 
@@ -11211,6 +12334,7 @@ mod tests {
             },
             LinkPresence::new(),
             LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
         ));
         tokio::time::sleep(Duration::from_secs(3)).await;
         let connections = leg.connections.load(std::sync::atomic::Ordering::SeqCst);
@@ -11417,6 +12541,480 @@ mod tests {
         })
     }
 
+    // ================================================ answering, on the wire
+    //
+    // Everything below drives `Daemon::answer` through the real `run` /
+    // `serve_connection` loop against a scripted app-server leg, so the wire id
+    // translation, the JSON that is actually written, the broker's disposition and
+    // the order the terminals arrive in are all exercised rather than assumed. The
+    // frames are the measured 0.153 ones — `fixtures/codex/approval-0.153.jsonl` for
+    // the request and its `serverRequest/resolved`, `codex_broker::relay` for the
+    // disposition — and the only thing this file composes is which of them the leg
+    // sends and when.
+
+    /// The wire id the app-server hands the first `serverRequest` on a connection.
+    /// Zero, and measured: `fixtures/codex/approval-0.153.jsonl` and
+    /// `approval-rebind-0.153.jsonl` both call it `0`, on both legs of the bounce.
+    const FIRST_APPROVAL_WIRE_ID: i64 = 0;
+    /// The second one on the same connection. The id space is per-connection and
+    /// shared across families, so a second outstanding request is simply the next
+    /// integer.
+    const SECOND_APPROVAL_WIRE_ID: i64 = 1;
+    /// A second command item, so the two cards of the concurrent case are genuinely
+    /// two cards: the derived request id follows `(thread, item)`, so a second item
+    /// is what makes a second card rather than a re-delivery of the first.
+    const SECOND_APPROVAL_ITEM: &str = "exec-1f0b2c44-9a51-4f60-8f7c-2b2a6d0e91cc";
+
+    /// A second command approval on the same thread and turn: another item, another
+    /// command, its own wire id.
+    fn second_command_approval(thread: &str, wire_id: i64) -> Value {
+        let mut request = command_approval(thread, wire_id);
+        request["params"]["itemId"] = json!(SECOND_APPROVAL_ITEM);
+        request["params"]["command"] = json!("/bin/zsh -lc 'touch second.txt'");
+        request["params"]["commandActions"] =
+            json!([{"type": "unknown", "command": "touch second.txt"}]);
+        request["params"]["proposedExecpolicyAmendment"] = json!(["touch", "second.txt"]);
+        request["params"]["availableDecisions"] = json!([
+            "accept",
+            {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["touch", "second.txt"]}},
+            "cancel"
+        ]);
+        request
+    }
+
+    /// **The broker's word on one answer**, composed exactly as
+    /// `codex_broker::relay::response_disposition` composes it.
+    ///
+    /// `thread` is an `Option` because the absence of `threadId` is a shape this
+    /// module has to be able to stage: it is the only way a disposition reaches
+    /// [`Connection::note_response_disposition`]'s own thread check, the D4 filter
+    /// having already dropped every frame that names the wrong one. `winner` is
+    /// omitted rather than nulled, because the broker omits it.
+    fn disposition(
+        thread: Option<&str>,
+        wire_id: i64,
+        delivered: bool,
+        winner: Option<&str>,
+        cause: Option<&str>,
+    ) -> Value {
+        let mut params = json!({"requestId": wire_id, "delivered": delivered});
+        if let Some(thread) = thread {
+            params["threadId"] = json!(thread);
+        }
+        if let Some(winner) = winner {
+            params["winner"] = json!(winner);
+        }
+        if let Some(cause) = cause {
+            params["cause"] = json!(cause);
+        }
+        json!({"method": RESPONSE_DISPOSITION, "params": params})
+    }
+
+    /// The `*/requestApproval` frames a script hands its subscribed connection, in
+    /// the order the wire delivers them.
+    fn staged_approvals(answer: ResumeAnswer) -> Vec<Value> {
+        match answer {
+            ResumeAnswer::ApprovalDeliveredThenResolved
+            | ResumeAnswer::ApprovalDeliveredThenTurnCompleted
+            | ResumeAnswer::ApprovalLostToTheTui
+            | ResumeAnswer::ApprovalLostToNobodyNamed
+            | ResumeAnswer::ApprovalDispositionOnAnotherThread
+            | ResumeAnswer::ApprovalDispositionNamingNoThread
+            | ResumeAnswer::ApprovalNeverTold
+            | ResumeAnswer::ApprovalWriteFailed
+            | ResumeAnswer::ApprovalWriteUnconfirmed => {
+                vec![command_approval(LIFECYCLE_THREAD, FIRST_APPROVAL_WIRE_ID)]
+            }
+            ResumeAnswer::TwoApprovalsBothDelivered => vec![
+                command_approval(LIFECYCLE_THREAD, FIRST_APPROVAL_WIRE_ID),
+                second_command_approval(LIFECYCLE_THREAD, SECOND_APPROVAL_WIRE_ID),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// **The last frame of a burst, and the only one with no bearing on any card.**
+    ///
+    /// A `turn/completed` for [`TURN_B`], which mints one turn-terminal fact and
+    /// retires nothing: every card these scripts raise belongs to [`APPROVAL_TURN`],
+    /// a different turn. Frames are read in the order they were written, so a test
+    /// that can see this fact in the log knows the terminal ahead of it — the one
+    /// whose whole job is to file nothing — has been through the loop and had its
+    /// chance. Without it, "exactly one resolution" would be a claim about a frame
+    /// that might simply not have been read yet.
+    ///
+    /// **[`TURN_B`] and not the capture's own turn**, which is the mistake this was
+    /// written with first: the resume answer that subscribes the connection already
+    /// describes the capture's turn as finished, so its fact is in the log before the
+    /// burst is written and a barrier keyed to it is satisfied by the attach. A
+    /// barrier that is true before the thing it is waiting for is not a barrier.
+    fn burst_barrier() -> Value {
+        serde_json::from_str(&turn_terminal(LIFECYCLE_THREAD, TURN_B))
+            .expect("the barrier is one frame")
+    }
+
+    /// The dedup key [`burst_barrier`]'s fact is filed under.
+    fn burst_barrier_key() -> String {
+        format!("{LIFECYCLE_THREAD}:turn:{TURN_B}")
+    }
+
+    /// **What the leg says the instant an answer reaches it**, and in what order.
+    ///
+    /// Every burst is written with no gap between its frames, because that is the
+    /// measured wire: the broker writes the disposition inside the very arm that
+    /// forwarded the answer, and the app-server's own terminal follows on the next
+    /// pass of the same relay loop. A test that inserted a pause here would be
+    /// staging a race the wire does not run.
+    fn disposition_burst(answer: ResumeAnswer, wire_id: i64) -> Vec<Value> {
+        match answer {
+            ResumeAnswer::ApprovalDeliveredThenResolved
+            | ResumeAnswer::TwoApprovalsBothDelivered => vec![
+                disposition(Some(LIFECYCLE_THREAD), wire_id, true, None, None),
+                resolved(LIFECYCLE_THREAD, wire_id),
+                burst_barrier(),
+            ],
+            ResumeAnswer::ApprovalDeliveredThenTurnCompleted => vec![
+                disposition(Some(LIFECYCLE_THREAD), wire_id, true, None, None),
+                approval_turn_terminal(LIFECYCLE_THREAD, "completed"),
+                burst_barrier(),
+            ],
+            ResumeAnswer::ApprovalLostToTheTui => vec![
+                disposition(Some(LIFECYCLE_THREAD), wire_id, false, Some("tui"), None),
+                resolved(LIFECYCLE_THREAD, wire_id),
+                burst_barrier(),
+            ],
+            ResumeAnswer::ApprovalLostToNobodyNamed => vec![
+                disposition(Some(LIFECYCLE_THREAD), wire_id, false, None, None),
+                resolved(LIFECYCLE_THREAD, wire_id),
+                burst_barrier(),
+            ],
+            // **No terminal behind either of these, deliberately.** Nothing answered the
+            // request, so the app-server has nothing to resolve and will send nothing.
+            // The barrier is a `turn/completed` for a DIFFERENT turn: it retires no card
+            // and files no resolution, so it proves the burst was read without standing
+            // in for the terminal that is missing.
+            ResumeAnswer::ApprovalWriteFailed => vec![
+                disposition(
+                    Some(LIFECYCLE_THREAD),
+                    wire_id,
+                    false,
+                    None,
+                    Some("write_failed"),
+                ),
+                burst_barrier(),
+            ],
+            ResumeAnswer::ApprovalWriteUnconfirmed => vec![
+                disposition(
+                    Some(LIFECYCLE_THREAD),
+                    wire_id,
+                    false,
+                    None,
+                    Some("unconfirmed"),
+                ),
+                burst_barrier(),
+            ],
+            ResumeAnswer::ApprovalDispositionOnAnotherThread => {
+                vec![disposition(
+                    Some(SWITCHED_THREAD),
+                    wire_id,
+                    true,
+                    None,
+                    None,
+                )]
+            }
+            ResumeAnswer::ApprovalDispositionNamingNoThread => {
+                vec![disposition(None, wire_id, true, None, None)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// **A real daemon, a real link, and the daemon's ear on that link's answer
+    /// channel** — the whole arrangement `Daemon::answer` needs before it can
+    /// address a Codex card at all.
+    ///
+    /// The one thing here that a production registration would have done for itself
+    /// is [`Daemon::install_codex_answers_for_tests`]: nothing in a scripted-leg
+    /// drive stakes a registration epoch, and `codex_answers_locked` rightly refuses
+    /// a handle no registration owns. Everything else is the production path —
+    /// [`run`] against a unix socket, the observer raising the card off a frame, and
+    /// `Daemon::answer` validating, claiming and reporting.
+    struct AnsweringLink {
+        leg: ScriptedLeg,
+        daemon: Arc<Daemon>,
+        session: SessionKey,
+        db: TempDb,
+        task: tokio::task::JoinHandle<()>,
+        /// One scripted leg at a time, process-wide — see [`drive_watching_presence`]
+        /// for what the cap is protecting.
+        _serialized: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    /// The test's end of a [`BurstValve`]: the one thing it can do is let more of the
+    /// burst go.
+    struct BurstOpen(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl BurstOpen {
+        /// Let the first `n` frames of the burst be written.
+        fn allow(&self, n: usize) {
+            self.0.store(n, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Let the whole burst go. (Any burst this module stages is far shorter.)
+        fn release(&self) {
+            self.allow(usize::MAX);
+        }
+    }
+
+    /// **Abort, and do not wait**, which a `Drop` could not do anyway: the leg's own
+    /// `Drop` runs next and unlinks the socket, so a link that has not yet reached an
+    /// await point wakes up with nothing to dial and no serialization guard to
+    /// contend for. The database file goes with [`TempDb`] and the store's handle on
+    /// it is already open, so a late write finds the inode it always had.
+    impl Drop for AnsweringLink {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl AnsweringLink {
+        async fn start(answer: ResumeAnswer) -> AnsweringLink {
+            AnsweringLink::start_with(answer, None).await
+        }
+
+        /// The same link, with the disposition burst held behind a valve the test opens.
+        /// See [`BurstValve`].
+        async fn start_gated(answer: ResumeAnswer) -> (AnsweringLink, BurstOpen) {
+            let allowed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let link = AnsweringLink::start_with(answer, Some(Arc::clone(&allowed))).await;
+            (link, BurstOpen(allowed))
+        }
+
+        async fn start_with(answer: ResumeAnswer, valve: BurstValve) -> AnsweringLink {
+            let serialized = ONE_LEG_AT_A_TIME.lock().await;
+            let leg = ScriptedLeg::start_dropping_at(answer, true, None, valve);
+            let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+            let (daemon, db) = linked_daemon(&session);
+            let (answers, asks) = answer_channel();
+            daemon
+                .install_codex_answers_for_tests(&session.uid, answers)
+                .await;
+            let task = tokio::spawn(run(
+                Arc::clone(&daemon),
+                session.clone(),
+                ControlLink {
+                    socket: leg.path.clone(),
+                    generation: 1,
+                    thread_id: None,
+                },
+                LinkPresence::new(),
+                LinkCarry::new(),
+                asks,
+            ));
+            AnsweringLink {
+                leg,
+                daemon,
+                session,
+                db,
+                task,
+                _serialized: serialized,
+            }
+        }
+
+        /// **Wait until the observer has raised `count` cards, then read them.**
+        ///
+        /// A bounded poll and never a sleep: the leg hands each request over in the
+        /// same breath as the answer that subscribed the connection, so this returns
+        /// in milliseconds, and the budget exists only so that a failure says what it
+        /// was waiting for instead of hanging.
+        async fn cards(&self, count: usize) -> Vec<crate::store::CodexPendingApprovalRow> {
+            self.wait_for(Duration::from_secs(5), |link| {
+                let held = open_cards(&link.daemon, &link.session.uid);
+                (held.len() >= count).then_some(held)
+            })
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "the observer never raised {count} card(s). the leg saw:\n{:#?}",
+                    self.frames()
+                )
+            })
+        }
+
+        /// The stored card for one row, decoded the way a phone decodes it.
+        fn card(row: &crate::store::CodexPendingApprovalRow) -> protocol::ws::ApprovalCard {
+            serde_json::from_str(&row.card).expect("the stored card decodes")
+        }
+
+        /// Poll `probe` until it yields, or the budget runs out.
+        async fn wait_for<T>(
+            &self,
+            budget: Duration,
+            probe: impl Fn(&AnsweringLink) -> Option<T>,
+        ) -> Option<T> {
+            let until = Instant::now() + budget;
+            loop {
+                if let Some(found) = probe(self) {
+                    return Some(found);
+                }
+                if Instant::now() >= until {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+
+        /// Every frame the leg received, in order.
+        fn frames(&self) -> Vec<Value> {
+            self.leg.seen.lock().unwrap().clone()
+        }
+
+        /// **Every response the link wrote**, in order — a method-less frame carrying
+        /// an id, which on this wire is only ever an answer to a `serverRequest`.
+        fn responses(&self) -> Vec<Value> {
+            self.frames()
+                .into_iter()
+                .filter(|frame| frame.get("method").is_none() && frame.get("id").is_some())
+                .collect()
+        }
+
+        /// The answer a phone sends: the card's own two identity fields and the
+        /// opaque id of an option it offered.
+        async fn answer(
+            &self,
+            card: &protocol::ws::ApprovalCard,
+            option_id: &str,
+        ) -> protocol::ws::AnswerResult {
+            self.daemon
+                .answer(
+                    &card.request_id,
+                    &card.payload_hash,
+                    protocol::ws::AnswerDecision::OptionId {
+                        option_id: option_id.into(),
+                    },
+                    Some(&self.session.uid),
+                )
+                .await
+        }
+
+        /// The same answer, on a task of its own, so the test thread is free while the
+        /// link is holding a claim behind a closed [`BurstValve`].
+        fn answer_detached(
+            &self,
+            card: &protocol::ws::ApprovalCard,
+            option_id: &str,
+        ) -> tokio::task::JoinHandle<protocol::ws::AnswerResult> {
+            let daemon = Arc::clone(&self.daemon);
+            let uid = self.session.uid.clone();
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let option_id = option_id.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId { option_id },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        }
+
+        /// Poll until this card's claim is durably `applying` — the state the link takes
+        /// at the one moment it knows the answer is about to be written.
+        async fn await_applying_claim(&self, request_id: &str) {
+            let got = self
+                .wait_for(Duration::from_secs(5), |link| {
+                    matches!(
+                        link.answer_status(request_id),
+                        Some(crate::store::AnswerStatus::Applying)
+                    )
+                    .then_some(())
+                })
+                .await;
+            assert!(
+                got.is_some(),
+                "the link never took a durable claim for {request_id}, so there is no \
+                 in-flight answer to hold"
+            );
+        }
+
+        fn resolutions(&self) -> Vec<protocol::ws::CodexResolution> {
+            resolutions(&self.daemon, &self.session.uid)
+        }
+
+        fn open_cards(&self) -> Vec<crate::store::CodexPendingApprovalRow> {
+            open_cards(&self.daemon, &self.session.uid)
+        }
+
+        /// **A connection of this test's own on the daemon's database file.**
+        ///
+        /// For `state::tests::ledger_rows`' reason: when the question is which
+        /// TABLE a row landed in, the store's own readers are part of what is under
+        /// test and cannot be the witness.
+        fn probe(&self) -> rusqlite::Connection {
+            rusqlite::Connection::open(self.db.path()).expect("the daemon's own database file")
+        }
+
+        fn answer_status(&self, request_id: &str) -> Option<crate::store::AnswerStatus> {
+            self.daemon
+                .store
+                .answer_status(&self.session.uid, request_id)
+                .expect("read the answer ledger")
+        }
+
+        /// **Wait until the leg's whole burst has been read and acted on** — see
+        /// [`burst_barrier`] for why that is a thing a test has to establish rather
+        /// than assume.
+        async fn await_burst(&self) {
+            let seen = self
+                .wait_for(Duration::from_secs(5), |link| {
+                    link.daemon
+                        .store
+                        .events_after(&link.session.uid, 0, 1000)
+                        .expect("read the log")
+                        .iter()
+                        .any(|event| event.source_event_id.as_deref() == Some(&burst_barrier_key()))
+                        .then_some(())
+                })
+                .await;
+            assert!(
+                seen.is_some(),
+                "the leg's burst never reached the end of the loop. the leg saw:\n{:#?}",
+                self.frames()
+            );
+        }
+
+        /// **Is this card still in `Daemon::inner.pending`?**
+        ///
+        /// Asked by attempting a second retirement, because that map has no reader
+        /// and should not grow one for a test: [`Daemon::retire_codex_approval`]
+        /// claims a card by REMOVING it, so `AlreadyGone` is exactly "the in-memory
+        /// card is not there", and a card that is there would be retired — which is
+        /// itself the failure, and is why this is only ever asked last.
+        async fn in_memory_card_is_gone(&self, request_id: &str) -> bool {
+            self.daemon
+                .retire_codex_approval(
+                    &self.session,
+                    request_id,
+                    protocol::ws::CodexResolution::Cleared {
+                        cause: protocol::ws::ClearCause::TurnCompleted,
+                    },
+                )
+                .await
+                == crate::state::Retirement::AlreadyGone
+        }
+    }
+
+    /// The sentence a rejected answer carries, or a panic naming what came instead.
+    fn refusal(result: &protocol::ws::AnswerResult) -> &str {
+        match result {
+            protocol::ws::AnswerResult::Rejected { reason } => reason,
+            other => panic!("this answer must be refused, and was not: {other:?}"),
+        }
+    }
+
     /// The open Codex cards this run's store holds, newest last.
     fn open_cards(daemon: &Arc<Daemon>, uid: &str) -> Vec<crate::store::CodexPendingApprovalRow> {
         daemon.store.codex_pending_approvals(uid).unwrap()
@@ -11475,6 +13073,7 @@ mod tests {
             carried: Arc::new(Mutex::new(Carried::default())),
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             swept_generation: None,
         }
     }
@@ -11757,8 +13356,11 @@ mod tests {
     ///
     /// `serverRequest/resolved` carries `{threadId, requestId}` and nothing
     /// else — no decision, no provenance, the same frame however it was
-    /// settled. What is certain is that this daemon did not settle it, because
-    /// this build cannot. `answered{by: local}` with the decision absent is
+    /// settled. Since 3b this daemon CAN settle a Codex approval, so the
+    /// certainty is narrower and comes from somewhere else: a phone answer that
+    /// won has already retired its card inside its own disposition's loop
+    /// iteration, so a `resolved` that still finds a card to retire is one this
+    /// daemon did not settle. `answered{by: local}` with the decision absent is
     /// exactly that much and no more.
     ///
     /// **Mutation:** key `outstanding` by the item id instead of the wire id
@@ -12395,29 +13997,33 @@ mod tests {
         );
     }
 
-    /// **A card the observer really raised is still not one the phone can
-    /// answer.**
+    /// **A card the observer raised is answered on the Codex path, and that path
+    /// touches none of the four shared tables.**
     ///
-    /// The three `shared_ledgers_admit` refusals used to be proved against a
-    /// Codex card placed in memory by hand, because no producer could raise
-    /// one. There is a producer now, and the honest form of the question is to
-    /// ask it of that producer's own card: the observer raises it through the
-    /// link, and `Daemon::answer` — the gate behind the hook gate — must still
-    /// refuse, before it claims anything in the shared ledgers.
+    /// The refusal this test used to assert was `shared_ledgers_admit`'s dead
+    /// end: a Codex card could not be answered at all, because there was nowhere
+    /// to put the claim. Phase 3b built the somewhere — the GENERALIZED
+    /// `mutation_ledger`, under `operation_kind = "answer"`, which is the same
+    /// claim-before-write primitive every later Codex mutation shares — and the
+    /// gate became a fork. What it must NOT have become is a widening, and that
+    /// is the half of the old test that is load-bearing and is kept verbatim
+    /// below: `answers`, `answer_claims`, `text_mutations` and
+    /// `pending_approvals` are read GLOBALLY by a rolled-back v0.6.0 daemon, so a
+    /// Codex row in any of them is the rollback hazard, whether it was written by
+    /// a refusal that leaked or by an answer that succeeded.
     ///
-    /// This is the whole answering surface for this chunk. The card is a
-    /// mirror: a human is told what a Codex run is waiting on, and answers it at
-    /// the keyboard. Typing it from a phone is Phase 4, and the refusal is what
-    /// makes that a decision somebody has to make rather than something that
-    /// quietly already works.
+    /// The answer here is refused, and for the honest reason rather than the old
+    /// one: there is no live connection to write it on. `linked_daemon` installs
+    /// a handle whose link task was never spawned, which is exactly the state a
+    /// daemon is in between connections — and the outcome is
+    /// `NotAddressable`, so the claim is dropped and the card stays answerable.
     ///
-    /// **Mutation:** widen `shared_ledgers_admit` to admit Codex and this goes
-    /// red at the `AnswerResult::Rejected` match — the answer path would then
-    /// write `answer_claims` and `answers` for a run a rolled-back v0.6.0
-    /// daemon rewrites globally, and would try to type into a pane that holds no
-    /// Claude prompt.
+    /// **Mutation:** point the answer path's durable claim at `claim_answer`
+    /// instead of `Store::claim_mutation` and the table sweep below goes red — a
+    /// Codex run would have a row in `answer_claims`, which v0.6.0 rewrites
+    /// without ever walking a session row.
     #[tokio::test]
-    async fn a_card_the_observer_raised_is_still_refused_by_the_answer_path() {
+    async fn a_card_the_observer_raised_is_answered_without_touching_the_shared_ledgers() {
         let session = SessionKey {
             uid: "01JQXV9K7B0000000000000A10".into(),
             name: "cc-1".into(),
@@ -12458,18 +14064,27 @@ mod tests {
             .await;
         match &result {
             protocol::ws::AnswerResult::Rejected { reason } => assert!(
-                reason.contains("codex session") && reason.contains("nothing was typed"),
-                "the refusal must name the agent it refused, before the claim: {reason}"
+                reason.contains("no live link") && reason.contains("nothing was sent"),
+                "the refusal must say what stopped it, and that nothing went out: {reason}"
             ),
-            other => panic!("a Codex card must not be answerable: {other:?}"),
+            other => panic!("with no connection to write on, nothing can be sent: {other:?}"),
         }
 
-        // And the refusal happened before the claim: the card is still open and
-        // no shared ledger holds a row for this run.
+        // Nothing was written, so nothing is claimed and the question stands.
         assert_eq!(
             open_cards(&daemon, &session.uid).len(),
             1,
-            "a refused answer must leave the question standing"
+            "an answer that provably went nowhere must leave the question standing"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(&session.uid, &card.request_id)
+                .unwrap(),
+            None,
+            "a claim is taken only once the connection has accepted the ask, so an \
+             answer that provably actuated nothing leaves none: the operator's next \
+             tap is a first attempt and not a duplicate"
         );
         // Asked of SQLite on a connection of our own, for the reason
         // `state::tests::ledger_rows` gives: the store's own readers are the
@@ -12494,6 +14109,1027 @@ mod tests {
                  rolled-back v0.6.0 daemon rewrites globally"
             );
         }
+    }
+
+    /// **A phone answer is written on the wire id THIS connection holds — and the
+    /// bytes are the assertion.**
+    ///
+    /// The card's id is derived from `(thread, item)` and survives a reconnect; the
+    /// id the app-server accepts an answer on does not. It is a per-connection
+    /// integer from zero, measured identical across a bounce
+    /// (`fixtures/codex/approval-rebind-0.153.jsonl` calls the same request `0` on
+    /// both legs), so only the connection that was handed the request can translate
+    /// one into the other. What it writes is a JSON-RPC response: the id of the
+    /// request it answers, and the decision the STORED card offered — the bare
+    /// string, for an option the app-server offered as a bare string.
+    ///
+    /// **Mutation:** write the response's id from `Connection::next_id`, the counter
+    /// this link numbers its own requests with, instead of the wire id `outstanding`
+    /// holds. Both halves go red: the frame is not the one the wire would accept,
+    /// and no disposition ever comes back for an id nobody is waiting on, so the
+    /// answer ends `Unknown` instead of applied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_phone_answer_is_written_on_the_wire_id_this_connection_holds() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDeliveredThenResolved).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+
+        assert_eq!(
+            link.responses(),
+            vec![json!({"id": FIRST_APPROVAL_WIRE_ID, "result": {"decision": "accept"}})],
+            "exactly one response, on the id the app-server called this request on \
+             THIS socket, carrying the bare-string decision the card offered"
+        );
+        match &result {
+            protocol::ws::AnswerResult::Applied { outcome } => {
+                assert_eq!(outcome.request_id, card.request_id);
+                assert_eq!(outcome.applied_via, protocol::ws::AnswerPath::CodexResponse);
+                assert_eq!(outcome.resolved_by, protocol::ws::ResolvedBy::Phone);
+            }
+            other => panic!("the broker acknowledged the write, so this is applied: {other:?}"),
+        }
+
+        // **The claim went to the agent-scoped ledger, and to nothing else.**
+        //
+        // `a_card_the_observer_raised_is_answered_without_touching_the_shared_ledgers`
+        // sweeps these four tables for an answer that was REFUSED, which is the
+        // furthest a daemon-side test can reach: the claim is taken by the link, at
+        // the one moment it knows the answer is about to be written, so only a test
+        // that gets an answer written can watch it land. `answers`, `answer_claims`,
+        // `text_mutations` and `pending_approvals` are read GLOBALLY by a rolled-back
+        // v0.6.0 daemon, which walks no session row — so a Codex row in any of them
+        // is the rollback hazard whether a refusal leaked it or a success wrote it.
+        //
+        // **Mutation:** point the link's claim at `Store::claim_answer` instead of
+        // `claim_mutation`. `answer_claims` gains a row for a Codex run and the sweep
+        // goes red.
+        let probe = link.probe();
+        for table in [
+            "answers",
+            "answer_claims",
+            "text_mutations",
+            "pending_approvals",
+        ] {
+            let count: i64 = probe
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                    rusqlite::params![link.session.uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "{table} must hold no row for a Codex run, and an answer that really \
+                 actuated is the case that could have put one there"
+            );
+        }
+        let claim: (String, String) = probe
+            .query_row(
+                "SELECT operation_kind, status FROM mutation_ledger
+                  WHERE session_uid = ?1 AND client_request_id = ?2",
+                rusqlite::params![link.session.uid, card.request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the claim this answer was written under");
+        assert_eq!(
+            (claim.0.as_str(), claim.1.as_str()),
+            (crate::store::OPERATION_ANSWER, "done"),
+            "one row, in the ledger a rolled-back daemon does not know about, closed \
+             by the same commit that retired the card"
+        );
+    }
+
+    /// **An amendment answer carries the body the app-server itself proposed.**
+    ///
+    /// A phone sends an opaque option id and nothing else. `accept` is the bare
+    /// string; `acceptWithExecpolicyAmendment` is a single-key OBJECT whose body
+    /// names the exact argv a "don't ask again" would whitelist — and that body is
+    /// read back out of the option table this daemon filed when it raised the card,
+    /// which is the table the app-server sent. So a phone picks between the server's
+    /// offers and can never compose one, and the `payload_hash` it echoes covers
+    /// that very table, so it cannot even pick from a stale one.
+    ///
+    /// **Mutation:** make `codex_approval::wire_decision` return
+    /// `Value::String(option_id)` unconditionally — the bare-string fallback. The
+    /// written frame becomes `{"decision":"acceptWithExecpolicyAmendment"}`, which
+    /// is a decision the app-server does not offer, and the frame assertion goes red.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_amendment_answer_carries_the_body_the_server_proposed() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDeliveredThenResolved).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "acceptWithExecpolicyAmendment").await;
+
+        assert_eq!(
+            link.responses(),
+            vec![json!({
+                "id": FIRST_APPROVAL_WIRE_ID,
+                "result": {"decision": {"acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": ["touch", "marker.txt"]
+                }}}
+            })],
+            "the amendment body is the one the request proposed, taken from the \
+             stored card's options and never from anything the phone supplied"
+        );
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "got {result:?}"
+        );
+        link.await_burst().await;
+        assert_eq!(
+            link.resolutions(),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "acceptWithExecpolicyAmendment".into()
+                }),
+            }],
+            "the resolution names the option the phone picked, not the body it \
+             expanded to"
+        );
+    }
+
+    /// **THE PROVENANCE RACE: a phone answer that won is recorded as the phone's,
+    /// even though `serverRequest/resolved` follows it with no gap at all.**
+    ///
+    /// `serverRequest/resolved` is the same frame however a request was settled — no
+    /// decision, no provenance — so the honest reading of one this daemon did not
+    /// settle is `answered{by: local}`. The wire delivers it immediately behind the
+    /// answer (85 ms in `fixtures/codex/approval-0.153.jsonl`, and the broker writes
+    /// its disposition inside the very arm that forwarded the response), so the two
+    /// terminals are in flight together and first-terminal-wins decides which one
+    /// the operator is shown.
+    ///
+    /// Waking the caller on another task and letting it file `Phone` afterwards made
+    /// that a race, and a decision made on a phone could be filed as one made at the
+    /// keyboard. Settling the ledger and retiring the card inside the disposition's OWN
+    /// loop iteration — before another frame is read — is what makes it a fact. The
+    /// `resolved` behind it then finds the card already gone and files nothing, which is
+    /// what the barrier proves it had the chance to do.
+    ///
+    /// # What this test proves, and what it does not
+    ///
+    /// It proves the OUTCOME: across both terminal arcs (this one and
+    /// [`a_won_phone_answer_survives_the_turn_terminal_behind_it`]) exactly one
+    /// resolution is filed and it names the phone and the option the phone chose.
+    ///
+    /// It does **not** discriminate the synchronous settle, and saying so is the point.
+    /// The obvious mutation — settle the won answer on a task of its own,
+    /// `let d = Arc::clone(self.daemon); let s = self.session.clone();
+    ///  tokio::spawn(async move { settle_won_answer(&d, &s, held).await; });`, which is
+    /// exactly the arrangement this replaced — was **measured on this build: it survived
+    /// 12 runs out of 12, on both arcs.** A spawned task on the multi-thread runtime
+    /// starts on another worker immediately and its store call is microseconds, while the
+    /// terminal behind it has to cross a unix socket first; the spawn wins essentially
+    /// always here. An earlier round documented that mutation as a coin toss, and it is
+    /// not one — on this machine it is not a discriminator at all, so treating it as
+    /// evidence would have been treating a green run as proof.
+    ///
+    /// What IS discriminated, and by a deterministic test, is the other half of the same
+    /// guard: `note_response_disposition` spends the `outstanding` mapping BEFORE it
+    /// files the terminal, so a retirement that fails cannot leave the following
+    /// `serverRequest/resolved` free to re-file the answer as the keyboard's. See
+    /// [`a_delivered_answer_whose_record_failed_is_not_refiled_by_the_terminal_behind_it`],
+    /// which stages the two frames one at a time through the leg's own valve.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_phone_answer_that_won_is_recorded_as_phone_even_though_resolved_follows_immediately()
+    {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDeliveredThenResolved).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "got {result:?}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.resolutions(),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+            }],
+            "ONE resolution, and it names the phone and what the phone chose — the \
+             `serverRequest/resolved` behind it has been read and had nothing left \
+             to file"
+        );
+        assert!(
+            link.open_cards().is_empty(),
+            "the card and its resolution are one commit, so a filed terminal cannot \
+             leave the question standing"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Settled("delivered".into())),
+            "the claim is settled in that same commit, with the outcome a duplicate \
+             tap would replay"
+        );
+        assert!(
+            link.in_memory_card_is_gone(&card.request_id).await,
+            "the in-memory card goes with the row: a card left in `inner.pending` is \
+             one every future tap serialises behind and no terminal can retire"
+        );
+    }
+
+    /// **The same arc, with the TURN's terminal behind the disposition instead of
+    /// the request's — and it is a different guard that stops this one.**
+    ///
+    /// `serverRequest/resolved` is not the only frame that can overtake a phone
+    /// answer: a turn that ends takes every card it raised with it, as
+    /// `cleared{turn_completed}`. The two read different things, and that is why
+    /// this arc is worth its own test. `serverRequest/resolved` is matched against
+    /// [`Connection::outstanding`] and retires through `inner.pending`, both in
+    /// memory; a turn terminal asks the STORE which cards are open, because a card
+    /// raised before a reconnect is on somebody's phone and this socket never saw
+    /// it. So what stops this terminal is specifically that the disposition's commit
+    /// deleted the card's ROW, not merely that it forgot the card.
+    ///
+    /// **Mutation:** drop the `DELETE FROM codex_pending_approvals` from
+    /// `Store::retire_codex_pending_approval`, leaving the settle and the resolution
+    /// in the transaction. The card is answered and its row survives, so the turn
+    /// terminal finds it standing.
+    ///
+    /// **What this does NOT catch, measured:** the ordering mutation
+    /// `a_phone_answer_that_won_is_recorded_as_phone_even_though_resolved_follows_immediately`
+    /// names — settling the won answer on a task of its own — leaves this green,
+    /// with or without a `yield_now` in front of it. The turn terminal reads the
+    /// store before it can retire anything, and that read is an await on the DB
+    /// executor, so it loses the race every time. `serverRequest/resolved` is the
+    /// discriminating terminal for the ordering, and this one for the commit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_won_phone_answer_survives_the_turn_terminal_behind_it() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDeliveredThenTurnCompleted).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "got {result:?}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.resolutions(),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+            }],
+            "the turn's own terminal arrived behind the disposition and found the \
+             card already retired by the answer that won it"
+        );
+        assert!(link.open_cards().is_empty());
+    }
+
+    /// **A losing phone answer names the winner, and leaves the card standing for
+    /// the winner's own terminal to retire.**
+    ///
+    /// The wire says nothing about a lost response: it is dropped with no reply and
+    /// no close, and the `serverRequest/resolved` that follows is the same frame it
+    /// would have been either way. Only the broker's arbiter knows, and it says so
+    /// in the disposition. Zero bytes reached the app-server, so retiring the card
+    /// here would file a resolution naming a decision that was never applied — the
+    /// winner's terminal is what retires it, as `answered{by: local}` with no
+    /// decision, which is the honest reading of a request this daemon did not settle.
+    ///
+    /// **Mutation:** delete the `Some("tui")` arm from `settle_lost_answer`'s match,
+    /// so a named TUI winner falls through to the unnamed sentence. The wording
+    /// assertion goes red.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_losing_phone_answer_names_the_winner_and_leaves_the_card_standing() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalLostToTheTui).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            why.contains("at the Mac") && why.contains("nothing you chose was applied"),
+            "the arbiter named the TUI, so the phone is told the Mac answered: {why}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Settled("lost".into())),
+            "the claim is terminal — the answer is never sent again — and the word it \
+             records is what actually happened to it"
+        );
+        assert_eq!(
+            link.resolutions(),
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Local,
+                decision: None,
+            }],
+            "the card was retired by the wire's own `serverRequest/resolved`, not by \
+             the answer path — which applied nothing and has no decision to name"
+        );
+        assert!(link.open_cards().is_empty());
+    }
+
+    /// **A loss this Mac could not RECORD is not reported as an ordinary loss.**
+    ///
+    /// A losing answer settles its claim on its own —
+    /// its card belongs to the winner's terminal, not to this call — and
+    /// `settle_claim_alone` logged whatever went wrong and returned nothing, so both
+    /// callers went on to report the ordinary outcome. The phone was then told the tidy
+    /// story ("something else answered this card first") for a run in which the ledger
+    /// still says `applying`: a claim recovery will make terminal-unknown on the next
+    /// start, against a card the operator has just been told is settled.
+    ///
+    /// The store failure has to reach the phone, because it changes what the operator
+    /// should do. The loss itself is still true and still said — zero bytes went out —
+    /// and the sentence now also says the Mac could not write it down.
+    ///
+    /// **Staged with the leg held, not the daemon.** The [`BurstValve`] holds the
+    /// broker's word in the window between the claim and the disposition, which is where
+    /// the fault has to appear: armed any earlier and the claim itself fails, which is a
+    /// different arm with its own refusal.
+    ///
+    /// **Mutation:** drop the `Err`/`Ok(false)` branch from `settle_lost_answer` (go back
+    /// to `settle_claim_alone(..).await;` discarding the result) and the second assertion
+    /// goes red — the operator is told a clean loss over a ledger that recorded nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_loss_whose_ledger_write_failed_tells_the_phone_so() {
+        let (link, burst) = AnsweringLink::start_gated(ResumeAnswer::ApprovalLostToTheTui).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let answering = link.answer_detached(&card, "accept");
+        link.await_applying_claim(&card.request_id).await;
+        // The claim is taken and the response is written; only now does the ledger go.
+        link.daemon.store.break_answer_ledger_for_tests(true);
+        burst.release();
+        let result = answering.await.expect("the answering task");
+        link.daemon.store.break_answer_ledger_for_tests(false);
+
+        let why = refusal(&result);
+        assert!(
+            why.contains("at the Mac"),
+            "the loss is still true and still named: {why}"
+        );
+        assert!(
+            why.contains("could not record") || why.contains("check the Mac"),
+            "a ledger this Mac could not write is not an ordinary outcome: {why}"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Applying),
+            "and the claim really is still live, which is what recovery will find"
+        );
+    }
+
+    /// **A `delivered:false` the broker will not attribute is not a loss.**
+    ///
+    /// A loss is a specific claim — something else answered this request, and its own
+    /// terminal is coming to retire the card — and it is the reason a lost card is
+    /// deliberately left standing. The broker names the winner when it has one to name.
+    /// When it does not, the silence is not a shy way of saying "overtaken": it is what
+    /// this leg is told when the slot is held by a writer whose write has not been
+    /// confirmed. That reservation can still be released, or expire, in which case
+    /// nothing answered the request, no terminal is coming, and a card left standing on
+    /// a "loss" stands for ever.
+    ///
+    /// So an unattributed `false` is settled as unknown. The card is retired rather than
+    /// left waiting, the claim goes terminal so no tap and no recovery re-sends it, and
+    /// the phone is told what is actually known: this answer was not sent, and this Mac
+    /// was not told what settled the card. The keyboard in front of the same prompt can
+    /// still take it if the reservation goes back — that is the broker's side of it, and
+    /// it is why retiring the card here costs the operator nothing.
+    ///
+    /// **The `serverRequest/resolved` behind the disposition is the hazard**: this is the
+    /// unattributed case where a terminal really can follow, because the reserver may
+    /// have gone on to win. The card is already retired by then, so that frame must find
+    /// nothing to re-file — otherwise the operator is told the answer is unknown and the
+    /// ledger records a keyboard answer.
+    ///
+    /// **Mutation:** route an unattributed `false` to `settle_lost_answer` (drop the
+    /// `winner` test in `note_response_disposition`). The ledger becomes
+    /// `Settled("lost")`, the card is left standing, and the phone is told something
+    /// answered it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disposition_that_names_no_winner_is_unattributed_rather_than_lost() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalLostToNobodyNamed).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            !why.contains("answered this card first")
+                && !why.contains("at the Mac")
+                && !why.contains("another CodeConnect daemon"),
+            "no winner was named, so nothing may be described as having answered: {why}"
+        );
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "an unattributed ending is unknown, and the card is spent: {why}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the claim is terminal-unknown, so no later tap and no recovery re-sends it"
+        );
+        assert!(
+            matches!(
+                link.resolutions().as_slice(),
+                [protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                    ..
+                }]
+            ),
+            "exactly one terminal, and the `resolved` behind it re-files nothing: {:?}",
+            link.resolutions()
+        );
+        assert!(
+            link.open_cards().is_empty(),
+            "the card is retired here, because no terminal is promised: {:?}",
+            link.open_cards()
+        );
+
+        // The replay for this row: the ledger is read before the card, so a second tap
+        // is answered by the terminal rather than by the card's absence.
+        let again = link.answer(&card, "accept").await;
+        assert!(
+            refusal(&again).contains("what became of it is not known"),
+            "a terminal-unknown row replays as unknown: {}",
+            refusal(&again)
+        );
+    }
+
+    /// **An unattributed answer whose record failed is not re-filed as the keyboard's.**
+    ///
+    /// The sibling of `a_delivered_answer_whose_record_failed_is_not_refiled_by_the_
+    /// terminal_behind_it`, on the path where the terminal behind the disposition is the
+    /// one the reserver earned rather than the one this phone's answer earned.
+    ///
+    /// Ordinarily the unattributed disposition retires the card, and a
+    /// `serverRequest/resolved` arriving after that finds nothing to retire. The state
+    /// this stages is the one where it does: the retirement's commit rolls back, so the
+    /// card is still standing and the claim is still `applying` — which is exactly what
+    /// recovery is for — and the wire id would still be in `outstanding` for the frame
+    /// behind it to spend. That frame files `answered{by: local}`, a KEYBOARD answer, for
+    /// a card whose operator has just been told nobody can say what settled it.
+    ///
+    /// So the mapping is spent by the disposition, whatever the retirement did with it.
+    ///
+    /// **Staged frame by frame** (see [`BurstValve`]): the event log is broken for the
+    /// disposition and healed before the `resolved` behind it, so that frame can do the
+    /// damage if the guard is missing. Nothing in production code is touched.
+    ///
+    /// **Mutation:** drop `self.outstanding.remove(&wire_id)` from the unattributed arm
+    /// of `note_response_disposition` and the first assertion below sees an
+    /// `Answered { by: Local }` for a card nobody answered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unattributed_answer_whose_record_failed_is_not_refiled_by_the_terminal_behind_it() {
+        let (link, burst) =
+            AnsweringLink::start_gated(ResumeAnswer::ApprovalLostToNobodyNamed).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let answering = link.answer_detached(&card, "accept");
+        link.await_applying_claim(&card.request_id).await;
+        // The retirement's own append is what fails; the read ahead of it and the
+        // `resolved` behind it both work, which is the shape of a contended log.
+        link.daemon.store.break_event_appends_for_tests(true);
+        burst.allow(1); // the disposition, and nothing behind it yet
+        let result = answering.await.expect("the answering task");
+        link.daemon.store.break_event_appends_for_tests(false);
+        assert!(
+            refusal(&result).contains("not known"),
+            "the phone is still told the honest ending: {}",
+            refusal(&result)
+        );
+
+        // …and now the terminal the reserver went on to earn.
+        burst.release();
+        link.await_burst().await;
+
+        assert_eq!(
+            link.resolutions(),
+            Vec::new(),
+            "nothing may be filed for this card: the phone's answer was never sent, and \
+             the terminal behind it says nothing about who answered"
+        );
+        assert_eq!(
+            link.open_cards().len(),
+            1,
+            "the card stays, because the commit that would have retired it rolled back"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Applying),
+            "and the claim stays live, which is what recovery reads to file the terminal \
+             unknown this deserves"
+        );
+    }
+
+    /// **A phone answer whose record failed is never re-filed as the keyboard's.**
+    ///
+    /// `settle_won_answer` can come back `Retirement::Failed` — the
+    /// one commit rolled back, so the card is put back in `inner.pending` for a later
+    /// terminal to retire. The very next frame on the wire is the `serverRequest/resolved`
+    /// this answer earned, and `outstanding` still held its wire id, so that terminal
+    /// retired the card as `answered{by: local}` — a KEYBOARD answer, filed for a
+    /// decision the broker had just confirmed the phone made, over a claim that is still
+    /// `applying`.
+    ///
+    /// The mapping is therefore spent on the delivered path before the terminal is filed.
+    /// What is left behind is the honest state: the card still standing, the claim still
+    /// live, and no resolution at all — which is exactly what recovery is for, and it
+    /// will file the terminal unknown a record this Mac could not write deserves.
+    ///
+    /// **Staged frame by frame** (see [`BurstValve`]): the event log is broken for the
+    /// disposition, so the retirement fails, and healed before the `resolved` behind it,
+    /// so that frame can do the damage if the guard is missing. Nothing in production
+    /// code is touched.
+    ///
+    /// **Mutation:** delete `self.outstanding.remove(&wire_id)` from the delivered path
+    /// in `note_response_disposition` and the resolution assertion goes red with
+    /// `Answered { by: Local, decision: None }`.
+    ///
+    /// Measured: *moving* that line below `settle_won_answer` is NOT a discriminator, and
+    /// should not be documented as one — no frame is read between the two, so its
+    /// position inside the call cannot matter. What matters is that the mapping is spent
+    /// at all before the loop reads the terminal behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivered_answer_whose_record_failed_is_not_refiled_by_the_terminal_behind_it() {
+        let (link, burst) =
+            AnsweringLink::start_gated(ResumeAnswer::ApprovalDeliveredThenResolved).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let answering = link.answer_detached(&card, "accept");
+        link.await_applying_claim(&card.request_id).await;
+        // The retirement's own append is what fails; the read ahead of it and the
+        // `resolved` behind it both work, which is the shape of a contended log.
+        link.daemon.store.break_event_appends_for_tests(true);
+        burst.allow(1); // the disposition, and nothing behind it yet
+        let result = answering.await.expect("the answering task");
+        link.daemon.store.break_event_appends_for_tests(false);
+
+        let why = refusal(&result);
+        assert!(
+            why.contains("could not record"),
+            "the write landed and the record of it did not, and the phone is told so: {why}"
+        );
+
+        // …and now the terminal the wire really does send behind it.
+        burst.release();
+        link.await_burst().await;
+
+        assert_eq!(
+            link.resolutions(),
+            Vec::new(),
+            "no terminal may be filed for this card: the phone's answer could not be \\
+             recorded and the keyboard's certainly did not happen"
+        );
+        assert_eq!(
+            link.open_cards().len(),
+            1,
+            "the card stays, because the commit that would have retired it rolled back"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Applying),
+            "and the claim stays live, which is what recovery reads to file the terminal \\
+             unknown this deserves"
+        );
+    }
+
+    /// **The two `cause` words this link branches on are the two the broker composes.**
+    ///
+    /// `WIRE_WRITE_FAILED` / `WIRE_UNCONFIRMED` are written out in this file because
+    /// `ccd` does not link `codex-broker` in a shipping build — it is a dev-dependency,
+    /// and a reader of a wire protocol that compiled against the writer's internals would
+    /// stop being a reader. That leaves two copies of one vocabulary, and this is what
+    /// stops them drifting: the test build CAN see the broker, so it compares them.
+    ///
+    /// A drift here is not a compile error anywhere, and it is not visible in any other
+    /// test either — the scripted leg composes the disposition from its own literals, so
+    /// renaming the word on both sides of THIS crate would leave every other test green
+    /// while the real broker's frames stopped being understood, and every caused
+    /// disposition would be read as a lost race.
+    ///
+    /// **Mutation:** change either constant and this goes red on its own.
+    #[test]
+    fn the_wire_causes_this_link_branches_on_are_the_ones_the_broker_composes() {
+        assert_eq!(WIRE_WRITE_FAILED, codex_broker::relay::CAUSE_WRITE_FAILED);
+        assert_eq!(WIRE_UNCONFIRMED, codex_broker::relay::CAUSE_UNCONFIRMED);
+        // And the method they arrive under is the broker's own, for the same reason.
+        assert_eq!(
+            RESPONSE_DISPOSITION,
+            codex_broker::relay::RESPONSE_DISPOSITION
+        );
+    }
+
+    /// **A write the broker could not put on the socket is not a lost race.**
+    ///
+    /// The stranding defect, at the one point an operator can see it. Arbitration used to
+    /// record the winner before any I/O, so a phone answer that won the slot and then
+    /// failed its upstream write produced `delivered:false` with no winner — and this
+    /// link read every `false` as "something else answered first". Three things were then
+    /// wrong at once: the ledger said `lost`, the card was left standing for a
+    /// `serverRequest/resolved` that can never come (nobody answered the request), and
+    /// the phone was told a story about a Mac where nothing had happened.
+    ///
+    /// The broker now says which it was. `cause` is present exactly when the leg's OWN
+    /// write is what failed, and it is never present beside a `winner` — so this arm is
+    /// reached only for an answer nothing overtook.
+    ///
+    /// **The terminal is `Unknown`, not "not applied", and that is deliberate.** The word
+    /// covers two refusals and only one of them proves anything. A hand-off the pump's
+    /// channel would not take is provably zero bytes — the envelope never reached the
+    /// socket. A `sink.send` that came back `Err` is not: tungstenite's send is a feed
+    /// plus a flush, so a refused flush can follow a feed that already put bytes out.
+    /// This reader cannot tell the two apart and must not act as though it could, so the
+    /// claim goes terminal and the card is retired rather than left answerable — the
+    /// reading that is safe under both.
+    ///
+    /// The broker reads the same frame the other way round and that is not a
+    /// disagreement: it releases the reservation under both, because the cost it is
+    /// weighing is the OTHER answerer — the keyboard in front of the same prompt, which
+    /// would otherwise be locked out of an approval nobody can answer. Each side is
+    /// conservative about the thing it can still get wrong.
+    ///
+    /// **Mutation:** route a caused disposition to `settle_lost_answer` (delete the
+    /// `cause` branch in `note_response_disposition`). The ledger becomes `Settled("lost")`,
+    /// the card stays open, and all four assertions below go red together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_upstream_write_retires_the_card_as_unknown_rather_than_lost() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalWriteFailed).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            !why.contains("something else answered") && !why.contains("at the Mac"),
+            "nothing answered this card, so nothing may be described as having: {why}"
+        );
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "an admitted write that failed is unproven, and the card is spent: {why}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the claim is terminal-unknown, so no later tap and no recovery re-sends it"
+        );
+        assert!(
+            matches!(
+                link.resolutions().as_slice(),
+                [protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                    ..
+                }]
+            ),
+            "exactly one terminal, and it says who attempted it and that its fate is \
+             unknown: {:?}",
+            link.resolutions()
+        );
+        assert!(
+            link.open_cards().is_empty(),
+            "no `serverRequest/resolved` is coming — nothing answered the request — so a \
+             card left standing here is standing for ever: {:?}",
+            link.open_cards()
+        );
+    }
+
+    /// **An unconfirmed write is the same terminal, reached from the other side.**
+    ///
+    /// `cause:"unconfirmed"` is the broker saying it cannot account for the bytes at all
+    /// — a dropped receipt, or its own write budget expiring against a peer that stopped
+    /// draining. On the broker's side the reservation STAYS (see
+    /// `codex_broker::response_capability::SlotState`), so unlike `write_failed` the
+    /// keyboard cannot take the approval either. On this side the two are the same fact:
+    /// the answer may have actuated, so it is never sent again.
+    ///
+    /// **Mutation:** treat only `"write_failed"` as caused and let `"unconfirmed"` fall
+    /// through to the loser path. The ledger below becomes `Settled("lost")`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unconfirmed_upstream_write_is_also_terminal_unknown() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalWriteUnconfirmed).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "{why}"
+        );
+        link.await_burst().await;
+
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+        assert!(link.open_cards().is_empty());
+    }
+
+    /// **A disposition that names another thread is not this card's business.**
+    ///
+    /// The `codeconnect/` namespace is the broker's alone — it refuses any frame
+    /// wearing it that arrives from the app-server — so this method has exactly one
+    /// author. The thread is checked anyway, because a frame carrying only a wire id
+    /// is ambiguous to a reader that files its cards by thread, and a wire id means
+    /// nothing outside the connection that issued it.
+    ///
+    /// **The thread is guarded TWICE here, and this shape is stopped by whichever
+    /// guard it reaches first** — which is worth saying plainly, because it means a
+    /// single-guard mutation leaves this green. [`Visit::admits`] drops a frame
+    /// naming a thread this link is not bound to before
+    /// [`Connection::note_response_disposition`] is called at all; and if it did
+    /// not, the check inside would drop it anyway. The sibling below is the shape
+    /// that reaches the inner check on its own.
+    ///
+    /// **Mutation, and it takes both:** make `Visit::admits` return `true` for
+    /// `(Some(bound), FrameThread::Named(seen))` regardless of agreement, AND drop
+    /// the thread comparison from `note_response_disposition`. Measured: either one
+    /// alone leaves this test passing. With both, the answer settles as delivered on
+    /// a disposition about somebody else's thread and the refusal assertion goes red.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disposition_naming_another_thread_is_not_this_cards_business() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDispositionOnAnotherThread).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        // Nothing settles it, so the answer runs out its budget and comes back
+        // terminal — which is also what makes the wait bounded rather than a sleep.
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "no disposition this card could act on ever arrived, so the only truthful \
+             ending is that nothing knows: {why}"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a delivery claim that a disposition for another thread had settled would \
+             read `done`/`delivered` here"
+        );
+    }
+
+    /// **A disposition that names no thread at all settles nothing either.**
+    ///
+    /// The sibling of the test above, and the reason it needs one: a disposition
+    /// naming the WRONG thread is stopped by the D4 filter, so it cannot exercise
+    /// [`Connection::note_response_disposition`]'s own check. A frame naming no
+    /// thread is `FrameThread::Unnamed`, which the filter admits as
+    /// connection-scoped — and the check inside is then the only thing between a
+    /// bare wire id and a card retired as delivered.
+    ///
+    /// That is the whole of what the inner check is for, and it is a real shape
+    /// rather than a defensive one: quote the wire id an answer is waiting on, omit
+    /// the thread, and the slot is consumed by a frame that names no card — leaving
+    /// the genuine disposition, when it comes, with nothing to settle.
+    ///
+    /// **Mutation:** drop the thread comparison from `note_response_disposition` —
+    /// `let matches_card = self.open_answers.lock()…contains_key(&wire_id);` — and
+    /// this answer settles as delivered on a frame that names no card at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disposition_that_names_no_thread_settles_nothing_either() {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalDispositionNamingNoThread).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+        let why = refusal(&result);
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "a bare wire id says nothing about which card it settled: {why}"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+    }
+
+    /// **An answer that is never told its fate becomes a terminal unknown, and takes
+    /// the connection down on its way.**
+    ///
+    /// The broker writes the disposition in the same arm that forwards the response,
+    /// so one that has not arrived within the budget is not late — the broker or this
+    /// link is gone. Waiting for ever would hold a durable claim and an approval card
+    /// on somebody's phone that no tap could ever answer again, so the connection is
+    /// dropped and [`run`] settles what it left: the card is retired saying exactly
+    /// what is not known, the claim goes terminal so it is never retried, and the
+    /// caller is told rather than left holding a sender that will never fire.
+    ///
+    /// **Mutations, and there are two — each on its own half.** Delete the
+    /// answer-deadline `bail!` in `serve_connection` and the answer is never told
+    /// anything: the timeout below fires. Delete the `settle_open_answers` call from
+    /// `run` and the connection drops as it should while the caller still hangs: the
+    /// same timeout fires, from the other side of the same promise.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_that_is_never_told_its_fate_becomes_terminal_unknown_and_drops_the_connection(
+    ) {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalNeverTold).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        // Bounded, because the promise under test is that this ends at all. The
+        // budget is `DISPOSITION_BUDGET` plus the reconnect that follows it, with
+        // room to spare.
+        let result = tokio::time::timeout(Duration::from_secs(10), link.answer(&card, "accept"))
+            .await
+            .expect("an answer nobody reports on must still reach an ending");
+        let why = refusal(&result);
+        assert!(
+            why.contains("not known") && why.contains("will not be sent again"),
+            "the write may have actuated and nothing that survives can say: {why}"
+        );
+
+        assert_eq!(
+            link.resolutions(),
+            vec![protocol::ws::CodexResolution::Unknown {
+                attempted_by: protocol::ws::ResolutionActor::Phone,
+                attempted_decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+                write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                cause: "the link's connection to Codex ended while this answer was in flight"
+                    .into(),
+            }],
+            "the card says what was attempted and how far it got, so an operator \
+             reading it knows not to answer again"
+        );
+        assert!(link.open_cards().is_empty());
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+        assert!(
+            link.daemon
+                .store
+                .unsettled_answer_claims()
+                .expect("read the claims")
+                .is_empty(),
+            "the claim is terminal, so recovery at the next start has nothing to \
+             make terminal — an `applying` row left here is an answer that would be \
+             reasoned about again"
+        );
+
+        let reconnected = link
+            .wait_for(Duration::from_secs(10), |link| {
+                (link
+                    .leg
+                    .connections
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    >= 2)
+                    .then_some(())
+            })
+            .await;
+        assert!(
+            reconnected.is_some(),
+            "the leg is dropped so it comes back: a link left on a connection that \
+             will not report on its answers cannot report on the next one either"
+        );
+    }
+
+    /// **Two cards answered together are both written, on their own wire ids, and
+    /// both settled.**
+    ///
+    /// The daemon serialises taps on ONE card and deliberately not across cards, so
+    /// two approvals answered at once really are two asks in flight on one
+    /// connection. `open_answers` is a map keyed by wire id for exactly that reason:
+    /// a single slot refused the second after the daemon had already committed to
+    /// it, which is a refusal the daemon's own concurrency model says cannot be right.
+    ///
+    /// **Mutation:** change `answer_approval`'s duplicate guard from
+    /// `contains_key(&wire_id)` to `!is_empty()` — one slot, by another name. One of
+    /// the two answers is refused with "already waiting to be confirmed", and it is
+    /// refused for a card nobody has answered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_cards_answered_together_are_both_written_and_both_settled() {
+        let link = AnsweringLink::start(ResumeAnswer::TwoApprovalsBothDelivered).await;
+        let cards = link.cards(2).await;
+        let first = AnsweringLink::card(
+            cards
+                .iter()
+                .find(|row| row.item_id == APPROVAL_ITEM)
+                .expect("the first item's card"),
+        );
+        let second = AnsweringLink::card(
+            cards
+                .iter()
+                .find(|row| row.item_id == SECOND_APPROVAL_ITEM)
+                .expect("the second item's card"),
+        );
+
+        let (a, b) = tokio::join!(
+            link.answer(&first, "accept"),
+            link.answer(&second, "accept")
+        );
+        assert!(
+            matches!(a, protocol::ws::AnswerResult::Applied { .. }),
+            "the first card's answer: {a:?}"
+        );
+        assert!(
+            matches!(b, protocol::ws::AnswerResult::Applied { .. }),
+            "the second card's answer: {b:?}"
+        );
+
+        let mut written = link.responses();
+        written.sort_by_key(|frame| frame["id"].as_i64().unwrap_or_default());
+        assert_eq!(
+            written,
+            vec![
+                json!({"id": FIRST_APPROVAL_WIRE_ID, "result": {"decision": "accept"}}),
+                json!({"id": SECOND_APPROVAL_WIRE_ID, "result": {"decision": "accept"}}),
+            ],
+            "each answer went out on the id its own request was called on"
+        );
+        for request_id in [&first.request_id, &second.request_id] {
+            assert_eq!(
+                link.answer_status(request_id),
+                Some(crate::store::AnswerStatus::Settled("delivered".into())),
+                "both claims are settled, not just the one that got there first"
+            );
+        }
+        assert!(link.open_cards().is_empty());
+    }
+
+    /// **An answer is refused, with no claim taken, when the connection is on its
+    /// way somewhere else.**
+    ///
+    /// The thread gate is the quiescence fence this phase has. A connection holding
+    /// a switch candidate it has not applied is bound to the card's thread and about
+    /// to leave it, and a response written into that window would land on a socket
+    /// that has moved on. Refused outright: nothing claimed, nothing written, and the
+    /// card still there when the switch settles — so the operator's next tap is a
+    /// first attempt rather than a duplicate.
+    ///
+    /// **Staged without a race, and bounded by one budget.** The leg answers no
+    /// `thread/resume` at all, which is the only state in which the loop declines to
+    /// apply a candidate, and it writes the announcement BEFORE the request. Frames
+    /// are read in the order they were written, so a test that can see the card has
+    /// necessarily seen the switch — the ordering is not sampled, it is guaranteed.
+    ///
+    /// What is bounded rather than guaranteed is how long the connection stays in
+    /// that state: an unanswered attach ends at [`RESUME_BUDGET`], 1.5 s under
+    /// `cfg(test)`, and the work between the card appearing and the answer being
+    /// refused is a two-millisecond poll and one in-process call. There is no way to
+    /// hold a candidate longer — every other state applies it — so the margin is what
+    /// there is, and it is measured rather than assumed: **150 consecutive runs on the
+    /// tree this was written against, 150 passed, 0 failed.** (Re-run it the same way if this test or
+    /// `RESUME_BUDGET` moves; the claim is about this margin, not about flakiness in
+    /// general.)
+    ///
+    /// **Mutation:** delete the `switch_candidate.is_some()` refusal from
+    /// `answer_approval`. The thread gate above it passes (this connection IS on the
+    /// card's thread) and `outstanding` does hold a live wire id for it, so the
+    /// answer is claimed and written — and the claim assertion, the standing-card
+    /// assertion and the silent-wire assertion all go red together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_is_refused_without_a_claim_when_the_connection_is_leaving_the_cards_thread()
+    {
+        let link = AnsweringLink::start(ResumeAnswer::ApprovalUnderAnUnappliedSwitch).await;
+        let cards = link.cards(1).await;
+        let card = AnsweringLink::card(&cards[0]);
+
+        let result = link.answer(&card, "accept").await;
+
+        let why = refusal(&result);
+        assert!(
+            why.contains("moving to another thread") && why.contains("nothing was sent"),
+            "the refusal must say what stopped it and that the card is still \
+             answerable: {why}"
+        );
+        assert!(
+            link.responses().is_empty(),
+            "not a byte: the whole point of refusing here is that the socket this \
+             card was raised on is about to be somewhere else"
+        );
+        assert_eq!(
+            link.answer_status(&card.request_id),
+            None,
+            "every reason an answer might not be written is established before the \
+             durable claim, so a refused ask leaves nothing behind"
+        );
+        assert_eq!(
+            link.open_cards().len(),
+            1,
+            "the question still stands, and stands to be answered once the switch \
+             has settled"
+        );
     }
 
     /// **A daemon bounce rebinds ONE card, from the store.**

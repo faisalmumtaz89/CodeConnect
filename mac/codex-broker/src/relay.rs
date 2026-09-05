@@ -38,7 +38,7 @@ use crate::refusal::{decide, Env, RelayAction};
 use crate::response_capability::S2cDisposition;
 use crate::response_capability::{LegCapabilities, ResponseArbiter};
 use crate::session::{ConnId, SessionThreads, ThreadBinding};
-use crate::upstream::{ws_config, UpstreamFactory};
+use crate::upstream::{ws_config, UpstreamFactory, UpstreamWrite};
 
 /// An audit-log sink. Every classification outcome and lifecycle event is reported here;
 /// production wires this to `tracing`, tests to a recording buffer.
@@ -104,6 +104,9 @@ struct Ctx<F: UpstreamFactory> {
     /// A `std::sync::Mutex` and not tokio's: every access is a field read or write
     /// with no await between lock and unlock.
     head_fanout: std::sync::Mutex<HeadFanout>,
+    /// **How long a leg waits for the proof that its answer was written.**
+    /// [`UPSTREAM_WRITE_BUDGET`], except where an integration test shortens it.
+    write_budget: std::time::Duration,
     log: EventSink,
     /// The measurement instrument. Off in production and unaskable from the shipping
     /// launcher; see [`crate::frame_tee`]. When off, every `record` below is an
@@ -171,6 +174,165 @@ struct HeadFanout {
 /// [`deliver_head`] would ever select. If that eviction is ever wrong the failure is
 /// the pre-existing fail-closed one: nothing is said, and the next bind asks again.
 const MAX_ANNOUNCEMENTS: usize = 2;
+
+/// **What the broker tells a `ccd` leg about the answer it just sent.**
+///
+/// A method-less `{id, result}` response is the one frame a leg sends whose fate it
+/// cannot observe: the arbiter forwards the winner's bytes and drops every sibling's
+/// with no reply and no close ([`crate::refusal::classify_response`]), so a leg that
+/// lost a race with the keyboard and a leg whose answer actuated the command see the
+/// identical nothing. Measured on real 0.153: the losing leg received zero frames and
+/// stayed open. A daemon that has to record who resolved an approval cannot derive
+/// that from silence, so the broker — the only party that knows — says it.
+///
+/// **`codeconnect/` and not a bare word.** The s2c direction is otherwise a byte-exact
+/// passthrough of the app-server, and this is the broker speaking about itself. The
+/// namespace is what keeps the two tellable apart for ever: no app-server method can
+/// collide with it, and a reader that does not know this method treats it as the
+/// unknown notification it is.
+///
+/// **`ccd` only.** The TUI leg is a real Codex client and gets the app-server's bytes
+/// and nothing else; a frame this broker composed has no business in that stream. The
+/// `ccd` leg is CodeConnect's own daemon, which is what makes it addressable.
+pub const RESPONSE_DISPOSITION: &str = "codeconnect/responseDisposition";
+
+/// **The method namespace this broker reserves for itself, both directions.**
+///
+/// Everything under it is composed here and nowhere else, which is what lets a `ccd`
+/// reader tell this broker's word from the app-server's for ever. That guarantee is
+/// only worth what the origin boundary enforces: the s2c direction is otherwise an
+/// unconditional passthrough, so without a gate an app-server could simply *say*
+/// [`RESPONSE_DISPOSITION`] about a pending request and be believed. A frame wearing
+/// this prefix arriving FROM upstream is therefore never traffic to filter and pass on
+/// — it is evidence about the far end, and it fails the leg closed. See
+/// [`crate::response_capability::LegCapabilities::observe_server_frame`].
+pub(crate) const CODECONNECT_NAMESPACE: &str = "codeconnect/";
+
+/// The disposition frame for one answered `serverRequest`.
+///
+/// `delivered` is a statement about **bytes**, not about correctness: `true` means the
+/// original response was written to the app-server socket, `false` means no complete
+/// message was. Nothing weaker would be usable — an answer that provably never left is
+/// one the daemon may report as not-taken, while an answer with no disposition at all
+/// is one it must report as unknown. It is read from the upstream pump's write receipt
+/// ([`crate::upstream::UpstreamWrite`]) and never from the in-process hand-off, which
+/// happens before the socket is touched at all.
+///
+/// `winner` is **omitted unless this broker can name the leg that answered first.**
+/// `delivered:false` on its own does not say who did: the answer may have lost to the
+/// keyboard, lost to another `ccd` leg, been refused a capability it never held, or been
+/// written into a socket that died. A reader that maps every `false` onto "answered at
+/// the Mac" is wrong in three of those four. So the field appears only carrying a role
+/// the arbiter has **confirmed** — a reservation whose write is still outstanding names
+/// nobody — and its absence keeps the meaning the reader can safely act on: *something
+/// else settled this, and this broker cannot say what.* It is never present alongside
+/// `delivered:true` — a leg told its own bytes went out is not being told about somebody
+/// else's.
+///
+/// `cause` is the other half of that, and it exists for one reason. The two ways a leg's
+/// OWN write can fail to land are not the same fact and must not read as a lost race:
+///
+/// * `"write_failed"` — the pump answered `false`: the socket refused the write. The
+///   arbiter reservation was released, so the approval is answerable again **at this
+///   broker**. Who can actually take it is the daemon's business and the answer is "the
+///   keyboard": `ccd` makes the claim terminal and retires the card, because the write
+///   was admitted before it failed and tungstenite's `send` is a feed plus a flush, so
+///   zero bytes is not provable. The release is what stops the keyboard being locked out
+///   of an approval nobody answered — it is not a second chance for the phone.
+/// * `"unconfirmed"` — the receipt was dropped, or the broker's own bound on the write
+///   expired. Nobody can say whether the bytes went out, so the reservation stands and
+///   the approval stays consumed.
+///
+/// `cause` and `winner` are mutually exclusive by construction: `winner` is read only on
+/// a leg that did not forward, `cause` only on a leg that did. `delivered:false` with
+/// NEITHER is the pre-existing shape and keeps its pre-existing meaning — this leg did
+/// not forward and no confirmed winner can be named (a losing sibling whose winner is
+/// still writing, a capability never held, a poisoned leg, a saturated arbiter).
+fn response_disposition(
+    thread_id: &str,
+    id: &RequestId,
+    delivered: bool,
+    winner: Option<Role>,
+    cause: Option<&str>,
+) -> String {
+    let mut params = serde_json::json!({
+        "threadId": thread_id,
+        "requestId": id.to_value(),
+        "delivered": delivered,
+    });
+    if let Some(role) = winner {
+        params["winner"] = winner_role(role).into();
+    }
+    if let Some(cause) = cause {
+        params["cause"] = cause.into();
+    }
+    serde_json::json!({ "method": RESPONSE_DISPOSITION, "params": params }).to_string()
+}
+
+/// **How long the broker waits for the proof that an answer's bytes went out.**
+///
+/// The receipt is awaited inline in [`handle_text`], which `handle_connection` awaits
+/// inline in turn — so an unbounded wait here parks the whole relay task: the leg cannot
+/// notice its own client closing, cannot read another frame, and the daemon on the other
+/// end is left to time out on its own with a card standing. That is the stall this bound closes.
+///
+/// **Ten seconds, and the number is a floor plus a ceiling, not a taste.**
+///
+/// The ceiling is `ccd`'s `DISPOSITION_BUDGET` (15 s in production): this bound must
+/// expire FIRST, or the daemon gives up on a broker that was still going to answer and
+/// files an unknown for a write the broker was about to confirm. Ten leaves five seconds
+/// for the disposition frame itself to be composed and read, which is orders of magnitude
+/// more than it needs.
+///
+/// The floor is what a real acknowledged write actually costs, measured on codex 0.153.2
+/// through the live gate `measure_a_ccd_leg_answering_a_command_approval`: it times the
+/// interval from writing the answer to reading the disposition — which contains this
+/// whole wait plus the frame's own trip back — and prints it as
+/// `MEASURED disposition round-trip`. The figure is **103.6 ms**, and it is an UPPER
+/// bound rather than the cost: that gate polls at 100 ms, so all the measurement
+/// establishes is that the round-trip finished inside the first tick. Ten seconds is
+/// roughly a hundred of those ticks.
+///
+/// The margin is deliberate: `sink.send` is a feed plus a flush on a socket the
+/// app-server may legitimately be slow to drain while it is doing something else, and
+/// this bound is for a peer that has STOPPED, not one that is busy. Since R5 the broker
+/// really does wait on the app-server, so a missing disposition can be a slow peer —
+/// which is exactly why the expiry reports `unconfirmed` rather than a proven failure.
+const UPSTREAM_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **The write was refused — at the socket, or one step before it.**
+///
+/// Two refusals wear this one word, and they do not prove the same thing.
+///
+/// A hand-off the pump's channel would not take is provably zero bytes: the envelope was
+/// never dequeued and never reached `sink.send` at all.
+///
+/// A `sink.send` that came back `Err` is not. Tungstenite's send is a feed followed by a
+/// flush, so a refused flush can follow a feed that already put bytes on the socket.
+/// "Refused" there means the write did not complete, not that it left nothing behind.
+///
+/// What the two share is the verdict, and it is chosen for the party that can still act.
+/// **The reservation is released either way**, so the keyboard in front of the same
+/// prompt is not locked out of an approval that may otherwise never be answered by
+/// anyone — that is a cost paid in the only direction where a wrong guess is recoverable.
+/// The daemon, which cannot recall bytes that may have gone out, does the opposite with
+/// the same frame: it retires the card as unknown rather than as not applied, and never
+/// sends the answer again. Neither side claims to know more than it does.
+pub const CAUSE_WRITE_FAILED: &str = "write_failed";
+
+/// **Nobody can say whether the write landed**: the receipt was dropped (the pump died or
+/// was cancelled mid-write) or [`UPSTREAM_WRITE_BUDGET`] expired. The reservation stands.
+pub const CAUSE_UNCONFIRMED: &str = "unconfirmed";
+
+/// The wire spelling of a recorded winner. Two words, and only ever these two: the
+/// daemon switches on them to decide whether it tells the phone the Mac answered or
+/// another phone did, and a third spelling would be a case it has no branch for.
+fn winner_role(role: Role) -> &'static str {
+    match role {
+        Role::Tui => "tui",
+        Role::Ccd => "ccd",
+    }
+}
 
 /// One `thread/started`, kept as it arrived.
 struct Announcement {
@@ -259,10 +421,25 @@ impl<F: UpstreamFactory> Broker<F> {
                 threads,
                 next_conn: AtomicU64::new(1),
                 head_fanout: std::sync::Mutex::new(HeadFanout::default()),
+                write_budget: UPSTREAM_WRITE_BUDGET,
                 log: Arc::new(|_| {}),
                 tee: FrameTee::off(),
             }),
         }
+    }
+
+    /// Shorten [`UPSTREAM_WRITE_BUDGET`] for a test that has to watch it expire.
+    ///
+    /// A configuration seam, not a behaviour one: the code under test is identical and
+    /// only the duration differs, the same way the `ccd` link's own
+    /// `DISPOSITION_BUDGET` is shortened under `cfg(test)`. The broker's integration
+    /// tests are a separate crate, so `cfg(test)` cannot reach them and a builder is
+    /// what is left. Production never calls it and takes the constant.
+    pub fn with_upstream_write_budget(mut self, budget: std::time::Duration) -> Self {
+        Arc::get_mut(&mut self.ctx)
+            .expect("no clones yet")
+            .write_budget = budget;
+        self
     }
 
     /// Replace the audit-log sink.
@@ -409,7 +586,8 @@ async fn handle_connection<F: UpstreamFactory>(
                                      through this broker; not delivered) (conn {})",
                                     conn.0
                                 ));
-                                if up.to_upstream.send(Message::Text(frame)).await.is_err() {
+                                let answer = UpstreamWrite::unacked(Message::Text(frame));
+                                if up.to_upstream.send(answer).await.is_err() {
                                     break;
                                 }
                                 deliver = false;
@@ -570,6 +748,26 @@ where
     let ccd_subscribing = matches!(role, Role::Ccd)
         && matches!(&shape, Shape::Request { method, .. } if method == "initialize");
 
+    // Noted for the same reason, and read after the action has been carried out:
+    // whether the answer went upstream is not known until the `Forward` arm has
+    // actually written it. See [`RESPONSE_DISPOSITION`].
+    //
+    // Two ids, and they are deliberately not the same one. `responded` is EVERY leg's
+    // answer — the arbiter reservation it may have taken belongs to whichever role sent
+    // it, and a reservation is confirmed or released by the leg that took it, TUI
+    // included. `answered` is the subset the broker speaks to: only a `ccd` leg is told
+    // a disposition, because only CodeConnect's own daemon is addressable by a frame this
+    // broker composed. With only the `ccd` id, a TUI winner's write
+    // was never confirmed and could never be named.
+    let responded: Option<RequestId> = match &shape {
+        Shape::Response { id, .. } => Some(id.clone()),
+        _ => None,
+    };
+    let answered: Option<RequestId> = match &responded {
+        Some(id) if matches!(role, Role::Ccd) => Some(id.clone()),
+        _ => None,
+    };
+
     // Scope `env` so it is dropped before any await (its `&dyn` trait objects are not
     // `Send`, and the connection task must be `Send`).
     let action = {
@@ -581,6 +779,39 @@ where
         };
         decide(role, &env, shape)
     };
+    // The receipt for the one message whose fate the arbiter and a leg are told about.
+    // Minted only for a RESPONSE that is actually forwarded — `Forward` is the only
+    // action that puts bytes on the wire at all, so for a response its absence is
+    // exactly the proof that some other answer settled the request, and the only
+    // condition under which this leg may be told who that was
+    // ([`WriteOutcome::NotForwarded`]). Every other forward is handed over
+    // unacknowledged and waits for nothing.
+    let mut wrote_upstream: Option<tokio::sync::oneshot::Receiver<bool>> = None;
+    // Set when this message's budget expires, or when the hand-off to the pump is
+    // refused: the disposition (if this leg is owed one) is written, then the leg closes.
+    let mut close_after_disposition = false;
+    // **One deadline for one message, and it starts before the hand-off.** The journey
+    // to the app-server's socket has two halves and both of them wait: the bounded
+    // channel in front of the pump, and then the `sink.send` the pump performs. A
+    // deadline that began at the receipt measured only the second, so a pump parked
+    // inside `sink.send` with a full queue behind it parked the answer — and, because
+    // `handle_connection` awaits this function inline, the whole leg — before any timer
+    // was running. Taken here, the same budget covers both halves, which is what makes
+    // it a bound on the answer rather than on one step of it.
+    let write_deadline = tokio::time::Instant::now() + ctx.write_budget;
+    // **The pump's channel would not take the envelope.** A separate flag and not a
+    // receipt outcome, because there IS no receipt to read: the envelope carrying the
+    // acknowledgement sender was dropped with the failed send, so the receiver would
+    // resolve to a dropped-sender error — "nobody can say" — for a write that nobody
+    // ever attempted. See the arm that sets it for why that is provably zero bytes.
+    let mut handoff_refused = false;
+    // **The queue would not take the envelope in time.** Distinct from the refusal above
+    // and settled the other way: a hand-off that was cancelled leaves the envelope
+    // unqueued, but from here that is indistinguishable from a receipt this leg gave up
+    // waiting for, and the reading that is safe under both is the one that keeps the
+    // reservation. A slot released for an answer that may have been written is how one
+    // command gets actuated twice.
+    let mut handoff_expired = false;
     match action {
         RelayAction::Forward { note } => {
             // M8 — the connection id is APPENDED AFTER the existing parenthesised note, never
@@ -597,51 +828,100 @@ where
                 WsPayload::Text(t) => t,
                 WsPayload::Binary => unreachable!("text branch"),
             };
-            if up.to_upstream.send(Message::Text(text)).await.is_err() {
-                if let Some(id) = &creation_id {
-                    // ZERO bytes reached the server, so the creation provably did not
-                    // happen: un-claim the slot so a retry (on a fresh connection) can
-                    // create the session's thread. Never a tombstone — nothing is ambiguous.
-                    ctx.threads.rollback_creation(conn, id);
-                    (ctx.log)(&format!(
-                        "{role:?}: upstream send failed (conn {conn}); creation claim rolled \
-                         back"
-                    ));
-                    // **A restored head is a head that BOUND** (round-3 F3). A switch
-                    // that provably failed puts the predecessor back as the session's
-                    // active thread, and that is exactly the event the fan-out repair
-                    // exists to follow: a `ccd` leg that initialized while the creation
-                    // was pending saw no bound head at subscribe time, and this rollback
-                    // is the last thing that will ever make one true for it. Without the
-                    // ask it waits for a server frame that the failed upstream is not
-                    // going to send, and stays unbound for the life of the session.
-                    deliver_head(ctx);
+            let write = if responded.is_some() {
+                let (write, receipt) = UpstreamWrite::acked(Message::Text(text));
+                wrote_upstream = Some(receipt);
+                write
+            } else {
+                UpstreamWrite::unacked(Message::Text(text))
+            };
+            // **Bounded, and bounded for every forward.** The hand-off is this leg's own
+            // await: a leg parked on it cannot read its client, cannot notice it leaving,
+            // and cannot serve the head it owes. The three outcomes are three different
+            // facts about the bytes and are settled three different ways.
+            match tokio::time::timeout_at(write_deadline, up.to_upstream.send(write)).await {
+                // Handed over. Nothing is proven about the socket yet; that is what the
+                // receipt below is for.
+                Ok(Ok(())) => {
+                    if ccd_subscribing {
+                        // Subscribe, then ask once. The registration is what makes every
+                        // LATER bind reach this leg; the ask covers the head that is
+                        // already bound when it arrives. `take` is what makes this
+                        // once-per-leg without a second flag — the reinitialization guard
+                        // above has already closed a leg that tried twice.
+                        if let Some(tx) = head_tx.take() {
+                            ctx.head_fanout
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .subscribers
+                                .insert(
+                                    conn,
+                                    CcdSubscriber {
+                                        tx,
+                                        live_seen: false,
+                                        replayed: None,
+                                    },
+                                );
+                            deliver_head(ctx);
+                        }
+                    }
                 }
-                (ctx.log)(&format!(
-                    "{role:?}: upstream gone (conn {conn}); closing leg"
-                ));
-                return Ok(true);
-            }
-            if ccd_subscribing {
-                // Subscribe, then ask once. The registration is what makes every
-                // LATER bind reach this leg; the ask covers the head that is already
-                // bound when it arrives. `take` is what makes this once-per-leg
-                // without a second flag — the reinitialization guard above has
-                // already closed a leg that tried twice.
-                if let Some(tx) = head_tx.take() {
-                    ctx.head_fanout
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .subscribers
-                        .insert(
-                            conn,
-                            CcdSubscriber {
-                                tx,
-                                live_seen: false,
-                                replayed: None,
-                            },
-                        );
-                    deliver_head(ctx);
+                // Refused: the pump is gone, so the envelope was never taken off the
+                // queue and never fed to `sink.send`. Zero bytes, proven.
+                Ok(Err(_)) => {
+                    if let Some(id) = &creation_id {
+                        // ZERO bytes reached the server, so the creation provably did not
+                        // happen: un-claim the slot so a retry (on a fresh connection) can
+                        // create the session's thread. Never a tombstone — nothing is
+                        // ambiguous.
+                        ctx.threads.rollback_creation(conn, id);
+                        (ctx.log)(&format!(
+                            "{role:?}: upstream send failed (conn {conn}); creation claim \
+                             rolled back"
+                        ));
+                        // **A restored head is a head that BOUND.** A switch that provably
+                        // failed puts the predecessor back as the session's active thread,
+                        // and that is exactly the event the fan-out repair exists to
+                        // follow: a `ccd` leg that initialized while the creation was
+                        // pending saw no bound head at subscribe time, and this rollback is
+                        // the last thing that will ever make one true for it. Without the
+                        // ask it waits for a server frame that the failed upstream is not
+                        // going to send, and stays unbound for the life of the session.
+                        deliver_head(ctx);
+                    }
+                    (ctx.log)(&format!(
+                        "{role:?}: upstream gone (conn {conn}); closing leg"
+                    ));
+                    // **A reservation this answer took is released here, for the same
+                    // reason the creation claim above is rolled back.** Zero bytes proven
+                    // is exactly what a socket that refused the write proves, arrived at
+                    // one step earlier, so it earns the same verdict — the slot goes back
+                    // and the approval is answerable again, by the keyboard in front of the
+                    // same prompt. Left standing it would spend the request for the whole
+                    // session: nobody answered it, so no `serverRequest/resolved` is coming
+                    // to retire the card either.
+                    if let Some(id) = &responded {
+                        caps.release_write(role, id);
+                    }
+                    // The leg still closes — its upstream is gone — but it is told first.
+                    handoff_refused = true;
+                    close_after_disposition = true;
+                }
+                // The queue would not take it inside the budget. The upstream has stopped
+                // behaving like the app-server, so the leg closes and takes it down — but a
+                // `ccd` leg is told first, and told `unconfirmed`. Nothing is rolled back
+                // here, and that is the fail-closed direction: a creation claim whose
+                // hand-off expired is settled by the connection's own teardown, which files
+                // it as indeterminate rather than reopening a slot for a request that may
+                // yet be sitting on a queue.
+                Err(_) => {
+                    (ctx.log)(&format!(
+                        "{role:?}: upstream did not take the message within {:?} (conn \
+                         {conn}); closing leg",
+                        ctx.write_budget
+                    ));
+                    handoff_expired = true;
+                    close_after_disposition = true;
                 }
             }
         }
@@ -660,7 +940,161 @@ where
             return Ok(true);
         }
     }
-    Ok(false)
+    // **Waited for here, after the action, before the frame — and BOUNDED.** The
+    // receipt is the pump's statement that this answer's `ws.send` completed. Without a
+    // deadline on this await, a `sink.send` parked on a
+    // backpressured app-server socket parked the whole relay task with it: this
+    // function is awaited inline from `handle_connection`, so the leg could not even
+    // notice its client closing while the receipt was stuck.
+    //
+    // Every response is waited on, not only a `ccd` one, because the wait is what
+    // decides the ARBITER's verdict on the reservation this leg took — and a TUI
+    // reservation that is never confirmed is a winner no losing phone can be told
+    // about. Only the `ccd` leg is then sent a frame about it.
+    //
+    // A hand-off that never completed is settled before any of that, because there is no
+    // receipt to read: a refused send dropped the acknowledgement sender along with the
+    // envelope, and an expired one left the envelope unqueued. Reading the receiver in
+    // either case would report "nobody can say" about a write nobody attempted. Both
+    // verdicts have been reached above; these are the words the daemon reads them in.
+    //
+    // The receipt continues on the SAME deadline the hand-off started, not a fresh one.
+    // Two budgets in series would be two chances to wait the whole of it, and the number
+    // is chosen against `ccd`'s own — the party that can say something has to give up
+    // first, and it cannot do that twice.
+    let outcome = if handoff_refused {
+        WriteOutcome::Failed
+    } else if handoff_expired {
+        WriteOutcome::Unconfirmed
+    } else {
+        match wrote_upstream {
+            None => WriteOutcome::NotForwarded,
+            Some(receipt) => match tokio::time::timeout_at(write_deadline, receipt).await {
+                // Proven written: the reservation becomes a confirmed win.
+                Ok(Ok(true)) => {
+                    if let Some(id) = &responded {
+                        caps.confirm_write(role, id);
+                    }
+                    WriteOutcome::Delivered
+                }
+                // Refused at the socket. The write did not complete, which is not the
+                // same as having left nothing behind — see [`CAUSE_WRITE_FAILED`] — but
+                // the reservation goes back regardless, so the keyboard in front of the
+                // same prompt can still answer. Holding a slot for a write that failed
+                // is how an approval ends up answerable by nobody.
+                Ok(Ok(false)) => {
+                    if let Some(id) = &responded {
+                        caps.release_write(role, id);
+                    }
+                    WriteOutcome::Failed
+                }
+                // The pump died or was cancelled mid-write. Nothing is proven either way,
+                // so the reservation STAYS — see [`crate::response_capability`].
+                Ok(Err(_)) => WriteOutcome::Unconfirmed,
+                // The budget expired. Also unproven, and additionally session-fatal: a
+                // write this broker cannot account for means the upstream is no longer
+                // behaving like the app-server, so the leg closes and takes its upstream
+                // down with it (dropping `up` ends the pump's outbound half). The
+                // disposition below is still written first, so the daemon is told
+                // `unconfirmed` rather than being left to time out on its own.
+                Err(_) => {
+                    (ctx.log)(&format!(
+                        "{role:?}: upstream write unacknowledged after {:?} (conn {conn}); \
+                     closing leg",
+                        ctx.write_budget
+                    ));
+                    close_after_disposition = true;
+                    WriteOutcome::Unconfirmed
+                }
+            },
+        }
+    };
+
+    // **Told last, and told even by a leg that is closing.** Tearing the leg down is a
+    // statement about the upstream, not about this answer: the arbiter has just reached a
+    // verdict on the reservation, and the daemon holding the card is the one party that
+    // has to act on it. Saying nothing would leave it to run out its own deadline and
+    // file the weakest terminal there is, for an answer whose fate this broker knows
+    // exactly. `bound_thread` names the request the way its reader
+    // files it, and returns `None` for exactly the ids this leg cannot truthfully speak
+    // about — in which case nothing is said.
+    if let Some(id) = answered {
+        if let Some(thread_id) = caps.bound_thread(&id) {
+            // **`winner` is named only when somebody ELSE answered, and `cause` only
+            // when this leg's own write did not land.** A leg that reached `Forward`
+            // consumed the slot itself, so the winner the arbiter holds for it is this
+            // very leg — naming it would tell the daemon the answer was overtaken when
+            // what actually happened is that this leg's own write failed. That
+            // misreading is closed by construction here: the two
+            // fields come from disjoint arms.
+            //
+            // A leg that did NOT forward can be told who did, and only when the arbiter
+            // has a CONFIRMED winner to name; a winner still writing, saturation and a
+            // capability never held all record none, and all three are honestly
+            // reported by saying nothing.
+            let (delivered, winner, cause) = match outcome {
+                WriteOutcome::Delivered => (true, None, None),
+                WriteOutcome::Failed => (false, None, Some(CAUSE_WRITE_FAILED)),
+                WriteOutcome::Unconfirmed => (false, None, Some(CAUSE_UNCONFIRMED)),
+                // **A missing `winner` here says "unattributed", never "overtaken".**
+                // This leg forwarded nothing, so its own answer is zero bytes either
+                // way — but the arbiter names only a CONFIRMED winner, and a slot that
+                // is merely reserved has none to name. That reservation can still be
+                // released or expire, in which case nothing answered the request at
+                // all. Saturation and a capability never held record none for their own
+                // reasons. The daemon must read the silence as "this broker will not
+                // say what settled it", which is the truth of all three, and not as a
+                // race it lost — see `ccd`'s `note_response_disposition`.
+                WriteOutcome::NotForwarded => (false, caps.recorded_winner(&id), None),
+            };
+            let frame = response_disposition(thread_id, &id, delivered, winner, cause);
+            (ctx.log)(&format!(
+                "{role:?}: response disposition delivered={delivered} winner={winner:?} \
+                 cause={cause:?} id={id:?} (conn {conn})"
+            ));
+            // **Bounded, like the write it reports on.** This send is downstream, to the
+            // daemon's own socket, and it is the last thing this leg does about the
+            // answer — so a daemon that has stopped draining could park the leg here just
+            // as surely as a stalled app-server parked it on the hand-off, and on a leg
+            // that is already closing there would be nothing left to end the wait. The
+            // budget is the same one, because the reader on the other end is timing this
+            // whole exchange against a deadline of its own: past it the frame has no
+            // reader left to inform, and the daemon's own budget files the terminal.
+            match tokio::time::timeout(ctx.write_budget, ws.send(Message::Text(frame))).await {
+                Ok(sent) => sent?,
+                Err(_) => {
+                    (ctx.log)(&format!(
+                        "{role:?}: response disposition undeliverable after {:?} (conn \
+                         {conn}); closing leg",
+                        ctx.write_budget
+                    ));
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(close_after_disposition)
+}
+
+/// **What became of the bytes of one forwarded response.**
+///
+/// The four are not degrees of the same thing; they are four different states the
+/// arbiter and the daemon must act on differently, and collapsing any two of them
+/// strands an approval. See [`response_disposition`] for how each is spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteOutcome {
+    /// The pump acknowledged the write. The reservation is confirmed.
+    Delivered,
+    /// The write was refused: the pump answered `false`, or its channel would not take
+    /// the envelope at all. The reservation was released. See [`CAUSE_WRITE_FAILED`] for
+    /// which of the two proves zero bytes and why the release is right for both.
+    Failed,
+    /// Receipt dropped, or the write budget expired. Nothing is proven; the reservation
+    /// stands.
+    Unconfirmed,
+    /// This leg forwarded nothing — it lost the race, or never held the capability. It
+    /// took no reservation, so it has none to confirm or release.
+    NotForwarded,
 }
 
 /// Keep a `thread/started` seen on the way out, so a later subscriber can be told

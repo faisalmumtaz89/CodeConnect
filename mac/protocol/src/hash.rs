@@ -482,6 +482,39 @@ pub fn send_text_hash(session_ref: &str, text: &str, submit: bool) -> String {
     sha256_hex(material.as_bytes())
 }
 
+/// **Identity of one phone answer to a Codex approval.**
+///
+/// The whole authorization surface of the decision, in the same length-prefixed,
+/// domain-tagged shape as [`send_text_hash`] and for the same reason: the ledger
+/// treats a retry under the same request id with *different* material as a conflict
+/// rather than a replay, so anything that could make this answer a different answer
+/// has to be inside the preimage. The card's own `payload_hash` carries the question
+/// and the exact option table it was displayed with; `option_id` is what the phone
+/// chose; `decision` is the body that will actually be written, which for an
+/// amendment is a structure the option id alone does not determine; and `thread_id`
+/// is which conversation the request belongs to.
+///
+/// The decision is hashed as its serialized JSON, because that is precisely what
+/// goes on the wire — hashing a rendering of it would let two decisions that
+/// serialize differently share an identity.
+pub fn answer_hash(
+    request_id: &str,
+    payload_hash: &str,
+    option_id: &str,
+    thread_id: &str,
+    decision: &serde_json::Value,
+) -> String {
+    let wire = decision.to_string();
+    let mut material = String::from("codeconnect.answer.v1");
+    for field in [request_id, payload_hash, option_id, thread_id, &wire] {
+        material.push('\n');
+        material.push_str(&field.len().to_string());
+        material.push(':');
+        material.push_str(field);
+    }
+    sha256_hex(material.as_bytes())
+}
+
 /// Identity of one `interrupt` mutation: which session's which turn is aborted.
 ///
 /// The same length-prefixed, domain-tagged shape as [`send_text_hash`], for the

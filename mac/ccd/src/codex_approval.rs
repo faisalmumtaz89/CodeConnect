@@ -441,6 +441,37 @@ fn decision(value: &Value) -> Option<(String, Option<Value>)> {
     }
 }
 
+/// **The wire decision a phone's `option_id` names, taken from the card itself.**
+///
+/// The inverse of [`decision`], and the reason [`Choice`] keeps `id` and `payload`
+/// apart: an id alone is not a decision the app-server accepts. `accept` is the bare
+/// string `"accept"`, while `acceptWithExecpolicyAmendment` is the single-key object
+/// whose body names the exact argv a "don't ask again" would whitelist.
+///
+/// **The body is the stored card's, never the phone's.** A phone sends an opaque id
+/// and nothing else ([`protocol::ws::AnswerDecision::OptionId`]); the amendment it
+/// would apply is read back out of the options this daemon filed when it raised the
+/// card — which are the ones the app-server itself proposed. So a phone can pick
+/// between the server's offers and can never compose one, and the hash the phone
+/// echoes back covers that very option set, so it cannot even pick from a stale one.
+///
+/// `None` when the id is not in the card's own option table: a decision the wire
+/// never offered for this request, refused rather than forwarded.
+pub(crate) fn wire_decision(options: &Value, option_id: &str) -> Option<Value> {
+    let offered = options
+        .as_array()?
+        .iter()
+        .find(|offer| offer.get("id").and_then(Value::as_str) == Some(option_id))?;
+    Some(match offered.get("payload") {
+        Some(payload) if !payload.is_null() => {
+            let mut body = Map::new();
+            body.insert(option_id.to_string(), payload.clone());
+            Value::Object(body)
+        }
+        _ => Value::String(option_id.to_string()),
+    })
+}
+
 /// The decisions to offer, in the order they will be shown.
 ///
 /// The command family's set is the wire's, filtered to what this build has

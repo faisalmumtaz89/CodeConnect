@@ -433,6 +433,40 @@ enum Consume {
     Lost,
 }
 
+/// **What a consumed slot has actually proven.**
+///
+/// The distinction that authorization alone cannot carry. Authorization happens before any
+/// I/O, so a slot marked spent at that moment records "somebody was allowed to answer",
+/// not "somebody answered" — and the two come apart exactly when the winner's upstream
+/// write fails. Under the old single state a refused write consumed the approval for
+/// ever: no answer had reached the app-server, so no `serverRequest/resolved` would ever
+/// follow, and the keyboard in front of the same prompt could no longer answer it either.
+///
+/// So a slot is `Reserved` from the moment it is won and becomes `Confirmed` only when
+/// the write behind it has been proven. The three transitions out of `Reserved` are the
+/// three things the wire can do to a write, and they are deliberately not the same:
+///
+/// * proven written  → [`ResponseArbiter::confirm`] → `Confirmed`, nameable as the winner.
+/// * proven refused  → [`ResponseArbiter::release`] → the slot is removed and the
+///   approval is answerable again, because zero bytes left.
+/// * neither         → the slot **stays `Reserved`**. A dropped receipt (the pump died or
+///   was cancelled mid-write) proves only that nobody can say: tungstenite's `send` is a
+///   feed plus a flush, so a partial write is a real state. Releasing on that would let a
+///   second answer actuate a command the first may already have actuated, which is worse
+///   than leaving the approval unanswerable.
+///
+/// A `Reserved` slot is occupied for [`ResponseArbiter::consume`] — mutual exclusion
+/// holds for the whole duration of the write — but it is NOT a winner for
+/// [`ResponseArbiter::winner`], which is what stops a losing sibling being told a name
+/// nothing has proven yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotState {
+    /// Won, write outstanding. Occupies the slot; names no winner.
+    Reserved(Role),
+    /// Won, and the upstream write for it completed.
+    Confirmed(Role),
+}
+
 /// The shared, cross-leg fanout arbiter: the one-use slots and their winner provenance.
 ///
 /// One `Arc<ResponseArbiter>` is shared by every connection task (like
@@ -441,10 +475,11 @@ enum Consume {
 /// — no I/O, unit-testable in isolation.
 #[derive(Debug, Default)]
 pub struct ResponseArbiter {
-    /// Consumed slots → the role that won each. Presence marks the slot spent; the value
-    /// is the winner-provenance (queryable via [`ResponseArbiter::winner`]). Bounded at
-    /// [`MAX_WINNERS`] (fail closed beyond it).
-    winners: Mutex<HashMap<UpstreamRequestKey, Role>>,
+    /// Consumed slots → what each consume has proven ([`SlotState`]). Presence marks the
+    /// slot spent for mutual exclusion; only a `Confirmed` entry is a winner anyone may be
+    /// told about (queryable via [`ResponseArbiter::winner`]). Bounded at [`MAX_WINNERS`]
+    /// (fail closed beyond it).
+    winners: Mutex<HashMap<UpstreamRequestKey, SlotState>>,
 }
 
 impl ResponseArbiter {
@@ -452,35 +487,94 @@ impl ResponseArbiter {
         ResponseArbiter::default()
     }
 
-    /// Atomically consume the slot for `key` on behalf of `role`. The first caller wins
-    /// (the slot records `role` as the winner); every later caller loses. One `Mutex`
-    /// section, so two legs racing the same fanned-out approval have exactly one winner.
-    /// If the winners map is saturated ([`MAX_WINNERS`]) and this is a new key, no winner
-    /// can be recorded, so the consume fails closed (`Lost`, zero bytes).
+    /// Atomically consume the slot for `key` on behalf of `role`, **as a reservation**.
+    /// The first caller wins (the slot records `role` as [`SlotState::Reserved`]); every
+    /// later caller loses. One `Mutex` section, so two legs racing the same fanned-out
+    /// approval have exactly one winner. If the winners map is saturated
+    /// ([`MAX_WINNERS`]) and this is a new key, no winner can be recorded, so the consume
+    /// fails closed (`Lost`, zero bytes).
+    ///
+    /// A reservation is not yet an answer. The caller must follow it with
+    /// [`ResponseArbiter::confirm`] once the write is proven, or
+    /// [`ResponseArbiter::release`] once it is proven to have failed — and with neither
+    /// when nothing can be proven. See [`SlotState`].
     fn consume(&self, key: &UpstreamRequestKey, role: Role) -> Consume {
         let mut winners = self.winners.lock().expect("arbiter mutex poisoned");
         // Already consumed (a losing sibling/duplicate), OR saturated so no winner can be
         // recorded: either way fail closed (zero bytes). Only a fresh key with room wins.
+        //
+        // **Saturation is a capacity residual, not a case the wire can reach.** It needs
+        // [`MAX_WINNERS`] — 65,536 — distinct approvals recorded in ONE session, each of
+        // them a decision a person made; the wire produces nothing like that, and the
+        // branch exists only so the map cannot grow without bound under something broken.
+        // Its report is deliberately the same as every other `Lost`: `delivered:false`
+        // with NO named winner. That is not a shortfall being papered over. The absence of
+        // a winner already carries exactly the right meaning — *something else settled
+        // this and this broker cannot say what* — and a saturated arbiter genuinely cannot
+        // say. A third disposition for it would add a wire case the daemon must branch on
+        // to reach the same conclusion it reaches from the silence.
         if winners.contains_key(key) || winners.len() >= MAX_WINNERS {
             Consume::Lost
         } else {
-            winners.insert(key.clone(), role);
+            winners.insert(key.clone(), SlotState::Reserved(role));
             Consume::Won
         }
     }
 
-    /// The recorded winner of a slot, if it has been consumed (winner-provenance query).
+    /// **The write behind a reservation completed: the reserver is now the winner.**
     ///
-    /// Production emits provenance on the [`LegCapabilities`] consume path (the audit
-    /// log); this direct accessor is the inspection seam the tests use, and the query
-    /// point the 2e winner-signal *injection* will build on. Test-only until then.
-    #[cfg(test)]
+    /// Only the leg that reserved the slot holds the receipt for its write, so only it
+    /// ever calls this, and it calls it for the one key it just won. Guarded on
+    /// `Reserved(role)` all the same, so a confirmation can never overwrite somebody
+    /// else's settled slot or resurrect one that was released.
+    fn confirm(&self, key: &UpstreamRequestKey, role: Role) {
+        let mut winners = self.winners.lock().expect("arbiter mutex poisoned");
+        if let Some(slot @ SlotState::Reserved(_)) = winners.get(key) {
+            if *slot == SlotState::Reserved(role) {
+                winners.insert(key.clone(), SlotState::Confirmed(role));
+            }
+        }
+    }
+
+    /// **The write behind a reservation was refused: the approval is answerable again.**
+    ///
+    /// Zero bytes reached the app-server, so nothing was answered and nothing will
+    /// resolve the request — the slot must go back, or the keyboard in front of the same
+    /// prompt is locked out of an approval nobody answered.
+    ///
+    /// Same `Reserved(role)` guard as [`ResponseArbiter::confirm`], and for the sharper
+    /// reason: a release that could remove a `Confirmed` entry would un-spend a slot whose
+    /// answer really did actuate.
+    fn release(&self, key: &UpstreamRequestKey, role: Role) {
+        let mut winners = self.winners.lock().expect("arbiter mutex poisoned");
+        if winners.get(key) == Some(&SlotState::Reserved(role)) {
+            winners.remove(key);
+        }
+    }
+
+    /// The **confirmed** winner of a slot, if one has been proven.
+    ///
+    /// Read on the losing side: a leg whose answer forwarded zero bytes asks who did
+    /// answer, so the broker can say so instead of leaving the daemon to guess. `None`
+    /// for a slot nothing has consumed — including a saturated arbiter, which records no
+    /// winner to report (see [`ResponseArbiter::consume`]).
+    ///
+    /// **`Reserved` names nobody.** A reservation is a leg that was allowed to answer and
+    /// whose bytes may still be in flight; reporting it as the winner would tell a losing
+    /// phone "the Mac answered this" on the strength of an authorization, which is the
+    /// claim the reservation exists to stop making. Only a `Confirmed` slot has an
+    /// answerer to name, and a loser told nothing keeps the meaning it can act on:
+    /// *something else settled this and this broker cannot say what.*
     fn winner(&self, key: &UpstreamRequestKey) -> Option<Role> {
-        self.winners
+        match self
+            .winners
             .lock()
             .expect("arbiter mutex poisoned")
             .get(key)
-            .copied()
+        {
+            Some(SlotState::Confirmed(role)) => Some(*role),
+            Some(SlotState::Reserved(_)) | None => None,
+        }
     }
 }
 
@@ -625,6 +719,23 @@ impl LegCapabilities {
                 "an unparseable or duplicate-member s2c frame could not be classified",
             );
         };
+        // **The broker's own namespace, refused at the origin.** The whole value of
+        // `codeconnect/` is that this broker is its only author, and the s2c direction is
+        // otherwise an unconditional passthrough — so an upstream frame wearing the prefix
+        // would be relayed verbatim and read by `ccd` as this broker's own word about a
+        // request it is still waiting on. Dropping it silently would leave the leg talking
+        // to something that just forged this broker's voice, so it fails closed the way
+        // every other untrustworthy s2c frame does: poison the view, close the leg. One
+        // `starts_with` on a method this path already has in hand.
+        if v.get("method")
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.starts_with(crate::relay::CODECONNECT_NAMESPACE))
+        {
+            self.poison("s2c frame in the broker's reserved `codeconnect/` namespace");
+            return S2cDisposition::CloseLeg(
+                "an s2c frame claimed the broker's reserved `codeconnect/` namespace",
+            );
+        }
         // Only a frame that occupies a bare RESPONSE id concerns us: it must carry a usable
         // top-level `id`. No top-level id ⇒ a notification (method-only ⇒ no client response)
         // or a non-id-bearing frame ⇒ occupies nothing ⇒ ignore.
@@ -896,6 +1007,109 @@ impl LegCapabilities {
     fn tracked_ids(&self) -> usize {
         self.view.len()
     }
+
+    /// The thread a cleanly-`Bound` id belongs to, for naming the request a
+    /// disposition is about.
+    ///
+    /// **A read, and only of what this leg was already handed.** The bare id in a
+    /// response identifies the request only on the connection that was handed it,
+    /// so a disposition frame quoting the id back is ambiguous to a reader that
+    /// files its cards by thread. This returns the thread from the very entry
+    /// [`ResponseCapabilityRegistry::authorize`] just consulted, so the frame names
+    /// the same request the answer did.
+    ///
+    /// Deliberately `Bound`-only: a `Tombstoned` or `Unseen` id has no single
+    /// thread this leg can truthfully name, and `poisoned` means no id on the leg
+    /// can be trusted to name one. Those cases return `None`, and the relay then
+    /// says nothing rather than guessing — the same fail-closed shape as
+    /// `authorize` itself.
+    pub(crate) fn bound_thread(&self, id: &RequestId) -> Option<&str> {
+        if self.poisoned {
+            return None;
+        }
+        match self.view.get(id) {
+            Some(IdState::Bound(entry)) => Some(entry.thread_id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// **Who actually answered the request this bare id names**, if anyone did.
+    ///
+    /// A leg whose answer forwarded zero bytes is told `delivered:false`, and that bit
+    /// alone conflates four different fates: it lost to the keyboard, it lost to another
+    /// phone, it never held the capability, or the arbiter had no room to record a
+    /// winner. Only the first two have an answerer to name, and the arbiter is the one
+    /// place that knows which. This rebuilds the slot key from the very entry
+    /// [`ResponseCapabilityRegistry::authorize`] consulted — the losing consume leaves
+    /// the binding in place, so the key is exactly the one that was raced for — and
+    /// reports the recorded role.
+    ///
+    /// `None` whenever no winner is recorded, and the caller says nothing rather than
+    /// inventing one. Same `Bound`-only, poison-first discipline as [`Self::bound_thread`]:
+    /// an id this leg cannot truthfully speak about names no slot to ask after either.
+    pub(crate) fn recorded_winner(&self, id: &RequestId) -> Option<Role> {
+        if self.poisoned {
+            return None;
+        }
+        let Some(IdState::Bound(entry)) = self.view.get(id) else {
+            return None;
+        };
+        self.arbiter.winner(&UpstreamRequestKey {
+            thread_id: entry.thread_id.clone(),
+            request_id: id.clone(),
+            generation: entry.generation,
+        })
+    }
+
+    /// **The upstream write for the answer at `id` completed: confirm this leg's win.**
+    ///
+    /// Called by the relay once the pump's receipt has resolved `true`, and only on the
+    /// leg that forwarded — a leg that did not forward holds no receipt. Rebuilds the slot
+    /// key from the same `Bound` entry [`ResponseCapabilityRegistry::authorize`]
+    /// consulted, so it confirms exactly the reservation that was taken.
+    pub(crate) fn confirm_write(&self, role: Role, id: &RequestId) {
+        if let Some(key) = self.slot_key(id) {
+            self.arbiter.confirm(&key, role);
+            (self.log)(&format!(
+                "capability confirmed: winner={role:?} id={id:?} thread={:?}",
+                key.thread_id
+            ));
+        }
+    }
+
+    /// **The upstream write for the answer at `id` was refused: put the slot back.**
+    ///
+    /// Called by the relay only when the pump's receipt resolved `false` — the socket
+    /// refused the write and zero bytes left, so nothing answered the request and nothing
+    /// will resolve it. A dropped receipt is NOT this: it proves nothing, and the relay
+    /// calls neither method for it. See [`SlotState`].
+    pub(crate) fn release_write(&self, role: Role, id: &RequestId) {
+        if let Some(key) = self.slot_key(id) {
+            self.arbiter.release(&key, role);
+            (self.log)(&format!(
+                "capability released: role={role:?} id={id:?} thread={:?} (write refused)",
+                key.thread_id
+            ));
+        }
+    }
+
+    /// The arbiter slot this leg's `Bound` entry for `id` names, or `None` when this leg
+    /// can truthfully name none. Same poison-first, `Bound`-only discipline as
+    /// [`Self::bound_thread`] and [`Self::recorded_winner`], for the same reason: an id
+    /// this leg cannot speak about names no slot either.
+    fn slot_key(&self, id: &RequestId) -> Option<UpstreamRequestKey> {
+        if self.poisoned {
+            return None;
+        }
+        let Some(IdState::Bound(entry)) = self.view.get(id) else {
+            return None;
+        };
+        Some(UpstreamRequestKey {
+            thread_id: entry.thread_id.clone(),
+            request_id: id.clone(),
+            generation: entry.generation,
+        })
+    }
 }
 
 impl ResponseCapabilityRegistry for LegCapabilities {
@@ -928,6 +1142,11 @@ impl ResponseCapabilityRegistry for LegCapabilities {
             Consume::Won => {
                 // Debug-escape the thread id (and the already-Debug id) so a control char
                 // or newline in an observed thread id cannot inject into the audit line.
+                //
+                // **"won" here is the RESERVATION.** The write behind it has not been
+                // attempted yet; `capability confirmed` (or `capability released`) is the
+                // line that says what became of it. The wording is unchanged because live
+                // gates assert this exact substring.
                 (self.log)(&format!(
                     "capability won: winner={role:?} thread={:?} id={id:?} gen={}",
                     entry.thread_id, entry.generation
@@ -1041,15 +1260,105 @@ mod tests {
 
     // --- Shared arbiter: atomic one-use + provenance -----------------------
 
+    /// **Reserve, then confirm: a consume is atomic and one-use, and the winner is
+    /// nameable only once the write behind it is proven.**
+    ///
+    /// The reservation excludes the sibling for the whole duration of the write — that is
+    /// the one-use half, unchanged. The other half is that `winner` stays silent until
+    /// `confirm`, so a losing sibling is never told a name on the strength of an
+    /// authorization.
+    ///
+    /// **Mutation:** have `consume` insert `Confirmed` and the middle assertion below
+    /// names a winner whose bytes have not been attempted yet.
     #[test]
     fn arbiter_is_atomic_one_use_and_records_the_winner() {
         let arb = ResponseArbiter::new();
         let k = key("thread-A", 0, GENERATION_UNSTAMPED);
-        // First consume wins and records provenance; the sibling loses, provenance holds.
         assert_eq!(arb.consume(&k, Role::Ccd), Consume::Won);
-        assert_eq!(arb.winner(&k), Some(Role::Ccd));
+        assert_eq!(
+            arb.winner(&k),
+            None,
+            "a reservation is not yet an answer, so it names nobody"
+        );
         assert_eq!(arb.consume(&k, Role::Tui), Consume::Lost, "sibling revoked");
+        arb.confirm(&k, Role::Ccd);
+        assert_eq!(
+            arb.winner(&k),
+            Some(Role::Ccd),
+            "the proven write is the winner"
+        );
+        assert_eq!(
+            arb.consume(&k, Role::Tui),
+            Consume::Lost,
+            "and a confirmed slot stays spent"
+        );
         assert_eq!(arb.winner(&k), Some(Role::Ccd), "winner is unchanged");
+    }
+
+    /// **A proven-refused write puts the slot back; nothing else does.**
+    ///
+    /// The stranding defect at its smallest: an approval whose only answer left
+    /// zero bytes must still be answerable, or the keyboard in front of it is locked out
+    /// of a question nobody answered. The three negatives are the guard rails —
+    /// `release` may not un-spend a confirmed win, may not act for a role that did not
+    /// reserve, and is not what a dropped receipt earns (the relay simply never calls it).
+    ///
+    /// **Mutation:** drop the `Reserved(role)` guard in `release` and the confirmed slot
+    /// below is un-spent, so an answer that actuated can be sent a second time.
+    #[test]
+    fn only_a_proven_refusal_releases_a_reserved_slot() {
+        let arb = ResponseArbiter::new();
+        let k = key("thread-A", 0, GENERATION_UNSTAMPED);
+
+        // A foreign role cannot release somebody else's reservation.
+        assert_eq!(arb.consume(&k, Role::Ccd), Consume::Won);
+        arb.release(&k, Role::Tui);
+        assert_eq!(arb.consume(&k, Role::Tui), Consume::Lost, "still reserved");
+
+        // The reserver's own proven refusal does release it.
+        arb.release(&k, Role::Ccd);
+        assert_eq!(
+            arb.consume(&k, Role::Tui),
+            Consume::Won,
+            "a refused write leaves the approval answerable"
+        );
+
+        // A confirmed win is never released.
+        arb.confirm(&k, Role::Tui);
+        arb.release(&k, Role::Tui);
+        assert_eq!(arb.consume(&k, Role::Ccd), Consume::Lost);
+        assert_eq!(arb.winner(&k), Some(Role::Tui));
+    }
+
+    /// **A confirmation only ever confirms the reservation that was taken.**
+    ///
+    /// A slot nothing reserved, and a slot reserved by the other role, are both left
+    /// exactly as they were — so a stray confirm can neither invent a winner nor rewrite
+    /// one.
+    ///
+    /// **Mutation:** drop the `Reserved(role)` guard in `confirm` and the first
+    /// assertion names a winner for a slot no leg ever consumed.
+    #[test]
+    fn a_confirmation_cannot_invent_or_rewrite_a_winner() {
+        let arb = ResponseArbiter::new();
+        let k = key("thread-A", 0, GENERATION_UNSTAMPED);
+
+        arb.confirm(&k, Role::Ccd);
+        assert_eq!(
+            arb.winner(&k),
+            None,
+            "nothing was reserved, so nothing wins"
+        );
+
+        assert_eq!(arb.consume(&k, Role::Ccd), Consume::Won);
+        arb.confirm(&k, Role::Tui);
+        assert_eq!(
+            arb.winner(&k),
+            None,
+            "a role that did not reserve cannot confirm the reservation"
+        );
+        arb.confirm(&k, Role::Ccd);
+        assert_eq!(arb.winner(&k), Some(Role::Ccd));
     }
 
     #[test]
@@ -1107,7 +1416,14 @@ mod tests {
         // ccd answers first → authorized; the TUI sibling then loses (revoked), zero bytes.
         assert!(ccd.authorize(Role::Ccd, &RequestId::Int(0), false));
         assert!(!tui.authorize(Role::Tui, &RequestId::Int(0), false));
-        // Winner-provenance is queryable on the shared arbiter.
+        // Winner-provenance is queryable on the shared arbiter — once the write behind
+        // the reservation has been proven, which is what the relay's receipt does.
+        assert_eq!(
+            arb.winner(&key("thread-A", 0, GENERATION_UNSTAMPED)),
+            None,
+            "the authorization alone names nobody"
+        );
+        ccd.confirm_write(Role::Ccd, &RequestId::Int(0));
         assert_eq!(
             arb.winner(&key("thread-A", 0, GENERATION_UNSTAMPED)),
             Some(Role::Ccd)
@@ -1438,6 +1754,94 @@ mod tests {
             // …and its answer would indeed have been discarded, which is the whole point.
             assert!(!leg.authorize(Role::Ccd, &RequestId::Int(0), false));
         }
+    }
+
+    /// **The reserved namespace is closed to upstream, whatever the method under it.**
+    ///
+    /// The gate is on the PREFIX, not on the one method the broker composes today: a
+    /// namespace whose guarantee is "this broker is its only author" is worth nothing if
+    /// the next method added to it arrives unguarded. Both frame shapes are covered
+    /// because the response disposition is a notification — a frame that carries no
+    /// top-level id and would otherwise be waved through before any id-bearing check
+    /// runs.
+    ///
+    /// **Mutation:** match the exact `codeconnect/responseDisposition` instead of the
+    /// prefix, and every other method in the namespace passes through unexamined.
+    #[test]
+    fn any_method_in_the_reserved_namespace_closes_the_leg() {
+        for forged in [
+            // The forgery itself: the broker's own frame, notification-shaped.
+            r#"{"method":"codeconnect/responseDisposition","params":{"threadId":"th-A","requestId":0,"delivered":true}}"#,
+            // Any other method under the prefix, id-bearing this time.
+            r#"{"id":0,"method":"codeconnect/anythingElse","params":{"threadId":"th-A"}}"#,
+        ] {
+            let arb = Arc::new(ResponseArbiter::new());
+            let mut leg = LegCapabilities::new(arb, silent());
+            assert!(
+                matches!(
+                    leg.observe_server_frame(&no_session(), forged),
+                    S2cDisposition::CloseLeg(_)
+                ),
+                "an upstream frame in the reserved namespace must close the leg: {forged}"
+            );
+            assert!(leg.is_poisoned(), "and nothing on it may authorize again");
+        }
+    }
+
+    /// The one frame the broker composes lives inside the prefix the gate defends. If
+    /// these two ever drift apart the gate stops guarding the thing it exists for.
+    #[test]
+    fn the_composed_frame_lives_inside_the_reserved_namespace() {
+        assert!(
+            crate::relay::RESPONSE_DISPOSITION.starts_with(crate::relay::CODECONNECT_NAMESPACE),
+            "the disposition method must sit under the namespace the s2c gate reserves"
+        );
+    }
+
+    /// **The loser can name the winner — and a leg that can name nothing names no
+    /// winner either.**
+    ///
+    /// The losing consume leaves the binding in place, which is what lets the losing leg
+    /// rebuild the slot key it raced for and ask the arbiter who took it. A poisoned leg
+    /// is the counterweight: no id on it resolves to a request it can truthfully speak
+    /// about, so it reports no winner rather than one read out of a view it no longer
+    /// trusts — the same discipline `bound_thread` and `authorize` already keep.
+    ///
+    /// **Mutation:** drop the poison gate in `recorded_winner` and a leg whose whole view
+    /// is untrustworthy still names an answerer.
+    #[test]
+    fn the_losing_leg_names_the_winner_and_a_poisoned_leg_names_none() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut ccd = LegCapabilities::new(Arc::clone(&arb), silent());
+        let mut tui = LegCapabilities::new(Arc::clone(&arb), silent());
+        let solicits = approval_frame(COMMAND_EXEC_APPROVAL, "th-A", 0);
+        ccd.observe_server_frame(&no_session(), &solicits);
+        tui.observe_server_frame(&no_session(), &solicits);
+
+        // Nothing has answered yet, so there is nobody to name.
+        assert_eq!(ccd.recorded_winner(&RequestId::Int(0)), None);
+        // The keyboard takes the slot; the phone lost it and can say so — but only once
+        // the keyboard's write is proven. A reservation still in flight names nobody,
+        // which is what stops a phone being told "the Mac answered" about a write that
+        // may yet fail.
+        assert!(tui.authorize(Role::Tui, &RequestId::Int(0), false));
+        assert!(!ccd.authorize(Role::Ccd, &RequestId::Int(0), false));
+        assert_eq!(
+            ccd.recorded_winner(&RequestId::Int(0)),
+            None,
+            "the keyboard's bytes are still in flight"
+        );
+        tui.confirm_write(Role::Tui, &RequestId::Int(0));
+        assert_eq!(ccd.recorded_winner(&RequestId::Int(0)), Some(Role::Tui));
+        // An id this leg never observed resolves to no slot to ask after.
+        assert_eq!(ccd.recorded_winner(&RequestId::Int(99)), None);
+
+        ccd.poison("an unclassifiable frame");
+        assert_eq!(
+            ccd.recorded_winner(&RequestId::Int(0)),
+            None,
+            "a leg that can name no thread can name no winner either"
+        );
     }
 
     /// **A dispatch does not outlive its turn.**
@@ -2036,13 +2440,23 @@ mod tests {
         {
             let mut w = arb.winners.lock().unwrap();
             for i in 0..MAX_WINNERS as i64 {
-                w.insert(key("saturate", i, GENERATION_UNSTAMPED), Role::Tui);
+                w.insert(
+                    key("saturate", i, GENERATION_UNSTAMPED),
+                    SlotState::Confirmed(Role::Tui),
+                );
             }
         }
         assert_eq!(
             arb.consume(&key("fresh", 0, GENERATION_UNSTAMPED), Role::Ccd),
             Consume::Lost,
             "a saturated arbiter fails closed on a new key"
+        );
+        // …and it has no winner to name, so the disposition omits the field rather than
+        // inventing an answerer. See `ResponseArbiter::consume`.
+        assert_eq!(
+            arb.winner(&key("fresh", 0, GENERATION_UNSTAMPED)),
+            None,
+            "saturation records no winner, so there is nothing to report"
         );
     }
 

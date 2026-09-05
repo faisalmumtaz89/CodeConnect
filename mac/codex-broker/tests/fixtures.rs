@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use codex_broker::message::{classify_shape, Shape, WsPayload};
 use codex_broker::relay::Broker;
-use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory};
+use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory, UpstreamWrite};
 use codex_broker::LaunchFingerprint;
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -78,7 +78,7 @@ impl UpstreamFactory for FakeFactory {
     fn connect(&self) -> ConnectFuture {
         let scripted: Vec<Message> = std::mem::take(&mut *self.inner.scripted.lock().unwrap());
         Box::pin(async move {
-            let (to_tx, mut to_rx) = tokio::sync::mpsc::channel::<Message>(256);
+            let (to_tx, mut to_rx) = tokio::sync::mpsc::channel::<UpstreamWrite>(256);
             let (from_tx, from_rx) = tokio::sync::mpsc::channel::<Message>(256);
             tokio::spawn(async move {
                 for m in scripted {
@@ -86,12 +86,18 @@ impl UpstreamFactory for FakeFactory {
                         return;
                     }
                 }
-                while to_rx.recv().await.is_some() {}
+                while let Some(write) = to_rx.recv().await {
+                    if let Some(ack) = write.ack {
+                        let _ = ack.send(true);
+                    }
+                }
                 drop(from_tx);
             });
             Ok(UpstreamChannels {
                 to_upstream: to_tx,
                 from_upstream: from_rx,
+                // The scripted drain ends when the channel closes; there is no pump.
+                pump: None,
             })
         })
     }

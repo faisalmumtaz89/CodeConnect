@@ -29,7 +29,9 @@
 #     back unconditionally — which is also exactly why a version fence could
 #     never have protected anything, and why the isolation does not rest on one.
 #     It rests on the table name: v0.6.0 contains no statement that names
-#     `codex_sessions` and none that names `codex_pending_approvals` — and, for
+#     `codex_sessions`, none that names `codex_pending_approvals` and none that
+#     names `mutation_ledger` — the generalized Codex mutation ledger a phone
+#     answer claims in — and, for
 #     the two paths that could still have put Codex state into the tables it DOES
 #     name, on the `sessions_refuse_codex_shadow` and
 #     `pending_approvals_refuse_codex_card` triggers, which live in the schema and
@@ -318,12 +320,13 @@ run "$NEW" new1
 assert_uv 5 "after new migrate"
 assert_seam_columns_exist "after new migrate"
 for object in codex_sessions all_sessions codex_pending_approvals all_pending_approvals \
-              pending_approvals_refuse_codex_card; do
+              pending_approvals_refuse_codex_card mutation_ledger; do
   [ "$(q "SELECT COUNT(*) FROM sqlite_master WHERE name='$object';")" = "1" ] \
     || { echo "FAIL: $object was not built by the new binary"; exit 1; }
 done
 echo "  agent-scoped storage built: codex_sessions, all_sessions, codex_pending_approvals,"
-echo "                              all_pending_approvals, pending_approvals_refuse_codex_card"
+echo "                              all_pending_approvals, pending_approvals_refuse_codex_card,"
+echo "                              mutation_ledger"
 
 echo "== 2) seed a live Claude session + a device, with PROBE values in every seam column =="
 # A raw insert (not registration) so we can put a distinct value in each seam
@@ -369,9 +372,30 @@ q "INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,ge
 [ "$(q "SELECT COUNT(*) FROM all_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
   || { echo "FAIL: all_pending_approvals does not see the scoped card"; exit 1; }
 
+# The ANSWER to that card, in the generalized Codex mutation ledger Phase 1
+# built for exactly this ("answer, compose, interrupt"). `answers` and
+# `answer_claims` are two more of the four tables v0.6.0 reads globally — its
+# recovery sweeps `answer_claims` into `answers` without walking a session row —
+# so a Codex claim in either is a row the old daemon would settle as its own, for
+# a run it cannot see and a pane that does not exist. `mutation_ledger` is a
+# table it has never heard of, which is the same isolation the card gets and for
+# the same reason.
+#
+# Seeded TERMINAL (`indeterminate`), and deliberately so: this row has to be
+# byte-identical at the end of the round trip, and a live `applying` claim is one
+# the NEW daemon is supposed to settle at its next start. Terminal-beside-an-open-
+# card is also a real state rather than a contrivance — it is what a request the
+# app-server re-delivered after a bounce looks like: the server really is still
+# waiting, the keyboard can still answer, and the phone is refused by the ledger.
+# The live-claim recovery is proven on its own, in its own home, at (6b).
+q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
+   VALUES('answer','$CX','$CX_REQ','h','$CX_THREAD',7,'accept','$CX_TURN','indeterminate',NULL,'2026-09-05T00:00:00.000Z','2026-09-05T00:00:01.000Z');"
+[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "1" ] \
+  || { echo "FAIL: the Codex answer seed did not land"; exit 1; }
+
 # The complete durable Codex state, hashed. Anything the old daemon or the old
 # CLI touches changes this — the run, its events, AND its open cards.
-codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid='$CX' ORDER BY seq; SELECT * FROM codex_pending_approvals ORDER BY request_id;"; }
+codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid='$CX' ORDER BY seq; SELECT * FROM codex_pending_approvals ORDER BY request_id; SELECT * FROM mutation_ledger ORDER BY client_request_id;"; }
 [ -n "$(codex_state)" ] || { echo "FAIL: the Codex seed did not land"; exit 1; }
 echo "  seeded: codex_sessions=$(q 'SELECT COUNT(*) FROM codex_sessions;') codex events=$(q "SELECT COUNT(*) FROM events WHERE session_uid='$CX';") lifecycle=$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$CX';")"
 
@@ -573,19 +597,29 @@ q3 "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,c
     INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,generation,created_ms,thread_id,turn_id,item_id,family)
     VALUES('$CX','cx-1','$CX_REQ','{}',7,1787016966352,'$CX_THREAD','$CX_TURN','$CX_ITEM','commandExecution');
     INSERT INTO answer_claims(session_uid,session_id,request_id,payload_hash,decision,started_at)
-    VALUES('$CX','cx-1','$CX_REQ','h','\"allow\"','2026-08-28T00:00:00.000Z');"
+    VALUES('$CX','cx-1','$CX_REQ','h','\"allow\"','2026-08-28T00:00:00.000Z');
+    INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
+    VALUES('answer','$CX','$CX_REQ','h','$CX_THREAD',7,'accept','$CX_TURN','applying',NULL,'2026-08-28T00:00:00.000Z',NULL);"
 [ "$(q3 "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")" = "1" ] \
   && [ "$(q3 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
   && [ "$(q3 "SELECT COUNT(*) FROM answer_claims WHERE session_uid='$CX';")" = "1" ] \
+  && [ "$(q3 "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "1" ] \
   || { echo "FAIL: the (5b) staging did not land, so it would prove nothing"; exit 1; }
-echo "  (5b) staged: the IDENTICAL card in BOTH tables, plus the claim v0.6.0 walks"
+echo "  (5b) staged: the IDENTICAL card in BOTH tables, the claim v0.6.0 walks, and the"
+echo "       Codex answer claim beside it in mutation_ledger"
 
 run_at "$OLD" old-sharedcard "$H3"
 SHARED_CARD_LEFT="$(q3 "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")"
 SHARED_CLAIM_LEFT="$(q3 "SELECT COUNT(*) FROM answer_claims WHERE session_uid='$CX';")"
 SCOPED_CARD_LEFT="$(q3 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")"
+# `AND status='applying'` is the whole assertion, not decoration: a v0.6.0 that DID
+# reach this row and rewrote its status in place would leave COUNT(*) at 1 and pass a
+# bare count. The claim is that the row is untouched, so the count has to be of rows
+# that are still exactly as they were staged.
+SCOPED_ANSWER_LEFT="$(q3 "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX' AND status='applying';")"
 echo "  (5b) MEASURED against the real v0.6.0: shared_card_left=$SHARED_CARD_LEFT"
 echo "       claim_left=$SHARED_CLAIM_LEFT scoped_card_left=$SCOPED_CARD_LEFT"
+echo "       scoped_answer_left=$SCOPED_ANSWER_LEFT"
 # The harm, measured rather than asserted from a comment: v0.6.0's recovery
 # walks `answer_claims` globally, records the claim as indeterminate, and
 # DELETES the pending card — for a run it has no other way of seeing. It cannot
@@ -601,6 +635,11 @@ echo "       claim_left=$SHARED_CLAIM_LEFT scoped_card_left=$SCOPED_CARD_LEFT"
 # the scoped copy of the very same card.
 [ "$SCOPED_CARD_LEFT" = "1" ] \
   || { echo "FAIL: v0.6.0 reached codex_pending_approvals, which it cannot name"; exit 1; }
+# And neither could it reach the ANSWER to that card. The claim one table over,
+# in `answer_claims`, is the one it just destroyed — same run, same request id,
+# same daemon, same second.
+[ "$SCOPED_ANSWER_LEFT" = "1" ] \
+  || { echo "FAIL: v0.6.0 reached mutation_ledger, which it cannot name"; exit 1; }
 grep -qiE "$(codex_identifiers)" "$H3/old-sharedcard.log" \
   && { echo "FAIL: (5b) the old daemon named Codex state in its log"; exit 1; } || true
 echo "  (5b) THE HARM REPRODUCED: v0.6.0 recorded the Codex claim as indeterminate and"
@@ -623,7 +662,75 @@ assert_uv 5 "after the final new reopen"
   || { echo "FAIL: the open Codex card did not survive the whole round trip"; exit 1; }
 [ "$(q "SELECT COUNT(*) FROM pending_approvals WHERE session_uid='$CX';")" = "0" ] \
   || { echo "FAIL: a Codex card leaked into the shared table on the way back up"; exit 1; }
-echo "  the Codex run and its open card survived new -> old -> new -> old + real prune -> new"
+[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX' AND status='indeterminate';")" = "1" ] \
+  || { echo "FAIL: the terminal Codex answer did not survive the whole round trip"; exit 1; }
+[ "$(q "SELECT COUNT(*) FROM answer_claims WHERE session_uid='$CX';")" = "0" ] \
+  || { echo "FAIL: a Codex answer leaked into the shared claim table on the way back up"; exit 1; }
+[ "$(q "SELECT COUNT(*) FROM answers WHERE session_uid='$CX';")" = "0" ] \
+  || { echo "FAIL: a Codex outcome leaked into the shared answers table"; exit 1; }
+echo "  the Codex run, its open card and its terminal answer survived"
+echo "  new -> old -> new -> old + real prune -> new"
+
+echo "== 6b) a LIVE answer claim, recovered by the new binary the way a restart does =="
+# Step 6 proves a TERMINAL answer claim survives the round trip untouched. This
+# proves the other half: an `applying` claim — a phone answer this daemon was in
+# the middle of writing when it stopped — is made terminal at the next start, its
+# card is retired with it, and neither half lands in a table v0.6.0 can reach.
+#
+# **On a home of its own, and rebuilt from scratch**, for (5b)'s reason: `$H` has
+# been through two old-daemon windows and a real prune, and a recovery measured on
+# top of all that would be measuring all of it. Here the only thing that has ever
+# touched the database is the binary under test.
+#
+# The card is seeded as a DECODABLE `ApprovalCard`, unlike (5b)'s `{}` placeholder.
+# That is load-bearing rather than tidy: recovery restores the cards into memory
+# first and retirement claims one by removing it from that map, so a card the
+# restore had to drop would make the retire find nothing and hide the very
+# ordering this step exists to check.
+H4="$H.livedanswer"
+mkdir -p "$H4"
+sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 2))/" "$H/config.json" > "$H4/config.json"
+run_at "$NEW" new-livedanswer-build "$H4"
+q4() { sqlite3 "$H4/events.db" "$1"; }
+[ "$(q4 'PRAGMA user_version;')" = "5" ] || { echo "FAIL: (6b) staging home is not at v5"; exit 1; }
+CARD_JSON='{"request_id":"'"$CX_REQ"'","payload_hash":"h","tool_name":"Bash","tool_input":{"command":"touch /tmp/a"},"display_text":"touch /tmp/a","generation":7,"identity_bound":false}'
+q4 "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+    VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex','live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
+    INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,generation,created_ms,thread_id,turn_id,item_id,family)
+    VALUES('$CX','cx-1','$CX_REQ','$CARD_JSON',7,1787016966352,'$CX_THREAD','$CX_TURN','$CX_ITEM','commandExecution');
+    INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
+    VALUES('answer','$CX','$CX_REQ','h','$CX_THREAD',7,'accept','$CX_TURN','applying',NULL,'2026-08-28T00:00:00.000Z',NULL);"
+[ "$(q4 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
+  && [ "$(q4 "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX' AND status='applying';")" = "1" ] \
+  || { echo "FAIL: the (6b) staging did not land, so it would prove nothing"; exit 1; }
+echo "  (6b) staged: an open Codex card and the live answer claim a kill would leave"
+
+run_at "$NEW" new-livedanswer "$H4"
+LIVE_CARD_LEFT="$(q4 "SELECT COUNT(*) FROM codex_pending_approvals WHERE session_uid='$CX';")"
+LIVE_CLAIM_STATUS="$(q4 "SELECT status FROM mutation_ledger WHERE session_uid='$CX' AND client_request_id='$CX_REQ';")"
+LIVE_RESOLVED="$(q4 "SELECT COUNT(*) FROM events WHERE session_uid='$CX' AND kind='approval_resolved';")"
+LIVE_SHARED_ANSWERS="$(q4 "SELECT COUNT(*) FROM answers WHERE session_uid='$CX';")"
+echo "  (6b) MEASURED: card_left=$LIVE_CARD_LEFT claim_status=$LIVE_CLAIM_STATUS"
+echo "       resolutions=$LIVE_RESOLVED shared_answers=$LIVE_SHARED_ANSWERS"
+[ "$LIVE_CARD_LEFT" = "0" ] \
+  || { echo "FAIL: (6b) the card outlived its own answer, so every future tap refuses it"; exit 1; }
+[ "$LIVE_CLAIM_STATUS" = "indeterminate" ] \
+  || { echo "FAIL: (6b) a claim nothing settled must be terminal, or the answer is sent twice"; exit 1; }
+[ "$LIVE_RESOLVED" = "1" ] \
+  || { echo "FAIL: (6b) the card was retired with no terminal anybody can read"; exit 1; }
+[ "$LIVE_SHARED_ANSWERS" = "0" ] \
+  || { echo "FAIL: (6b) a Codex recovery wrote the shared answers table"; exit 1; }
+# A real assertion, not a no-op. `grep -q` prints nothing and `|| true` swallowed its
+# status, so this line could neither pass nor fail — it measured nothing while looking
+# like the arm-5b check it was copied from. Here the NEW daemon is the one running, and
+# it is entitled to name Codex state in its own log; what it must not do is stay silent
+# about a recovery it performed, because a silent recovery is one an operator cannot
+# audit. So the direction is inverted from 5b's: a hit is required.
+grep -qiE "$(codex_identifiers)" "$H4/new-livedanswer.log" \
+  || { echo "FAIL: (6b) the new daemon recovered a Codex answer and said nothing about it in its log"; exit 1; }
+echo "  (6b) the card is retired, the claim is terminal, the resolution is filed, and"
+echo "       nothing v0.6.0 can read was written"
+rm -rf "$H4"
 
 echo "== 7) THE PRODUCER, and the two guards that close it — real binaries throughout =="
 # Everything above proves the old binary cannot reach a Codex row *that stays in

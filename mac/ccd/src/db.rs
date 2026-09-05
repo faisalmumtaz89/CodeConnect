@@ -280,20 +280,100 @@ impl Db {
             .await
     }
 
-    /// Delete one Codex card **and** file its resolution, in one commit. The
-    /// pair is the terminal: a card whose row outlived its own resolution is
-    /// restored by recovery, and a resolution with no delete is a card that
-    /// comes back.
+    /// Delete one Codex card, file its resolution **and** close any phone answer
+    /// claim on it, in one commit. The set is the terminal: a card whose row
+    /// outlived its own resolution is restored by recovery, a resolution with no
+    /// delete is a card that comes back, and a settled claim over a standing card
+    /// is a question nobody can answer again.
     pub async fn retire_codex_pending_approval(
         &self,
         session_uid: String,
         request_id: String,
         pending: PendingEvent,
+        answer: Option<crate::store::AnswerTerminal>,
     ) -> Result<Option<Event>> {
         self.run(move |store| {
-            store.retire_codex_pending_approval(&session_uid, &request_id, &pending)
+            store.retire_codex_pending_approval(&session_uid, &request_id, &pending, answer)
         })
         .await
+    }
+
+    /// Take the one durable claim on answering a Codex card, in the generalized
+    /// mutation ledger every Codex mutation shares.
+    pub async fn claim_answer_mutation(
+        &self,
+        session_uid: String,
+        request_id: String,
+        claimed: crate::store::ClaimedMaterial,
+        now: String,
+    ) -> Result<crate::store::MutationClaim> {
+        self.run(move |store| {
+            store.claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                &claimed,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Record an answer's terminal outcome for a card that is not being retired —
+    /// a loss, where something else answered and its own terminal retires the
+    /// card. `false` when the claim was already terminal.
+    pub async fn settle_answer_mutation(
+        &self,
+        session_uid: String,
+        request_id: String,
+        outcome: &'static str,
+        now: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                outcome,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Make one answer claim terminal without being able to say what it did.
+    /// Reached only for a claim whose card is already gone; one that still has a
+    /// card is settled inside the retirement's own transaction.
+    pub async fn settle_answer_indeterminate(
+        &self,
+        session_uid: String,
+        request_id: String,
+        now: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation_indeterminate(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Where one phone answer's claim stands, durably.
+    pub async fn answer_status(
+        &self,
+        session_uid: String,
+        request_id: String,
+    ) -> Result<Option<crate::store::AnswerStatus>> {
+        self.run(move |store| store.answer_status(&session_uid, &request_id))
+            .await
+    }
+
+    /// Every phone answer this daemon left mid-flight, for recovery.
+    pub async fn unsettled_answer_claims(&self) -> Result<Vec<crate::store::AnswerClaimRow>> {
+        self.run(|store| store.unsettled_answer_claims()).await
     }
 
     pub async fn claim_text_mutation(

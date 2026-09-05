@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use codex_broker::relay::Broker;
-use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory};
+use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory, UpstreamWrite};
 use codex_broker::{LaunchFingerprint, COMMAND_EXEC_APPROVAL};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,28 @@ struct FakeState {
     /// deliberately kept alive (its sender is parked in `parked_senders`), because a closed
     /// read side would close the leg before any client message was even classified.
     dead_upstreams: Mutex<VecDeque<bool>>,
+    /// One flag per upstream connection, popped front-first: `true` makes that
+    /// connection's drain **discard** every admitted c2s message instead of writing it.
+    /// This is the fake's model of a write that was handed off successfully and then
+    /// failed at the socket: the channel accepted it, and zero bytes reached the
+    /// app-server. The message is dropped whole — nothing acknowledges it — which is
+    /// exactly what a leg awaiting proof of its write observes when the pump dies
+    /// mid-write.
+    discard_upstreams: Mutex<VecDeque<bool>>,
+    /// One flag per upstream connection, popped front-first: `true` makes that
+    /// connection's drain answer every acknowledged write `false` — the receipt the real
+    /// [`codex_broker::upstream::pump`] sends when `sink.send` returned `Err`. Nothing is
+    /// recorded, because nothing was written.
+    ///
+    /// This is the **proven** failure, and it is a different fact from
+    /// [`FakeState::discard_upstreams`]: there the ack sender is dropped, which proves
+    /// only that nobody can say. The two produce different dispositions and the tests
+    /// below hold them apart.
+    ///
+    /// The fake keeps draining afterwards. Production's pump ends its outbound half on a
+    /// failed send and the leg follows the upstream down; that teardown is the pump's own
+    /// behaviour and is tested in `upstream.rs`. What this models is the one write.
+    failed_writes: Mutex<VecDeque<bool>>,
     /// Keeps the s2c senders of dead-write upstreams alive for the life of the test.
     parked_senders: Mutex<Vec<tokio::sync::mpsc::Sender<Message>>>,
 }
@@ -76,17 +98,42 @@ impl UpstreamFactory for FakeFactory {
             .unwrap()
             .pop_front()
             .unwrap_or(false);
+        let discard_writes = self
+            .inner
+            .discard_upstreams
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(false);
+        let failed_writes = self
+            .inner
+            .failed_writes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(false);
         Box::pin(async move {
-            let (to_tx, mut to_rx) = tokio::sync::mpsc::channel::<Message>(64);
+            let (to_tx, mut to_rx) = tokio::sync::mpsc::channel::<UpstreamWrite>(64);
             let (from_tx, from_rx) = tokio::sync::mpsc::channel::<Message>(64);
             if dead_write {
                 // Write side dead on arrival; read side parked open so the leg is not closed
                 // by an upstream EOF before the client's first message is classified.
                 drop(to_rx);
+                // The script still plays. A leg whose write side is dead is exactly the leg
+                // that must be able to hold a capability first — the s2c approval is what
+                // gives it one — so that the answer it then fails to hand over is an answer
+                // the arbiter had reserved a slot for. Without this the fault is only ever
+                // reachable by a leg that had nothing to lose.
+                for m in scripted {
+                    if from_tx.send(m).await.is_err() {
+                        break;
+                    }
+                }
                 recorded.parked_senders.lock().unwrap().push(from_tx);
                 return Ok(UpstreamChannels {
                     to_upstream: to_tx,
                     from_upstream: from_rx,
+                    pump: None,
                 });
             }
             tokio::spawn(async move {
@@ -97,7 +144,25 @@ impl UpstreamFactory for FakeFactory {
                 }
                 // Hold from_tx open by keeping it in scope while draining client traffic.
                 while let Some(m) = to_rx.recv().await {
-                    if let Message::Text(t) = m {
+                    if discard_writes {
+                        // Taken off the channel and thrown away: zero bytes reached the
+                        // app-server, and the message is dropped whole rather than written
+                        // or acknowledged.
+                        drop(m);
+                        continue;
+                    }
+                    if failed_writes {
+                        // The write was attempted and the socket refused it: the pump
+                        // answers `false`. Nothing is recorded, because nothing went out.
+                        if let Some(ack) = m.ack {
+                            let _ = ack.send(false);
+                        }
+                        continue;
+                    }
+                    // The fake IS the pump: it writes the message, then acknowledges the
+                    // write. Recording it is this harness's stand-in for the bytes
+                    // reaching the app-server.
+                    if let Message::Text(t) = m.msg {
                         // Answer the FIRST matching trigger, once (a real app-server answers
                         // each request exactly once).
                         if let Some(i) = replies.iter().position(|(trig, _)| t.contains(trig)) {
@@ -108,12 +173,87 @@ impl UpstreamFactory for FakeFactory {
                         }
                         recorded.recorded.lock().unwrap().push(t);
                     }
+                    if let Some(ack) = m.ack {
+                        let _ = ack.send(true);
+                    }
                 }
                 drop(from_tx);
             });
             Ok(UpstreamChannels {
                 to_upstream: to_tx,
                 from_upstream: from_rx,
+                // The scripted drain ends when the channel closes; there is no pump.
+                pump: None,
+            })
+        })
+    }
+}
+
+/// **The PRODUCTION pump, over a transport that takes the approval and then never reads
+/// again.**
+///
+/// Every other test in this file drives [`FakeFactory`], which stands in for the pump: it
+/// takes an [`UpstreamWrite`] off the channel and answers the receipt itself, so
+/// `codex_broker::upstream::pump` and its real `sink.send` are never executed. That is
+/// exactly the seam that matters: the bound the broker needs is a bound on a `sink.send`
+/// parked against a socket that has stopped draining, and no fake can produce one.
+///
+/// So this factory builds the real thing. A `tokio::io::duplex(1)` gives a one-byte pipe;
+/// the near half is handed to the production `pump`, the far half is a WebSocket that
+/// SENDS the scripted approval (so the leg has a capability to answer) and is then parked
+/// without ever reading. The first answer the relay forwards therefore blocks inside
+/// `sink.send` for ever, which is the fault.
+///
+/// `queue` is the capacity of the c2s channel in front of that parked pump — production's
+/// is 64. Narrowing it to one is how a test reaches the *second* fault on the same path:
+/// a queue that is full while the pump is stuck, so the answer cannot even be handed over.
+struct StalledUpstreamFactory {
+    /// The far ends, kept alive so the writes block instead of erroring.
+    parked: Arc<Mutex<Vec<WebSocketStream<tokio::io::DuplexStream>>>>,
+    queue: usize,
+}
+
+impl Default for StalledUpstreamFactory {
+    fn default() -> Self {
+        Self {
+            parked: Arc::default(),
+            queue: 64,
+        }
+    }
+}
+
+impl HarnessFactory for StalledUpstreamFactory {
+    type Fac = StalledUpstreamFactory;
+    fn build(self, _state: &Arc<FakeState>) -> StalledUpstreamFactory {
+        self
+    }
+}
+
+impl UpstreamFactory for StalledUpstreamFactory {
+    fn connect(&self) -> ConnectFuture {
+        let parked = Arc::clone(&self.parked);
+        let queue = self.queue;
+        Box::pin(async move {
+            use tokio_tungstenite::tungstenite::protocol::Role as WsRole;
+            let (near, far) = tokio::io::duplex(1);
+            let ws = WebSocketStream::from_raw_socket(near, WsRole::Client, None).await;
+            let mut peer = WebSocketStream::from_raw_socket(far, WsRole::Server, None).await;
+            let (to_tx, to_rx) = tokio::sync::mpsc::channel::<UpstreamWrite>(queue);
+            let (from_tx, from_rx) = tokio::sync::mpsc::channel::<Message>(64);
+            // The real pump, started the way `WsUdsUpstreamFactory` starts one — handle
+            // kept, so this leg's teardown ends it exactly as production's does.
+            let pump = codex_broker::upstream::spawn_pump(ws, to_rx, from_tx);
+            // One approval, so the leg holds a capability. Sent before the peer is parked;
+            // the pump's inbound half reads it, so this does not block.
+            peer.send(approval(COMMAND_EXEC_APPROVAL, "th-A", 0))
+                .await
+                .expect("the parked peer can still write");
+            // …and from here it reads nothing, ever.
+            parked.lock().unwrap().push(peer);
+            Ok(UpstreamChannels {
+                to_upstream: to_tx,
+                from_upstream: from_rx,
+                pump: Some(pump),
             })
         })
     }
@@ -161,6 +301,22 @@ impl Harness {
         self.state.dead_upstreams.lock().unwrap().push_back(dead);
     }
 
+    /// Make the **next** upstream connection accept every admitted message and write
+    /// none of it. See [`FakeState::discard_upstreams`].
+    fn push_discard_upstream(&self, discard: bool) {
+        self.state
+            .discard_upstreams
+            .lock()
+            .unwrap()
+            .push_back(discard);
+    }
+
+    /// Make the **next** upstream connection answer every acknowledged write `false` —
+    /// a write the socket provably refused. See [`FakeState::failed_writes`].
+    fn push_failed_write(&self, failed: bool) {
+        self.state.failed_writes.lock().unwrap().push_back(failed);
+    }
+
     fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
     }
@@ -176,7 +332,49 @@ fn start_broker_with_events() -> Harness {
     start_broker_inner(true)
 }
 
+/// A broker whose upstream is the **production pump** over a transport that never
+/// reads, with a short write budget so the bound can be watched expiring.
+fn start_broker_stalled(budget: Duration) -> Harness {
+    start_broker_with(false, Some(budget), StalledUpstreamFactory::default())
+}
+
+/// The same, with the c2s queue in front of the parked pump narrowed to `queue` slots,
+/// so a test can fill it and reach the hand-off itself.
+fn start_broker_stalled_behind_a_full_queue(budget: Duration, queue: usize) -> Harness {
+    start_broker_with(
+        false,
+        Some(budget),
+        StalledUpstreamFactory {
+            queue,
+            ..Default::default()
+        },
+    )
+}
+
 fn start_broker_inner(record_events: bool) -> Harness {
+    start_broker_with(record_events, None, ())
+}
+
+/// What a harness needs from the factory it is built over.
+trait HarnessFactory {
+    type Fac: UpstreamFactory;
+    fn build(self, state: &Arc<FakeState>) -> Self::Fac;
+}
+
+impl HarnessFactory for () {
+    type Fac = FakeFactory;
+    fn build(self, state: &Arc<FakeState>) -> FakeFactory {
+        FakeFactory {
+            inner: Arc::clone(state),
+        }
+    }
+}
+
+fn start_broker_with<H: HarnessFactory>(
+    record_events: bool,
+    budget: Option<Duration>,
+    which: H,
+) -> Harness {
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
@@ -188,11 +386,12 @@ fn start_broker_inner(record_events: bool) -> Harness {
     let _ = std::fs::remove_file(&ccd_sock);
 
     let state = Arc::new(FakeState::default());
-    let factory = FakeFactory {
-        inner: Arc::clone(&state),
-    };
+    let factory = which.build(&state);
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint(), factory);
+    if let Some(budget) = budget {
+        broker = broker.with_upstream_write_budget(budget);
+    }
     if record_events {
         let sink = Arc::clone(&events);
         broker = broker.with_event_sink(Arc::new(move |line: &str| {
@@ -235,6 +434,21 @@ async fn recorded_after(state: &Arc<FakeState>, want: usize) -> Vec<String> {
     state.recorded.lock().unwrap().clone()
 }
 
+/// Wait, bounded, for an audit line containing `needle`. Returns whether it appeared.
+///
+/// The confirmation of a write happens on the winning leg's own task, after its receipt
+/// resolves. A test that needs the arbiter to be in its post-write state waits for the
+/// line rather than for a duration.
+async fn event_containing(h: &Harness, needle: &str) -> bool {
+    for _ in 0..200 {
+        if h.events().iter().any(|e| e.contains(needle)) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
 /// Give the broker a beat to process a message that it must NOT forward.
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -250,6 +464,22 @@ async fn next_frame(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
         .expect("stream closed")
         .expect("ws error");
     serde_json::from_str(msg.to_text().unwrap()).unwrap()
+}
+
+/// Read whatever a leg still has for us, then say whether it was closed.
+///
+/// Bounded: a leg that is neither closed nor talking within the window is reported as
+/// still open rather than hanging the suite, so a test asserting a close fails with
+/// what it saw instead of timing out.
+async fn frames_until_closed(ws: &mut WebSocketStream<UnixStream>) -> (Vec<String>, bool) {
+    let mut seen = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+            Err(_) => return (seen, false),
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return (seen, true),
+            Ok(Some(Ok(m))) => seen.push(m.to_text().unwrap_or_default().to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1992,6 +2222,638 @@ async fn duplicate_response_on_same_leg_is_one_use() {
     let rec = h.state.recorded.lock().unwrap().clone();
     assert_eq!(rec.len(), 1, "duplicate answer forwards zero bytes");
     assert!(!rec.iter().any(|m| m.contains(r#""by":"second""#)));
+}
+
+/// **The winner is told, in the shape a reader can file.**
+///
+/// A `ccd` leg that answers an approval cannot otherwise observe whether its bytes
+/// went upstream: the arbiter forwards one sibling and drops the rest with no reply
+/// and no close. Measured on real 0.153 (`measure_a_ccd_leg_answering_a_command_approval`,
+/// `measure_what_a_losing_ccd_response_is_told`): the winner's command ran and the
+/// loser received zero frames. This is the frame that tells the two apart.
+///
+/// **Mutation:** drop the `if let Some(id) = answered` block at the end of
+/// `handle_text` and the disposition never arrives, so the daemon can only ever
+/// record a phone answer as unknown.
+#[tokio::test]
+async fn a_ccd_answer_that_forwards_is_told_it_was_delivered() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(
+        rec.len(),
+        1,
+        "the winning answer forwards its original bytes"
+    );
+
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(true));
+    // Named the way the reader files its cards: the bare id alone identifies the
+    // request only on this connection.
+    assert_eq!(told["params"]["threadId"], "th-A");
+    assert_eq!(told["params"]["requestId"], serde_json::json!(0));
+}
+
+/// **And so is the loser, with the opposite bit.**
+///
+/// The TUI answers first, so the `ccd` sibling forwards zero bytes. `delivered:false`
+/// is a statement about bytes, and it is what lets a daemon report an answer that
+/// provably never left as not-taken rather than as unknown.
+///
+/// **Mutation:** compute `delivered` from anything other than the `Forward` action —
+/// e.g. hard-code `true` — and the losing leg is told its answer landed, which is the
+/// one lie this frame exists to prevent.
+#[tokio::test]
+async fn a_ccd_answer_that_loses_the_race_is_told_it_was_not_delivered() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains(r#""by":"keyboard""#));
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert!(
+        told["params"].get("cause").is_none(),
+        "a leg that never forwarded has no write of its own to explain: {told}"
+    );
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        1,
+        "the losing answer still forwards zero bytes"
+    );
+
+    // And the slot the keyboard CONFIRMED stays spent, for every leg including its own:
+    // an answer that actuated may never be sent a second time. This is the negative that
+    // makes the release in `a_write_the_socket_refused_releases_the_slot_for_the_keyboard`
+    // a statement about proven failure rather than a general re-opening.
+    tui.send(answer(0, "keyboard-again")).await.unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        1,
+        "a confirmed win is one-use, and stays one-use"
+    );
+}
+
+/// **`delivered:true` must mean the bytes were WRITTEN, not merely handed off.**
+///
+/// The forward path hands the answer to an in-process channel; the socket write
+/// happens later, in the upstream pump. A leg told `delivered:true` on the hand-off
+/// alone is told an answer landed whenever the pump dies between the two — and the
+/// daemon durably records a resolution that wrote zero bytes, which is the one claim
+/// this frame exists to make impossible.
+///
+/// The fake takes the message off the channel and throws it away without answering for
+/// it, which is what a pump that died mid-write looks like from the relay's side: the
+/// hand-off succeeded and no receipt ever came back. That is `unconfirmed` — see
+/// [`a_write_the_socket_refused_releases_the_slot_for_the_keyboard`] for the other,
+/// PROVEN failure, which is a different disposition and a different arbiter outcome.
+///
+/// **Mutation:** derive `delivered` from the `Forward` action instead of from the
+/// pump's acknowledgement, and this leg is told its answer landed when nothing
+/// acknowledged reaching the app-server.
+#[tokio::test]
+async fn a_ccd_answer_whose_upstream_write_never_completed_is_told_it_was_not_delivered() {
+    let h = start_broker();
+    h.push_discard_upstream(true);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["threadId"], "th-A");
+    assert_eq!(told["params"]["requestId"], serde_json::json!(0));
+    assert_eq!(
+        told["params"]["delivered"],
+        serde_json::json!(false),
+        "an answer the pump never wrote reached the app-server as zero bytes"
+    );
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "nothing was written upstream"
+    );
+}
+
+/// **A write the socket refused releases the slot: the keyboard can still answer.**
+///
+/// The arbiter used to record the winner at the moment a leg was *authorized*, before any
+/// I/O. That made "first authorization wins" the rule instead of "first successfully
+/// written answer wins": a phone answer that won arbitration and then failed its
+/// `ws.send` consumed the request for ever. Nobody had answered, so no
+/// `serverRequest/resolved` would ever follow — and the keyboard sitting in front of the
+/// same approval could no longer answer it either, because the slot was spent.
+///
+/// The reservation is therefore released on a **proven** failed send, and the disposition
+/// says why with `cause:"write_failed"` so the daemon can tell it from a lost race.
+///
+/// **Mutation:** record the winner in `consume` and never release it (an arbiter
+/// that confirms on authorization) and the keyboard's answer forwards zero bytes.
+#[tokio::test]
+async fn a_write_the_socket_refused_releases_the_slot_for_the_keyboard() {
+    let h = start_broker();
+    // The ccd leg connects first, so the failed-write upstream is its own.
+    h.push_failed_write(true);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["cause"], "write_failed",
+        "a refused write is reported as a refused write, not as a lost race: {told}"
+    );
+    assert!(
+        told["params"].get("winner").is_none(),
+        "nobody won, so no winner may be named: {told}"
+    );
+
+    // The whole point: the approval is still answerable.
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(
+        rec.len(),
+        1,
+        "the released slot must let the keyboard answer, saw {rec:?}"
+    );
+    assert!(rec[0].contains(r#""by":"keyboard""#), "{rec:?}");
+}
+
+/// **The hand-off is the OTHER place a write can be refused, and it releases the slot
+/// for the same reason.**
+///
+/// An admitted answer reaches the socket in two steps, and only the second one is a
+/// write. The first is the hand-off to the pump's channel, and when THAT fails the pump
+/// is already gone: the envelope was never taken off the queue, so it was never fed to
+/// `sink.send` at all. Zero bytes, and the failure itself is the proof — a stronger
+/// proof than the socket refusal that shares the `write_failed` word, which only says
+/// the write did not complete.
+///
+/// The leg is torn down either way, because its upstream is gone. The **session** is
+/// not: the arbiter is shared across legs, so a reservation left standing by a leg that
+/// provably wrote nothing spends the approval for the keyboard sitting in front of the
+/// same prompt — nobody answered, no `serverRequest/resolved` is coming, and the card
+/// can no longer be answered by anyone.
+///
+/// The creation rollback beside it has always drawn exactly this conclusion from exactly
+/// this failure ([`a_failed_upstream_send_rolls_the_creation_claim_back`]); the
+/// reservation is the second claim the same hand-off can leave behind.
+///
+/// **Mutation:** drop the release from the failed-hand-off arm and the keyboard's answer
+/// forwards zero bytes. Drop the disposition and this leg is told nothing at all about
+/// an answer whose fate is fully known.
+#[tokio::test]
+async fn a_write_the_channel_refused_releases_the_slot_for_the_keyboard() {
+    let h = start_broker();
+    // The ccd leg connects first, so the dead write side is its own.
+    h.push_dead_upstream(true); // ccd leg: the hand-off fails
+    h.push_dead_upstream(false); // tui leg: healthy
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["cause"], "write_failed",
+        "an envelope the pump's channel never took is a proven zero-byte write: {told}"
+    );
+    assert!(
+        told["params"].get("winner").is_none(),
+        "nobody won, so no winner may be named: {told}"
+    );
+
+    // The whole point: the approval is still answerable.
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(
+        rec.len(),
+        1,
+        "the released slot must let the keyboard answer, saw {rec:?}"
+    );
+    assert!(rec[0].contains(r#""by":"keyboard""#), "{rec:?}");
+}
+
+/// **A dropped receipt is unconfirmed, and unconfirmed is not released.**
+///
+/// The pump was cancelled or died between taking the message and answering for it. That
+/// proves only that this broker cannot say whether the bytes went out — tungstenite's
+/// `send` is a feed plus a flush, so a partial write is a real state. Releasing the slot
+/// on that would let a second answer actuate a command the first one may already have
+/// actuated, which is strictly worse than leaving the approval unanswerable.
+///
+/// So the reservation stands, the disposition says `cause:"unconfirmed"`, and the
+/// keyboard's later answer forwards zero bytes.
+///
+/// **Mutation:** release on a dropped receipt as well as on a proven failure, and the
+/// keyboard's answer forwards a second time.
+#[tokio::test]
+async fn a_dropped_receipt_is_unconfirmed_and_keeps_the_slot_consumed() {
+    let h = start_broker();
+    h.push_discard_upstream(true);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["cause"], "unconfirmed",
+        "a dropped receipt proves nothing about the bytes: {told}"
+    );
+    assert!(
+        told["params"].get("winner").is_none(),
+        "no winner is confirmed, so none is named: {told}"
+    );
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    settle().await;
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "an unconfirmed answer keeps the slot consumed: {:?}",
+        h.state.recorded.lock().unwrap()
+    );
+}
+
+/// **A confirmed win stays consumed, and the loser is told who won.**
+///
+/// The complement of the two above: when the winner's write really did complete, no
+/// later answer may forward, and the disposition names the confirmed winner rather than
+/// carrying a `cause`.
+///
+/// The loser's answer is sent only after the winner's confirmation is in the audit log,
+/// so the assertion is about the arbiter's state and not about task scheduling.
+///
+/// **Mutation:** name the winner from a reservation rather than from a confirmation and
+/// the second assertion below passes before the write has been proven.
+#[tokio::test]
+async fn a_confirmed_win_stays_consumed_and_names_its_winner() {
+    let h = start_broker_with_events();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let confirmed = event_containing(&h, "capability confirmed: winner=Tui").await;
+    assert!(
+        confirmed,
+        "the keyboard's write was never confirmed: {:?}",
+        h.events()
+    );
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(told["params"]["winner"], "tui", "{told}");
+    assert!(
+        told["params"].get("cause").is_none(),
+        "a lost race carries no write cause: {told}"
+    );
+
+    tui.send(answer(0, "keyboard-again")).await.unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        1,
+        "a confirmed slot is spent for every leg, including the winner's own"
+    );
+}
+
+/// **The acknowledged write is BOUNDED, and its expiry is session-fatal.**
+///
+/// Neither `sink.send` nor the receipt await had a deadline, and
+/// `handle_connection` awaits `handle_text` inline — so a `sink.send` parked on an
+/// app-server socket that had stopped draining parked the whole relay task with it. The
+/// leg could not notice its own client closing, could not read another frame, and the
+/// `ccd` daemon on the other end was left to run out its own 15-second
+/// `DISPOSITION_BUDGET` with the card still on somebody's phone.
+///
+/// This is the ONE test that runs the production `upstream::pump` — see
+/// [`StalledUpstreamFactory`] for why the ordinary fake cannot produce this fault at all.
+/// The write really enters `sink.send`, really blocks on a one-byte pipe nobody drains,
+/// and the broker's own bound is what ends it.
+///
+/// Two things are then required, and they are the whole contract:
+///
+///   * the daemon is TOLD, `cause:"unconfirmed"` — not proven-failed, because a write
+///     that entered `sink.send` may have been partly flushed, and not silence, because
+///     silence is what the daemon would have had to time out on.
+///   * the leg is CLOSED. A write this broker cannot account for means the upstream is no
+///     longer behaving like the app-server; tearing the leg down takes the upstream with
+///     it (its `to_upstream` sender drops, which ends the pump), which is the existing
+///     session-fatal contract for an upstream that has stopped being one.
+///
+/// **Mutation:** delete the `tokio::time::timeout` around the receipt in `handle_text`
+/// and this test hangs at `next_frame`'s own five-second bound — which is precisely the
+/// hang it exists to prove is gone.
+#[tokio::test]
+async fn an_upstream_write_that_never_completes_is_bounded_and_closes_the_leg() {
+    let h = start_broker_stalled(Duration::from_millis(300));
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["cause"], "unconfirmed",
+        "a write the broker gave up waiting for is unproven, not proven-failed: {told}"
+    );
+
+    let (seen, closed) = frames_until_closed(&mut ccd).await;
+    assert!(
+        seen.is_empty(),
+        "nothing follows the disposition on a leg being torn down: {seen:?}"
+    );
+    assert!(
+        closed,
+        "an upstream whose write cannot be accounted for is session-fatal"
+    );
+}
+
+/// **The budget has to start before the hand-off, because the hand-off is where a stuck
+/// pump is actually felt.**
+///
+/// A deadline that begins at the receipt measures only the second half of the answer's
+/// journey. The first half is `to_upstream.send`, and it waits: the channel in front of
+/// the pump is bounded, so a pump parked inside `sink.send` with a full queue behind it
+/// parks the answer BEFORE its timer starts. Nothing then expires, the disposition is
+/// never composed, and the leg — which awaits this inline — cannot read another frame or
+/// notice its own client leaving. That is the same stall the receipt bound closed, one
+/// step earlier on the same path, and it is reached by exactly the fault that makes the
+/// receipt bound necessary.
+///
+/// So the deadline covers the hand-off and the receipt together, as one budget for one
+/// answer. The staging is the production pump over a socket that stopped draining (see
+/// [`StalledUpstreamFactory`]) with its queue narrowed to a single slot: two allowlisted
+/// notifications, which wait for nothing, leave the pump blocked on the first and the
+/// second sitting on the queue with nowhere to go. The answer behind them cannot be
+/// handed over at all.
+///
+/// What is reported is `unconfirmed`, and that is the conservative reading rather than
+/// the tightest one. Cancelling the send does leave the envelope unqueued, but the
+/// budget is one budget: from outside, "the queue never took it" and "the pump never
+/// answered for it" are one expiry, and the outcome that is safe under both is the one
+/// that keeps the reservation. Releasing a slot for an answer that may have been written
+/// is how the same command gets actuated twice.
+///
+/// **Mutation:** start the deadline at the receipt again (bound only the receipt await)
+/// and this hangs at `next_frame`'s own five-second bound.
+#[tokio::test]
+async fn an_upstream_write_that_cannot_be_handed_over_is_bounded_and_closes_the_leg() {
+    let h = start_broker_stalled_behind_a_full_queue(Duration::from_millis(300), 1);
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    // The first is taken off the queue and blocks in `sink.send` for ever; the second
+    // fills the one slot behind it. Neither waits for a receipt, so both return.
+    for _ in 0..2 {
+        ccd.send(Message::Text(
+            r#"{"method":"initialized","params":{}}"#.into(),
+        ))
+        .await
+        .unwrap();
+        settle().await;
+    }
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["cause"], "unconfirmed",
+        "an answer the queue never took is unproven, not proven-failed: {told}"
+    );
+
+    let (seen, closed) = frames_until_closed(&mut ccd).await;
+    assert!(
+        seen.is_empty(),
+        "nothing follows the disposition on a leg being torn down: {seen:?}"
+    );
+    assert!(
+        closed,
+        "an upstream that cannot even take a message is session-fatal"
+    );
+}
+
+/// **The `codeconnect/` namespace is the broker's alone, and it is enforced at the
+/// origin.**
+///
+/// The s2c direction is otherwise an unconditional passthrough, so an app-server that
+/// emitted `codeconnect/responseDisposition` for a pending request would have its frame
+/// handed to the `ccd` leg verbatim — consumed as if this broker had said it, and the
+/// genuine disposition, arriving after, discarded as a duplicate. That inverts the one
+/// fact the leg cannot otherwise observe.
+///
+/// Dropping the frame silently would not be enough. This broker is the only author in
+/// that namespace, so a frame wearing it from upstream is not traffic to filter, it is
+/// evidence that the thing on the other end of the socket is not what this leg thinks
+/// it is — and nothing further on that leg can be trusted either. It follows the
+/// crate's existing rule for an s2c frame that cannot be trusted: poison the capability
+/// view and close.
+///
+/// **Mutation:** delete the namespace gate in `observe_server_frame` and the forgery is
+/// delivered to the leg, which then files it as this broker's own word.
+#[tokio::test]
+async fn an_upstream_frame_in_the_brokers_namespace_is_dropped_and_closes_the_leg() {
+    let h = start_broker();
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+        Message::Text(
+            r#"{"method":"codeconnect/responseDisposition","params":{"threadId":"th-A","requestId":0,"delivered":true}}"#
+                .into(),
+        ),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    // The approval proves the leg was alive and delivering right up to the forgery.
+    drain_approval(&mut ccd).await;
+
+    let (seen, closed) = frames_until_closed(&mut ccd).await;
+    assert!(
+        seen.is_empty(),
+        "an upstream frame wearing `codeconnect/` must never reach the leg, saw {seen:?}"
+    );
+    assert!(closed, "the leg must be closed, not left open");
+}
+
+/// **`delivered:false` alone does not say who answered, so the winner is named.**
+///
+/// A daemon that reads every `false` as "answered at the Mac" is telling the phone a
+/// story it made up: the loser may have lost to the keyboard, lost to a second phone,
+/// or never held the capability at all. The arbiter already knows which leg consumed
+/// the slot, so the loser is told the winner's ROLE and the daemon stops guessing.
+///
+/// **Mutation:** drop the `winner` field from the disposition and the daemon is back to
+/// inferring the answerer from a bare `false`.
+#[tokio::test]
+async fn a_losing_ccd_answer_names_the_keyboard_that_won() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1, "the keyboard's answer forwards");
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition");
+    assert_eq!(told["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        told["params"]["winner"], "tui",
+        "the keyboard answered first, and the phone is told exactly that"
+    );
+}
+
+/// **And the winner is a role, not an assumption: another phone can be it.**
+///
+/// This is the case the daemon reads most wrongly with only a bare `false` to go on —
+/// "answered at the Mac" when in fact a second `ccd` leg answered from another phone.
+/// It also fixes the other half of the contract: the leg whose own bytes went out is
+/// told `delivered:true` and told nothing about a winner, because the winner is itself
+/// and there is nobody else to name.
+///
+/// **Mutation:** emit `winner` whenever the arbiter has one recorded, without the
+/// "this leg did not forward" guard, and the winning leg is handed a `winner` naming
+/// itself — a leg being told its own answer was overtaken.
+#[tokio::test]
+async fn a_losing_ccd_answer_names_the_other_phone_leg_that_won() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut first = connect(&h.ccd_sock).await;
+    drain_approval(&mut first).await;
+    let mut second = connect(&h.ccd_sock).await;
+    drain_approval(&mut second).await;
+
+    first.send(answer(0, "phone-a")).await.unwrap();
+    let won = next_frame(&mut first).await;
+    assert_eq!(won["params"]["delivered"], serde_json::json!(true));
+    assert!(
+        won["params"].get("winner").is_none(),
+        "a leg told its own bytes went out is never told about somebody else's: {won}"
+    );
+
+    second.send(answer(0, "phone-b")).await.unwrap();
+    let lost = next_frame(&mut second).await;
+    assert_eq!(lost["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        lost["params"]["winner"], "ccd",
+        "another phone answered first, which is not the same statement as \"the Mac did\""
+    );
+}
+
+/// **The TUI is never told.**
+///
+/// The disposition is a frame this broker composed, and the `Tui` leg is a real Codex
+/// client whose stream is a byte-exact passthrough of the app-server. Only
+/// CodeConnect's own daemon is addressable this way.
+///
+/// **Mutation:** drop the `matches!(role, Role::Ccd)` conjunct where `answered` is
+/// noted and the real TUI is handed a method it has never been told about.
+#[tokio::test]
+async fn a_tui_answer_is_never_told_a_disposition() {
+    let h = start_broker();
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    h.push_replies(vec![(
+        "keyboard".into(),
+        Message::Text(r#"{"method":"thread/status/changed","params":{}}"#.into()),
+    )]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1);
+    // **A barrier, not a sleep.** The scripted reply is emitted by the fake when it
+    // sees the answer arrive upstream, so once it lands here everything the broker
+    // had for this leg has been written. A disposition would have had to come first.
+    let next = next_frame(&mut tui).await;
+    assert_eq!(
+        next["method"], "thread/status/changed",
+        "a TUI leg must see the app-server's next frame, never a broker-composed one"
+    );
+}
+
+/// **An answer the leg could never have been authorized for is told nothing.**
+///
+/// `bound_thread` returns `None` for an id this leg never observed, so there is no
+/// thread the broker can truthfully name and it says nothing rather than guessing —
+/// the same fail-closed shape as `authorize`. A daemon that is told nothing records
+/// the answer as unknown, which is the honest reading of a claim whose fate the
+/// broker cannot describe.
+///
+/// **Mutation:** make `bound_thread` fall back to the empty string instead of `None`
+/// and an unsolicited response is answered with a disposition naming no thread.
+#[tokio::test]
+async fn an_unsolicited_ccd_response_is_told_nothing() {
+    let h = start_broker();
+    h.push_replies(vec![(
+        "thread/loaded/list".into(),
+        Message::Text(r#"{"method":"thread/status/changed","params":{}}"#.into()),
+    )]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(answer(99, "ghost")).await.unwrap();
+    // The barrier is a request this leg IS allowed to make: it forwards, the fake
+    // answers it, and the answer arriving proves the broker has finished with
+    // everything sent before it — a disposition would have had to precede it.
+    ccd.send(Message::Text(
+        r#"{"id":7,"method":"thread/loaded/list","params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let next = next_frame(&mut ccd).await;
+    assert_eq!(
+        next["method"], "thread/status/changed",
+        "an id this leg never observed names no thread, so nothing is said about it"
+    );
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        1,
+        "only the barrier reached upstream; the unsolicited response forwarded zero bytes"
+    );
 }
 
 #[tokio::test]

@@ -711,6 +711,16 @@ pub enum AnswerPath {
     /// Physically identical to answering at the Mac's keyboard, which is what
     /// makes first-answer-wins a property of the TTY rather than of a protocol.
     SendKeys,
+    /// The JSON-RPC response to the app-server's own `requestApproval`, written
+    /// on the Codex link's socket.
+    ///
+    /// Neither of the two above can describe it, and the difference is not
+    /// cosmetic: nothing is rendered and nothing is typed, so "first answer wins"
+    /// is a property of the broker's arbiter rather than of a TTY, and the loser
+    /// of that race is a fact this daemon is *told* rather than one it infers.
+    /// Additive (minor 16): a Claude answer never uses it, so Claude's
+    /// `AnswerPath` serialization is unchanged.
+    CodexResponse,
 }
 
 /// The phone's answer, expressed in terms of what Claude is showing.
@@ -1317,10 +1327,16 @@ mod tests {
              `CodexResolution` envelope, `AnswerDecision::OptionId`, the `interrupt` \
              operation and the composite-id codec — is minor 15"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 16,
+            "`AnswerPath::CodexResponse` — the phone answering a Codex approval by \
+             writing the app-server's own response, which is neither a hook return nor \
+             a keystroke — is minor 16"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 15);
+        assert_eq!(crate::PROTOCOL_MINOR, 16);
     }
 
     /// **The tags, pinned on this side too.**

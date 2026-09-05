@@ -456,7 +456,14 @@ fn live_gate() -> Option<PathBuf> {
     Some(codex)
 }
 
-fn tagged_pids(tag: &str) -> Vec<i32> {
+/// Every live process whose argv names `tag`, with the argv, so a caller can pick
+/// one role out of a run's several.
+///
+/// One `ps` reader for both questions: a sandbox's teardown wants the pids and
+/// nothing else, while a gate that has to reach the **broker** — which lives inside
+/// the `internal-codex-host` process, beside the TUI and the app-server that carry
+/// the same run dir — can only tell them apart by what they were launched as.
+fn tagged_processes(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
         .args(["-Axww", "-o", "pid=,command="])
@@ -469,8 +476,15 @@ fn tagged_pids(tag: &str) -> Vec<i32> {
         .filter_map(|line| {
             let (pid, cmd) = line.trim_start().split_once(char::is_whitespace)?;
             let pid: i32 = pid.trim().parse().ok()?;
-            (pid != me && cmd.contains(tag)).then_some(pid)
+            (pid != me && cmd.contains(tag)).then_some((pid, cmd.to_string()))
         })
+        .collect()
+}
+
+fn tagged_pids(tag: &str) -> Vec<i32> {
+    tagged_processes(tag)
+        .into_iter()
+        .map(|(pid, _)| pid)
         .collect()
 }
 
@@ -1680,6 +1694,581 @@ fn print_events(daemon: &Arc<crate::state::Daemon>, uid: &str, header: &str) {
     }
 }
 
+// ------------------------------------------------------- the answering harness
+
+/// Both broker legs, and a real `codex --remote` in the pane.
+///
+/// The premise every answering gate below shares, factored because it is the same
+/// four waits every time and a gate that inlined them would be four more chances to
+/// wait on the wrong thing.
+async fn wait_for_the_broker_and_the_tui(sb: &LiveSandbox) {
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+}
+
+/// **Wait for the composer before typing into it.**
+///
+/// `tui_running` is satisfied by a process that has not painted yet, and a key sent
+/// that early lands in the buffer while the Enter is swallowed — so the prompt sits
+/// in the composer for ever and the gate times out somewhere unrelated.
+async fn wait_for_a_composer(sb: &LiveSandbox) {
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer. pane:\n{}",
+        sb.capture_pane()
+    );
+}
+
+/// One completed turn, which is what puts a rollout on disk.
+///
+/// Measured: a thread the TUI has only just created has `turns: []` and no rollout,
+/// and `thread/resume` on it is refused outright — so a link that never ran one of
+/// these is unsubscribed while looking connected.
+async fn run_the_warm_up_turn(sb: &LiveSandbox) {
+    assert!(
+        sb.submit_until(
+            "Reply with the single word amber and nothing else.",
+            Duration::from_secs(180),
+            || sb.capture_pane().to_lowercase().contains("• amber"),
+        )
+        .await,
+        "the warm-up turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+}
+
+/// **Register this run the way a real Codex supervisor does**, and let the daemon
+/// build its own link.
+///
+/// This is what replaced a test-only installer that staked an epoch by hand and
+/// handed the daemon an answer channel a test had minted. Everything downstream of
+/// a registration was therefore untested here: the agent gate, the identity guards,
+/// the generation high-water, the row landing in `codex_sessions`, the epoch stake,
+/// the supervisor publish, and — the one that actually carries a phone answer — the
+/// link transaction that mints the answer channel and installs it beside the task it
+/// belongs to. A gate that installs its own owner proves the answer path works for a
+/// session no production frame could have produced.
+///
+/// The frame is the coordinator's own: `agent: Codex`, the broker's `ccd.sock`, and
+/// generation 1 — the literal `supervise_ready_session` sends.
+async fn register_the_run(
+    daemon: &Arc<crate::state::Daemon>,
+    session: &SessionKey,
+    sb: &LiveSandbox,
+) -> crate::state::Registration {
+    register_the_run_on(daemon, session, &sb.ccd_sock()).await
+}
+
+/// The same registration, naming a ccd socket of the caller's choosing.
+///
+/// The two fault gates put a [`GatedCcdLeg`] in front of the broker's own leg and
+/// register the run onto **that**, which is how they hold the broker's replies
+/// without touching the daemon, the link or the broker. Everything else here is
+/// identical, including that the daemon is the one that builds the link.
+async fn register_the_run_on(
+    daemon: &Arc<crate::state::Daemon>,
+    session: &SessionKey,
+    socket: &Path,
+) -> crate::state::Registration {
+    let (tx, rx) = tokio::sync::mpsc::channel::<protocol::ipc::DaemonFrame>(
+        protocol::config::Config::default().ipc_write_queue,
+    );
+    // The daemon writes to this channel for the life of the session; a receiver that
+    // dropped would turn every such write into an error about a supervisor that is
+    // still, as far as this test is concerned, connected.
+    Box::leak(Box::new(rx));
+    daemon
+        .register_supervisor(
+            protocol::ipc::RegisterSession {
+                session_id: session.name.clone(),
+                session_uid: Some(session.uid.clone()),
+                tmux_session: session.name.clone(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                supervisor_pid: std::process::id(),
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Codex,
+                agent_bin: None,
+                // The launch case: `thread/started` has not been seen yet, so the
+                // registration claims no thread and the link learns one off the wire.
+                codex_thread_id: None,
+                codex_socket: Some(socket.to_string_lossy().into_owned()),
+                codex_generation: Some(1),
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            },
+            tx,
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .await
+        .expect("a real Codex coordinator's registration frame must be accepted")
+}
+
+/// **The broker's own word about what became of a `ccd` leg's response.**
+///
+/// `relay.rs` writes one of these per response a `ccd` leg sends, in the same arm
+/// that forwards it, so counting them counts responses written upstream — which is
+/// how "the app-server was not sent a second answer" becomes a measurement rather
+/// than an inference. Verbatim from `relay.rs`'s own `format!`.
+const CCD_DISPOSITION_NOTE: &str = "Ccd: response disposition";
+
+fn ccd_dispositions(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|line| line.contains(CCD_DISPOSITION_NOTE))
+        .collect()
+}
+
+/// The `winner=` the broker recorded on one disposition line, as it spelled it.
+///
+/// `Option<Role>`'s `Debug`, so the three readings are `None`, `Some(Tui)` and
+/// `Some(Ccd)` — and the first is not a fourth kind of loss but the broker
+/// declining to name anybody, which is exactly the case a loser's sentence may not
+/// describe as "answered at the Mac".
+fn disposition_winner(line: &str) -> Option<String> {
+    let at = line.find("winner=")? + "winner=".len();
+    Some(line[at..].split_whitespace().next()?.to_string())
+}
+
+fn disposition_delivered(line: &str) -> Option<bool> {
+    let at = line.find("delivered=")? + "delivered=".len();
+    line[at..].split_whitespace().next()?.parse().ok()
+}
+
+/// **The `winner=` spellings a loser's sentence is allowed to be derived from**, and
+/// the sentence each one earns.
+///
+/// Read off `settle_lost_answer`, which is the production code under test: only a
+/// `tui` winner may be described as answered at the Mac, only a `ccd` winner as
+/// answered through another daemon, and a disposition that names nobody gets the
+/// sentence that claims nothing. The table is here so the race gate can check the
+/// phone's sentence against the broker's log rather than against itself.
+const LOSER_SENTENCE: [(&str, &str); 3] = [
+    (
+        "Some(Tui)",
+        "this card was answered at the Mac first, so nothing you chose was applied",
+    ),
+    (
+        "Some(Ccd)",
+        "this card was answered through another CodeConnect daemon first, so nothing \
+         you chose was applied",
+    ),
+    (
+        "None",
+        "something else answered this card first, so nothing you chose was applied",
+    ),
+];
+
+/// **The sentence `settle_lost_answer` owes a loser, given what the broker named.**
+///
+/// Runs in the ordinary suite, because the mapping is the claim and it needs no
+/// codex. **Mutation:** make a missing winner read as the Mac's and the third case
+/// goes red — which is the exact dishonesty the race gate exists to catch, since
+/// three of the four ways a response can fail to land are not the keyboard.
+#[test]
+fn only_a_named_tui_winner_earns_the_answered_at_the_mac_sentence() {
+    let sentence = |line: &str| {
+        let named = disposition_winner(line).expect("a disposition line names a winner field");
+        LOSER_SENTENCE
+            .iter()
+            .find(|(spelling, _)| *spelling == named)
+            .map(|(_, sentence)| *sentence)
+    };
+    assert_eq!(
+        sentence("Ccd: response disposition delivered=false winner=Some(Tui) id=Int(3) (conn 5)"),
+        Some(LOSER_SENTENCE[0].1)
+    );
+    assert_eq!(
+        sentence("Ccd: response disposition delivered=false winner=Some(Ccd) id=Int(3) (conn 5)"),
+        Some(LOSER_SENTENCE[1].1)
+    );
+    assert_eq!(
+        sentence("Ccd: response disposition delivered=false winner=None id=Int(3) (conn 5)"),
+        Some(LOSER_SENTENCE[2].1),
+        "a disposition that names nobody must NOT be describable as the Mac's answer: \
+         a response can also lose to another daemon, to a capability it never held, or \
+         to a socket that died"
+    );
+    assert_eq!(
+        disposition_delivered(
+            "Ccd: response disposition delivered=true winner=None id=Int(9) (conn 2)"
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        disposition_delivered(
+            "Ccd: response disposition delivered=false winner=Some(Tui) id=Int(9) (conn 2)"
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        ccd_dispositions("Ccd: leg opened (conn 1)\nTui: forward (turn/start)\n").len(),
+        0,
+        "a log with no response in it counts none"
+    );
+}
+
+/// **A byte-for-byte pipe in front of the broker's ccd leg, with a valve on what
+/// comes back.**
+///
+/// The one contrivance in the two fault gates below, and it is here — where the
+/// reasoning can be read — rather than spread through them.
+///
+/// The window a restart has to be caught in is the interval between the link taking
+/// its durable claim and the broker telling it what became of the response. In
+/// production that is one relay-loop arm — `relay.rs` composes the disposition in the
+/// very arm that forwarded the answer — plus however long the app-server takes to
+/// accept the write, which on a healthy socket is microseconds and is bounded above by
+/// `relay::UPSTREAM_WRITE_BUDGET` (10 s). Nothing in this build may widen it, because a
+/// production hook that made the daemon pause there would be machinery existing only to
+/// be tested. So the *transport* is what holds still.
+///
+/// **Downstream only, and that is the whole design.** The link→broker direction is
+/// never held, so the answer really leaves the daemon, really reaches the broker, and
+/// really actuates — which is what makes "after the write" a fact about the run
+/// rather than a description of the staging. Only the broker→link direction is held,
+/// which stages exactly one thing: *no answer came back*. That is a state the real
+/// world produces — a Mac that lost power between writing and reading, a broker that
+/// died, a socket that stalled — and it is staged without asking any code under test
+/// to behave differently. The link's socket stays open throughout, so there is no EOF
+/// and no error: from the link's side this is simply a wire that has gone quiet.
+///
+/// **It does not hold for ever, and must not be relied on to.** `codex_link`'s
+/// `DISPOSITION_BUDGET` is what a link does about a wire that went quiet, and it is
+/// 750 ms under `cfg(test)` — so a claim nobody has settled becomes terminal *in this
+/// process* three quarters of a second later, which is a different ending from the
+/// one these gates are about. The valve turns a two-millisecond coin flip into three
+/// quarters of a second of room; the gates still poll for the claim and still fail
+/// loudly if they miss it.
+///
+/// **The broker never notices.** Only the broker→link direction is held, and the
+/// broker's own bound is on the app-server WRITE, which this valve is downstream of —
+/// so the disposition is composed on time, queued into a pipe this process is holding,
+/// and `UPSTREAM_WRITE_BUDGET` is never reached. What the link sees is silence, which
+/// is the whole staging.
+///
+/// **Why not a signal.** Measured on this platform: `SIGSTOP` sent to a `tmux` pane's
+/// own child returns success and does nothing at all — the process stays `S`,
+/// keeps running, and the broker answers as though nothing happened. A staging built
+/// on it would silently measure the ordinary delivered path while claiming to measure
+/// a fault, which is the failure mode a gate exists to prevent rather than to have.
+struct GatedCcdLeg {
+    path: PathBuf,
+    /// While false, every byte the broker sends is held in this process instead of
+    /// being handed to the link. Never affects the other direction.
+    delivering: Arc<std::sync::atomic::AtomicBool>,
+    accepting: tokio::task::JoinHandle<()>,
+}
+
+impl GatedCcdLeg {
+    async fn in_front_of(sb: &LiveSandbox) -> GatedCcdLeg {
+        let path = sb.base.join(format!("gated-ccd.{}.sock", nanos()));
+        let listener = tokio::net::UnixListener::bind(&path)
+            .unwrap_or_else(|e| panic!("bind the gated ccd leg at {}: {e}", path.display()));
+        let upstream = sb.ccd_sock();
+        let delivering = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let valve = Arc::clone(&delivering);
+        let accepting = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(broker) = UnixStream::connect(&upstream).await else {
+                    return;
+                };
+                tokio::spawn(GatedCcdLeg::pipe(client, broker, Arc::clone(&valve)));
+            }
+        });
+        GatedCcdLeg {
+            path,
+            delivering,
+            accepting,
+        }
+    }
+
+    /// One connection's two halves. Upstream is an unconditional copy; downstream
+    /// reads first and only then asks the valve, so a frame that was already in
+    /// flight when the valve closed is held rather than raced through.
+    async fn pipe(
+        client: UnixStream,
+        broker: UnixStream,
+        valve: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut from_link, mut to_link) = client.into_split();
+        let (mut from_broker, mut to_broker) = broker.into_split();
+        let up = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut from_link, &mut to_broker).await;
+        });
+        let down = tokio::spawn(async move {
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let read = match from_broker.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                while !valve.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                if to_link.write_all(&buf[..read]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let _ = up.await;
+        let _ = down.await;
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Hold everything the broker says from here on. Called **before** the answer, so
+    /// no disposition can be in flight ahead of it.
+    fn hold(&self) {
+        self.delivering
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        println!("GATED CCD LEG — the broker's replies are held from here");
+    }
+
+    fn release(&self) {
+        self.delivering
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        println!("GATED CCD LEG — the broker's replies flow again");
+    }
+
+    fn close(self) {
+        self.accepting.abort();
+    }
+}
+
+/// **A real phone: the daemon's own `ws_server`, on loopback, over a real WebSocket.**
+///
+/// Plan Phase 3's gates are written "WS test client", and the difference from calling
+/// [`crate::state::Daemon::answer`] directly is not decoration. An answer that arrives
+/// this way is decoded from bytes by `protocol::ws::ClientMessage`, admitted by the
+/// handshake, dispatched by `ws_server`'s own match arm, and answered with a
+/// `ServerMessage::AnswerResult` the phone has to be able to decode — four seams a
+/// direct call skips, each of which has shipped a bug before. The daemon underneath is
+/// the same one the link is installed on, so the card, the claim and the terminal are
+/// all the production ones.
+///
+/// **Loopback, so no TLS and no pairing.** `plaintext_trust` classifies 127.0.0.1 as
+/// [`crate::ws_server::PlaintextTrust::TrustedPath`] — the bytes never leave the
+/// machine — and `Config::default()` does not set `tls_required`, so the server admits
+/// a plaintext connection on its own production rules rather than on a test switch. The
+/// credential is this daemon's static bootstrap token, which is what
+/// `Daemon::authenticate` compares first and what an unpaired client legitimately
+/// carries; answering is not one of the shell-equivalent verbs that require a paired
+/// device, so nothing here is reached by a shortcut a real phone could not take.
+struct PhoneOverTheWire {
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    serving: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl PhoneOverTheWire {
+    /// Serve this daemon on a loopback port, connect, and complete the `hello`.
+    async fn connect(daemon: &Arc<crate::state::Daemon>) -> PhoneOverTheWire {
+        // **The port is claimed by holding it and then letting it go.** `serve` binds
+        // the address itself — that bind is part of what is under test — so the only
+        // way to learn a free one is to have owned it a moment earlier. A listener
+        // that never accepted leaves no TIME_WAIT behind, so the rebind below is not
+        // racing a socket in teardown; a port somebody else takes in the gap fails
+        // the bind loudly rather than silently serving somewhere else.
+        let probe = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("claim a loopback port");
+        let addr = probe.local_addr().expect("the claimed port");
+        drop(probe);
+
+        let token = Arc::new(format!("live-gate-bootstrap-{}", nanos()));
+        let serving = {
+            let daemon = Arc::clone(daemon);
+            let token = Arc::clone(&token);
+            tokio::spawn(async move {
+                crate::ws_server::serve(
+                    daemon,
+                    addr,
+                    token,
+                    None,
+                    crate::ws_server::PlaintextTrust::TrustedPath,
+                )
+                .await
+            })
+        };
+
+        let mut stream = None;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(open) => {
+                    stream = Some(open);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let stream = stream.unwrap_or_else(|| panic!("the daemon's ws_server never bound {addr}"));
+        let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
+            .await
+            .expect("the daemon's own WebSocket handshake");
+
+        let hello = serde_json::json!({
+            "type": "hello",
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "token": token.as_str(),
+            "client_name": "codex-live-gate",
+        });
+        println!("PHONE-> {hello}");
+        ws.send(Message::Text(hello.to_string()))
+            .await
+            .expect("write the hello");
+        let mut phone = PhoneOverTheWire { ws, serving };
+        let ack = phone
+            .read_until(Duration::from_secs(20), |frame| {
+                frame["type"].as_str() == Some("hello_ack")
+            })
+            .await
+            .expect("the daemon must answer a hello on its own listener");
+        assert_eq!(
+            ack["protocol_version"].as_u64(),
+            Some(u64::from(protocol::PROTOCOL_VERSION)),
+            "the ack must be for the protocol this client spoke: {ack}"
+        );
+        phone
+    }
+
+    /// Read server frames until one satisfies `want`, printing every one.
+    async fn read_until(
+        &mut self,
+        budget: Duration,
+        want: impl Fn(&Value) -> bool,
+    ) -> Option<Value> {
+        let deadline = Instant::now() + budget;
+        loop {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            let next = tokio::time::timeout(left, self.ws.next()).await.ok()??;
+            let Ok(Message::Text(text)) = next else {
+                continue;
+            };
+            println!("PHONE<- {}", frame_preview(&text, 2000));
+            let Ok(frame) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if want(&frame) {
+                return Some(frame);
+            }
+        }
+    }
+
+    /// **The tap.** Sends the `answer` a phone sends and decodes the
+    /// `answer_result` a phone decodes.
+    async fn answer(
+        &mut self,
+        card: &protocol::ws::ApprovalCard,
+        option_id: &str,
+        uid: &str,
+        budget: Duration,
+    ) -> protocol::ws::AnswerResult {
+        let frame = serde_json::json!({
+            "type": "answer",
+            "request_id": card.request_id,
+            "payload_hash": card.payload_hash,
+            "decision": {"type": "option_id", "option_id": option_id},
+            "session_id": uid,
+        });
+        println!("PHONE-> {frame}");
+        self.ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write the answer");
+        let request_id = card.request_id.clone();
+        let reply = self
+            .read_until(budget, |frame| {
+                frame["type"].as_str() == Some("answer_result")
+                    && frame["request_id"].as_str() == Some(request_id.as_str())
+            })
+            .await
+            .unwrap_or_else(|| panic!("no answer_result for {request_id} within {budget:?}"));
+        serde_json::from_value(reply["result"].clone())
+            .expect("the phone must be able to decode the daemon's answer_result")
+    }
+
+    /// **The tap, without waiting for the verdict.**
+    ///
+    /// A phone answering a card whose disposition is being held gets no `answer_result`
+    /// until the daemon's own `DISPOSITION_BUDGET` expires — 15 s in a real `ccd`
+    /// process, which is longer than the window gate 5 has to kill it in. This writes the
+    /// frame and leaves; what the daemon did with it is read out of its database.
+    async fn send_answer(&mut self, card: &protocol::ws::ApprovalCard, option_id: &str, uid: &str) {
+        let frame = serde_json::json!({
+            "type": "answer",
+            "request_id": card.request_id,
+            "payload_hash": card.payload_hash,
+            "decision": {"type": "option_id", "option_id": option_id},
+            "session_id": uid,
+        });
+        println!("PHONE-> {frame}");
+        self.ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write the answer");
+    }
+
+    fn close(self) {
+        self.serving.abort();
+    }
+}
+
+/// **A phone on a daemon this process does not host**: the real `ccd` child's own
+/// loopback listener, with the credential it minted into its own root.
+///
+/// [`PhoneOverTheWire::connect`] serves an in-process daemon and then dials it; there is
+/// no daemon to serve here, so this dials what the child already bound. Everything after
+/// the connect — the `hello`, the ack, the `answer` frame, the `answer_result` — is the
+/// same code path, because it is the same struct.
+impl PhoneOverTheWire {
+    async fn connect_to(addr: std::net::SocketAddr, token: &str) -> PhoneOverTheWire {
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .unwrap_or_else(|e| panic!("dial the ccd child at {addr}: {e}"));
+        let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), stream)
+            .await
+            .expect("the child's own WebSocket handshake");
+        let hello = serde_json::json!({
+            "type": "hello",
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "token": token,
+            "client_name": "codex-live-gate",
+        });
+        println!("PHONE-> {hello}");
+        ws.send(Message::Text(hello.to_string()))
+            .await
+            .expect("write the hello");
+        // Nothing to abort: this process serves nothing. A completed future stands in
+        // for the handle the in-process constructor holds.
+        let mut phone = PhoneOverTheWire {
+            ws,
+            serving: tokio::spawn(async { Ok(()) }),
+        };
+        phone
+            .read_until(Duration::from_secs(20), |frame| {
+                frame["type"].as_str() == Some("hello_ack")
+            })
+            .await
+            .expect("the ccd child must answer a hello on its own listener");
+        phone
+    }
+}
+
 // ------------------------------------------------------------------- the gate
 
 /// **The sandbox's copy of the operator's credential is private, and gone once it
@@ -1893,6 +2482,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         },
         first_presence.clone(),
         crate::codex_link::LinkCarry::new(),
+        crate::codex_link::answer_channel().1,
     ));
 
     // The measuring instrument for claim 5, attached HERE rather than later: it has
@@ -3109,6 +3699,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         },
         crate::codex_link::LinkPresence::new(),
         crate::codex_link::LinkCarry::new(),
+        crate::codex_link::answer_channel().1,
     ));
     let mut third_log: Vec<String> = Vec::new();
     let reattached = wait_until(Duration::from_secs(60), || {
@@ -3890,6 +4481,705 @@ async fn measure_the_approval_wire_on_the_ccd_leg() {
     let _ = coord.wait();
     let _ = std::fs::remove_file("/tmp/cc-approval-probe.txt");
 }
+/// **MEASUREMENT: what does the app-server accept as the response to a
+/// `requestApproval`, and what does the broker do with it?**
+///
+/// Nothing downstream of this can be designed honestly until three things are
+/// facts rather than readings of a schema bundle that declares no `result` at
+/// all for these server-requests: (a) the exact accepted response envelope,
+/// (b) whether a response sent by the ccd leg actually actuates the command,
+/// and (c) what the TUI's pane does when it does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_a_ccd_leg_answering_a_command_approval() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("ans");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-answer-probe.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI"
+    );
+
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    let init = raw.initialize().await;
+    assert!(init["result"].is_object(), "initialize: {init}");
+    raw.notify("initialized", serde_json::json!({})).await;
+
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer. pane:\n{}",
+        sb.capture_pane()
+    );
+    assert!(
+        sb.submit_until(
+            "Reply with the single word amber and nothing else.",
+            Duration::from_secs(180),
+            || sb.capture_pane().to_lowercase().contains("• amber"),
+        )
+        .await,
+        "the warm-up turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    let mut thread_id = String::new();
+    for _ in 0..60 {
+        let loaded = raw
+            .request(
+                "thread/loaded/list",
+                serde_json::json!({}),
+                Duration::from_secs(20),
+            )
+            .await;
+        if let Some(id) = loaded["result"]["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+        {
+            thread_id = id.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(!thread_id.is_empty(), "no loaded thread to resume onto");
+
+    let mut sub = WireTap::split(raw, "SUB");
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 500 + attempt;
+        sub.send(serde_json::json!({
+            "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+        }))
+        .await;
+        let frames = Arc::clone(&sub.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        if sub
+            .seen()
+            .into_iter()
+            .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v.get("result").is_some())
+        {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(resumed, "the ccd leg never subscribed");
+    assert!(sub.barrier(Duration::from_secs(30)).await);
+
+    // ---- provoke one command approval ------------------------------------
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(180),
+            || sub
+                .methods()
+                .iter()
+                .any(|m| m.ends_with("/requestApproval")),
+        )
+        .await,
+        "no approval reached the ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"]
+        .as_i64()
+        .expect("a server-request carries a numeric id");
+    println!("MEASURED wire id to answer on = {wire_id}");
+    println!("PANE BEFORE THE ANSWER:\n{}", sb.capture_pane());
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; the probe would prove nothing"
+    );
+
+    // ---- THE MEASUREMENT --------------------------------------------------
+    // The shape under test, taken from the only place it is written down:
+    // `codex_approval`'s decision grammar and the vendored schema it was read
+    // from. If the server disagrees, that disagreement is the finding.
+    // **Timed, because a bound has to be derived from a measurement.**
+    // `relay::UPSTREAM_WRITE_BUDGET` is how long the broker waits for the pump's proof
+    // that this very `ws.send` completed, and `codex_link::DISPOSITION_BUDGET` is how
+    // long this side waits for the frame that proof produces. Both are set above what a
+    // real acknowledged write costs on 0.153, and this is where that cost is read.
+    let answered_at = Instant::now();
+    sub.send(serde_json::json!({"id": wire_id, "result": {"decision": "accept"}}))
+        .await;
+
+    let told = wait_until(Duration::from_secs(30), || {
+        sub.methods()
+            .iter()
+            .any(|m| m == "codeconnect/responseDisposition")
+    })
+    .await;
+    let round_trip = answered_at.elapsed();
+    println!(
+        "MEASURED disposition round-trip (answer written -> disposition read) = {round_trip:?}"
+    );
+    println!(
+        "MEASURED disposition = {:?}",
+        sub.first("codeconnect/responseDisposition")
+    );
+    assert!(
+        told,
+        "the broker must tell the answering leg what became of its response; \
+         without it a phone answer can only ever be recorded as unknown"
+    );
+    let disposition = sub
+        .first("codeconnect/responseDisposition")
+        .expect("the disposition frame");
+    assert_eq!(disposition["params"]["delivered"], serde_json::json!(true));
+    assert_eq!(
+        disposition["params"]["requestId"],
+        serde_json::json!(wire_id)
+    );
+    assert_eq!(
+        disposition["params"]["threadId"],
+        Value::String(thread_id.clone())
+    );
+
+    let actuated = wait_until(Duration::from_secs(90), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    let resolved = wait_until(Duration::from_secs(30), || {
+        sub.methods().iter().any(|m| m == "serverRequest/resolved")
+    })
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+
+    println!("PANE AFTER THE ANSWER:\n{}", sb.capture_pane());
+    println!("MEASURED actuated (marker file exists) = {actuated}");
+    println!("MEASURED serverRequest/resolved observed = {resolved}");
+    println!(
+        "MEASURED resolved frame = {:?}",
+        sub.first("serverRequest/resolved")
+    );
+    println!("SUB methods after the answer: {:?}", sub.methods());
+    println!(
+        "MEASURED frames carrying our wire id back:\n{:#?}",
+        sub.seen()
+            .into_iter()
+            .filter(|v| v.get("id").and_then(Value::as_i64) == Some(wire_id))
+            .collect::<Vec<_>>()
+    );
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        actuated,
+        "a response of {{id, result:{{decision:\"accept\"}}}} sent by the ccd leg did NOT \
+         run the command. That is the finding: the shape, the capability, or the \
+         arbiter is not what `codex_approval`'s decision grammar says."
+    );
+}
+
+/// **MEASUREMENT: what does the LOSING leg learn?**
+///
+/// The keyboard answers first, and only then does the ccd leg send the response
+/// it had already composed. Gate 3 of Phase 3 needs a truthful outcome for that
+/// loser, and the whole question is whether anything at all comes back to the
+/// leg that lost — because if nothing does, an honest loser outcome cannot be
+/// derived from the wire and has to be built.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_a_losing_ccd_response_is_told() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("lose");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-loser-probe.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs"
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI"
+    );
+
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    assert!(raw.initialize().await["result"].is_object());
+    raw.notify("initialized", serde_json::json!({})).await;
+
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer"
+    );
+    assert!(
+        sb.submit_until(
+            "Reply with the single word amber and nothing else.",
+            Duration::from_secs(180),
+            || sb.capture_pane().to_lowercase().contains("• amber"),
+        )
+        .await,
+        "the warm-up turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    let mut thread_id = String::new();
+    for _ in 0..60 {
+        let loaded = raw
+            .request(
+                "thread/loaded/list",
+                serde_json::json!({}),
+                Duration::from_secs(20),
+            )
+            .await;
+        if let Some(id) = loaded["result"]["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+        {
+            thread_id = id.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(!thread_id.is_empty(), "no loaded thread to resume onto");
+
+    let mut sub = WireTap::split(raw, "SUB");
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 500 + attempt;
+        sub.send(serde_json::json!({
+            "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+        }))
+        .await;
+        let frames = Arc::clone(&sub.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        if sub
+            .seen()
+            .into_iter()
+            .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v.get("result").is_some())
+        {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(resumed, "the ccd leg never subscribed");
+    assert!(sub.barrier(Duration::from_secs(30)).await);
+
+    let frames = Arc::clone(&sub.frames);
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(180),
+            || frames.lock().expect("wire tap sink").iter().any(|f| f
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.ends_with("/requestApproval"))),
+        )
+        .await,
+        "no approval reached the ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"].as_i64().expect("a numeric server-request id");
+
+    // ---- the KEYBOARD answers first --------------------------------------
+    sb.send_keys(&["Enter"]);
+    assert!(
+        wait_until(Duration::from_secs(60), || sub
+            .methods()
+            .iter()
+            .any(|m| m == "serverRequest/resolved"))
+        .await,
+        "the keyboard answer never resolved the request. pane:\n{}",
+        sb.capture_pane()
+    );
+    let before_losing_send = sub.seen().len();
+    println!("PANE AFTER THE KEYBOARD ANSWER:\n{}", sb.capture_pane());
+
+    // ---- and only NOW does the ccd leg answer ----------------------------
+    sub.send(serde_json::json!({"id": wire_id, "result": {"decision": "cancel"}}))
+        .await;
+    // A barrier on this very leg, so "nothing came back" is a fact about the
+    // wire and not about how long the probe was willing to wait.
+    assert!(
+        sub.barrier(Duration::from_secs(30)).await,
+        "the losing leg must still answer a barrier — if it does not, the broker \
+         closed it, and THAT is the signal"
+    );
+
+    let disposition = sub
+        .first("codeconnect/responseDisposition")
+        .expect("the losing leg must be told its response went nowhere");
+    println!("MEASURED loser disposition = {disposition}");
+    assert_eq!(disposition["params"]["delivered"], serde_json::json!(false));
+    assert_eq!(
+        disposition["params"]["requestId"],
+        serde_json::json!(wire_id)
+    );
+
+    let after = sub.seen();
+    let arrived: Vec<Value> = after[before_losing_send..]
+        .iter()
+        .filter(|v| v["method"].as_str() != Some("thread/loaded/list"))
+        .cloned()
+        .collect();
+    println!(
+        "MEASURED frames handed to the losing leg after its response (barrier excluded):\n{:#?}",
+        arrived
+            .iter()
+            .filter(|v| v.get("id").and_then(Value::as_i64).is_none() || v.get("method").is_some())
+            .collect::<Vec<_>>()
+    );
+    println!("MEASURED leg still open after losing = true (the barrier answered)");
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// **THE PHASE-3b GATE: a phone answer, through the production daemon, reaches
+/// the real app-server — and the TUI's prompt goes away without a key being
+/// pressed.**
+///
+/// Everything else about answering is proven in halves: the unit gates drive
+/// `Daemon::answer` against a link whose replies a test writes, and
+/// [`measure_a_ccd_leg_answering_a_command_approval`] writes the response frame by
+/// hand. This is the only place the whole chain runs against a real codex — the
+/// observer raising the card, `Daemon::answer` validating and claiming it, the
+/// link translating the durable request id into the wire id THIS connection was
+/// handed, the broker's arbiter, the app-server actuating it, and the broker's
+/// disposition coming back to settle the claim.
+///
+/// The pane assertion is the one that cannot be faked by any of the halves: the
+/// TUI is a separate process that was showing an approval prompt, and nothing
+/// typed into it.
+///
+/// **The owner is a real registration and the tap is a real socket.** Both used to
+/// be stand-ins: the session was given an answer channel by a test-only installer
+/// that staked an epoch by hand, and the tap was a direct call to
+/// [`crate::state::Daemon::answer`]. Neither is here now.
+/// [`register_the_run`] sends the coordinator's own frame through
+/// `register_supervisor`, so the epoch, the row, the supervisor handle, the answer
+/// channel and the link task are all built by the production acceptance; and
+/// [`PhoneOverTheWire`] speaks `answer` to this daemon's own `ws_server` and decodes
+/// the `answer_result` it sends back. What is left between a phone in a pocket and
+/// this gate is the transport (a tailnet address instead of loopback) and the
+/// device credential — nothing on the answer path itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_answer_runs_the_command_and_dismisses_the_tui_prompt() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("e2e");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-e2e.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+
+    // The real daemon, and a link the daemon built for itself out of a real
+    // registration.
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    // ---- provoke one command approval, and let the OBSERVER card it ---------
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}\nbroker.log:\n{}",
+        sb.capture_pane(),
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    let pane_while_asking = sb.capture_pane();
+    println!("PANE WHILE THE APPROVAL IS UP:\n{pane_while_asking}");
+    assert!(
+        pane_while_asking.contains("Would you like to run the following command?"),
+        "the premise: the TUI is showing the prompt this answer is about"
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; this gate would prove nothing"
+    );
+
+    // ---- THE ANSWER, over the wire, exactly as the phone sends it ------------
+    let result = phone
+        .answer(&card, "accept", &uid, Duration::from_secs(120))
+        .await;
+    println!("MEASURED AnswerResult = {result:?}");
+    match &result {
+        protocol::ws::AnswerResult::Applied { outcome } => {
+            assert_eq!(outcome.applied_via, protocol::ws::AnswerPath::CodexResponse);
+            assert_eq!(outcome.resolved_by, protocol::ws::ResolvedBy::Phone);
+        }
+        other => panic!(
+            "the phone's answer must be applied. broker.log:\n{}\ngot: {other:?}",
+            read_file(&sb.run_dir.join("broker.log"))
+        ),
+    }
+
+    // The app-server acted on it: the command really ran.
+    let actuated = wait_until(Duration::from_secs(90), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    // And the prompt is gone from a pane nothing was typed into.
+    let dismissed = wait_until(Duration::from_secs(60), || {
+        !sb.capture_pane()
+            .contains("Would you like to run the following command?")
+    })
+    .await;
+    let pane_after = sb.capture_pane();
+    println!("PANE AFTER THE PHONE ANSWERED:\n{pane_after}");
+    println!("MEASURED actuated = {actuated}, tui dismissed = {dismissed}");
+
+    let status = daemon
+        .store
+        .answer_status(&uid, &card.request_id)
+        .expect("read the answer ledger")
+        .expect("the claim is durable");
+    let open_after = cards().len();
+    let resolutions: Vec<protocol::ws::CodexResolution> = daemon
+        .store
+        .events_after(&uid, 0, 10_000)
+        .expect("read the run's events")
+        .into_iter()
+        .filter(|e| e.kind == protocol::event::EventKind::ApprovalResolved)
+        .map(|e| serde_json::from_value(e.payload).expect("a resolution decodes"))
+        .collect();
+    println!("MEASURED status = {status:?}, open cards after = {open_after}");
+    println!("MEASURED resolutions = {resolutions:?}");
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    phone.close();
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        actuated,
+        "the app-server never ran the command the phone approved"
+    );
+    assert!(
+        dismissed,
+        "the TUI is still showing a prompt that has been answered. pane:\n{pane_after}"
+    );
+    assert_eq!(
+        status,
+        crate::store::AnswerStatus::Settled("delivered".into()),
+        "the broker told this daemon its answer was the one that landed"
+    );
+    assert_eq!(open_after, 0, "an answered card is retired from the phone");
+    assert_eq!(
+        resolutions,
+        vec![protocol::ws::CodexResolution::Answered {
+            by: protocol::ws::ResolutionActor::Phone,
+            decision: Some(protocol::ws::AnswerDecision::OptionId {
+                option_id: "accept".into()
+            }),
+        }],
+        "and the fleet is told who answered and with what — the two facts \
+         serverRequest/resolved cannot carry"
+    );
+}
+
+/// **The same gate for the other family, whose options the wire does not carry.**
+///
+/// A command approval's option set comes off the wire (`availableDecisions`); a
+/// file change's comes from `Family::labels`, because the frame offers nothing
+/// (measured — `measure_what_a_file_change_approval_offers`). So the id a phone
+/// names for a file change is checked against, and rebuilt from, a table this
+/// daemon owns rather than one the server sent — a genuinely different path to
+/// the same wire decision, and the app-server has to accept it just the same.
+///
+/// The edit landing on disk is the actuation proof here, in place of the command
+/// family's marker file.
+///
+/// **Answered through [`crate::state::Daemon::answer`] rather than over the wire, on
+/// purpose.** The WS seam — decode, admit, dispatch, encode the reply — is the same
+/// four steps for every family and is proven once, live, by the command gate's
+/// [`PhoneOverTheWire`]. What is different here is the option table and the decision
+/// built from it, and that is what this gate spends its run on.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_answer_applies_a_file_change_and_dismisses_the_tui_prompt() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("fce2e");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let target = std::path::PathBuf::from(format!("/tmp/cc-3b-fc.{}.txt", nanos()));
+    std::fs::write(&target, "hello from the codex approvals probe\n").expect("seed the target");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!(
+                "Use apply_patch to edit {}, replacing the word hello with goodbye. \
+                 Do not explain, just do it.",
+                target.display()
+            ),
+            Duration::from_secs(300),
+            || cards().iter().any(|card| card.family == "fileChange"),
+        )
+        .await,
+        "the observer never raised a file-change card. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards()
+        .into_iter()
+        .find(|card| card.family == "fileChange")
+        .expect("the file-change card");
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    println!(
+        "PANE WHILE THE FILE-CHANGE APPROVAL IS UP:\n{}",
+        sb.capture_pane()
+    );
+    // The daemon-owned table, on the card, in the order it will be shown.
+    let offered: Vec<&str> = card.tool_input["options"]
+        .as_array()
+        .expect("options ride the card")
+        .iter()
+        .map(|option| option["id"].as_str().expect("an option id"))
+        .collect();
+    assert_eq!(
+        offered,
+        ["accept", "acceptForSession", "cancel"],
+        "the file-change family's options are this daemon's table, not the wire's"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "hello from the codex approvals probe\n",
+        "the edit was applied before anybody answered; this gate would prove nothing"
+    );
+
+    let result = daemon
+        .answer(
+            &card.request_id,
+            &card.payload_hash,
+            protocol::ws::AnswerDecision::OptionId {
+                option_id: "accept".into(),
+            },
+            Some(&uid),
+        )
+        .await;
+    println!("MEASURED AnswerResult = {result:?}");
+
+    let applied = wait_until(Duration::from_secs(90), || {
+        std::fs::read_to_string(&target)
+            .map(|body| body.contains("goodbye"))
+            .unwrap_or(false)
+    })
+    .await;
+    let pane_after = sb.capture_pane();
+    println!("PANE AFTER THE PHONE ANSWERED:\n{pane_after}");
+    let status = daemon
+        .store
+        .answer_status(&uid, &card.request_id)
+        .expect("read the answer ledger")
+        .expect("the claim is durable");
+    println!("MEASURED applied = {applied}, status = {status:?}");
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&target);
+
+    assert!(
+        matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+        "the phone's answer must be applied: {result:?}"
+    );
+    assert!(
+        applied,
+        "the app-server never wrote the edit the phone approved"
+    );
+    assert_eq!(
+        status,
+        crate::store::AnswerStatus::Settled("delivered".into())
+    );
+}
 
 /// Does this frame **settle** the approval on `item_id`?
 ///
@@ -4555,4 +5845,1804 @@ async fn measure_what_a_file_change_approval_offers() {
         .status();
     let _ = coord.wait();
     let _ = std::fs::remove_file(&target);
+}
+
+// ==================================================== THE PHASE-3b FAULT GATES
+
+/// **The same store, and a daemon that has never seen it.**
+///
+/// A bounce, expressed as the only thing a test can honestly express it as: the
+/// process's in-memory state — the pending map, the link, the registration epochs —
+/// is gone, and everything the next daemon knows it has to read back off disk. That
+/// is precisely the boundary [`crate::state::Daemon::recover`] exists to cross, and
+/// a gate that reused the old `Daemon` would be testing a restart that kept its
+/// memory.
+fn rebuild_the_daemon(store: &Arc<crate::store::Store>) -> Arc<crate::state::Daemon> {
+    let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
+    Box::leak(Box::new(tail_rx));
+    crate::state::Daemon::new(
+        protocol::config::Config::default(),
+        Arc::clone(store),
+        Arc::new(crate::apns::LoggingPushSender::new()) as Arc<dyn crate::apns::PushSender>,
+        crate::state::Endpoint {
+            host: "test.ts.net".into(),
+            port: 8787,
+            tls: false,
+        },
+        tail_tx,
+    )
+}
+
+/// Every `answer` row this run has in `mutation_ledger`, as
+/// `(client_request_id, status, outcome)`.
+///
+/// Read from SQLite directly rather than through
+/// [`crate::store::Store::answer_status`], because the claim under test is about
+/// **how many rows exist**, and a reader that returns one status by key cannot tell
+/// one row from two. `ORDER BY started_at` so a second row would be visible beside
+/// the first rather than shadowing it.
+fn answer_ledger(db: &TempDb, uid: &str) -> Vec<(String, String, Option<String>)> {
+    let conn = rusqlite::Connection::open(db.path()).expect("open the daemon's own database");
+    let mut stmt = conn
+        .prepare(
+            "SELECT client_request_id, status, outcome FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2
+              ORDER BY started_at ASC",
+        )
+        .expect("prepare the ledger read");
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::store::OPERATION_ANSWER, uid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read the ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode the ledger");
+    rows
+}
+
+/// Every resolution this run has filed, in order.
+fn resolutions(
+    daemon: &Arc<crate::state::Daemon>,
+    uid: &str,
+) -> Vec<protocol::ws::CodexResolution> {
+    daemon
+        .store
+        .events_after(uid, 0, 10_000)
+        .expect("read the run's events")
+        .into_iter()
+        .filter(|e| e.kind == protocol::event::EventKind::ApprovalResolved)
+        .map(|e| serde_json::from_value(e.payload).expect("a resolution decodes"))
+        .collect()
+}
+
+/// How many `ApprovalRequest` facts this run has filed — one per card ever raised.
+fn cards_ever_raised(daemon: &Arc<crate::state::Daemon>, uid: &str) -> usize {
+    daemon
+        .store
+        .events_after(uid, 0, 10_000)
+        .expect("read the run's events")
+        .into_iter()
+        .filter(|e| e.kind == protocol::event::EventKind::ApprovalRequest)
+        .count()
+}
+
+/// **How long a gate may spend catching a claim between its write and its
+/// settlement.**
+///
+/// The window is real and it is short: `codex_link`'s `DISPOSITION_BUDGET` is
+/// 750 ms under `cfg(test)`, so a claim nobody has settled is made terminal
+/// **in this process** three quarters of a second after the response is written —
+/// which is a different ending from the one gate 4 is about. Polling at 1 ms over a
+/// local SQLite read costs microseconds per pass, so the abort lands with the whole
+/// budget still ahead of it; a gate that missed the window fails saying so rather
+/// than asserting the wrong terminal.
+const CLAIM_POLL: Duration = Duration::from_millis(1);
+
+/// Poll until this card's claim is durably `applying`.
+async fn wait_for_an_applying_claim(
+    daemon: &Arc<crate::state::Daemon>,
+    uid: &str,
+    request_id: &str,
+    budget: Duration,
+) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if matches!(
+            daemon.store.answer_status(uid, request_id),
+            Ok(Some(crate::store::AnswerStatus::Applying))
+        ) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(CLAIM_POLL).await;
+    }
+}
+
+/// **Stage one phone answer so that it is written, actuates, and is never answered
+/// for.**
+///
+/// The staging both fault gates below share. Everything in it is production code
+/// except the [`GatedCcdLeg`], whose whole reasoning is written down where it is
+/// defined: the reply direction is held so no disposition can come back, the write
+/// direction is not, so the answer really leaves the daemon and really runs.
+///
+/// The claim is then waited for rather than assumed. It is taken by the link at the
+/// one moment it knows the response is about to be written, so a gate that bounced
+/// the daemon before seeing it durably `applying` would be bouncing past the state
+/// it exists to catch — and would then assert the wrong terminal for the right
+/// reason.
+async fn stage_an_unanswered_write(
+    daemon: &Arc<crate::state::Daemon>,
+    gate: &GatedCcdLeg,
+    uid: &str,
+    card: &protocol::ws::ApprovalCard,
+    option_id: &str,
+) -> tokio::task::JoinHandle<protocol::ws::AnswerResult> {
+    // Closed BEFORE the answer, so no reply can be in flight ahead of it. The
+    // link→broker direction is untouched, so the write below really leaves the
+    // daemon and really actuates.
+    gate.hold();
+    let answering = {
+        let daemon = Arc::clone(daemon);
+        let uid = uid.to_string();
+        let request_id = card.request_id.clone();
+        let payload_hash = card.payload_hash.clone();
+        let option_id = option_id.to_string();
+        tokio::spawn(async move {
+            daemon
+                .answer(
+                    &request_id,
+                    &payload_hash,
+                    protocol::ws::AnswerDecision::OptionId { option_id },
+                    Some(&uid),
+                )
+                .await
+        })
+    };
+    assert!(
+        wait_for_an_applying_claim(daemon, uid, &card.request_id, Duration::from_secs(20)).await,
+        "the link never took a durable claim for {}, so there is no in-flight answer \
+         for a restart to be caught by. ledger: {:?}",
+        card.request_id,
+        daemon.store.answer_status(uid, &card.request_id)
+    );
+    println!("STAGED — the answer is claimed and written, and nothing can answer for it");
+    answering
+}
+
+/// **A phone answer caught in flight by a daemon bounce ends as ONE terminal
+/// unknown, against ONE card and ONE ledger row** (plan Phase 3, gate 4).
+///
+/// The gate the whole `applying` state exists for. A claim under `answer` is taken
+/// by the link at the one moment it knows the response is about to be written, and
+/// settled when the broker says what became of it — so a claim that survives a
+/// restart is, by construction, an answer nothing left alive can describe. The only
+/// truthful ending is terminal `Unknown`, and *terminal* is the whole point: the
+/// app-server accepts exactly one answer to a request, so a card whose answer might
+/// have landed must never become answerable again.
+///
+/// Four things are asserted and they fail in four different ways:
+///
+///   * **one card ever, across a real rebind.** The bounced daemon does not merely
+///     recover: it REGISTERS again, and its fresh link resumes onto the same thread —
+///     which is the one path that can put a second copy of this question in front of
+///     the observer. The re-delivery rule dedupes on `(threadId, itemId)` (measured in
+///     [`a_card_raised_before_a_daemon_bounce_rebinds_onto_one_card`]), so a second
+///     `ApprovalRequest` fact would mean a bounced daemon asked a phone the same
+///     question twice. Without the rebind this assertion is about a producer that was
+///     never given the chance to file the duplicate.
+///   * **one ledger row.** Two rows under one request id would mean the claim key is
+///     not the identity, and first-terminal-wins would be deciding between rows
+///     rather than between outcomes.
+///   * **the claim is terminal `indeterminate`, and the card is retired with exactly
+///     one `Unknown{attempted_by: Phone}`** carrying the option the phone actually
+///     named — which is the only thing left that can say what was attempted.
+///   * **the phone is refused for ever after.** Not "there is no link": the ledger is
+///     read before the link is asked, so the operator gets the sentence that says
+///     this may have happened and will not be tried again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown() {
+    /// The cause `recover_codex_answers` files, verbatim. Pinned because it is what
+    /// an operator reads on a card that can never be answered again, and a change to
+    /// it is a change to what the fleet was told.
+    const RECOVERED_CAUSE: &str =
+        "this Mac stopped between writing the answer and learning what became of it";
+    /// What the caller waiting on the aborted link is told. `LinkAnswers::answer`'s
+    /// dropped-sender arm: the task took the ask and then went away, so the only
+    /// truthful thing to say is that nothing here knows.
+    const LOST_CALLER_SENTENCE: &str =
+        "the link stopped while this answer was being written, so whether it reached \
+         Codex is not known; it will not be sent again. Check the Mac.";
+    /// What a second tap is told, once the ledger is terminal.
+    const REFUSED_AFTERWARDS: &str =
+        "an answer to this card was already sent and what became of it is not known; \
+         it will not be sent again. Check the Mac.";
+
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("bounce4");
+    let mut coord = sb.spawn_coordinator(&codex);
+    // Under the sandbox's own private directory, not /tmp: a marker in /tmp outlives
+    // the run whenever the gate fails before its cleanup, and three of them were left
+    // behind by earlier runs. `LiveSandbox` removes its base tree on drop, so the
+    // marker goes with it however the gate ends.
+    let marker = sb.base.join(format!("cc-3b-gate4.{}.txt", nanos()));
+    let marker = marker.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let registration = register_the_run_on(&daemon, &session, gate.path()).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}\nbroker.log:\n{}",
+        sb.capture_pane(),
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    println!("PANE WHILE THE APPROVAL IS UP:\n{}", sb.capture_pane());
+
+    // ---- the answer, claimed and written, with nobody left to answer for it ----
+    let answering = stage_an_unanswered_write(&daemon, &gate, &uid, &card, "accept").await;
+
+    // ---- THE BOUNCE ---------------------------------------------------------
+    // The supervisor's disconnect is how a link is retired in production, and it
+    // ABORTS the task rather than winding it down — which is exactly the shape of a
+    // daemon that stopped, because the link's own `settle_open_answers` teardown is
+    // code the cancelled future never reaches.
+    daemon.unregister_supervisor(&registration).await;
+    let caught = daemon.store.answer_status(&uid, &card.request_id);
+    println!("MEASURED claim at the moment of the bounce = {caught:?}");
+    assert_eq!(
+        caught.expect("read the ledger"),
+        Some(crate::store::AnswerStatus::Applying),
+        "the claim was already settled before the bounce, so this run staged a \
+         different fault from the one gate 4 is about. Widen the staging rather than \
+         weakening the assertion."
+    );
+    let told = answering.await.expect("the answering task");
+    println!("MEASURED what the caller on the aborted link was told = {told:?}");
+
+    let store = Arc::clone(&daemon.store);
+    drop(daemon);
+    let fresh = rebuild_the_daemon(&store);
+    fresh.recover().await;
+    println!("RECOVERED — a daemon that has only ever seen this store from disk");
+
+    // ---- AND THEN IT REBINDS, which is what the plan's gate 4 is about ------
+    //
+    // A recovery on its own proves the ledger and the card were read back. It does not
+    // prove the thing the gate is named for: a restarted daemon does not sit there, it
+    // registers and its link resumes onto the same thread — and everything the
+    // app-server replays into that resume goes through the observer that RAISES CARDS.
+    // Without the rebind, "exactly one card ever" is a claim about a producer that was
+    // never given the chance to file a second one.
+    //
+    // The valve is released first so the fresh link's own traffic is not held, and the
+    // wait is through the resume: the link attaches, the answer describes the turn, and
+    // the item this card was raised for is in it. Ten seconds is the same settling the
+    // sibling gate uses, and it is bounded by the assertions rather than by hope — a
+    // duplicate card would be visible the moment it was filed.
+    gate.release();
+    let rebound = register_the_run_on(&fresh, &session, gate.path()).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    println!(
+        "REBOUND — the fresh daemon registered and its link resumed; cards now = {}",
+        fresh
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+            .len()
+    );
+
+    // ---- THE ASSERTIONS -----------------------------------------------------
+    let ledger = answer_ledger(&db, &uid);
+    let filed = resolutions(&fresh, &uid);
+    let raised = cards_ever_raised(&fresh, &uid);
+    let open = fresh
+        .store
+        .codex_pending_approvals(&uid)
+        .expect("read the run's open cards");
+    println!("MEASURED ledger = {ledger:?}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!(
+        "MEASURED cards ever raised = {raised}, open now = {}",
+        open.len()
+    );
+
+    let again = fresh
+        .answer(
+            &card.request_id,
+            &card.payload_hash,
+            protocol::ws::AnswerDecision::OptionId {
+                option_id: "accept".into(),
+            },
+            Some(&uid),
+        )
+        .await;
+    println!("MEASURED a second tap after the bounce = {again:?}");
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    fresh.unregister_supervisor(&rebound).await;
+    gate.close();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert_eq!(
+        told,
+        protocol::ws::AnswerResult::Rejected {
+            reason: LOST_CALLER_SENTENCE.into()
+        },
+        "a caller whose link went away mid-answer must be told nothing here knows, \
+         never that the answer was applied"
+    );
+    assert_eq!(
+        raised, 1,
+        "exactly one card may ever have existed for this item, ACROSS the rebind above; \
+         a second would be a bounced daemon asking a phone the same question twice"
+    );
+    assert_eq!(
+        ledger,
+        vec![(card.request_id.clone(), "indeterminate".to_string(), None)],
+        "exactly one ledger row for this request id, and it is terminal"
+    );
+    assert_eq!(
+        filed,
+        vec![protocol::ws::CodexResolution::Unknown {
+            attempted_by: protocol::ws::ResolutionActor::Phone,
+            attempted_decision: Some(protocol::ws::AnswerDecision::OptionId {
+                option_id: "accept".into()
+            }),
+            write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+            cause: RECOVERED_CAUSE.into(),
+        }],
+        "the card is retired ONCE, saying who attempted what and that its fate is \
+         not known"
+    );
+    assert!(
+        open.is_empty(),
+        "a card whose answer can never be resolved must not still be on the phone: {open:?}"
+    );
+    assert_eq!(
+        again,
+        protocol::ws::AnswerResult::Rejected {
+            reason: REFUSED_AFTERWARDS.into()
+        },
+        "the phone may never answer this card again, and must be told why rather \
+         than told there is no link"
+    );
+    println!(
+        "GATE PASS — a claim outstanding across a daemon bounce became one terminal \
+         unknown, on one card and one ledger row, and the phone can never answer it again"
+    );
+}
+
+/// **A real `ccd` process, on a private root, that this test can kill.**
+///
+/// Every other gate in this file drives an in-process [`crate::state::Daemon`], and for
+/// most of them that is the right instrument: the daemon under test IS the library, and a
+/// child process would only put a socket between the assertions and the thing they are
+/// about. Gate 5 is the one that cannot use it. Its subject is *abrupt death and a
+/// reopened database* — a process that stops between writing an answer and learning what
+/// became of it, whose SQLite connection is never closed, whose WAL is left exactly where
+/// the kill found it, and whose successor has to open that file and decide. Dropping an
+/// `Arc<Daemon>` and constructing another over the same live `Arc<Store>` reproduces none
+/// of that: the store object survives, the connection is never torn, and the "restart"
+/// inherits a database that was closed politely by a process that is still running.
+///
+/// So this spawns the real binary.
+///
+/// **Isolated from the operator's own daemon by construction, not by care.** A private
+/// `CODECONNECT_HOME` moves the database, the IPC socket, the token, the TLS directory
+/// and the config together (`protocol::root_dir`), and the config it writes pins the
+/// listener to `127.0.0.1` on a port claimed and released a moment earlier — so the child
+/// never asks tailscale for anything, never binds 8787, and cannot be reached from
+/// outside this machine. The root is short (`/tmp/ccg5.…`) because a unix socket path is
+/// capped at `SUN_LEN`, which the scratchpad path is far past.
+struct CcdChild {
+    home: PathBuf,
+    port: u16,
+    token: String,
+    child: Child,
+}
+
+impl CcdChild {
+    /// The `ccd` binary this harness drives, from this test binary's own target
+    /// directory — `CARGO_BIN_EXE_*` is not handed to a unit test of the crate that owns
+    /// the binary, which is the same reason [`resolve_codeconnect`] looks it up by path.
+    fn binary() -> PathBuf {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "ccd", "--bin", "ccd"])
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+            .status()
+            .expect("run cargo build -p ccd");
+        assert!(status.success(), "cargo build -p ccd failed");
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let bin = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target/<profile>/deps/<test binary>")
+            .join("ccd");
+        assert!(
+            is_executable_file(&bin),
+            "the ccd binary this gate kills is not at {}",
+            bin.display()
+        );
+        bin
+    }
+
+    /// Create the private root and start the first process on it.
+    fn start() -> CcdChild {
+        let home = PathBuf::from(format!("/tmp/ccg5.{}.{}", std::process::id(), nanos()));
+        create_private_dir(&home).expect("the child's private root");
+        // Claimed by holding it and letting it go, for `PhoneOverTheWire::connect`'s
+        // reason: the child binds it itself, so the only way to learn a free one is to
+        // have owned it a moment earlier.
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("claim a loopback port");
+        let port = probe.local_addr().expect("the claimed port").port();
+        drop(probe);
+        std::fs::write(
+            home.join("config.json"),
+            format!(r#"{{"ws_port":{port},"ws_bind":"127.0.0.1","ws_loopback":true}}"#),
+        )
+        .expect("write the child's config");
+        let child = CcdChild::spawn_on(&home);
+        // Minted by the first start and stable across restarts, so the phone below keeps
+        // its credential over the kill.
+        let token = wait_for_file(&home.join("token"), Duration::from_secs(30));
+        let mut ccd = CcdChild {
+            home,
+            port,
+            token: token.trim().to_string(),
+            child,
+        };
+        ccd.wait_until_listening();
+        ccd
+    }
+
+    fn spawn_on(home: &Path) -> Child {
+        Command::new(CcdChild::binary())
+            .env("CODECONNECT_HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                std::fs::File::create(home.join("ccd.stdout.log")).expect("the child's log"),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(home.join("ccd.stderr.log")).expect("the child's log"),
+            ))
+            .spawn()
+            .expect("spawn the real ccd binary")
+    }
+
+    /// Both listeners up: the IPC socket a supervisor registers over, and the loopback
+    /// WebSocket a phone taps on.
+    fn wait_until_listening(&mut self) {
+        let sock = self.home.join("ccd.sock");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            let ipc = std::os::unix::fs::FileTypeExt::is_socket(
+                &std::fs::metadata(&sock)
+                    .map(|m| m.file_type())
+                    .unwrap_or_else(|_| std::fs::metadata("/").unwrap().file_type()),
+            );
+            let ws = std::net::TcpStream::connect(("127.0.0.1", self.port)).is_ok();
+            if ipc && ws {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "the ccd child never bound both listeners. stderr:\n{}",
+            read_file(&self.home.join("ccd.stderr.log"))
+        );
+    }
+
+    fn db(&self) -> PathBuf {
+        self.home.join("events.db")
+    }
+
+    /// **SIGKILL, by the pid of the process this harness started.** Never by name and
+    /// never by a command-line match: the operator's own daemon is running while this
+    /// gate runs, and a sweep by argv would find it.
+    fn kill(&mut self) {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &self.child.id().to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = self.child.wait();
+    }
+
+    /// Start again on the same root — the same `events.db`, opened by a process that has
+    /// never seen it, with whatever the kill left in the WAL.
+    fn restart(&mut self) {
+        self.child = CcdChild::spawn_on(&self.home);
+        self.wait_until_listening();
+    }
+
+    /// Register the Codex run over the child's own IPC socket, exactly as the
+    /// coordinator's `supervise_ready_session` does — the same
+    /// [`protocol::ipc::ClientFrame::Register`], newline-framed. The connection is
+    /// returned because the daemon treats the socket closing as the supervisor going
+    /// away, so it has to be held for the life of the run.
+    async fn register(&self, session: &SessionKey, codex_socket: &Path) -> UnixStream {
+        let mut stream = UnixStream::connect(self.home.join("ccd.sock"))
+            .await
+            .expect("dial the ccd child's ipc socket");
+        let frame = protocol::ipc::ClientFrame::Register(protocol::ipc::RegisterSession {
+            session_id: session.name.clone(),
+            session_uid: Some(session.uid.clone()),
+            tmux_session: session.name.clone(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            supervisor_pid: std::process::id(),
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: Some(codex_socket.to_string_lossy().into_owned()),
+            codex_generation: Some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        });
+        let mut line = serde_json::to_vec(&frame).expect("the registration serializes");
+        line.push(b'\n');
+        use tokio::io::AsyncWriteExt as _;
+        stream
+            .write_all(&line)
+            .await
+            .expect("write the registration");
+        stream.flush().await.expect("flush the registration");
+        stream
+    }
+}
+
+impl Drop for CcdChild {
+    fn drop(&mut self) {
+        self.kill();
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// Poll for a file the child writes at startup, and return its contents.
+fn wait_for_file(path: &Path, budget: Duration) -> String {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("{} never appeared", path.display());
+}
+
+/// The `answer` rows one run has in a database this process does not own.
+fn answer_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>)> {
+    let conn = rusqlite::Connection::open(db).expect("open the child's database");
+    let mut stmt = conn
+        .prepare(
+            "SELECT client_request_id, status, outcome FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2
+              ORDER BY started_at ASC",
+        )
+        .expect("prepare the ledger read");
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::store::OPERATION_ANSWER, uid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("read the ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode the ledger");
+    rows
+}
+
+/// The open Codex cards one run has in a database this process does not own.
+fn open_cards_at(db: &Path, uid: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db).expect("open the child's database");
+    let mut stmt = conn
+        .prepare("SELECT card FROM codex_pending_approvals WHERE session_uid = ?1")
+        .expect("prepare the card read");
+    let rows = stmt
+        .query_map(rusqlite::params![uid], |r| r.get(0))
+        .expect("read the cards")
+        .collect::<Result<Vec<String>, _>>()
+        .expect("decode the cards");
+    rows
+}
+
+/// The resolutions one run has filed, in a database this process does not own.
+fn resolutions_at(db: &Path, uid: &str) -> Vec<protocol::ws::CodexResolution> {
+    let conn = rusqlite::Connection::open(db).expect("open the child's database");
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM events WHERE session_uid = ?1 AND kind = 'approval_resolved'
+              ORDER BY seq ASC",
+        )
+        .expect("prepare the event read");
+    let rows = stmt
+        .query_map(rusqlite::params![uid], |r| r.get::<_, String>(0))
+        .expect("read the events")
+        .collect::<Result<Vec<String>, _>>()
+        .expect("decode the events");
+    rows.into_iter()
+        .map(|p| serde_json::from_str(&p).expect("a resolution decodes"))
+        .collect()
+}
+
+/// **A REAL `ccd` process, SIGKILLed after the write, records `Unknown` once when it is
+/// started again on the same database — and the app-server is never sent a second
+/// answer** (plan Phase 3, gate 5 — the one live kill).
+///
+/// The sibling of gate 4 and a strictly stronger statement about the same fault, in two
+/// separate ways.
+///
+/// **It is a process, and the process really dies.** Gate 4 bounces an in-process daemon:
+/// the `Arc<Store>` survives, its SQLite connection is closed politely, and the
+/// "restart" inherits a file nothing ever abandoned. That is a faithful model of a
+/// supervisor disconnect and no model at all of a kill. Here [`CcdChild`] runs the
+/// shipping binary on a private `CODECONNECT_HOME`, `SIGKILL` ends it by the pid this
+/// harness started — never by name, because the operator's own daemon is running beside
+/// it — and the successor opens `events.db` with whatever the kill left in the WAL. That
+/// is the abrupt-death-and-reopen shape, and nothing short of a child process has it.
+///
+/// **And the command really runs.** The valve holds only what comes BACK, so the answer
+/// reached the broker, reached the app-server and actuated while the daemon that wrote it
+/// was dying without ever being told. That is what turns "after the write" from a
+/// description of the staging into a measured fact about the run: the bytes were out, the
+/// actuation happened, and the daemon that recorded `Unknown` could not have known
+/// either.
+///
+/// **"Never re-answered" is measured, not reasoned.** `relay.rs` writes one
+/// `response disposition` line per response a `ccd` leg sends, in the same arm that
+/// forwards it, so the count of those lines in the broker's own log is the count of
+/// answers this daemon ever put upstream. Exactly one, across a kill, a restart, a
+/// refused second tap and a fresh link that resumes onto the same thread.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_daemon_killed_after_the_write_records_unknown_and_never_answers_again() {
+    /// Responses a `ccd` leg may put upstream for one approval, ever. The
+    /// app-server accepts exactly one answer to a `serverRequest`; a second would be
+    /// this daemon answering a question it had already recorded as unanswerable.
+    const RESPONSES_UPSTREAM: usize = 1;
+
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("kill5");
+    let mut coord = sb.spawn_coordinator(&codex);
+    // Sandbox-private, so a gate that fails early leaves nothing in /tmp.
+    let marker = sb
+        .base
+        .join(format!("cc-3b-gate5.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+
+    // ---- the daemon under test is a process ---------------------------------
+    let mut ccd = CcdChild::start();
+    println!(
+        "SPAWNED a real ccd on {} (pid {}), loopback :{}",
+        ccd.home.display(),
+        ccd.child.id(),
+        ccd.port
+    );
+    let supervisor = ccd.register(&session, gate.path()).await;
+    let db = ccd.db();
+    let cards = || open_cards_at(&db, &uid);
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the ccd child never raised a card for the approval. pane:\n{}\nchild stderr:\n{}",
+        sb.capture_pane(),
+        read_file(&ccd.home.join("ccd.stderr.log"))
+    );
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&cards().remove(0)).expect("the stored card decodes");
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; this gate would prove nothing"
+    );
+
+    // ---- a phone answers it, and nothing will ever answer the phone ---------
+    gate.hold();
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    phone.send_answer(&card, "accept", &uid).await;
+
+    // The claim proves the child accepted the ask and wrote the response — read out of
+    // its own database, because there is no in-process handle to ask.
+    let claimed = wait_until(Duration::from_secs(20), || {
+        answer_ledger_at(&db, &uid)
+            .first()
+            .map(|(_, status, _)| status == "applying")
+            .unwrap_or(false)
+    })
+    .await;
+    println!(
+        "MEASURED claim before the kill = {:?}",
+        answer_ledger_at(&db, &uid)
+    );
+    assert!(
+        claimed,
+        "the child never took a durable claim, so there is no in-flight answer for a \
+         kill to be caught by. child stderr:\n{}",
+        read_file(&ccd.home.join("ccd.stderr.log"))
+    );
+
+    // ---- THE KILL -----------------------------------------------------------
+    ccd.kill();
+    println!("KILLED — the process that wrote the answer is gone, mid-flight");
+    drop(supervisor);
+    phone.close();
+
+    // ---- and the write really had landed ------------------------------------
+    let actuated = wait_until(Duration::from_secs(120), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    println!("MEASURED actuated = {actuated}");
+
+    // ---- a NEW process, on the database the kill left behind -----------------
+    gate.release();
+    ccd.restart();
+    println!("RESTARTED — a process that has only ever seen this database from disk");
+    let after_recovery = resolutions_at(&db, &uid);
+    println!("MEASURED resolutions immediately after the restart = {after_recovery:?}");
+
+    // A fresh link on the same thread, which is what a restarted daemon really does.
+    // It is the one thing that could answer a second time, so it has to be here.
+    let supervisor = ccd.register(&session, gate.path()).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    let second_tap = phone
+        .answer(&card, "accept", &uid, Duration::from_secs(30))
+        .await;
+    println!("MEASURED a second tap after the restart = {second_tap:?}");
+
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let dispositions = ccd_dispositions(&broker_log);
+    let ledger = answer_ledger_at(&db, &uid);
+    let filed = resolutions_at(&db, &uid);
+    let open = cards();
+    println!("MEASURED ccd response dispositions = {dispositions:?}");
+    println!("MEASURED ledger = {ledger:?}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED open cards = {}", open.len());
+    println!("PANE AT THE END:\n{}", sb.capture_pane());
+    println!("BROKER LOG:\n{broker_log}");
+    println!(
+        "CHILD STDERR:\n{}",
+        read_file(&ccd.home.join("ccd.stderr.log"))
+    );
+
+    phone.close();
+    drop(supervisor);
+    gate.close();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+
+    assert!(
+        actuated,
+        "the app-server never ran the command, so the response never left the daemon \
+         and this gate did not stage a kill AFTER the write"
+    );
+    assert_eq!(
+        filed.len(),
+        1,
+        "exactly one terminal for this card, ever: {filed:?}"
+    );
+    assert!(
+        matches!(
+            filed.first(),
+            Some(protocol::ws::CodexResolution::Unknown {
+                attempted_by: protocol::ws::ResolutionActor::Phone,
+                ..
+            })
+        ),
+        "and it is the terminal unknown a phone claim of unproven delivery earns: {filed:?}"
+    );
+    assert_eq!(
+        after_recovery, filed,
+        "nothing after the restart may add to or rewrite the terminal it filed"
+    );
+    assert_eq!(
+        ledger.len(),
+        1,
+        "one ledger row for one answer, across the whole run: {ledger:?}"
+    );
+    assert_eq!(
+        ledger[0].1, "indeterminate",
+        "and it is terminal: {ledger:?}"
+    );
+    assert!(
+        matches!(second_tap, protocol::ws::AnswerResult::Rejected { .. }),
+        "a terminal-unknown card is never answerable again: {second_tap:?}"
+    );
+    assert!(
+        open.is_empty(),
+        "no card may be left standing for a question nothing can answer: {open:?}"
+    );
+    assert_eq!(
+        dispositions.len(),
+        RESPONSES_UPSTREAM,
+        "the ccd side put {} response(s) upstream for this approval; exactly \
+         {RESPONSES_UPSTREAM} is the whole claim, because the app-server accepts one \
+         answer to a serverRequest and a second would be this daemon answering a \
+         question it had already recorded as unanswerable. lines: {dispositions:?}",
+        dispositions.len()
+    );
+    println!(
+        "GATE PASS — a real ccd process killed after the write recorded exactly one \
+         Unknown when it was restarted on the same database, the write it had already \
+         made actuated, and the ccd side never wrote a second answer"
+    );
+}
+
+/// **A second ccd connection, resumed, that only watches.**
+///
+/// The instrument for any claim about ORDER. The production link consumes the frames
+/// it acts on and files terminals from them, so a gate that has to say which of two
+/// frames arrived first cannot ask the link — it needs a connection in the same
+/// position that does nothing but record. The resume is what makes it one at all:
+/// [`measure_the_approval_wire_on_the_ccd_leg`] measured that an unsubscribed leg is
+/// handed no turn or approval traffic whatsoever.
+async fn subscribed_tap(sb: &LiveSandbox, label: &'static str) -> (WireTap, String) {
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    assert!(
+        raw.initialize().await["result"].is_object(),
+        "the tap's initialize must be answered, or every frame it fails to see is a \
+         fact about an unopened connection"
+    );
+    raw.notify("initialized", serde_json::json!({})).await;
+    let mut thread_id = String::new();
+    for _ in 0..60 {
+        let loaded = raw
+            .request(
+                "thread/loaded/list",
+                serde_json::json!({}),
+                Duration::from_secs(20),
+            )
+            .await;
+        if let Some(id) = loaded["result"]["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+        {
+            thread_id = id.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        !thread_id.is_empty(),
+        "no loaded thread for the tap to resume onto"
+    );
+    let mut tap = WireTap::split(raw, label);
+    let mut resumed = false;
+    for attempt in 0..12 {
+        let id = 600 + attempt;
+        tap.send(serde_json::json!({
+            "id": id, "method": "thread/resume", "params": {"threadId": thread_id}
+        }))
+        .await;
+        let frames = Arc::clone(&tap.frames);
+        wait_until(Duration::from_secs(10), || {
+            frames
+                .lock()
+                .expect("wire tap sink")
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_i64) == Some(id))
+        })
+        .await;
+        if tap
+            .seen()
+            .iter()
+            .any(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v.get("result").is_some())
+        {
+            resumed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(
+        resumed,
+        "the tap never subscribed, so nothing it fails to see is evidence about the wire"
+    );
+    (tap, thread_id)
+}
+
+/// **The keyboard and the phone answer one approval at once: one winner actuates,
+/// and the loser is told something true** (plan Phase 3, gate 3).
+///
+/// The two halves of this gate are answered by different evidence on purpose.
+///
+/// **One winner** is the fleet's own record: exactly one `ApprovalResolved` fact and
+/// exactly one settled ledger row, whichever side won. Two would mean a card
+/// resolved twice, which is what the first-terminal-wins rule and the ledger's
+/// `status = 'applying'` guard exist to make impossible — and a race is the only
+/// thing that ever tests either.
+///
+/// **A truthful loser** is the *broker's* record, and it has to be, because the
+/// daemon's sentence is derived from what the broker named and checking a derivation
+/// against itself proves nothing. `relay.rs` logs
+/// `Ccd: response disposition delivered=… winner=…` in the same arm that decides it,
+/// so this gate reads the winner out of the broker's own log and requires the
+/// sentence the phone was given to be the one [`LOSER_SENTENCE`] owes for exactly
+/// that spelling. The case that matters is `winner=None`: `delivered:false` on its
+/// own conflates losing to the keyboard, losing to another daemon, never holding the
+/// capability, and being written into a socket that died — so a loser told "answered
+/// at the Mac" on a disposition that named nobody would be a false statement three
+/// times out of four.
+///
+/// **Which side wins is a measurement, not a requirement.** The gate asserts the
+/// invariants that must hold either way, prints which happened, and lets the run say
+/// so — a gate that demanded a particular winner would be asserting the scheduler.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn the_keyboard_and_the_phone_racing_one_approval_leave_one_truthful_winner() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("race3");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-gate3.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    assert!(
+        sb.capture_pane()
+            .contains("Would you like to run the following command?"),
+        "the premise: the TUI is showing the prompt both answers are about. pane:\n{}",
+        sb.capture_pane()
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; this gate would prove nothing"
+    );
+
+    // ---- THE RACE -----------------------------------------------------------
+    // The answer is started first and then the key is pressed, with nothing awaited
+    // between them: `send_keys` runs a `tmux` process, so pressing first would hand
+    // the keyboard a head start measured in milliseconds. This is as close to
+    // simultaneous as a harness driving one real TUI through a terminal can be.
+    let answering = {
+        let daemon = Arc::clone(&daemon);
+        let uid = uid.clone();
+        let request_id = card.request_id.clone();
+        let payload_hash = card.payload_hash.clone();
+        tokio::spawn(async move {
+            daemon
+                .answer(
+                    &request_id,
+                    &payload_hash,
+                    protocol::ws::AnswerDecision::OptionId {
+                        option_id: "accept".into(),
+                    },
+                    Some(&uid),
+                )
+                .await
+        })
+    };
+    sb.send_keys(&["Enter"]);
+    let result = answering.await.expect("the answering task");
+    println!("MEASURED AnswerResult = {result:?}");
+
+    let actuated = wait_until(Duration::from_secs(120), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    // Everything the wire had to say has to have landed before the counts are taken,
+    // and the terminal is filed by whichever side won — so the wait is on the record
+    // rather than on a sleep.
+    let settled = wait_until(Duration::from_secs(60), || {
+        !resolutions(&daemon, &uid).is_empty() && cards().is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let dispositions: Vec<String> = ccd_dispositions(&broker_log)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let filed = resolutions(&daemon, &uid);
+    let ledger = answer_ledger(&db, &uid);
+    let open = cards().len();
+    println!("PANE AFTER THE RACE:\n{}", sb.capture_pane());
+    println!("MEASURED actuated = {actuated}, settled = {settled}, open cards = {open}");
+    println!("MEASURED ccd response dispositions = {dispositions:?}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED ledger = {ledger:?}");
+    println!("BROKER LOG:\n{broker_log}");
+
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    // ---- what must hold whichever side won ----------------------------------
+    assert!(
+        actuated,
+        "one of the two answers was `accept`, so the command must have run whoever won"
+    );
+    assert_eq!(
+        dispositions.len(),
+        1,
+        "the ccd side wrote exactly one response, so the broker owes exactly one \
+         disposition: {dispositions:?}"
+    );
+    assert_eq!(
+        filed.len(),
+        1,
+        "a card is resolved once. Two terminals would mean first-terminal-wins did \
+         not hold under the only conditions that test it: {filed:?}"
+    );
+    assert_eq!(ledger.len(), 1, "one answer, one ledger row: {ledger:?}");
+    assert_eq!(open, 0, "the answered card must be off the phone");
+
+    let line = &dispositions[0];
+    let delivered = disposition_delivered(line).expect("the broker names delivered");
+    let named = disposition_winner(line).expect("the broker names a winner field");
+
+    if delivered {
+        // ---- the phone won --------------------------------------------------
+        println!("RACE OUTCOME = phone won (delivered=true, winner={named})");
+        assert!(
+            matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+            "the broker says the phone's bytes went upstream, so the phone must have \
+             been told its answer was applied: {result:?}"
+        );
+        assert_eq!(
+            ledger[0].2.as_deref(),
+            Some("delivered"),
+            "and the claim must be settled with the outcome a duplicate would replay"
+        );
+        assert_eq!(
+            filed,
+            vec![protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+            }],
+            "a phone answer that WON must be recorded as the phone's, with the option \
+             it named — never as `local`, which is what the terminals that follow the \
+             resolution would file if the disposition had not already retired the card"
+        );
+    } else {
+        // ---- the phone lost -------------------------------------------------
+        println!("RACE OUTCOME = phone lost (delivered=false, winner={named})");
+        let owed = LOSER_SENTENCE
+            .iter()
+            .find(|(spelling, _)| *spelling == named)
+            .map(|(_, sentence)| *sentence)
+            .unwrap_or_else(|| {
+                panic!("the broker named a winner this build has no sentence for: {named}")
+            });
+        assert_eq!(
+            result,
+            protocol::ws::AnswerResult::Rejected {
+                reason: owed.to_string()
+            },
+            "the loser's sentence must be the one the broker's own `winner={named}` \
+             earns. A missing winner in particular may NOT be described as the Mac's \
+             answer: it also covers losing to another daemon, to a capability never \
+             held, and to a socket that died."
+        );
+        assert_eq!(
+            ledger[0].2.as_deref(),
+            Some("lost"),
+            "a losing answer's claim is settled `lost`, which is what leaves the card \
+             for the winner's own terminal to retire"
+        );
+        assert!(
+            !matches!(
+                filed[0],
+                protocol::ws::CodexResolution::Answered {
+                    by: protocol::ws::ResolutionActor::Phone,
+                    ..
+                }
+            ),
+            "the phone lost, so the fleet must not be told the phone answered: {filed:?}"
+        );
+    }
+    println!(
+        "GATE PASS — one winner actuated, one terminal was filed, and the loser was \
+         told what the broker's own arbiter recorded"
+    );
+}
+
+/// **`acceptForSession` on a file change is accepted by the real app-server, and the
+/// edit lands** (plan Phase 3, "option variants round-trip by `option_id`").
+///
+/// The option that has the least evidence behind it anywhere in this build. A
+/// command approval's options come off the wire in `availableDecisions`, so
+/// answering with one is answering with something the server itself proposed. A file
+/// change carries **no** option set at all (measured —
+/// [`measure_what_a_file_change_approval_offers`]), so `acceptForSession` exists only
+/// in `Family::labels`, a table this daemon owns, pinned to text somebody read off
+/// the TUI's screen. Nothing but a live round trip can say whether the server
+/// actually takes it.
+///
+/// And it is the one file-change option with a side effect beyond this decision: it
+/// widens what the rest of the session may edit without asking. A card that offered
+/// it and a server that refused it would be a button that does nothing; a card that
+/// offered it and a server that took it as something else would be a widening
+/// nobody chose.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn accept_for_session_on_a_file_change_is_taken_by_the_app_server() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("afs");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let target = std::path::PathBuf::from(format!("/tmp/cc-3b-afs.{}.txt", nanos()));
+    std::fs::write(&target, "hello from the codex approvals probe\n").expect("seed the target");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!(
+                "Use apply_patch to edit {}, replacing the word hello with goodbye. \
+                 Do not explain, just do it.",
+                target.display()
+            ),
+            Duration::from_secs(300),
+            || cards().iter().any(|card| card.family == "fileChange"),
+        )
+        .await,
+        "the observer never raised a file-change card. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards()
+        .into_iter()
+        .find(|card| card.family == "fileChange")
+        .expect("the file-change card");
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    println!(
+        "PANE WHILE THE FILE-CHANGE APPROVAL IS UP:\n{}",
+        sb.capture_pane()
+    );
+    // The option this gate is about is on the card, under the id it will be answered
+    // by — from this daemon's own table, because the wire offered none.
+    assert_eq!(
+        card.tool_input["options"][1]["id"],
+        serde_json::json!("acceptForSession"),
+        "the option under test must be the one the card offered: {}",
+        card.tool_input["options"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "hello from the codex approvals probe\n",
+        "the edit was applied before anybody answered; this gate would prove nothing"
+    );
+
+    let result = daemon
+        .answer(
+            &card.request_id,
+            &card.payload_hash,
+            protocol::ws::AnswerDecision::OptionId {
+                option_id: "acceptForSession".into(),
+            },
+            Some(&uid),
+        )
+        .await;
+    println!("MEASURED AnswerResult = {result:?}");
+
+    let applied = wait_until(Duration::from_secs(120), || {
+        std::fs::read_to_string(&target)
+            .map(|body| body.contains("goodbye"))
+            .unwrap_or(false)
+    })
+    .await;
+    let dismissed = wait_until(Duration::from_secs(60), || {
+        !sb.capture_pane()
+            .contains("Would you like to make this change?")
+    })
+    .await;
+    let status = daemon.store.answer_status(&uid, &card.request_id);
+    let filed = resolutions(&daemon, &uid);
+    let ledger = answer_ledger(&db, &uid);
+    println!("PANE AFTER THE PHONE ANSWERED:\n{}", sb.capture_pane());
+    println!("MEASURED applied = {applied}, dismissed = {dismissed}, status = {status:?}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED ledger = {ledger:?}");
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&target);
+
+    assert!(
+        matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+        "the app-server must accept a decision this daemon composed from its OWN \
+         option table, or `acceptForSession` is a button that does nothing: {result:?}"
+    );
+    assert!(
+        applied,
+        "the app-server never wrote the edit the phone approved for the session"
+    );
+    assert_eq!(
+        status.expect("read the answer ledger"),
+        Some(crate::store::AnswerStatus::Settled("delivered".into())),
+        "and the broker told this daemon the bytes went upstream"
+    );
+    assert_eq!(
+        filed,
+        vec![protocol::ws::CodexResolution::Answered {
+            by: protocol::ws::ResolutionActor::Phone,
+            decision: Some(protocol::ws::AnswerDecision::OptionId {
+                option_id: "acceptForSession".into()
+            }),
+        }],
+        "the fleet is told the phone answered, and with the exact option it named — \
+         which is the only record of a widening that outlives this one decision"
+    );
+    println!(
+        "GATE PASS — a live 0.153 app-server took `acceptForSession`, a decision \
+         composed entirely from this daemon's own pane-measured option table"
+    );
+}
+
+/// **A winning `cancel` is recorded as the phone's answer, not as a turn abort**
+/// (plan Phase 3, "phone-first ⇒ …"; the provenance race, on the real wire).
+///
+/// `cancel` is the one decision whose own consequence can overwrite its record.
+/// Measured on 0.153 (A25): a declined command lets the turn continue, while a
+/// cancelled one **interrupts** it — and an interrupted turn's terminal retires every
+/// card the visit was holding as [`protocol::ws::ClearCause::TurnAborted`]. Both
+/// frames are broadcast to the same connection, microseconds apart, and both are
+/// terminals for the same card. Whichever is filed first is what the fleet keeps.
+///
+/// So the honest answer — "the phone answered, and it chose cancel" — is available
+/// only if the phone's terminal is filed by the loop that reads the disposition,
+/// **before another frame is read**. That is exactly what
+/// `Connection::note_response_disposition` does and exactly why it does it there
+/// rather than on the waiting caller's task: the broker composes the disposition in
+/// the arm that forwards the answer, so it is ahead of both of them on the answering
+/// leg, and the two frames below then find the card already gone.
+///
+/// This gate is that design measured: it requires the interrupt to really arrive,
+/// requires it to arrive fast, pins the order the two competing terminals actually
+/// reach a watching leg in, and then requires the record to be
+/// `Answered{Phone, cancel}` anyway.
+///
+/// The tap is what makes the ordering evidence rather than inference: the link
+/// consumes what it acts on, so a second subscribed connection is the only thing
+/// that can say which frame came first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_winning_cancel_is_recorded_as_the_phones_answer_and_not_a_turn_abort() {
+    /// **STOP AND AMEND: the plan states this ordering and the wire disagrees.**
+    ///
+    /// `internal/CODEX-PLAN.md` amendment **A25**, under its measured 0.153.2
+    /// approval wire, records that "interrupt orders `turn/completed{interrupted}`
+    /// before `resolved`".
+    ///
+    /// **Measured here, twice, against real codex 0.153.2: the opposite.** On a
+    /// phone-driven `cancel`, a subscribed watching leg is handed the request's own
+    /// `serverRequest/resolved` FIRST — at index 0 — and the interrupt's
+    /// `turn/completed{interrupted}` six frames later, about 104 ms after the answer.
+    /// Two runs, same indices, same magnitude. The measurement wins over the plan;
+    /// A25's clause needs re-deriving rather than this constant being flipped to
+    /// match it.
+    ///
+    /// **A hypothesis about why, which this gate did NOT test:** A25's ordering is
+    /// probably the *keyboard* cancel, where the TUI issues its own `turn/interrupt`
+    /// and that request's terminal therefore leads the approval's. Nothing here
+    /// measured a keyboard cancel, so that is a reading offered for whoever amends
+    /// the plan, not a second fact.
+    ///
+    /// **The provenance outcome is the same either way, and that is the point of
+    /// pinning the order rather than depending on it.** Both frames are terminals for
+    /// this card and each files a different resolution — `resolved` files
+    /// `answered{by: local, decision: none}`, the aborted turn files
+    /// `cleared{turn_aborted}` — but the broker composes the disposition in the arm
+    /// that forwards the answer, so on the ANSWERING leg it precedes both, and
+    /// `note_response_disposition` files `answered{by: phone}` before another frame is
+    /// read. The two below then find the card already gone. A release that reordered
+    /// them would not change that; it would change which wrong answer a regression
+    /// produced, which is exactly why the order is asserted and not assumed.
+    const RESOLUTION_LEADS_THE_INTERRUPT: bool = true;
+    /// **How fast the cancelled turn terminalizes.** Not a tuning knob: an interrupt
+    /// that took minutes could not race anything and the provenance question would
+    /// not arise. Measured at ~0.1 s on 0.153.2; the ceiling is loose enough that a
+    /// loaded machine does not fail the gate and tight enough that "fast" is an
+    /// assertion rather than a description. The real elapsed time is printed.
+    const INTERRUPT_BUDGET: Duration = Duration::from_secs(10);
+
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("cancel");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-cancel.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut tap, thread_id) = subscribed_tap(&sb, "WATCH").await;
+    println!("MEASURED thread under test = {thread_id}");
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    let before = tap.seen().len();
+
+    // ---- the phone cancels, unopposed ---------------------------------------
+    let started = Instant::now();
+    let result = daemon
+        .answer(
+            &card.request_id,
+            &card.payload_hash,
+            protocol::ws::AnswerDecision::OptionId {
+                option_id: "cancel".into(),
+            },
+            Some(&uid),
+        )
+        .await;
+    println!("MEASURED AnswerResult = {result:?}");
+
+    let interrupted = |frames: &[Value]| {
+        frames.iter().position(|f| {
+            f["method"].as_str() == Some("turn/completed")
+                && f.pointer("/params/turn/status").and_then(Value::as_str) == Some("interrupted")
+        })
+    };
+    let frames_after = Arc::clone(&tap.frames);
+    let saw_interrupt = wait_until(INTERRUPT_BUDGET, || {
+        let frames = frames_after.lock().expect("wire tap sink");
+        interrupted(&frames[before..]).is_some()
+    })
+    .await;
+    let interrupt_took = started.elapsed();
+    assert!(
+        tap.barrier(Duration::from_secs(30)).await,
+        "the tap must answer a barrier, or its frame list is a list from a corpse"
+    );
+
+    let after: Vec<Value> = tap.seen()[before..].to_vec();
+    let interrupt_at = interrupted(&after);
+    let resolved_at = after
+        .iter()
+        .position(|f| f["method"].as_str() == Some("serverRequest/resolved"));
+    let filed = resolutions(&daemon, &uid);
+    let ledger = answer_ledger(&db, &uid);
+    let open = cards().len();
+    println!("PANE AFTER THE CANCEL:\n{}", sb.capture_pane());
+    println!("TAP methods after the answer: {:?}", tap.methods());
+    println!(
+        "MEASURED interrupt observed = {saw_interrupt} after {interrupt_took:?}; \
+         turn/completed{{interrupted}} at index {interrupt_at:?}, \
+         serverRequest/resolved at index {resolved_at:?}"
+    );
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED ledger = {ledger:?}, open cards = {open}");
+    println!(
+        "MEASURED marker created = {}",
+        std::path::Path::new(&marker).exists()
+    );
+    println!("BROKER LOG:\n{}", read_file(&sb.run_dir.join("broker.log")));
+
+    tap.handle.abort();
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        matches!(result, protocol::ws::AnswerResult::Applied { .. }),
+        "an unopposed cancel must be applied: {result:?}"
+    );
+    assert!(
+        saw_interrupt,
+        "a cancelled command approval must interrupt the turn, or this gate is not \
+         about the frame that races the phone's terminal at all. TAP: {:?}",
+        tap.methods()
+    );
+    let (interrupt_at, resolved_at) = (
+        interrupt_at.expect("the interrupt was observed"),
+        resolved_at.expect("the request's own resolution reached the tap"),
+    );
+    assert_eq!(
+        resolved_at < interrupt_at,
+        RESOLUTION_LEADS_THE_INTERRUPT,
+        "the measured order of the two terminals moved: serverRequest/resolved at \
+         {resolved_at}, turn/completed{{interrupted}} at {interrupt_at}. Both are \
+         terminals for this card and they file different resolutions, so re-derive \
+         which one a link would reach first before moving this constant."
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "a cancelled command must not have run"
+    );
+    assert_eq!(ledger.len(), 1, "one answer, one ledger row: {ledger:?}");
+    assert_eq!(
+        ledger[0].2.as_deref(),
+        Some("delivered"),
+        "the winning cancel's claim is settled with the outcome a duplicate replays"
+    );
+    assert_eq!(
+        filed,
+        vec![protocol::ws::CodexResolution::Answered {
+            by: protocol::ws::ResolutionActor::Phone,
+            decision: Some(protocol::ws::AnswerDecision::OptionId {
+                option_id: "cancel".into()
+            }),
+        }],
+        "the record must be the phone's answer and the option it named. \
+         `cleared{{turn_aborted}}` is what the interrupt this very cancel caused would \
+         file, and this run measured it arriving at {interrupt_at} against \
+         serverRequest/resolved at {resolved_at} — see RESOLUTION_LEADS_THE_INTERRUPT \
+         above, which is a measured constant and not an invariant. Whichever of the two \
+         came first, the terminal must be filed by the disposition that knew who \
+         answered rather than by whichever frame won that race."
+    );
+    assert_eq!(open, 0, "the cancelled card must be off the phone");
+    println!(
+        "GATE PASS — a winning cancel interrupted the turn in {interrupt_took:?}; both \
+         competing terminals reached a watching leg (resolved at {resolved_at}, the \
+         aborted turn at {interrupt_at}) and the fleet still records \
+         Answered{{Phone, cancel}} rather than Cleared{{TurnAborted}}"
+    );
+}
+
+/// **A phone answer the keyboard beat is told what the broker's own arbiter
+/// recorded** (plan Phase 3, gate 3's other half).
+///
+/// [`the_keyboard_and_the_phone_racing_one_approval_leave_one_truthful_winner`] runs
+/// the two answers as close to together as this harness can and measures which won.
+/// It has never been the keyboard, and the reason is structural rather than
+/// interesting: the phone's answer is a function call in this process while the
+/// keyboard's is a `tmux` fork, a keypress, a TUI redraw and a second socket. So the
+/// losing branch — the one where the daemon has to say something true about an answer
+/// that went nowhere — is not reachable by racing.
+///
+/// It is reachable by **ordering**, and this gate orders it with the same
+/// [`GatedCcdLeg`] the fault gates use. The keyboard answers first and really wins:
+/// its response reaches the app-server on the TUI's own leg, which this gate never
+/// touches, and the broker's arbiter records `tui` for the request. What the valve
+/// holds is only the `serverRequest/resolved` coming back to **ccd** — so the link
+/// has not yet learned the question is settled, and still holds the wire id. The
+/// phone then answers into exactly the state production produces whenever a phone is
+/// a few milliseconds slow: a card that is still open, on a request that is already
+/// decided.
+///
+/// A separate, unproxied tap is what says when to answer. It is subscribed to the
+/// same broadcast, so it sees the `serverRequest/resolved` the link is being held
+/// back from — which makes "the keyboard has won" an observation rather than a sleep.
+///
+/// The assertion that matters is the **sentence**, checked against the broker's log
+/// rather than against the daemon's own reasoning: `settle_lost_answer` derives what
+/// the phone is told from the `winner` the broker named, so checking it against
+/// anything the daemon computed would be checking a derivation against itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_answer_that_lost_to_the_keyboard_is_told_what_the_broker_named() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("loser3");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3b-loser3.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let registration = register_the_run_on(&daemon, &session, gate.path()).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    // Unproxied on purpose: this connection has to see what the link is being held
+    // back from, so it dials the broker's own leg.
+    let (tap, thread_id) = subscribed_tap(&sb, "WATCH").await;
+    println!("MEASURED thread under test = {thread_id}");
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+
+    // ---- the keyboard answers, and the link is not told ---------------------
+    gate.hold();
+    let before = tap.seen().len();
+    sb.send_keys(&["Enter"]);
+    let frames = Arc::clone(&tap.frames);
+    let keyboard_won = wait_until(Duration::from_secs(60), || {
+        frames.lock().expect("wire tap sink")[before..]
+            .iter()
+            .any(|f| f["method"].as_str() == Some("serverRequest/resolved"))
+    })
+    .await;
+    assert!(
+        keyboard_won,
+        "the keyboard's answer never resolved the request, so there is no winner for \
+         the phone to lose to. pane:\n{}\nTAP: {:?}",
+        sb.capture_pane(),
+        tap.methods()
+    );
+    assert!(
+        !cards().is_empty(),
+        "the link learned the request was resolved despite the valve, so the phone \
+         would be refused by the card lookup rather than by the arbiter — which is a \
+         different refusal from the one this gate is about"
+    );
+    println!("KEYBOARD WON — and the link has not been told");
+
+    // ---- and only now does the phone answer ---------------------------------
+    let answering = {
+        let daemon = Arc::clone(&daemon);
+        let uid = uid.clone();
+        let request_id = card.request_id.clone();
+        let payload_hash = card.payload_hash.clone();
+        tokio::spawn(async move {
+            daemon
+                .answer(
+                    &request_id,
+                    &payload_hash,
+                    protocol::ws::AnswerDecision::OptionId {
+                        option_id: "accept".into(),
+                    },
+                    Some(&uid),
+                )
+                .await
+        })
+    };
+    // The claim proves the link accepted the ask and wrote the response — which is
+    // what makes this a LOST answer rather than one that was never addressable.
+    //
+    // **Bounded by the gap this gate actually has, and ASSERTED.** `DISPOSITION_BUDGET`
+    // is 750 ms under `cfg(test)`, so a claim nobody settles is made terminal by this
+    // very process three quarters of a second after the write — a poll that ran to
+    // 500 ms left 250 ms of margin, and a `println!` where the assertion should have
+    // been meant a miss degraded the gate silently into measuring the wrong ending.
+    // 400 ms is the poll; missing it is a failure that says so.
+    let claimed =
+        wait_for_an_applying_claim(&daemon, &uid, &card.request_id, Duration::from_millis(400))
+            .await;
+    println!("MEASURED the phone's answer reached the wire (claimed) = {claimed}");
+    assert!(
+        claimed,
+        "the link never took a durable claim, so this run staged an answer that was \
+         never addressable rather than one that LOST. ledger: {:?}",
+        daemon.store.answer_status(&uid, &card.request_id)
+    );
+    gate.release();
+    let result = answering.await.expect("the answering task");
+    println!("MEASURED AnswerResult = {result:?}");
+
+    let settled = wait_until(Duration::from_secs(60), || {
+        !resolutions(&daemon, &uid).is_empty() && cards().is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let dispositions: Vec<String> = ccd_dispositions(&broker_log)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let filed = resolutions(&daemon, &uid);
+    let ledger = answer_ledger(&db, &uid);
+    let actuated = std::path::Path::new(&marker).exists();
+    println!("PANE AFTER BOTH ANSWERS:\n{}", sb.capture_pane());
+    println!("MEASURED settled = {settled}, actuated = {actuated}");
+    println!("MEASURED ccd response dispositions = {dispositions:?}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED ledger = {ledger:?}");
+    println!("BROKER LOG:\n{broker_log}");
+
+    tap.handle.abort();
+    daemon.unregister_supervisor(&registration).await;
+    gate.close();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        claimed,
+        "the link never claimed the phone's answer, so nothing was written and this \
+         gate measured a refusal rather than a loss"
+    );
+    assert!(
+        actuated,
+        "the keyboard accepted, so the command must have run — once, by the winner"
+    );
+    assert_eq!(
+        dispositions.len(),
+        1,
+        "the ccd side wrote exactly one response: {dispositions:?}"
+    );
+    let line = &dispositions[0];
+    assert_eq!(
+        disposition_delivered(line),
+        Some(false),
+        "a response the arbiter dropped must be reported as having delivered nothing: \
+         {line}"
+    );
+    let named = disposition_winner(line).expect("the broker names a winner field");
+    assert_eq!(
+        named, "Some(Tui)",
+        "the keyboard won, so the broker's arbiter must be able to NAME it — a \
+         `winner=None` here would mean the daemon could only say 'something else' \
+         about an answer the Mac demonstrably gave: {line}"
+    );
+    let owed = LOSER_SENTENCE
+        .iter()
+        .find(|(spelling, _)| *spelling == named)
+        .map(|(_, sentence)| *sentence)
+        .expect("this build has a sentence for every winner the broker names");
+    assert_eq!(
+        result,
+        protocol::ws::AnswerResult::Rejected {
+            reason: owed.to_string()
+        },
+        "the loser's sentence must be the one the broker's own `winner={named}` earns"
+    );
+    assert_eq!(ledger.len(), 1, "one answer, one ledger row: {ledger:?}");
+    assert_eq!(
+        ledger[0].2.as_deref(),
+        Some("lost"),
+        "a losing answer's claim is settled `lost` — which is what leaves the card \
+         standing for the WINNER's own terminal to retire, rather than filing a \
+         resolution naming a decision nothing applied"
+    );
+    assert_eq!(
+        filed,
+        vec![protocol::ws::CodexResolution::Answered {
+            by: protocol::ws::ResolutionActor::Local,
+            decision: None,
+        }],
+        "the card is retired by the wire's own terminal, which carries no decision — \
+         `answered{{by: local}}` with the choice absent is the honest reading, and \
+         recording the phone's option here would be recording a decision that was \
+         never applied"
+    );
+    println!(
+        "GATE PASS — a phone answer the keyboard beat was dropped by the arbiter, \
+         settled `lost`, retired as the Mac's answer, and the phone was told exactly \
+         what the broker named"
+    );
 }

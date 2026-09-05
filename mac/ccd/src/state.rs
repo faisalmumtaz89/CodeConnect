@@ -652,6 +652,21 @@ struct RetainedCarry {
 /// that reconnects registers again under the same uid, and the losing connection's
 /// teardown can run afterwards. Acting blindly would tear down the link the *new*
 /// registration had just installed.
+/// **Everything the daemon holds of one link**, minted together and installed
+/// together.
+///
+/// Three cells with one lifetime: they go onto the handle in a single statement,
+/// they leave the map with it, and a stale task still winding down writes into all
+/// three at once — into cells no lookup can reach. Threading them as three separate
+/// arguments said the same thing less well and let a caller pair one link's cell
+/// with another's, which is precisely the mistake the shared lifetime exists to make
+/// unrepresentable.
+struct LinkCells {
+    presence: crate::codex_link::LinkPresence,
+    carry: crate::codex_link::LinkCarry,
+    answers: crate::codex_link::LinkAnswers,
+}
+
 struct CodexLinkHandle {
     epoch: u64,
     /// The [`crate::codex_link::ControlLink::generation`] this link speaks for — the
@@ -673,6 +688,13 @@ struct CodexLinkHandle {
     /// itself across the window where the row already describes an incoming
     /// registration whose handles are not published yet.
     presence: crate::codex_link::LinkPresence,
+    /// **How the daemon asks this link to write on its socket** — see
+    /// [`crate::codex_link::LinkAnswers`]. On the handle for the same lifetime reason
+    /// as the two cells above, and it is the sharper case of the three: an ask that
+    /// reached a superseded task would put a phone's decision on a socket the session
+    /// no longer owns. Taking the sender out of the map with the handle is what makes
+    /// that unreachable rather than unlikely.
+    answers: crate::codex_link::LinkAnswers,
     /// **What the link itself knows** — see [`crate::codex_link::LinkCarry`]. The
     /// other cell, on the handle for the same lifetime reason as the presence one,
     /// and read by exactly one caller: [`Inner::retain_codex_carry`]. **Not when
@@ -787,15 +809,14 @@ impl Inner {
         session_uid: &str,
         epoch: u64,
         generation: u64,
-        presence: crate::codex_link::LinkPresence,
-        carry: crate::codex_link::LinkCarry,
+        cells: LinkCells,
         spawn: impl FnOnce() -> tokio::task::JoinHandle<()>,
     ) -> Result<Option<tokio::task::JoinHandle<()>>, Option<u64>> {
         let owner = self.owner_of(session_uid);
         if owner != Some(epoch) {
             return Err(owner);
         }
-        Ok(self.install_codex_link(session_uid, epoch, generation, presence, carry, spawn()))
+        Ok(self.install_codex_link(session_uid, epoch, generation, cells, spawn()))
     }
 
     /// **Which registration this session BELONGS to** — the one question every
@@ -888,8 +909,7 @@ impl Inner {
         session_uid: &str,
         epoch: u64,
         generation: u64,
-        presence: crate::codex_link::LinkPresence,
-        carry: crate::codex_link::LinkCarry,
+        cells: LinkCells,
         task: tokio::task::JoinHandle<()>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if self.owner_of(session_uid) != Some(epoch) {
@@ -908,8 +928,9 @@ impl Inner {
                 epoch,
                 generation,
                 task,
-                presence,
-                carry,
+                presence: cells.presence,
+                answers: cells.answers,
+                carry: cells.carry,
             },
         ) {
             // Nothing should be here — the gate serializes this sequence and the
@@ -1867,7 +1888,10 @@ impl Daemon {
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
         }
 
-        match self.db.list_pending_approvals().await {
+        // **Whether the cards are back, which is what the answer recovery below depends
+        // on.** A read failure is not information: see the comment at the end of this
+        // function.
+        let cards_are_back = match self.db.list_pending_approvals().await {
             Ok(rows) if !rows.is_empty() => {
                 // Counted up front, before the state lock is taken.
                 //
@@ -1983,9 +2007,42 @@ impl Daemon {
                     "recovery: {restored} approval card(s) restored; each is re-checked against \
                      the pane before it can be answered"
                 );
+                true
             }
-            Ok(_) => {}
-            Err(err) => crate::log_error!("recovery: could not read pending approvals: {err:#}"),
+            Ok(_) => true,
+            Err(err) => {
+                crate::log_error!("recovery: could not read pending approvals: {err:#}");
+                false
+            }
+        };
+
+        // **Last, and only if the cards are actually back.**
+        //
+        // A phone answer's terminal retires its card, and retirement claims the card by
+        // removing it from `inner.pending` — so this running before the restore above
+        // would find nothing to claim, file no resolution, and leave behind exactly the
+        // ghost it exists to prevent: a card the phone can see and every tap refuses.
+        //
+        // A restore that FAILED is the same hazard wearing a different hat, and it is
+        // worse because nothing about it looks wrong. With the read broken there is no
+        // card in memory to claim, so every outstanding answer retires as `AlreadyGone`
+        // and settles its ledger row alone — the claim goes terminal while the DURABLE
+        // card row, which the failed read never reached, is untouched. The next healthy
+        // start restores that row onto a phone beside a terminal claim, and no terminal
+        // will ever retire it: the resolution it earned was filed against a card that
+        // was not there.
+        //
+        // So a read failure decides nothing. The `applying` row survives restarts
+        // precisely so a start that CAN see the cards deals with it, and that start does
+        // the whole job in one piece.
+        if cards_are_back {
+            self.recover_codex_answers().await;
+        } else {
+            crate::log_warn!(
+                "recovery: the pending cards could not be read, so no in-flight answer was \
+                 made terminal; their claims stay live for the next start, which is the \
+                 only one that can retire the cards beside them"
+            );
         }
     }
 
@@ -2290,12 +2347,16 @@ impl Daemon {
         }
         inner.seed_codex_presence(&session.uid, &link, &presence);
         let generation = link.generation;
+        let (answers, asks) = crate::codex_link::answer_channel();
         let outcome = inner.spawn_codex_link_if_owner(
             &session.uid,
             epoch,
             generation,
-            presence.clone(),
-            carry.clone(),
+            LinkCells {
+                presence: presence.clone(),
+                carry: carry.clone(),
+                answers,
+            },
             || {
                 tokio::spawn(crate::codex_link::run(
                     Arc::clone(self),
@@ -2303,6 +2364,7 @@ impl Daemon {
                     link,
                     presence,
                     carry,
+                    asks,
                 ))
             },
         );
@@ -3685,6 +3747,28 @@ impl Daemon {
         request_id: &str,
         resolution: protocol::ws::CodexResolution,
     ) -> Retirement {
+        self.retire_codex_answered(session, request_id, resolution, None)
+            .await
+    }
+
+    /// [`Daemon::retire_codex_approval`], plus the phone answer's own terminal in
+    /// the same commit.
+    ///
+    /// **Why the two cannot be two commits.** A settled claim over a card that is
+    /// still standing is a question the operator can never answer again — the ledger
+    /// refuses the second tap, and the card goes on being displayed. A retired card
+    /// over a live claim is the mirror: recovery finds the claim at the next start
+    /// and files a second terminal for a card that already has one. The transaction
+    /// is what makes both unrepresentable rather than unlikely.
+    ///
+    /// `None` for every terminal that is not a phone answer, which is all of 3a's.
+    pub(crate) async fn retire_codex_answered(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        resolution: protocol::ws::CodexResolution,
+        answer: Option<crate::store::AnswerTerminal>,
+    ) -> Retirement {
         let id: ApprovalId = (session.uid.clone(), request_id.to_string());
         let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
             return Retirement::AlreadyGone;
@@ -3704,7 +3788,12 @@ impl Daemon {
             let _ordered = gate.lock().await;
             let retired = self
                 .db
-                .retire_codex_pending_approval(session.uid.clone(), request_id.to_string(), pending)
+                .retire_codex_pending_approval(
+                    session.uid.clone(),
+                    request_id.to_string(),
+                    pending,
+                    answer,
+                )
                 .await;
             if let Ok(Some(event)) = &retired {
                 let _ = self.events_tx.send(event.clone());
@@ -4247,6 +4336,304 @@ impl Daemon {
         }
     }
 
+    /// **Answer one Codex card from the phone.**
+    ///
+    /// Reached from [`Daemon::answer`] under that function's per-approval
+    /// serialisation, so everything below runs with at most one tap in flight for
+    /// this card.
+    ///
+    /// # What makes this a different function rather than a branch
+    ///
+    /// Claude's path types into a pane, and everything it does is shaped by that:
+    /// it holds a hook responder, it fingerprints the prompt it expects to find, and
+    /// it cannot tell a keyboard answer from its own except by watching the pane.
+    /// None of that applies here. The answer is a JSON-RPC response written on the
+    /// link's own socket, the app-server actuates it, and which of the two answers
+    /// won is a fact the broker reports rather than one this daemon infers.
+    ///
+    /// # The four tables it does not touch
+    ///
+    /// `answers`, `answer_claims`, `text_mutations` and `pending_approvals` are read
+    /// globally by a rolled-back v0.6.0 daemon, so a Codex row in any of them is the
+    /// rollback hazard [`Daemon::shared_ledgers_admit`] exists to prevent. The claim
+    /// this path takes goes in `mutation_ledger` — the generalized Codex ledger,
+    /// which no v0.6.0 statement names — and the tripwire in the tests is pointed at
+    /// exactly that claim.
+    ///
+    /// # Validate here, claim and write there
+    ///
+    /// Everything this function checks is a property of the STORED card: that it is
+    /// still open, that the hash the phone echoed is the one it was displayed under,
+    /// and that the option named is one the app-server itself proposed. None of that
+    /// needs a socket. Everything that needs the socket — whether the connection
+    /// holds a live wire id for this card, on the card's own thread, with no switch
+    /// in flight — is asked of the link, and the link takes the durable claim at the
+    /// one moment it knows the answer is about to be written. That is what keeps a
+    /// refused ask from leaving an `applying` row behind for recovery to turn into a
+    /// spurious `Unknown`.
+    async fn answer_codex(
+        &self,
+        row: &crate::store::SessionRow,
+        request_id: &str,
+        payload_hash: &str,
+        decision: AnswerDecision,
+    ) -> AnswerResult {
+        let AnswerDecision::OptionId { option_id } = &decision else {
+            return AnswerResult::Rejected {
+                reason: "a Codex card is answered by naming one of the options it \
+                         offered; this decision names none of them, so nothing was sent"
+                    .into(),
+            };
+        };
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 1. **The durable ledger wins over everything, including the card.** A
+        //    terminal claim can outlive the question it answered: a lost race leaves
+        //    the card standing for the winner's own terminal to retire, and a bounce
+        //    re-delivers a request the app-server really is still waiting on. In both
+        //    the card is there and the phone must not answer it again — and the
+        //    operator needs to be told which of those it is, not merely refused. The
+        //    link would refuse this on its own claim; asking here is what makes the
+        //    refusal a sentence rather than "there is no link".
+        match self
+            .db
+            .answer_status(session.uid.clone(), request_id.to_string())
+            .await
+        {
+            Ok(Some(crate::store::AnswerStatus::Settled(outcome))) => {
+                // **Branch on what the ledger recorded, not on the fact that it is
+                // terminal.** `lost` is the record that this phone's answer reached
+                // nothing; replaying it as "answered from a phone" tells the operator the
+                // opposite of what happened, at the moment they are asking.
+                return AnswerResult::Rejected {
+                    reason: crate::store::replayed_answer_sentence(&outcome),
+                };
+            }
+            Ok(Some(crate::store::AnswerStatus::Indeterminate)) => {
+                return AnswerResult::Rejected {
+                    reason: "an answer to this card was already sent and what became of it \
+                             is not known; it will not be sent again. Check the Mac."
+                        .into(),
+                }
+            }
+            // `Applying` is an attempt this very daemon has in flight, and the
+            // per-approval gate above means it cannot be for this card. Left to the
+            // link's own claim, which is the one that decides.
+            Ok(_) => {}
+            Err(err) => {
+                return AnswerResult::Rejected {
+                    reason: format!(
+                        "could not read this card's answer ledger ({err}); nothing was sent"
+                    ),
+                }
+            }
+        }
+
+        // 2. The card, as this daemon filed it. Not the phone's copy of it: the
+        //    options an answer is checked against have to be the ones the
+        //    app-server proposed, and the hash below is what ties the two together.
+        let cards = match self.db.codex_pending_approvals(session.uid.clone()).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                return AnswerResult::Rejected {
+                    reason: format!(
+                        "could not read this run's open cards ({err}); nothing was sent"
+                    ),
+                }
+            }
+        };
+        let Some(held) = cards.into_iter().find(|card| card.request_id == request_id) else {
+            return AnswerResult::Rejected {
+                reason: "unknown or already-resolved request".into(),
+            };
+        };
+        let Ok(card) = serde_json::from_str::<protocol::ws::ApprovalCard>(&held.card) else {
+            return AnswerResult::Rejected {
+                reason: "the stored card could not be read, so what it offered cannot be \
+                         established; nothing was sent"
+                    .into(),
+            };
+        };
+        // **The hash gate, and it covers the option set.** `tool_input.options` is
+        // inside the preimage `payload_hash` is taken over, so a phone echoing the
+        // hash it displayed cannot be answering an option table that has since been
+        // replaced — which is the whole reason the options ride inside the hash.
+        if card.payload_hash != payload_hash {
+            return AnswerResult::Rejected {
+                reason: "stale payload_hash: the card you answered is out of date".into(),
+            };
+        }
+        // 3. The wire decision, rebuilt from the card's own options. A phone sends
+        //    an opaque id; the body of an amendment is never anything it supplied.
+        let Some(wire) =
+            crate::codex_approval::wire_decision(&card.tool_input["options"], option_id)
+        else {
+            return AnswerResult::Rejected {
+                reason: format!(
+                    "{option_id:?} is not one of the options this card offered; nothing was sent"
+                ),
+            };
+        };
+
+        // 4. The material this answer will be claimed with — the whole authorization
+        //    surface, so the same id carrying a different decision, a different card
+        //    or a different thread is a conflict rather than a replay.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: held.thread_id.clone(),
+            generation: held.generation,
+            route: option_id.clone(),
+            target_turn_id: Some(held.turn_id.clone()),
+            claimed_hash: protocol::hash::answer_hash(
+                request_id,
+                payload_hash,
+                option_id,
+                &held.thread_id,
+                &wire,
+            ),
+        };
+
+        // 5. The link claims and writes, in that order, and files the terminal
+        //    itself — see [`crate::codex_link::AnswerRequest`].
+        let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid);
+        let report = match &link {
+            Some(answers) => answers.answer(request_id, wire, claimed).await,
+            None => crate::codex_link::AnswerReport::NotApplied(
+                "there is no live link to this Codex session, so nothing was sent; \
+                 answer at the Mac"
+                    .into(),
+            ),
+        };
+        match report.reason() {
+            Some(reason) => AnswerResult::Rejected {
+                reason: reason.to_string(),
+            },
+            None => AnswerResult::Applied {
+                outcome: protocol::ws::AnswerOutcome {
+                    request_id: request_id.to_string(),
+                    session_id: session.name.clone(),
+                    decision,
+                    resolved_by: protocol::ws::ResolvedBy::Phone,
+                    applied_via: protocol::ws::AnswerPath::CodexResponse,
+                    resolved_at: protocol::time::now_rfc3339(),
+                    detail: None,
+                    inferred: false,
+                    indeterminate: false,
+                },
+            },
+        }
+    }
+
+    /// **Settle every phone answer this daemon was in the middle of when it
+    /// stopped.**
+    ///
+    /// An `applying` claim under `answer` is one whose response may or may not have
+    /// reached the app-server: the claim is taken only once the live connection has
+    /// accepted the ask, and the write follows immediately, so nothing that survives
+    /// the restart can say which side of it the process died on. The disposition is
+    /// not replayed and `serverRequest/resolved` names no decision, so there is no
+    /// frame left that could tell.
+    ///
+    /// That is terminal `Unknown`, and terminal is the point — the card is retired
+    /// saying exactly that rather than being answered a second time against a request
+    /// the app-server accepts exactly one answer to. Card and claim go in the one
+    /// commit, for [`Daemon::retire_codex_answered`]'s reason.
+    ///
+    /// **It runs after the cards are back in memory**, and that ordering is
+    /// load-bearing: retirement claims the card by removing it from `inner.pending`,
+    /// so a settle that ran first would find nothing, file no resolution, and leave
+    /// a card every future tap refuses.
+    async fn recover_codex_answers(&self) {
+        let claims = match self.db.unsettled_answer_claims().await {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex answer claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex answer(s) were in flight; recording them as unknown rather \
+             than sending again",
+            claims.len()
+        );
+        for claim in claims {
+            let now = protocol::time::now_rfc3339();
+            // The run's name, for the resolution event.
+            //
+            // **`Err` is not `Ok(None)`, and conflating them is the same mistake as
+            // running this after a failed card restore.** A run that is genuinely GONE
+            // has no card left to retire either, so its claim is made terminal in the
+            // ledger and nothing else happens — that is honest. A read that FAILED says
+            // nothing about whether the run is there, and settling the ledger on the
+            // strength of it strands whatever card the run still has.
+            let row = match self.db.get_session(claim.session_uid.clone()).await {
+                Ok(Some(row)) => Some(row),
+                Ok(None) => None,
+                Err(err) => {
+                    crate::log_error!(
+                        "recovery: could not read the run behind the answer to {}, so its \
+                         claim is left live for the next start: {err:#}",
+                        claim.client_request_id
+                    );
+                    continue;
+                }
+            };
+            let Some(row) = row else {
+                if let Err(err) = self
+                    .db
+                    .settle_answer_indeterminate(
+                        claim.session_uid.clone(),
+                        claim.client_request_id.clone(),
+                        now,
+                    )
+                    .await
+                {
+                    crate::log_error!(
+                        "recovery: could not make the answer to {} terminal: {err:#}",
+                        claim.client_request_id
+                    );
+                }
+                continue;
+            };
+            let session = SessionKey::new(&row.session_uid, &row.session_id);
+            let retired = self
+                .retire_codex_answered(
+                    &session,
+                    &claim.client_request_id,
+                    protocol::ws::CodexResolution::Unknown {
+                        attempted_by: protocol::ws::ResolutionActor::Phone,
+                        attempted_decision: Some(AnswerDecision::OptionId {
+                            option_id: claim.claimed.route.clone(),
+                        }),
+                        write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                        cause: "this Mac stopped between writing the answer and learning \
+                                what became of it"
+                            .into(),
+                    },
+                    Some(crate::store::AnswerTerminal::Indeterminate),
+                )
+                .await;
+            if matches!(retired, Retirement::AlreadyGone) {
+                if let Err(err) = self
+                    .db
+                    .settle_answer_indeterminate(
+                        claim.session_uid.clone(),
+                        claim.client_request_id.clone(),
+                        now,
+                    )
+                    .await
+                {
+                    crate::log_error!(
+                        "recovery: could not make the answer to {} terminal: {err:#}",
+                        claim.client_request_id
+                    );
+                }
+            }
+        }
+    }
+
     /// Apply a phone answer. Idempotent by `(session, request_id)`, guarded by
     /// `payload_hash`.
     pub async fn answer(
@@ -4272,20 +4659,38 @@ impl Daemon {
         // deletes the claim and the card as its own, and a crash inside it leaves
         // a claim only `settle_indeterminate` can retire — into `answers`, the
         // fourth shared table.
-        match self.db.get_session(session_uid.clone()).await {
-            Ok(Some(row)) if !self.shared_ledgers_admit(&row.agent) => {
-                return AnswerResult::Rejected {
-                    reason: format!(
-                        "{session_uid} is a {} session and this daemon only answers Claude \
-                         cards; nothing was typed",
-                        row.agent.as_str()
-                    ),
+        //
+        // **It is now a fork rather than a dead end, and the gate has not moved.**
+        // A Codex answer is not typed and touches none of these four tables; it
+        // goes to [`Daemon::answer_codex`], whose durable claim lands in
+        // `mutation_ledger` — the generalized Codex ledger, which no v0.6.0
+        // statement names. What `shared_ledgers_admit` says is unchanged — these
+        // ledgers are Claude's — and what changed is that the other agent now has
+        // somewhere to be sent instead of nowhere.
+        //
+        // **The branch names the agent it routes to, and refuses the rest.**
+        // `AgentKind::Unsupported` is a run some future build wrote; its contract
+        // is that every actuation site fails closed, and "not Claude" is not
+        // evidence of Codex. Refused here, before any lock or durable claim, so a
+        // database from a build this one does not understand costs nothing but a
+        // sentence.
+        let codex = match self.db.get_session(session_uid.clone()).await {
+            Ok(Some(row)) => match row.agent {
+                protocol::agent::AgentKind::Claude => None,
+                protocol::agent::AgentKind::Codex => Some(row),
+                protocol::agent::AgentKind::Unsupported(ref name) => {
+                    return AnswerResult::Rejected {
+                        reason: format!(
+                            "{session_uid} is a {name} session, which this daemon does not \
+                             know how to answer; nothing was sent"
+                        ),
+                    }
                 }
-            }
+            },
             // No row: the uid came from the answers ledger for a run since
             // deleted (`approval_target`'s replay arm), so there is no agent to
             // read and step 1 below replays the stored outcome as it always has.
-            Ok(_) => {}
+            Ok(None) => None,
             // The same shape `approval_target` uses for a failed session lookup.
             // Unreadable is not evidence of Claude, and this gate is the one
             // check on this path that may not be skipped on a bad day.
@@ -4294,7 +4699,7 @@ impl Daemon {
                     reason: format!("session lookup failed: {err}"),
                 }
             }
-        }
+        };
 
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
 
@@ -4308,7 +4713,12 @@ impl Daemon {
         // backstop) would otherwise have already caused. Claude's
         // allow/deny/option-index/text decisions do not reach this branch and are
         // byte-identical.
-        if matches!(decision, AnswerDecision::OptionId { .. }) {
+        //
+        // **Claude-only now, and that is what the `codex.is_none()` says.** The
+        // same decision on a Codex session is the only one that path accepts, so
+        // the refusal keeps naming exactly the mistake it always named: an
+        // `option_id` aimed at a session that has no options to name.
+        if codex.is_none() && matches!(decision, AnswerDecision::OptionId { .. }) {
             return AnswerResult::Rejected {
                 reason: "an option_id answer is for a Codex session; this is a Claude session, \
                          so nothing was typed"
@@ -4333,6 +4743,16 @@ impl Daemon {
             Arc::clone(inner.answer_locks.entry(id.clone()).or_default())
         };
         let _serialised = gate.lock().await;
+
+        // **The fork, taken under the same serialisation and no earlier.** Two
+        // taps on one Codex card queue behind each other here exactly as two on a
+        // Claude card do, so the second is a well-formed duplicate that reads the
+        // first one's row rather than a race that claims twice.
+        if let Some(row) = codex {
+            return self
+                .answer_codex(&row, request_id, payload_hash, decision)
+                .await;
+        }
 
         // 1. Durable ledger wins over everything: an already-answered request is
         //    a no-op that replays the original outcome.
@@ -5991,12 +6411,16 @@ impl Daemon {
                     // [`Inner::seed_codex_presence`], a named step for the same
                     // reason its sibling above is one.
                     inner.seed_codex_presence(&session.uid, &link, &presence);
+                    let (answers, asks) = crate::codex_link::answer_channel();
                     let outcome = inner.spawn_codex_link_if_owner(
                         &session.uid,
                         epoch,
                         link.generation,
-                        presence.clone(),
-                        carry.clone(),
+                        LinkCells {
+                            presence: presence.clone(),
+                            carry: carry.clone(),
+                            answers,
+                        },
                         || {
                             tokio::spawn(crate::codex_link::run(
                                 Arc::clone(self),
@@ -6004,6 +6428,7 @@ impl Daemon {
                                 link,
                                 presence,
                                 carry,
+                                asks,
                             ))
                         },
                     );
@@ -6632,6 +7057,67 @@ impl Daemon {
     /// own claim until its link comes up, rather than the outgoing connection's last
     /// word. In the steady state the two epochs are equal and this costs a map
     /// lookup.
+    /// **How to reach the link that owns this session right now**, or nothing.
+    ///
+    /// The same epoch test as [`Daemon::codex_addressee_locked`], and for a sharper
+    /// reason than reading presence: a sender belonging to a registration that has
+    /// handed the session on would put a phone's decision on a socket this session no
+    /// longer owns. Asking the ownership map here makes "which link may be read from"
+    /// and "which link may be written to" the same question.
+    fn codex_answers_locked(
+        inner: &Inner,
+        session_uid: &str,
+    ) -> Option<crate::codex_link::LinkAnswers> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.answers.clone())
+    }
+
+    /// **Give a test's own link the daemon's ear.**
+    ///
+    /// A scripted-leg test drives the real [`crate::codex_link::run`] against a leg
+    /// it writes the replies for, and nothing in that path stakes a registration —
+    /// while [`Daemon::codex_answers_locked`] deliberately refuses a handle whose
+    /// epoch no registration owns. This stakes one and installs the sender beside
+    /// it, so `Daemon::answer` can reach the link the test is actually driving.
+    ///
+    /// Test-only, and narrow on purpose: it installs the answer channel and
+    /// nothing else, so every other property of a real registration stays
+    /// something a test has to obtain honestly.
+    ///
+    /// **The live gates no longer use it.** `codex_link_live`'s answering gates
+    /// register through [`Daemon::register_supervisor`] with the coordinator's own
+    /// frame, so the epoch, the row, the supervisor handle, the answer channel and
+    /// the link task are all built by the production acceptance there. What is left
+    /// here is the scripted suite, where there is no socket for a real registration
+    /// to name.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_answers_for_tests(
+        &self,
+        session_uid: &str,
+        answers: crate::codex_link::LinkAnswers,
+    ) {
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence: crate::codex_link::LinkPresence::new(),
+                answers,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+    }
+
     fn codex_addressee_locked(
         inner: &Inner,
         session_uid: &str,
@@ -7338,7 +7824,23 @@ impl Daemon {
             inner
                 .pending
                 .iter()
-                .filter(|(_, p)| !p.claimed && now - p.created_ms > max_age_ms)
+                .filter(|(_, p)| {
+                    // **Claude's cards only**, the same filter the pane sweep already
+                    // applies and for a sharper reason. `resolve_without_phone` writes
+                    // the shared `answers`, reports `AnswerPath::SendKeys` and deletes
+                    // from the shared `pending_approvals` — three of the four tables a
+                    // rolled-back v0.6.0 daemon rewrites globally — so a Codex card
+                    // passing through here is the rollback leak the agent split exists
+                    // to prevent, and the outcome it files is a keyboard timeout for a
+                    // question no keyboard was ever shown.
+                    //
+                    // There is no Codex sweep to put in its place, and the absence is
+                    // the measurement rather than an omission: the app-server holds a
+                    // `serverRequest` open until something answers it, so a Codex
+                    // approval does not go stale. The frames that settle it are what
+                    // retire the card.
+                    p.agent.is_claude() && !p.claimed && now - p.created_ms > max_age_ms
+                })
                 .map(|((_, request_id), p)| (request_id.clone(), p.session.clone()))
                 .collect()
         };
@@ -12483,8 +12985,11 @@ mod tests {
                 uid,
                 first.epoch,
                 1,
-                crate::codex_link::LinkPresence::new(),
-                crate::codex_link::LinkCarry::new(),
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                },
                 link
             )
             .is_none());
@@ -12514,8 +13019,11 @@ mod tests {
                 uid,
                 second.epoch,
                 1,
-                crate::codex_link::LinkPresence::new(),
-                crate::codex_link::LinkCarry::new(),
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                },
                 park()
             )
             .is_none());
@@ -12618,6 +13126,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -12711,6 +13220,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry,
             },
         );
@@ -12733,6 +13243,7 @@ mod tests {
                 generation: 1,
                 task: ordinary,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -12888,6 +13399,7 @@ mod tests {
                 generation: 7,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -13160,8 +13672,11 @@ mod tests {
                 uid,
                 current - 1,
                 1,
-                crate::codex_link::LinkPresence::new(),
-                crate::codex_link::LinkCarry::new(),
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                },
                 stale,
             )
             .expect(
@@ -13195,8 +13710,11 @@ mod tests {
                 uid,
                 current,
                 1,
-                crate::codex_link::LinkPresence::new(),
-                crate::codex_link::LinkCarry::new(),
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                },
                 live,
             )
             .is_none());
@@ -13252,8 +13770,11 @@ mod tests {
                 uid,
                 current - 1,
                 1,
-                crate::codex_link::LinkPresence::new(),
-                crate::codex_link::LinkCarry::new(),
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                },
                 move || {
                     built.store(true, Ordering::SeqCst);
                     tokio::spawn(std::future::pending())
@@ -13284,8 +13805,11 @@ mod tests {
                     uid,
                     current,
                     1,
-                    crate::codex_link::LinkPresence::new(),
-                    crate::codex_link::LinkCarry::new(),
+                    LinkCells {
+                        presence: crate::codex_link::LinkPresence::new(),
+                        carry: crate::codex_link::LinkCarry::new(),
+                        answers: crate::codex_link::answer_channel().0,
+                    },
                     move || {
                         built_now.store(true, Ordering::SeqCst);
                         tokio::spawn(std::future::pending())
@@ -13613,6 +14137,7 @@ mod tests {
                 // Nothing drives it; the resolver reads the cell, never the task.
                 task: tokio::spawn(std::future::pending()),
                 presence: presence.clone(),
+                answers: crate::codex_link::answer_channel().0,
                 // Empty: what the link KNOWS is a separate cell from what it
                 // publishes, and a test that needs one reaches through the handle.
                 carry: crate::codex_link::LinkCarry::new(),
@@ -13879,6 +14404,7 @@ mod tests {
                     // right answer BEFORE this task's first connection attempt.
                     task: tokio::spawn(std::future::pending()),
                     presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry,
                 },
             );
@@ -13953,6 +14479,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry: chasing,
                 },
             );
@@ -13973,6 +14500,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence: mid_chase.clone(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -14007,6 +14535,7 @@ mod tests {
                     generation: 2,
                     task: tokio::spawn(std::future::pending()),
                     presence: after_relaunch.clone(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -14167,6 +14696,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -14201,6 +14731,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry,
                 },
             );
@@ -14290,6 +14821,7 @@ mod tests {
                     generation,
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
+                    answers: crate::codex_link::answer_channel().0,
                     carry,
                 },
             );
@@ -14527,6 +15059,7 @@ mod tests {
                 generation: 1,
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry,
             },
         );
@@ -14616,6 +15149,7 @@ mod tests {
                 generation: 1,
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry,
             },
         );
@@ -14719,6 +15253,7 @@ mod tests {
                 generation: 1,
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry,
             },
         );
@@ -15153,6 +15688,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence,
+                    answers: crate::codex_link::answer_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -15328,6 +15864,7 @@ mod tests {
                     generation: 1,
                     task: tokio::spawn(std::future::pending()),
                     presence,
+                    answers: crate::codex_link::answer_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -15906,6 +16443,7 @@ mod tests {
                 generation: 1,
                 task: live,
                 presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -19108,6 +19646,752 @@ mod tests {
         );
     }
 
+    /// A real command approval, read by the production parser so the option table
+    /// on the card is the one the wire and `Family::labels` actually produce.
+    fn codex_command_card(request_id: &str) -> protocol::ws::ApprovalCard {
+        let params = json!({
+            "kind": "command",
+            "threadId": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+            "turnId": "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+            "itemId": "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+            "environmentId": "local",
+            "reason": "May I create the requested probe file?",
+            "command": "/bin/zsh -lc 'touch /tmp/marker.txt'",
+            "cwd": "/tmp",
+            "proposedExecpolicyAmendment": ["touch"],
+            "availableDecisions": [
+                "accept",
+                {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["touch"]}},
+                "cancel"
+            ]
+        });
+        crate::codex_approval::Approval::read(crate::codex_approval::Family::Command, &params, None)
+            .expect("the production parser reads a measured command approval")
+            .card(request_id.to_string(), 1)
+    }
+
+    /// Put a card on the store the way the observer does, and hand the daemon a
+    /// link whose asks this test answers itself.
+    ///
+    /// Overwriting the handle `register_supervisor` installed is the point: that
+    /// one's link is dialling a socket nothing listens on, which is the
+    /// `NotAddressable` case. Replacing its sender at the same epoch is what makes
+    /// the *other* three outcomes reachable without a real app-server.
+    async fn codex_card_with_a_link(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+    ) -> (
+        protocol::ws::ApprovalCard,
+        tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::AnswerRequest>,
+    ) {
+        let session = SessionKey::new(uid, "cc-1");
+        let card = codex_command_card(request_id);
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    card.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a real card, filed the way the observer files one"
+        );
+        let (answers, asks) = crate::codex_link::answer_channel();
+        let mut inner = daemon.inner.lock().await;
+        let epoch = *inner
+            .registration_epochs
+            .get(uid)
+            .expect("the registration staked its claim");
+        let held = inner.codex_links.remove(uid).expect("a link was installed");
+        held.task.abort();
+        inner.codex_links.insert(
+            uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: held.generation,
+                task: tokio::spawn(std::future::pending()),
+                presence: held.presence,
+                answers,
+                carry: held.carry,
+            },
+        );
+        drop(inner);
+        (card, asks)
+    }
+
+    /// Take the link handle away, leaving the registration standing.
+    ///
+    /// The state a daemon is in when the wrapper is gone but the run is not: an
+    /// answer has nowhere to go, and the honest report is that nothing was sent.
+    /// The cards this run still has open, read from the store rather than from
+    /// memory: a card that is only in memory is not one a restart would restore.
+    fn open_cards(daemon: &Arc<Daemon>, uid: &str) -> Vec<crate::store::CodexPendingApprovalRow> {
+        daemon.store.codex_pending_approvals(uid).unwrap()
+    }
+
+    async fn unlink_codex(daemon: &Arc<Daemon>, uid: &str) {
+        if let Some(held) = daemon.inner.lock().await.codex_links.remove(uid) {
+            held.task.abort();
+        }
+    }
+
+    /// **An option the card never offered is refused before anything is claimed.**
+    ///
+    /// `decline` is in the app-server's own decision grammar and is deliberately in
+    /// neither family's table — the TUI does not render it — so it is the exact
+    /// shape of a decision that is wire-legal and still not this card's to give.
+    ///
+    /// **Mutation:** have `wire_decision` fall back to `Value::String(option_id)`
+    /// when the id is not in the options and this goes red: a phone could name any
+    /// decision the app-server understands, whatever the card showed.
+    #[tokio::test]
+    async fn an_option_the_card_never_offered_is_refused_before_the_claim() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-decline").await;
+        // **Dropped on purpose.** With the receiver gone the ask cannot be parked,
+        // so a build that let this option through fails the send and refuses for
+        // the WRONG reason — a fast, legible failure instead of a test that hangs
+        // waiting for a reply nobody was going to give.
+        drop(asks);
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "decline".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("not one of the options") && reason.contains("nothing was sent"),
+                "the refusal must name what was wrong with it: {reason}"
+            ),
+            other => panic!("a decision this card never offered must not be sent: {other:?}"),
+        }
+        assert!(
+            store.unsettled_answer_claims().unwrap().is_empty(),
+            "a refusal that happens before the ask leaves no claim to recover"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the question still stands, so a correct answer can still be given"
+        );
+    }
+
+    /// **A stale `payload_hash` is refused, and refused before anything is
+    /// claimed.**
+    ///
+    /// The hash is taken over the card's whole preimage, `tool_input.options`
+    /// included, so it is what ties an answer to the exact option table the phone
+    /// was shown. A phone answering a card that has since been re-delivered with a
+    /// different question would otherwise be picking an option out of a list nobody
+    /// is looking at any more.
+    ///
+    /// **Mutation:** drop the `card.payload_hash != payload_hash` gate and this
+    /// goes red — the answer would be written against whatever the card now says.
+    #[tokio::test]
+    async fn a_stale_payload_hash_is_refused_before_anything_is_claimed() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-stale").await;
+        drop(asks);
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                "sha256:a-hash-this-card-was-never-displayed-under",
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("stale payload_hash"),
+                "the refusal must say the card is out of date: {reason}"
+            ),
+            other => panic!("an answer to a card nobody is showing must not be sent: {other:?}"),
+        }
+        assert!(
+            store.unsettled_answer_claims().unwrap().is_empty(),
+            "the gate is before the claim, so a stale answer leaves nothing behind"
+        );
+        assert_eq!(open_cards(&daemon, uid).len(), 1);
+    }
+
+    /// **An answer with no link to write it on leaves no claim and no terminal.**
+    ///
+    /// This is the case the claim ordering exists for. Claiming first would leave
+    /// an `applying` row for an answer that provably went nowhere, and the next
+    /// restart's recovery would retire a perfectly answerable card as `Unknown` —
+    /// so the operator loses the question because the wrapper was briefly down.
+    ///
+    /// **Mutation:** take the claim in `Daemon::answer_codex` before asking the
+    /// link and this goes red at `unsettled_answer_claims`.
+    #[tokio::test]
+    async fn an_answer_with_no_link_leaves_no_claim_and_the_card_standing() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, _asks) = codex_card_with_a_link(&daemon, uid, "rq-nolink").await;
+        unlink_codex(&daemon, uid).await;
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("no live link") && reason.contains("nothing was sent"),
+                "the refusal must say what stopped it, and that nothing went out: {reason}"
+            ),
+            other => panic!("with nothing to write on, nothing can be sent: {other:?}"),
+        }
+        assert!(
+            store.unsettled_answer_claims().unwrap().is_empty(),
+            "an answer that provably actuated nothing leaves no claim: the operator's \
+             next tap is a first attempt and not a duplicate"
+        );
+        assert_eq!(open_cards(&daemon, uid).len(), 1);
+        assert_no_ledger_rows(&db, uid);
+    }
+
+    /// **A FRESH daemon settles an answer the last one left in flight, and the
+    /// card goes with it.**
+    ///
+    /// Driven through [`Daemon::recover`] on a store seeded with a card and an
+    /// `applying` claim, because that is the only version of the question worth
+    /// asking: recovery's two halves are ordered, and calling the private settle
+    /// directly is exactly what hid the ordering bug. Retirement claims the card by
+    /// removing it from `inner.pending`, so a settle that ran before the cards were
+    /// restored found nothing, filed no resolution, and left a card every future tap
+    /// refuses.
+    ///
+    /// **Mutation:** move `recover_codex_answers` back above the pending restore in
+    /// `Daemon::recover` and both the resolution assertion and the "no card" one go
+    /// red.
+    #[tokio::test]
+    async fn a_fresh_daemon_recovers_an_outstanding_answer_as_terminal_unknown() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let request_id = "rq-recovered";
+        {
+            let seeder = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&seeder, uid, "cc-1").await;
+            let (card, _asks) = codex_card_with_a_link(&seeder, uid, request_id).await;
+            // The claim the dead daemon took, exactly as the link takes it.
+            assert_eq!(
+                store
+                    .claim_mutation(
+                        crate::store::OPERATION_ANSWER,
+                        uid,
+                        request_id,
+                        &crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: "hash".into(),
+                        },
+                        &protocol::time::now_rfc3339(),
+                    )
+                    .unwrap(),
+                crate::store::MutationClaim::Claimed
+            );
+            assert!(!card.payload_hash.is_empty());
+        }
+
+        // A daemon that has never seen any of this, doing what a restart does.
+        let reborn = daemon_on(Arc::clone(&store), Config::default());
+        reborn.recover().await;
+
+        assert!(
+            store.codex_pending_approvals(uid).unwrap().is_empty(),
+            "a card whose answer is terminal is retired, not restored"
+        );
+        assert!(
+            reborn.inner.lock().await.pending.is_empty(),
+            "and it is not left in memory either, or the phone shows a question \
+             nothing can answer"
+        );
+        let resolved = approval_events(&reborn, uid, EventKind::ApprovalResolved)
+            .into_iter()
+            .map(|e| serde_json::from_value::<protocol::ws::CodexResolution>(e.payload).unwrap())
+            .collect::<Vec<_>>();
+        match resolved.as_slice() {
+            [protocol::ws::CodexResolution::Unknown {
+                attempted_by,
+                attempted_decision,
+                write_stage,
+                ..
+            }] => {
+                assert_eq!(*attempted_by, protocol::ws::ResolutionActor::Phone);
+                assert_eq!(
+                    *attempted_decision,
+                    Some(AnswerDecision::OptionId {
+                        option_id: "accept".into()
+                    }),
+                    "the claim's route is what lets a recovered terminal say what was \
+                     attempted"
+                );
+                assert_eq!(
+                    *write_stage,
+                    protocol::ws::WriteStage::UpstreamWriteUnconfirmed
+                );
+            }
+            other => panic!("one terminal, and it says nothing is known: {other:?}"),
+        }
+        assert!(
+            store.unsettled_answer_claims().unwrap().is_empty(),
+            "and the claim is terminal, so a second restart does not do this again"
+        );
+    }
+
+    /// **A terminal `unknown` is never answered again.**
+    ///
+    /// The card is deliberately still there in the case this covers: a bounce
+    /// re-delivers the request, the app-server is genuinely still waiting, and the
+    /// keyboard can still answer it. What must not happen is the phone writing a
+    /// second response to a request that accepts exactly one — so the refusal comes
+    /// from the ledger and the card is left alone rather than suppressed.
+    ///
+    /// **Mutation:** let `claim_mutation` replace a terminal row (`INSERT OR
+    /// REPLACE`, or dropping the `status = 'applying'` guard on the settle) and the
+    /// second answer below is admitted.
+    #[tokio::test]
+    async fn a_terminal_unknown_answer_is_never_sent_again() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-terminal").await;
+        drop(asks);
+        let now = protocol::time::now_rfc3339();
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+            claimed_hash: "hash".into(),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                &card.request_id,
+                &material,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                &card.request_id,
+                &now
+            )
+            .unwrap());
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("not known") && reason.contains("will not be sent again"),
+                "the operator has to be told why, or the card just looks broken: {reason}"
+            ),
+            other => panic!("a terminal unknown must never be re-answered: {other:?}"),
+        }
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the server is still waiting, so the keyboard can still answer it"
+        );
+    }
+
+    /// **A session this build has no word for is refused before any lock or
+    /// claim.**
+    ///
+    /// `AgentKind::Unsupported` is a run some future build wrote, and its contract
+    /// is that every actuation site fails closed. "Not Claude" is not evidence of
+    /// Codex: routing it down the Codex path would enter the claim machinery for a
+    /// wire this daemon cannot speak.
+    ///
+    /// **Mutation:** restore the `!shared_ledgers_admit(..)` test in place of the
+    /// explicit `AgentKind` match and this goes red — the answer reaches the Codex
+    /// path and refuses for the wrong reason.
+    #[tokio::test]
+    async fn an_unsupported_agent_is_refused_before_any_lock_or_claim() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+        // A row of the shape a later build writes, read by this one.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE codex_sessions SET agent = 'gemini' WHERE session_uid = ?1",
+                [uid],
+            )
+            .unwrap();
+
+        let result = daemon
+            .answer(
+                "rq-unsupported",
+                "hash",
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("gemini") && reason.contains("nothing was sent"),
+                "the refusal must name the agent it refused: {reason}"
+            ),
+            other => panic!("an unknown agent must fail closed: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        assert!(store.unsettled_answer_claims().unwrap().is_empty());
+    }
+
+    /// **Answering a Codex card writes nothing a rolled-back daemon can reach —
+    /// on the refusing path AND on the succeeding one.**
+    ///
+    /// Phase 3b turned `shared_ledgers_admit`'s dead end into a fork, so the
+    /// question this test asks changed shape: it is no longer "is a Codex answer
+    /// refused" but "does a Codex answer, refused or not, stay out of the four
+    /// tables a rolled-back v0.6.0 daemon rewrites globally". Both decisions are
+    /// fired here for that reason — a `Deny` the Codex path has no words for, and
+    /// an `option_id` it does — and the tripwire has to stay silent for both.
+    ///
+    /// The tripwire, not a row count, for the reason [`arm_ledger_tripwire`]
+    /// gives: a path that inserts and then cleans up leaves the same zero behind
+    /// as one that never inserted, and a daemon killed in that window does not.
+    ///
+    /// **Mutation:** point the answer path's durable claim at `claim_answer`
+    /// instead of `claim_mutation` — or read `answers` instead of the mutation
+    /// ledger in step 1 — and `assert_no_insert_was_attempted` goes red.
+    ///
+    /// **It fires on the second call, and only there, which is a property of the
+    /// staging rather than a weakness in it.** The first call carries a decision
+    /// the Codex path has no words for, so it is refused by the grammar check
+    /// before any claim is reached and touches nothing either way — that half is
+    /// asserting the refusal happens *before* the ledger, which is its own claim.
+    /// The `option_id` call is the one that walks the whole path (ledger read,
+    /// stored card, hash gate, option table, claimed material, ask), so it is the
+    /// one a widened fork would show up in.
+    /// **A recovery that could not read the cards must not decide anything about them.**
+    ///
+    /// The restore reads `all_pending_approvals`; a failure there was
+    /// logged and stepped over, and answer recovery ran anyway. With no card in
+    /// `inner.pending`, the retirement it attempts returns `AlreadyGone` and settles the
+    /// LEDGER on its own — so the claim becomes terminal `indeterminate` while the
+    /// durable card row, which the failed read never reached, is untouched.
+    ///
+    /// The next healthy start then restores that row onto a phone, beside a terminal
+    /// claim. Every tap on it is refused for ever, and no terminal will ever retire it:
+    /// the resolution it earned was filed against a card that was not there.
+    ///
+    /// A read failure is not information. The claim is left exactly as it was — the
+    /// `applying` row is the durable record that survives restarts precisely so it can be
+    /// dealt with by a start that CAN see the cards — and the second recovery here does
+    /// the whole job in one piece.
+    ///
+    /// **Mutation:** go back to running `recover_codex_answers` after a failed restore
+    /// (drop the `restored` guard) and the first two assertions go red together: a ghost
+    /// card stands beside an indeterminate claim, and its resolution was filed by the
+    /// recovery that could not see it.
+    #[tokio::test]
+    async fn a_recovery_that_cannot_read_the_cards_leaves_the_claim_for_the_next_one() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let writing = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&writing, uid, "cc-1").await;
+        assert!(raise_codex_card(&writing, uid, "req-ghost", "item-ghost").await);
+        let held = open_cards(&writing, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-ghost")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+
+        // The durable claim the link takes at the moment it writes — and then the
+        // process that took it is gone, which is the whole premise of recovery.
+        assert_eq!(
+            writing
+                .db
+                .claim_answer_mutation(
+                    uid.to_string(),
+                    "req-ghost".into(),
+                    crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("tu-1".into()),
+                        claimed_hash: card.payload_hash.clone(),
+                    },
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+        drop(writing);
+
+        // --- a start that cannot read the cards ---
+        // The restore reads `all_pending_approvals`; taking that view away is the
+        // smallest faithful stand-in for the class (a contended read, a corrupt page)
+        // and it is reversible, so the SECOND start below is an ordinary healthy one.
+        store.break_pending_card_reads_for_tests(true);
+        let blind = daemon_on(Arc::clone(&store), Config::default());
+        blind.recover().await;
+        store.break_pending_card_reads_for_tests(false);
+        assert_eq!(
+            blind
+                .store
+                .answer_status(uid, "req-ghost")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Applying),
+            "a start that could not see the cards has decided nothing about them"
+        );
+        drop(blind);
+
+        // --- and a healthy one behind it ---
+        let healthy = daemon_on(Arc::clone(&store), Config::default());
+        healthy.recover().await;
+
+        assert!(
+            open_cards(&healthy, uid).is_empty(),
+            "no card may be left standing beside a terminal claim — that is the ghost \
+             every future tap refuses: {:?}",
+            open_cards(&healthy, uid)
+        );
+        assert_eq!(
+            healthy
+                .store
+                .answer_status(uid, "req-ghost")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the recovery that COULD see the card is the one that made it terminal"
+        );
+        let filed: Vec<protocol::ws::CodexResolution> = healthy
+            .store
+            .events_after(uid, 0, 10_000)
+            .expect("read the events")
+            .into_iter()
+            .filter(|e| e.kind == EventKind::ApprovalResolved)
+            .map(|e| serde_json::from_value(e.payload).expect("a resolution decodes"))
+            .collect();
+        assert!(
+            matches!(
+                filed.as_slice(),
+                [protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    ..
+                }]
+            ),
+            "exactly one terminal, filed once, by the start that retired the card: {filed:?}"
+        );
+    }
+
+    /// **A run this daemon could not READ is not a run that is gone.**
+    ///
+    /// The other half of the failed-restore gap. Answer recovery needs the run's name for the
+    /// resolution event, and it read that with `let Ok(Some(row)) = get_session(..) else`
+    /// — one pattern for two facts that call for opposite actions. `Ok(None)` is a run
+    /// that was genuinely deleted: it has no card left to retire either, so making the
+    /// claim terminal in the ledger and doing nothing else is honest. `Err` says only
+    /// that this read failed, and settling the ledger on the strength of it strands
+    /// whatever card the run still has — the same ghost, reached by a different door.
+    ///
+    /// `recover_codex_answers` is called directly rather than through `recover`, because
+    /// the branch under test is inside it and a whole recovery with the fleet view gone
+    /// would fail in a dozen places first — which would prove nothing about this one.
+    ///
+    /// **Mutation:** fold the `Err` arm back into `Ok(None)` (restore the
+    /// `let Ok(Some(row)) = .. else` pattern) and the first assertion goes red: the claim
+    /// is terminal while the card that belongs to it is still standing.
+    #[tokio::test]
+    async fn a_run_whose_read_failed_is_not_a_run_that_is_gone() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "req-unread", "item-unread").await);
+        let held = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-unread")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+        assert_eq!(
+            daemon
+                .db
+                .claim_answer_mutation(
+                    uid.to_string(),
+                    "req-unread".into(),
+                    crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("tu-1".into()),
+                        claimed_hash: card.payload_hash.clone(),
+                    },
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+
+        store.break_session_reads_for_tests(true);
+        daemon.recover_codex_answers().await;
+        store.break_session_reads_for_tests(false);
+
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(uid, "req-unread")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Applying),
+            "a read that failed says nothing about the run, so it decides nothing about \
+             the claim either"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "and the card is exactly where it was"
+        );
+
+        // …and a pass that CAN read the run does the whole job in one piece.
+        daemon.recover_codex_answers().await;
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(uid, "req-unread")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+        assert!(
+            open_cards(&daemon, uid).is_empty(),
+            "the card is retired by the pass that could name its run"
+        );
+    }
+
+    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
+    /// "a phone answered".**
+    ///
+    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
+    /// outcomes. `delivered` is a phone answer the broker confirmed went upstream.
+    /// `lost` is the opposite fact: this phone's answer forwarded ZERO bytes, something
+    /// else settled the request, and the card was left standing for that other terminal.
+    /// Replaying both as "already answered from a phone" tells the operator their tap was
+    /// applied when the whole record says it was not — and it is the sentence a second
+    /// tap on a lost card gets, which is exactly the moment they are asking.
+    ///
+    /// The card is a real one, raised through the observer's own producer, and the ledger
+    /// row is settled through the store's own primitive, so this is the replay path and
+    /// not a hand-built string.
+    ///
+    /// **Mutation:** collapse `replayed_answer_sentence` back to one format string over
+    /// `{outcome}` and the second assertion goes red — the operator is told a phone
+    /// answered a card no phone answer ever reached.
+    #[tokio::test]
+    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "req-lost", "item-lost").await);
+        let held = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-lost")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+
+        // The exact durable state a lost race leaves: a claim under this card's key,
+        // settled `lost`, with the card still standing for the winner's own terminal.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("tu-1".into()),
+            claimed_hash: card.payload_hash.clone(),
+        };
+        let now = protocol::time::now_rfc3339();
+        assert_eq!(
+            daemon
+                .db
+                .claim_answer_mutation(uid.to_string(), "req-lost".into(), claimed, now.clone())
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+        assert!(daemon
+            .db
+            .settle_answer_mutation(uid.to_string(), "req-lost".into(), "lost", now)
+            .await
+            .expect("the settle"));
+
+        let again = daemon
+            .answer(
+                "req-lost",
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+
+        let AnswerResult::Rejected { reason } = &again else {
+            panic!("a terminal claim may never actuate again: {again:?}");
+        };
+        assert!(
+            reason.contains("nothing was sent again"),
+            "the refusal must say nothing went out: {reason}"
+        );
+        assert!(
+            !reason.contains("answered from a phone"),
+            "no phone answer ever reached Codex for this card — `lost` is the record \
+             that it did not: {reason}"
+        );
+        assert!(
+            reason.contains("lost") || reason.contains("something else answered"),
+            "and the operator is told what actually happened to it: {reason}"
+        );
+    }
+
     #[tokio::test]
     async fn answering_a_codex_card_is_refused_before_the_claim() {
         let (store, db) = shared_store_on_disk();
@@ -19172,10 +20456,54 @@ mod tests {
 
         match &result {
             AnswerResult::Rejected { reason } => assert!(
-                reason.contains("codex session") && reason.contains("nothing was typed"),
-                "the refusal must name the agent it refused, before the claim: {reason}"
+                reason.contains("naming one of the options") && reason.contains("nothing was sent"),
+                "a Codex card names its options; a bare allow/deny is not one of them: {reason}"
             ),
-            other => panic!("a Codex card must not be answerable: {other:?}"),
+            other => panic!("a decision this card never offered must not be sent: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+
+        // **And the decision the Codex path DOES accept, on a card the producer
+        // really raised.**
+        //
+        // A hand-placed card would refuse at the store lookup — "unknown or
+        // already-resolved request" — which is the honest answer for a request no
+        // Codex card stands behind, and is exactly why it proves nothing here: the
+        // shared ledgers are never reached because the function returns before
+        // them. So this half raises a real card through the observer's own
+        // producer, and the answer runs the whole validating path on it: the
+        // ledger read, the store card, the hash gate, the option table, the
+        // claimed material, and the ask. Every one of those is a place a widened
+        // fork would have touched a shared table, and the tripwire has to stay
+        // silent through all of it.
+        assert!(raise_codex_card(&daemon, uid, "derived-tripwire", "exec-tripwire").await);
+        let real = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "derived-tripwire")
+            .expect("the producer filed the card");
+        let real_card: ApprovalCard =
+            serde_json::from_str(&real.card).expect("the stored card decodes");
+        let by_option = daemon
+            .answer(
+                &real.request_id,
+                &real_card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &by_option {
+            // Refused at the link, which is the last gate on the path and the
+            // furthest a daemon with no live connection can get. What matters is
+            // where it got to before it was refused, and the two assertions below
+            // are what say so.
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("nothing was sent"),
+                "the refusal must say that nothing went out: {reason}"
+            ),
+            other => panic!("with no connection to write on, nothing can be sent: {other:?}"),
         }
         assert_no_ledger_rows(&db, uid);
         assert_no_insert_was_attempted(&db, uid);
@@ -19316,6 +20644,54 @@ mod tests {
                 "commandExecution",
             )
             .await
+    }
+
+    /// **Claude's stale-approval sweep must never reach a Codex card.**
+    ///
+    /// The sweep answers an unanswered card at the Mac's expense: it writes the
+    /// shared `answers` table, reports `AnswerPath::SendKeys` and deletes from the
+    /// shared `pending_approvals`. Every one of those is a table a rolled-back
+    /// v0.6.0 daemon rewrites globally, so a Codex card passing through it is the
+    /// rollback leak the whole agent split exists to prevent — and the outcome it
+    /// files is a Claude-shaped keyboard timeout for a question no keyboard was
+    /// ever shown.
+    ///
+    /// It is also a lie about the wire. The measured Codex approval never times
+    /// out: the app-server holds the `serverRequest` open until something answers
+    /// it, and the frames that settle it are what retire the card.
+    ///
+    /// **Mutation:** drop the `p.agent.is_claude()` filter from
+    /// `expire_stale_approvals` and both halves go red — the Codex card vanishes
+    /// from memory and a row appears in the shared ledgers.
+    #[tokio::test]
+    async fn a_codex_card_is_never_swept_by_claudes_stale_approval_expiry() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        // Older than any age the sweep could be asked about.
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&(uid.to_string(), "derived-1".to_string()))
+            .expect("the card just raised")
+            .created_ms = 0;
+        daemon.expire_stale_approvals(1).await;
+
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the app-server is still waiting on this request, so the card stands"
+        );
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).is_empty(),
+            "a Claude-shaped keyboard timeout is not a terminal any Codex frame produced"
+        );
+        assert_no_ledger_rows(&db, uid);
     }
 
     fn approval_events(daemon: &Daemon, uid: &str, kind: EventKind) -> Vec<Event> {

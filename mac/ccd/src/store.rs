@@ -587,20 +587,167 @@ pub enum TextClaim {
 /// The immutable material a mutation was claimed with — enough to replay the
 /// **original** route on a retry, not just recognise it. Written once at claim
 /// and returned verbatim to a duplicate.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedMaterial {
     pub thread_id: String,
     pub generation: u64,
-    /// The snapshotted route: `"turn_start"` or `"turn_steer"`.
+    /// **The snapshotted route, in the operation kind's own vocabulary.** A
+    /// compose is `"turn_start"` or `"turn_steer"`; an answer is the id of the
+    /// option the phone named, which is the only thing "which way did this
+    /// actuation go?" can mean for a decision.
     pub route: String,
     pub target_turn_id: Option<String>,
     pub claimed_hash: String,
 }
 
+/// **How a phone answer's ledger row is closed in the commit that retires its
+/// card.**
+///
+/// Two endings and not three, because the third — "nothing was written, and that
+/// is provable" — never reaches a durable row at all: the claim is taken only
+/// once the live connection has accepted the ask, so an answer that cannot be
+/// addressed leaves the ledger untouched and the card answerable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerTerminal {
+    /// The upstream write is proven. A duplicate replays this outcome rather than
+    /// writing a second response to a request the app-server answers once.
+    Settled(&'static str),
+    /// The answer may have actuated and nothing that survives can say. Terminal
+    /// precisely so that it is never retried.
+    Indeterminate,
+}
+
+/// **Where one phone answer's claim stands, durably.**
+///
+/// The ledger's own three states, named rather than spelled: a gate that has to read
+/// a terminal back — because the card it belonged to is no longer there to read —
+/// must not do it by string-matching a column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerStatus {
+    /// Claimed, and nothing has settled it. A daemon that stops here leaves the row
+    /// recovery makes terminal.
+    Applying,
+    /// Settled with a proven outcome, which a duplicate replays.
+    Settled(String),
+    /// Terminal, and nothing can say what it did. Never retried.
+    Indeterminate,
+}
+
+/// One unsettled claim under [`OPERATION_ANSWER`], for recovery to make terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerClaimRow {
+    pub session_uid: String,
+    /// The card's durable, item-derived request id.
+    pub client_request_id: String,
+    /// The material the answer was claimed with. `route` is the option the phone
+    /// named, which is what lets a recovered terminal say what was attempted.
+    pub claimed: ClaimedMaterial,
+    pub started_at: String,
+}
+
+/// One SQL string literal, quotes doubled. Test fixture only — every production
+/// statement in this file is parameterised.
+#[cfg(test)]
+fn escape_sql_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// **The two outcomes a settled answer claim records.**
+///
+/// Spelled once so a duplicate replays the same word the first attempt wrote, and so a
+/// reader that has to tell them apart cannot do it with a literal that drifts.
+pub const ANSWER_DELIVERED: &str = "delivered";
+pub const ANSWER_LOST: &str = "lost";
+
+/// **What a settled answer claim is replayed as, in the operator's words.**
+///
+/// `Settled` is the ledger's word for *terminal*, and it carries two facts that are each
+/// other's opposite. `delivered` is a phone answer the broker confirmed reached the
+/// app-server; `lost` is a phone answer that forwarded ZERO bytes because something else
+/// settled the request first, and whose card was deliberately left standing for that
+/// other terminal to retire. Both are replayed here, because both mean "this card will
+/// not be answered from a phone again" — but telling an operator their tap was applied
+/// when the record says it was not is the one thing this sentence must never do.
+///
+/// An outcome this build has no words for still refuses, naming the word rather than
+/// guessing at it: the terminal is what governs, and the vocabulary is not.
+pub fn replayed_answer_sentence(outcome: &str) -> String {
+    match outcome {
+        ANSWER_DELIVERED => "this card was already answered from a phone; nothing was sent \
+                             again"
+            .to_string(),
+        ANSWER_LOST => "a phone answer to this card lost the race — something else answered \
+                        it first — so nothing was sent again"
+            .to_string(),
+        other => format!("this card's answer is already settled ({other}); nothing was sent again"),
+    }
+}
+
+/// **The one `operation_kind` a phone answer is claimed under.**
+///
+/// Spelled once so a typo is a compile error rather than a claim nothing can find
+/// again — the same reason every other wire vocabulary in this file is a constant.
+pub const OPERATION_ANSWER: &str = "answer";
+
+/// Close one answer claim inside a caller's transaction, **or fail the whole
+/// transaction**.
+///
+/// **First terminal wins**, and that is what the `status = 'applying'` guard is:
+/// a claim recovery already made `indeterminate` is the record that this card
+/// must never be answered again, and a late disposition arriving afterwards would
+/// otherwise overwrite it with a cheerful outcome for an answer nobody can prove
+/// was sent.
+///
+/// **Exactly one row, and the count is the whole point of checking it.** Sharing a
+/// transaction with the card's deletion proves that the two statements ran together; it
+/// does not prove the second one did anything. A guarded `UPDATE` that matched nothing
+/// succeeds, so discarding the count let
+/// [`Store::retire_codex_pending_approval`] delete the card and file a resolution naming
+/// the PHONE while settling zero applying claims — the exact state a recovery that
+/// already made the claim `indeterminate` leaves behind, and the state a claim that was
+/// never taken is in.
+///
+/// Every caller that passes an [`AnswerTerminal`] holds a live `applying` claim by
+/// construction (the link takes it at the one moment it knows the answer is about to be
+/// written), so anything but one row is a contradiction rather than a case. It returns
+/// `Err`, which rolls the caller's transaction back: the card stays, the resolution is
+/// not filed, and recovery makes the terminal on the next start.
+fn settle_answer_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_uid: &str,
+    client_request_id: &str,
+    answer: AnswerTerminal,
+    at: &str,
+) -> Result<()> {
+    let (status, outcome) = match answer {
+        AnswerTerminal::Settled(outcome) => ("done", Some(outcome)),
+        AnswerTerminal::Indeterminate => ("indeterminate", None),
+    };
+    let settled = tx.execute(
+        "UPDATE mutation_ledger SET status = ?4, outcome = ?5, settled_at = ?6
+          WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3
+            AND status = 'applying'",
+        params![
+            OPERATION_ANSWER,
+            session_uid,
+            client_request_id,
+            status,
+            outcome,
+            at
+        ],
+    )?;
+    if settled != 1 {
+        return Err(anyhow::anyhow!(
+            "settling the answer claim for {client_request_id} in {session_uid} matched \
+             {settled} applying row(s), not one: the card must not be retired against a \
+             claim this commit did not settle"
+        ));
+    }
+    Ok(())
+}
+
 /// What claiming a generalized [`mutation_ledger`](Store::claim_mutation) row
 /// found — the same taxonomy as [`TextClaim`], widened to any operation.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationClaim {
     /// Nothing under this key: the caller now owns it and may actuate.
@@ -1038,6 +1185,112 @@ impl Store {
             ("events", "events_hidden")
         } else {
             ("events_hidden", "events")
+        };
+        conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+            .expect("test fixture");
+    }
+
+    /// Make the recovery's **pending-card read** fail, reversibly, while every other read
+    /// and write keeps working.
+    ///
+    /// Renaming the Codex card table is not this: SQLite rewrites the view's reference
+    /// along with it, so `all_pending_approvals` stays whole and the read succeeds (see
+    /// [`Store::hide_codex_cards_for_tests`], which relies on exactly that). The view
+    /// itself is what has to go.
+    ///
+    /// The behaviour under test is what a recovery DECIDES when it cannot see the cards,
+    /// and nothing the daemon does can produce a failing read on demand. Reversible, so
+    /// the same store can then be recovered by a healthy start — which is the second half
+    /// of the claim.
+    /// A view cannot be renamed, so it is dropped and rebuilt from its own recorded
+    /// definition — `sqlite_master` holds the exact `CREATE VIEW` the migration wrote, so
+    /// the restored view is that statement and not a copy of it kept here to drift.
+    #[cfg(test)]
+    pub fn break_pending_card_reads_for_tests(&self, broken: bool) {
+        let conn = self.write();
+        if broken {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = \
+                     'all_pending_approvals'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("test fixture: the recovery view exists");
+            conn.execute_batch(&format!(
+                "CREATE TABLE all_pending_approvals_saved (sql TEXT);
+                 INSERT INTO all_pending_approvals_saved (sql) VALUES ({});
+                 DROP VIEW all_pending_approvals;",
+                escape_sql_literal(&sql)
+            ))
+            .expect("test fixture");
+        } else {
+            let sql: String = conn
+                .query_row("SELECT sql FROM all_pending_approvals_saved", [], |row| {
+                    row.get(0)
+                })
+                .expect("test fixture: the view definition was saved");
+            conn.execute_batch(&format!("{sql};\nDROP TABLE all_pending_approvals_saved;"))
+                .expect("test fixture");
+        }
+    }
+
+    /// Make every **session read** fail, reversibly, while every other read and write
+    /// keeps working.
+    ///
+    /// `get_session` reads the `all_sessions` view, and the distinction under test is
+    /// `Err` (this read failed and says nothing about the run) against `Ok(None)` (the
+    /// run is genuinely gone). Only a failing read can tell them apart, and nothing the
+    /// daemon does produces one on demand. Dropped and rebuilt from its own recorded
+    /// definition, for [`Store::break_pending_card_reads_for_tests`]'s reason.
+    #[cfg(test)]
+    pub fn break_session_reads_for_tests(&self, broken: bool) {
+        let conn = self.write();
+        if broken {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'all_sessions'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("test fixture: the fleet view exists");
+            conn.execute_batch(&format!(
+                "CREATE TABLE all_sessions_saved (sql TEXT);
+                 INSERT INTO all_sessions_saved (sql) VALUES ({});
+                 DROP VIEW all_sessions;",
+                escape_sql_literal(&sql)
+            ))
+            .expect("test fixture");
+        } else {
+            let sql: String = conn
+                .query_row("SELECT sql FROM all_sessions_saved", [], |row| row.get(0))
+                .expect("test fixture: the view definition was saved");
+            conn.execute_batch(&format!("{sql};\nDROP TABLE all_sessions_saved;"))
+                .expect("test fixture");
+        }
+    }
+
+    /// Make every **mutation-ledger** read and write fail, reversibly, while every other
+    /// read and write keeps working.
+    ///
+    /// The narrowest seam that reaches the one arm that was once unguarded: an answer
+    /// whose card is not this call's to retire settles its claim ON ITS OWN, and that
+    /// standalone settle can fail while the card path is perfectly healthy. Breaking the
+    /// cards table or the event log breaks the retirement instead, so the standalone
+    /// settle is never reached at all — which is how a test can look like it covers the
+    /// arm and cover nothing.
+    ///
+    /// Reversible (a rename, like [`Store::break_event_appends_for_tests`]) because a
+    /// test has to arm it *between* the claim and the settle: the claim is taken while
+    /// the ledger is whole, and only then does the fault appear. No view or trigger names
+    /// `mutation_ledger`, so the rename is symmetric.
+    #[cfg(test)]
+    pub fn break_answer_ledger_for_tests(&self, broken: bool) {
+        let conn = self.write();
+        let (from, to) = if broken {
+            ("mutation_ledger", "mutation_ledger_hidden")
+        } else {
+            ("mutation_ledger_hidden", "mutation_ledger")
         };
         conn.execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .expect("test fixture");
@@ -2750,11 +3003,19 @@ impl Store {
     /// Returns the resolution event, or `None` when it was a duplicate — the
     /// `resolved:{request_id}` source id is the third of the three
     /// first-terminal-wins guards and the only one that survives a reconnect.
+    /// **`answer` joins the same commit.** A phone answer's ledger row is the
+    /// record that this card must never be answered again; the card's deletion is
+    /// the record that it is no longer being asked. Settling one without the other
+    /// is the failure either way round — a settled ledger over a standing card is
+    /// a question the operator can never answer again, and a retired card over a
+    /// live claim is a claim recovery will make terminal for a card that already
+    /// has a terminal. `None` for every terminal that is not a phone answer.
     pub fn retire_codex_pending_approval(
         &self,
         session_uid: &str,
         request_id: &str,
         pending: &PendingEvent,
+        answer: Option<AnswerTerminal>,
     ) -> Result<Option<Event>> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2762,6 +3023,9 @@ impl Store {
             "DELETE FROM codex_pending_approvals WHERE session_uid = ?1 AND request_id = ?2",
             params![session_uid, request_id],
         )?;
+        if let Some(answer) = answer {
+            settle_answer_in_tx(&tx, session_uid, request_id, answer, &pending.ts)?;
+        }
         let event = append_in_tx(&tx, pending)?;
         tx.commit()?;
         Ok(event)
@@ -3049,10 +3313,11 @@ impl Store {
     // client_request_id)`. It is the same claim-before-write, lookup-then-
     // conflict primitive as `claim_text_mutation`/`settle_text_mutation` above,
     // widened so any Codex mutation (answer, compose, interrupt) shares one
-    // idempotency law. The Codex producers that call it land in a later phase;
-    // Phase 1 ships the schema and this primitive with its conflict semantics
-    // proven — hence `cfg_attr(not(test), allow(dead_code))`, the same idiom the
-    // store already uses for a primitive tested now and wired live later.
+    // idempotency law. Phase 1 shipped the schema and this primitive with its
+    // conflict semantics proven and no caller; Phase 3b wired the first producer
+    // to it — a phone answer claims here under `operation_kind = "answer"` — so
+    // the `cfg_attr(not(test), allow(dead_code))` this used to carry is gone,
+    // because the code is live.
 
     /// Take durable ownership of one mutation, or find out who already has.
     ///
@@ -3062,7 +3327,6 @@ impl Store {
     /// [`MutationClaim::Conflict`]: an id is a retry key, never a licence to
     /// actuate something else. Read and insert share one immediate transaction,
     /// so two deliveries replaying one id cannot both come back `Claimed`.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub fn claim_mutation(
         &self,
@@ -3161,7 +3425,6 @@ impl Store {
     /// `'indeterminate'` (which recovery writes for a claim it could not prove
     /// landed). A second settle of a terminal claim writes nothing and reports it
     /// did not win. Returns whether this call was the one that settled it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn settle_mutation(
         &self,
         operation_kind: &str,
@@ -3184,6 +3447,95 @@ impl Store {
             ],
         )?;
         Ok(updated == 1)
+    }
+
+    /// **Make one claim terminal without being able to say what it did.**
+    ///
+    /// Recovery's word for a claim whose write may or may not have reached the
+    /// socket. The same first-terminal-wins guard as [`Store::settle_mutation`],
+    /// and reached only for a claim whose card is already gone — a claim that
+    /// still has a card is settled inside
+    /// [`Store::retire_codex_pending_approval`]'s transaction instead, so the two
+    /// halves of one terminal cannot land apart.
+    pub fn settle_mutation_indeterminate(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+        settled_at: &str,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let updated = conn.execute(
+            "UPDATE mutation_ledger SET status = 'indeterminate', settled_at = ?4
+              WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3
+                AND status = 'applying'",
+            params![operation_kind, session_uid, client_request_id, settled_at],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// **One answer claim's durable status.**
+    ///
+    /// Read by the answer path before it asks the link, so a card whose claim is
+    /// already terminal is refused with the reason rather than with whatever the
+    /// link happens to say. A terminal claim outlives its card in two shapes that
+    /// both leave the question standing: a lost race, and a request the app-server
+    /// re-delivered after a bounce.
+    pub fn answer_status(
+        &self,
+        session_uid: &str,
+        client_request_id: &str,
+    ) -> Result<Option<AnswerStatus>> {
+        let status = self
+            .read()
+            .query_row(
+                "SELECT status, outcome FROM mutation_ledger
+                  WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3",
+                params![OPERATION_ANSWER, session_uid, client_request_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(status.map(|(status, outcome)| match status.as_str() {
+            "done" => AnswerStatus::Settled(outcome.unwrap_or_default()),
+            "applying" => AnswerStatus::Applying,
+            _ => AnswerStatus::Indeterminate,
+        }))
+    }
+
+    /// **Every phone answer this daemon was in the middle of when it stopped.**
+    ///
+    /// Filtered to [`OPERATION_ANSWER`] because these settle by retiring an
+    /// approval card, and no other operation has one to retire. The claimed
+    /// material comes back with them so a recovered terminal can name the decision
+    /// that was attempted rather than only the card it was attempted against.
+    pub fn unsettled_answer_claims(&self) -> Result<Vec<AnswerClaimRow>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
+                    route, target_turn_id, started_at
+               FROM mutation_ledger
+              WHERE operation_kind = ?1 AND status = 'applying'
+              ORDER BY started_at ASC",
+        )?;
+        let rows = stmt.query_map(params![OPERATION_ANSWER], |row| {
+            Ok(AnswerClaimRow {
+                session_uid: row.get(0)?,
+                client_request_id: row.get(1)?,
+                claimed: ClaimedMaterial {
+                    thread_id: row.get(3)?,
+                    generation: row.get::<_, i64>(4)? as u64,
+                    route: row.get(5)?,
+                    target_turn_id: row.get(6)?,
+                    claimed_hash: row.get(2)?,
+                },
+                started_at: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn load_cursor(&self, session_uid: &str) -> Result<Option<TailCursor>> {
@@ -3921,7 +4273,9 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             claimed_hash      TEXT NOT NULL,
             thread_id         TEXT NOT NULL,
             generation        INTEGER NOT NULL,
-            -- 'turn_start' | 'turn_steer' — the snapshotted route.
+            -- The snapshotted route, in the operation kind's own vocabulary:
+            -- 'turn_start' | 'turn_steer' for a compose, and the chosen option's
+            -- id for an answer.
             route             TEXT NOT NULL,
             target_turn_id    TEXT,
             -- applying | done | indeterminate
@@ -5370,6 +5724,390 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "indeterminate", "the terminal outcome is immutable");
+    }
+
+    /// **One phone answer, claimed and settled in the one generalized ledger.**
+    ///
+    /// The ledger Phase 1 built says it covers "answer, compose, interrupt", and
+    /// this is the answer half arriving. What it must NOT arrive as is a second
+    /// claim-before-write table for the operation the first one was built for:
+    /// two idempotency laws for one question drift the moment only one of them
+    /// learns something, and the cross-operation tests could then never exercise
+    /// the production answer path.
+    ///
+    /// The claimed material is the whole authorization surface of an answer. For
+    /// `operation_kind = "answer"` the `route` column carries the option the
+    /// phone named — that is what "the snapshotted route" means for an answer,
+    /// and it is what recovery reads back to say which decision was attempted —
+    /// while `claimed_hash` covers the card's payload hash and the wire decision
+    /// as well, so a replay under the same id against a refreshed card is a
+    /// conflict rather than a second write.
+    ///
+    /// **Mutation:** claim answers under a second, answer-only ledger table of
+    /// their own and the `Applied` replay below goes red, because the generalized
+    /// ledger — the one every later Codex mutation will use — would know nothing
+    /// about the answer. (A25 forbids that second table, and
+    /// `a_fresh_database_is_created_at_the_current_schema` asserts it does not exist.)
+    #[test]
+    fn an_answer_is_claimed_and_settled_in_the_one_generalized_ledger() {
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = protocol::time::now_rfc3339();
+        insert_codex_card(&store, &session, "derived-1", "item-1", "turn-1", 10, "{}").unwrap();
+
+        let material = |hash: &str| ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: hash.into(),
+        };
+        assert_eq!(
+            store
+                .claim_mutation(
+                    "answer",
+                    &session.uid,
+                    "derived-1",
+                    &material("hashA"),
+                    &now
+                )
+                .unwrap(),
+            MutationClaim::Claimed,
+            "an answer takes its claim in the ledger every Codex mutation shares"
+        );
+
+        // The card, its terminal and the ledger settle are one commit.
+        let event = store
+            .retire_codex_pending_approval(
+                &session.uid,
+                "derived-1",
+                &pending(
+                    &session,
+                    EventKind::ApprovalResolved,
+                    Some("resolved:derived-1"),
+                ),
+                Some(AnswerTerminal::Settled("delivered")),
+            )
+            .unwrap();
+        assert!(event.is_some(), "the resolution rides the same transaction");
+        assert!(store
+            .codex_pending_approvals(&session.uid)
+            .unwrap()
+            .is_empty());
+
+        // A second tap replays the recorded outcome instead of writing again.
+        match store
+            .claim_mutation(
+                "answer",
+                &session.uid,
+                "derived-1",
+                &material("hashA"),
+                &now,
+            )
+            .unwrap()
+        {
+            MutationClaim::Applied { outcome, claimed } => {
+                assert_eq!(outcome, "delivered");
+                assert_eq!(claimed.route, "accept", "the option the phone named");
+            }
+            other => panic!("a settled answer must replay, not re-actuate: {other:?}"),
+        }
+
+        // The same id against a card that has since been refreshed is a different
+        // mutation, and is refused rather than conflated with the one above.
+        assert_eq!(
+            store
+                .claim_mutation(
+                    "answer",
+                    &session.uid,
+                    "derived-1",
+                    &material("hashB"),
+                    &now
+                )
+                .unwrap(),
+            MutationClaim::Conflict
+        );
+    }
+
+    /// **The ledger settle, the card delete and the resolution are one commit or
+    /// none of them.**
+    ///
+    /// Three separate writes left a window at every boundary, and the worst of
+    /// them is silent: a settled ledger with the card still standing is an answer
+    /// the operator can never make again against a question that is still being
+    /// asked. The failure is injected reversibly, so what is asserted is that a
+    /// commit which cannot delete the card leaves the claim exactly as live as it
+    /// was — and the next terminal can still finish it.
+    ///
+    /// **Mutation:** settle the ledger in a commit of its own *before* the card's
+    /// transaction and the `Indeterminate` assertion below goes red — the row
+    /// would read `done` for a card nobody retired, which is the silent shape: the
+    /// operator is refused by the ledger while the question is still on screen.
+    ///
+    /// The mirror ordering — settling *after* the card's commit — is deliberately
+    /// not claimed here, because this test cannot tell it apart: the injected
+    /// failure aborts the card's transaction first, so a settle placed after it is
+    /// never reached either. Distinguishing that one needs a failure injected
+    /// between two commits, which is a fixture this store does not have and which
+    /// would only exist to test the arrangement the fix removes.
+    #[test]
+    fn a_retirement_that_cannot_commit_leaves_the_answer_claim_live() {
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = protocol::time::now_rfc3339();
+        insert_codex_card(&store, &session, "derived-1", "item-1", "turn-1", 10, "{}").unwrap();
+        let material = ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: "hashA".into(),
+        };
+        assert_eq!(
+            store
+                .claim_mutation("answer", &session.uid, "derived-1", &material, &now)
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+
+        store.hide_codex_cards_for_tests(true);
+        assert!(
+            store
+                .retire_codex_pending_approval(
+                    &session.uid,
+                    "derived-1",
+                    &pending(
+                        &session,
+                        EventKind::ApprovalResolved,
+                        Some("resolved:derived-1")
+                    ),
+                    Some(AnswerTerminal::Settled("delivered")),
+                )
+                .is_err(),
+            "a commit that cannot reach the card must fail rather than settle half of it"
+        );
+        store.hide_codex_cards_for_tests(false);
+
+        match store
+            .claim_mutation("answer", &session.uid, "derived-1", &material, &now)
+            .unwrap()
+        {
+            MutationClaim::Indeterminate { .. } => {}
+            other => panic!("nothing may have settled: {other:?}"),
+        }
+        assert_eq!(
+            store.codex_pending_approvals(&session.uid).unwrap().len(),
+            1,
+            "the question still stands, so the next terminal can retire it"
+        );
+    }
+
+    /// **The one commit must prove it settled the claim it was given, or roll back.**
+    ///
+    /// `settle_answer_in_tx` discarded the guarded `UPDATE`'s affected
+    /// row count, so a retirement carrying an `AnswerTerminal` could delete the card and
+    /// append `ApprovalResolved{Phone}` while settling **zero** applying claims — the
+    /// sharing of one transaction proved only that the two statements ran together, not
+    /// that the second one did anything.
+    ///
+    /// That is not a hypothetical shape: a recovery that already made the claim
+    /// `indeterminate` leaves exactly this state, and so does a claim that was never
+    /// taken. In both, the card would go, a resolution naming the PHONE would be filed,
+    /// and the ledger would keep saying something else entirely.
+    ///
+    /// Every caller that passes an `AnswerTerminal` holds a live `applying` claim by
+    /// construction, so "exactly one row" is the invariant and not a preference. A
+    /// violation rolls back, the card stays, `Retirement::Failed` puts it back in memory
+    /// and recovery makes the same terminal on the next start — the fail-closed
+    /// direction.
+    ///
+    /// **Mutation:** ignore the affected-row count in `settle_answer_in_tx` (return
+    /// `Ok(())` from the `execute`) and both halves below go red: the card disappears and
+    /// a resolution is filed for a claim that was already terminal.
+    #[test]
+    fn an_answer_terminal_that_settles_no_claim_rolls_the_whole_commit_back() {
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = protocol::time::now_rfc3339();
+
+        // --- no claim at all under this key ---
+        insert_codex_card(&store, &session, "derived-1", "item-1", "turn-1", 10, "{}").unwrap();
+        assert!(
+            store
+                .retire_codex_pending_approval(
+                    &session.uid,
+                    "derived-1",
+                    &pending(
+                        &session,
+                        EventKind::ApprovalResolved,
+                        Some("resolved:derived-1")
+                    ),
+                    Some(AnswerTerminal::Settled(ANSWER_DELIVERED)),
+                )
+                .is_err(),
+            "a phone terminal for a claim that does not exist must not commit"
+        );
+        assert_eq!(
+            store.codex_pending_approvals(&session.uid).unwrap().len(),
+            1,
+            "the card stays, so the next terminal can still retire it"
+        );
+        assert!(
+            store
+                .events_after(&session.uid, 0, 100)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::ApprovalResolved),
+            "and no resolution was filed for a settle that settled nothing"
+        );
+
+        // --- a claim that is already terminal: first-terminal-wins, and the guard is
+        //     what makes the second one fail loudly instead of quietly doing nothing ---
+        let material = ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: "hashA".into(),
+        };
+        assert_eq!(
+            store
+                .claim_mutation("answer", &session.uid, "derived-1", &material, &now)
+                .unwrap(),
+            MutationClaim::Claimed
+        );
+        assert!(store
+            .settle_mutation("answer", &session.uid, "derived-1", ANSWER_LOST, &now)
+            .unwrap());
+        assert!(
+            store
+                .retire_codex_pending_approval(
+                    &session.uid,
+                    "derived-1",
+                    &pending(
+                        &session,
+                        EventKind::ApprovalResolved,
+                        Some("resolved:derived-1")
+                    ),
+                    Some(AnswerTerminal::Settled(ANSWER_DELIVERED)),
+                )
+                .is_err(),
+            "a claim another terminal already settled may not be overwritten by this one"
+        );
+        assert_eq!(
+            store.codex_pending_approvals(&session.uid).unwrap().len(),
+            1,
+            "and nothing about the card changed either"
+        );
+        match store
+            .claim_mutation("answer", &session.uid, "derived-1", &material, &now)
+            .unwrap()
+        {
+            MutationClaim::Applied { outcome, .. } => assert_eq!(
+                outcome, ANSWER_LOST,
+                "the first terminal still stands, byte for byte"
+            ),
+            other => panic!("the settled claim must replay: {other:?}"),
+        }
+    }
+
+    /// **Recovery can name every answer this daemon left mid-flight.**
+    ///
+    /// An `applying` row under `operation_kind = "answer"` is a claim whose write
+    /// may or may not have reached the socket, and nothing that survives the
+    /// restart can say which — so recovery has to find it in order to make it
+    /// terminal rather than leave it live for a second tap to inherit.
+    ///
+    /// **Mutations:** drop the `operation_kind` filter and a `compose` claim comes
+    /// back here, which would retire an approval card on the strength of an
+    /// unrelated mutation. Drop the `status = 'applying'` guard from either
+    /// settle and one of the two first-terminal assertions below goes red.
+    #[test]
+    fn recovery_reads_every_unsettled_answer_claim_and_no_other_operation() {
+        let (store, _p) = temp_store();
+        let session = key("AA", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = protocol::time::now_rfc3339();
+        let material = |route: &str| ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: route.into(),
+            target_turn_id: None,
+            claimed_hash: "hashA".into(),
+        };
+        store
+            .claim_mutation("answer", &session.uid, "req-1", &material("accept"), &now)
+            .unwrap();
+        store
+            .claim_mutation(
+                "compose",
+                &session.uid,
+                "req-2",
+                &material("turn_start"),
+                &now,
+            )
+            .unwrap();
+        store
+            .claim_mutation("answer", &session.uid, "req-3", &material("cancel"), &now)
+            .unwrap();
+        assert!(store
+            .settle_mutation("answer", &session.uid, "req-3", "delivered", &now)
+            .unwrap());
+
+        let open = store.unsettled_answer_claims().unwrap();
+        assert_eq!(
+            open.iter()
+                .map(|claim| (
+                    claim.client_request_id.as_str(),
+                    claim.claimed.route.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("req-1", "accept")],
+            "only the answers, and only the ones nothing has settled"
+        );
+
+        // **First terminal wins, and it has to hold in both directions.** Recovery
+        // writing `indeterminate` over a settled answer would forget an outcome
+        // that was proven, and a late disposition writing `delivered` over
+        // recovery's `indeterminate` would claim proof for an answer nobody can
+        // account for. Both are asserted, because only asserting one leaves the
+        // other's guard free to be deleted.
+        assert!(store
+            .settle_mutation_indeterminate("answer", &session.uid, "req-1", &now)
+            .unwrap());
+        assert!(
+            !store
+                .settle_mutation("answer", &session.uid, "req-1", "delivered", &now)
+                .unwrap(),
+            "a late disposition may never overwrite the terminal recovery wrote"
+        );
+        assert!(
+            !store
+                .settle_mutation_indeterminate("answer", &session.uid, "req-3", &now)
+                .unwrap(),
+            "recovery may never overwrite an outcome that was proven"
+        );
+        assert_eq!(
+            store.answer_status(&session.uid, "req-3").unwrap(),
+            Some(AnswerStatus::Settled("delivered".into())),
+            "req-3 settled `delivered` before recovery ran, and stays that way"
+        );
+        assert!(store.unsettled_answer_claims().unwrap().is_empty());
     }
 
     /// **What the column holds, and what each shape of it authorizes.**
@@ -10279,6 +11017,14 @@ mod tests {
         // asks the schema what the schema said would agree with any answer.
         assert_eq!(version, 5, "the schema version other builds will read");
         assert_eq!(version, SCHEMA_VERSION);
+        // **One answer ledger, and it is the generalized one.** `mutation_ledger`
+        // was built for "answer, compose, interrupt" and its conflict law is
+        // proven; a second claim-before-write table for the very operation it was
+        // built for would be two idempotency laws for one question. The negative
+        // is asserted here because it is the thing that stays true only if
+        // somebody keeps checking it.
+        assert!(table_exists(&conn, "mutation_ledger").unwrap());
+        assert!(!table_exists(&conn, "codex_answers").unwrap());
         assert!(column_exists(&conn, "events", "session_uid").unwrap());
         assert!(!needs_session_uid_migration(&conn).unwrap());
         // Both halves of the fleet and the view that reads them, built by the
