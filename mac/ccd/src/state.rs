@@ -231,6 +231,41 @@ pub struct Daemon {
     /// awaits a rival registration can run the whole of itself inside. See
     /// `register_supervisor`.
     registration_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per session, held across a phone answer's whole passage through the
+    /// outgoing Codex link — the epoch check, the ask, the claim, the write and the
+    /// broker's disposition — and across the stake that hands the session to a
+    /// replacement registration.
+    ///
+    /// **It exists because the epoch check is an instant and the write is not.**
+    /// [`Daemon::codex_answers_locked`] compares the registration epoch and hands
+    /// back a CLONE of the link's answer sender, and the `inner` lock that made the
+    /// comparison trustworthy is released in the same statement. Everything after it
+    /// — the link's own admission (which gates on thread, switch, wire id and
+    /// duplicate, never on a registration), the durable claim, the socket write —
+    /// runs with no registration held, so a replacement could stake the session and
+    /// the outgoing link would still put a response on its socket. Measured:
+    /// `a_replacement_registration_waits_for_the_outgoing_links_admitted_answer`
+    /// stages exactly that interleaving.
+    ///
+    /// With this gate there are two states and no third. Either an answer holds it,
+    /// and the stake waits until that answer has reached a terminal — never expiring
+    /// it, because an admitted answer is already durable and the honest thing is to
+    /// let it finish; or the stake holds it, and the answer that arrives afterwards
+    /// re-reads the epoch under the new owner and is handed the replacement's link or
+    /// none at all. The outgoing sender is never reachable across the stake.
+    ///
+    /// **An `RwLock`, and not a mutex, because answers are not rivals of each
+    /// other.** A session can have two cards open and answer both at once — the link
+    /// is built for it, and its ask channel carries one entry per open card — so
+    /// answers take the READ side and stay concurrent exactly as they were. The stake
+    /// is the only writer, and it is what they must be exclusive with. A plain mutex
+    /// would have bought the same safety by serialising a concurrency the link
+    /// deliberately supports, which is a narrowing nothing in this design needs.
+    ///
+    /// Same shape and same one-way ordering as the two gates above — gate, then
+    /// `inner`, never the reverse — and taken INSIDE the registration gate on the
+    /// registration path, so the two can never be acquired in opposite orders.
+    answer_gates: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// Held for the duration of a liveness sweep, so two never overlap.
     ///
     /// Taken with `try_lock`, which makes a slow sweep skip the next tick
@@ -706,6 +741,42 @@ struct CodexLinkHandle {
 /// How long a superseded control link may take to stop. Bounded: a task that will
 /// not die must not hold a registration open, and the link's own awaits are short.
 const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// The margin the quiesce budget adds above an answer's own two budgets: room for
+/// the durable claim that precedes the socket write (a blocking-pool SQLite upsert,
+/// fast but not itself a `Duration` constant) plus slack, so the sum is genuinely
+/// *above* the answer's worst case and not merely equal to it.
+const ANSWER_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
+
+/// How long a registration waits for the outgoing link's admitted answers to reach a
+/// terminal before it stops waiting and aborts that link instead.
+///
+/// **Derived from the answer's real worst case, not restated**. An
+/// admitted answer's whole passage is the durable claim, then
+/// [`crate::codex_link::SEND_BUDGET`] on the socket write, then
+/// [`crate::codex_link::DISPOSITION_BUDGET`] on the broker's account of it. This is
+/// that sum plus [`ANSWER_QUIESCE_MARGIN`], computed from those constants so the
+/// invariant "above the answer's worst case" holds by construction in BOTH builds —
+/// the old hand-copied `cfg(test)` literal (5 s) was *below* the test worst case
+/// (`SEND_BUDGET` alone did not shrink under test), which is the inverse of the
+/// invariant it claimed.
+///
+/// **On expiry the registration does NOT refuse**. It falls through to
+/// the stake and the park/abort below: aborting the outgoing link is what settles an
+/// answer that has stopped bounding itself — the link task is cancelled, its
+/// [`crate::codex_link::PendingAnswer`] (which now owns the read guard) is dropped,
+/// and the answer ends `Unknown`. Bailing here instead — as an earlier version did,
+/// and from *above* the park — converted a recoverable stall into a permanent,
+/// self-renewing wedge, because the supervisor's backoff loop re-registers forever
+/// and every attempt bailed before reaching the only thing that unwedges a stuck
+/// answer. On any path the wire can produce the wait ends because the answer ended,
+/// well within budget; the clock is the backstop for a link that has stopped bounding
+/// itself, and aborting it is strictly safer than leaving the session wedged.
+const ANSWER_QUIESCE_BUDGET: Duration = Duration::from_millis(
+    (crate::codex_link::SEND_BUDGET.as_millis()
+        + crate::codex_link::DISPOSITION_BUDGET.as_millis()
+        + ANSWER_QUIESCE_MARGIN.as_millis()) as u64,
+);
 
 /// How many times [`Daemon::resolve_codex_inbound`] may re-resolve a reference whose
 /// run changed underneath it.
@@ -1711,6 +1782,7 @@ impl Daemon {
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
+            answer_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
@@ -2147,6 +2219,18 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
+    /// The gate serializing one session's phone answers against the stake that hands
+    /// the session to a replacement registration. See [`Daemon::answer_gates`] for
+    /// what it is protecting and why an epoch comparison could not.
+    ///
+    /// Same eviction rule as its two siblings: an entry nobody holds is dropped, so
+    /// the map is bounded by live sessions rather than by every session ever seen.
+    async fn answer_gate(&self, session_uid: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut gates = self.answer_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
     /// Move whatever link the slot holds into the park, **atomically**.
     ///
     /// One lock acquisition, so there is no instant in which the handle belongs to
@@ -2197,10 +2281,16 @@ impl Daemon {
     ///
     /// **And it is where a departing link's memory is taken**, in the same lock
     /// acquisition that proves the task stopped — see [`Inner::retain_codex_carry`].
-    async fn join_parked_codex_links(&self, session: &SessionKey) -> bool {
+    async fn join_parked_codex_links(self: &Arc<Self>, session: &SessionKey) -> bool {
         let deadline = std::time::Instant::now() + CODEX_LINK_STOP_BUDGET;
         loop {
-            let remaining = {
+            // **Settled outside the lock**: an aborted link's open answers are made
+            // terminal (claim indeterminate, card retired) here rather than by the
+            // task, which an abort stops before its own teardown can run. Only a link
+            // that was installed ever receives an answer — the answer path resolves
+            // through the installed handle — and an installed link parks with its
+            // carry, so its ledger is exactly the one reachable through `retain`.
+            let (remaining, empty, to_settle) = {
                 let mut inner = self.inner.lock().await;
                 let Some(parked) = inner.parked_codex_links.get_mut(&session.uid) else {
                     return true;
@@ -2224,15 +2314,32 @@ impl Daemon {
                     }
                 }
                 let remaining = parked.len();
+                // The ledger goes with the carry, so it is captured before retention
+                // consumes the parked cell.
+                let to_settle: Vec<crate::codex_link::OpenAnswers> = stopped
+                    .iter()
+                    .map(|parked| parked.carry.open_answers())
+                    .collect();
                 for parked in stopped {
                     inner.retain_codex_carry(&session.uid, parked);
                 }
                 if empty {
                     inner.parked_codex_links.remove(&session.uid);
-                    return true;
                 }
-                remaining
+                (remaining, empty, to_settle)
             };
+            for open in &to_settle {
+                crate::codex_link::settle_open_answers(
+                    self,
+                    session,
+                    open,
+                    "the link to this Codex session was aborted while this answer was in flight",
+                )
+                .await;
+            }
+            if empty {
+                return true;
+            }
             if std::time::Instant::now() >= deadline {
                 crate::log_warn!(
                     "{remaining} codex link(s) for {} are still running after an abort; \
@@ -4494,9 +4601,30 @@ impl Daemon {
 
         // 5. The link claims and writes, in that order, and files the terminal
         //    itself — see [`crate::codex_link::AnswerRequest`].
-        let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid);
-        let report = match &link {
-            Some(answers) => answers.answer(request_id, wire, claimed).await,
+        //
+        //    **Held across all of it, and taken before `inner`.** The epoch compared
+        //    on the next line is compared at an instant; the claim and the socket
+        //    write that follow are not, and without this gate a replacement
+        //    registration could stake the session inside that gap and the outgoing
+        //    link would go on to write a response on a socket the session had left.
+        //    See [`Daemon::answer_gates`]. Ordering: answer gate, then `inner` — the
+        //    same one-way rule the other two gates keep, and the registration path
+        //    takes this one INSIDE its own gate so the pair can never invert. The
+        //    READ side, so two cards answered at once stay concurrent — the stake is
+        //    the only writer, and the only thing an answer must be exclusive with.
+        // **An OWNED read guard, carried into the answer**. A borrowed
+        // guard lives only in this future; but the work happens in the link task, and
+        // if this future is aborted after the ask is enqueued the borrowed guard would
+        // drop while the old link still owned the queued response — the stake could
+        // then land and the old link still write. The owned guard travels with the ask
+        // into [`crate::codex_link::AnswerRequest`]/`PendingAnswer` and is only released
+        // at pre-write refusal or terminal teardown, so the registration's write side
+        // genuinely waits for the response to finish, not merely for this caller to.
+        let quiesce = self.answer_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
             None => crate::codex_link::AnswerReport::NotApplied(
                 "there is no live link to this Codex session, so nothing was sent; \
                  answer at the Mac"
@@ -4559,78 +4687,141 @@ impl Daemon {
             claims.len()
         );
         for claim in claims {
-            let now = protocol::time::now_rfc3339();
-            // The run's name, for the resolution event.
-            //
-            // **`Err` is not `Ok(None)`, and conflating them is the same mistake as
-            // running this after a failed card restore.** A run that is genuinely GONE
-            // has no card left to retire either, so its claim is made terminal in the
-            // ledger and nothing else happens — that is honest. A read that FAILED says
-            // nothing about whether the run is there, and settling the ledger on the
-            // strength of it strands whatever card the run still has.
-            let row = match self.db.get_session(claim.session_uid.clone()).await {
-                Ok(Some(row)) => Some(row),
-                Ok(None) => None,
-                Err(err) => {
-                    crate::log_error!(
-                        "recovery: could not read the run behind the answer to {}, so its \
-                         claim is left live for the next start: {err:#}",
-                        claim.client_request_id
-                    );
-                    continue;
-                }
-            };
-            let Some(row) = row else {
-                if let Err(err) = self
-                    .db
-                    .settle_answer_indeterminate(
-                        claim.session_uid.clone(),
-                        claim.client_request_id.clone(),
-                        now,
-                    )
-                    .await
-                {
-                    crate::log_error!(
-                        "recovery: could not make the answer to {} terminal: {err:#}",
-                        claim.client_request_id
-                    );
-                }
-                continue;
-            };
-            let session = SessionKey::new(&row.session_uid, &row.session_id);
-            let retired = self
-                .retire_codex_answered(
-                    &session,
-                    &claim.client_request_id,
-                    protocol::ws::CodexResolution::Unknown {
-                        attempted_by: protocol::ws::ResolutionActor::Phone,
-                        attempted_decision: Some(AnswerDecision::OptionId {
-                            option_id: claim.claimed.route.clone(),
-                        }),
-                        write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
-                        cause: "this Mac stopped between writing the answer and learning \
-                                what became of it"
-                            .into(),
-                    },
-                    Some(crate::store::AnswerTerminal::Indeterminate),
-                )
-                .await;
-            if matches!(retired, Retirement::AlreadyGone) {
-                if let Err(err) = self
-                    .db
-                    .settle_answer_indeterminate(
-                        claim.session_uid.clone(),
-                        claim.client_request_id.clone(),
-                        now,
-                    )
-                    .await
-                {
-                    crate::log_error!(
-                        "recovery: could not make the answer to {} terminal: {err:#}",
-                        claim.client_request_id
-                    );
-                }
+            self.settle_stranded_answer_claim(&claim).await;
+        }
+    }
+
+    /// **Make one stranded answer claim terminal `Unknown`, card and all.**
+    ///
+    /// The per-claim half of [`Daemon::recover_codex_answers`], shared with the
+    /// handover sweep so both close the same claim the same way: the card is
+    /// retired saying its answer's fate is unknown and the claim is settled
+    /// `indeterminate` in the one commit, or — for a run whose card is already
+    /// gone — the ledger alone is made terminal.
+    ///
+    /// **`Err` is not `Ok(None)`.** A run that is genuinely GONE has no card left
+    /// to retire either, so its claim is made terminal in the ledger and nothing
+    /// else happens — that is honest. A read that FAILED says nothing about
+    /// whether the run is there, and settling the ledger on the strength of it
+    /// strands whatever card the run still has, so the claim is left live for the
+    /// next attempt.
+    async fn settle_stranded_answer_claim(&self, claim: &crate::store::AnswerClaimRow) {
+        let now = protocol::time::now_rfc3339();
+        let row = match self.db.get_session(claim.session_uid.clone()).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None,
+            Err(err) => {
+                crate::log_error!(
+                    "could not read the run behind the answer to {}, so its \
+                     claim is left live for the next attempt: {err:#}",
+                    claim.client_request_id
+                );
+                return;
             }
+        };
+        let Some(row) = row else {
+            if let Err(err) = self
+                .db
+                .settle_answer_indeterminate(
+                    claim.session_uid.clone(),
+                    claim.client_request_id.clone(),
+                    now,
+                )
+                .await
+            {
+                crate::log_error!(
+                    "could not make the answer to {} terminal: {err:#}",
+                    claim.client_request_id
+                );
+            }
+            return;
+        };
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+        let retired = self
+            .retire_codex_answered(
+                &session,
+                &claim.client_request_id,
+                protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    attempted_decision: Some(AnswerDecision::OptionId {
+                        option_id: claim.claimed.route.clone(),
+                    }),
+                    write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                    cause: "this Mac stopped between writing the answer and learning \
+                            what became of it"
+                        .into(),
+                },
+                Some(crate::store::AnswerTerminal::Indeterminate),
+            )
+            .await;
+        if matches!(retired, Retirement::AlreadyGone) {
+            if let Err(err) = self
+                .db
+                .settle_answer_indeterminate(
+                    claim.session_uid.clone(),
+                    claim.client_request_id.clone(),
+                    now,
+                )
+                .await
+            {
+                crate::log_error!(
+                    "could not make the answer to {} terminal: {err:#}",
+                    claim.client_request_id
+                );
+            }
+        }
+    }
+
+    /// **Durably settle every applying answer claim of an outgoing session.**
+    ///
+    /// The claim row is committed before the answer enters the daemon's in-memory
+    /// `open_answers`, and the write that commits it cannot be cancelled, so a
+    /// handover that aborts the outgoing link and settles that ledger can miss a
+    /// claim caught in the window between the two: committed, but never in the
+    /// ledger the abort walks. This reads the claims from the authoritative record
+    /// — the store — and makes each terminal `Unknown`, card retired, by the same
+    /// path a restart's recovery uses. Run after the link is aborted and before
+    /// the replacement is staked, it leaves no `applying` claim and no open card
+    /// for a session the daemon is handing on.
+    /// Settle any answer claim the outgoing link committed but never reached the
+    /// in-memory ledger to settle by hand.
+    ///
+    /// The abort above settles what is in `open_answers`, but a phone answer writes
+    /// its durable claim before it enters that ledger and the write cannot be
+    /// cancelled, so an abort in that window leaves an `applying` claim with an open
+    /// card the abort never saw. This reads the authoritative record — the claim rows
+    /// themselves — and settles each the way a restart's recovery would, so the card
+    /// is retired before the stake rather than lingering until the next start. The one
+    /// tail it cannot cover is a write that commits *strictly after* this read; that
+    /// claim is no worse off than before this sweep existed, and a restart's recovery
+    /// remains its backstop.
+    async fn sweep_stranded_answer_claims(&self, session_uid: &str) {
+        let claims = match self
+            .db
+            .unsettled_answer_claims_for(session_uid.to_string())
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!(
+                    "handover for {session_uid}: could not read the outgoing session's \
+                     answer claims, so a claim committed but not yet in the ledger may be \
+                     left applying until the next start: {err:#}"
+                );
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "handover for {session_uid}: {} answer claim(s) were still applying on the \
+             outgoing link; recording them as unknown rather than leaving them for the \
+             next start",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_answer_claim(&claim).await;
         }
     }
 
@@ -5849,6 +6040,17 @@ impl Daemon {
         let gate = self.registration_gate(&uid).await;
         let _acceptance = gate.lock().await;
 
+        // **The answer quiesce is taken LATER — just above the stake — not here**
+        //. All of the accept/reject preparation below (the row re-read,
+        // the agent boundary, the generation and thread-binding checks, the exit-replay
+        // corpse refusal) reads only state a concurrent registration writes, never a
+        // phone answer, so serializing it against answers would buy nothing and holding
+        // the answer writer across it is exactly what let a DB/ingest stall block every
+        // new answer indefinitely. The writer is acquired immediately before the stake,
+        // where it belongs, and an exit replay (refused the claim above the stake) never
+        // touches it at all. See [`ANSWER_QUIESCE_BUDGET`] and the block just above
+        // `inner.stake`.
+
         // **The row, re-read under the gate — and every decision about it made from
         // THIS read, not the one at the top of the function** (round-2 F2).
         //
@@ -6069,6 +6271,76 @@ impl Daemon {
         // incarnation refuses. A supervisor too old to set the flag behaves exactly as
         // it did before, which is the same narrowing the identity-less report path
         // already carries.
+        // **The answer quiesce, taken here — immediately above the stake, and only
+        // for a real registration**.
+        //
+        // The stake below is what makes the incumbent link unaddressable, and it is
+        // the only thing that does: the answer path's epoch check is an instant, and
+        // the claim and socket write that follow it hold no registration at all. So an
+        // answer already admitted must reach a terminal before the stake, or one that
+        // arrives after re-reads the epoch under the new owner — the two are serialized
+        // by this writer against the answer path's reader (which now OWNS its guard,
+        // carried into the [`crate::codex_link::PendingAnswer`], so a cancelled answer
+        // future cannot release it while the link still owns the queued response).
+        //
+        // Acquired here rather than at the top of the function so all of the accept/
+        // reject preparation above (the row re-read, the agent boundary, the generation
+        // and thread-binding checks) runs WITHOUT the writer held — a DB or ingest
+        // stall there no longer blocks every new answer, and the whole worst case a
+        // waiting answer can produce is the two link budgets it is derived from. Taken
+        // AFTER the `inner` used for the corpse check has been released, so the one-way
+        // order (answer gate, then `inner`) still holds: the stake below re-takes
+        // `inner` under this guard.
+        //
+        // **Skipped entirely for an exit replay.** A replay is a corpse recording its
+        // own end (`report_exit` opens a connection, replays the registration, then
+        // sends `SessionExited`); it holds no session and races no answer, and it may
+        // be refused the claim a few lines down. Waiting on the writer would only
+        // delay — and, in an earlier version that bailed on expiry from ABOVE the park,
+        // DROP — the `SessionExited` it exists to deliver, leaving the run Live forever.
+        //
+        // **On expiry it does NOT refuse, and it aborts the outgoing link BEFORE the
+        // stake.** A phone answer still in flight past the budget is one the wire has
+        // stopped bounding, so the outgoing link is parked, aborted, and its open
+        // answers made terminal (claim indeterminate, card retired) right here —
+        // ahead of the stake below. Ordering it before the stake is load-bearing:
+        // once staked the incumbent is unaddressable to NEW answers, but an answer
+        // already admitted on the old link could still land a write after the stake,
+        // and any fallible step between a stake and the abort could `bail!` with the
+        // outgoing link still live and its card still dangling. Settling first closes
+        // both. See [`ANSWER_QUIESCE_BUDGET`].
+        //
+        // Settling the aborted link's `open_answers` is the ledger walk, but a claim
+        // is committed to the store BEFORE it enters that ledger and the commit
+        // cannot be cancelled, so an abort in that window leaves a claim the ledger
+        // walk never sees. The store sweep that follows the join reads the claims
+        // from the authoritative record and makes each terminal, so no claim
+        // committed but not yet in the ledger is left applying with its card open.
+        let quiesce = self.answer_gate(&uid).await;
+        let quiesced = if info.exit_replay {
+            None
+        } else {
+            match tokio::time::timeout(ANSWER_QUIESCE_BUDGET, Arc::clone(&quiesce).write_owned())
+                .await
+            {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    crate::log_error!(
+                        "registration for {uid}: a phone answer is in flight through the \
+                         outgoing link and has not returned within {ANSWER_QUIESCE_BUDGET:?}; \
+                         aborting the outgoing link and durably settling its open answers \
+                         before staking, so nothing admitted on it can write after the stake \
+                         and no card is left dangling"
+                    );
+                    let outgoing = SessionKey::new(uid.clone(), info.session_id.clone());
+                    self.park_current_codex_link(&uid).await;
+                    let _ = self.join_parked_codex_links(&outgoing).await;
+                    self.sweep_stranded_answer_claims(&uid).await;
+                    None
+                }
+            }
+        };
+
         let incarnation = Incarnation::of(&info);
         let epoch = {
             let mut inner = self.inner.lock().await;
@@ -6106,6 +6378,15 @@ impl Daemon {
             }
             inner.stake(&uid, incarnation)
         };
+
+        // **Released the instant the stake is taken.** The answer quiesce exists only
+        // to fence the stake against an answer already admitted on the old link; once
+        // the stake stands, the epoch filter makes that link unaddressable and the
+        // guard has done its whole job. Held through the registration tail below it
+        // would block every same-session answer for the rest of this function — and
+        // the phone WebSocket waits on those inline — so it is dropped here, not at
+        // return.
+        drop(quiesced);
 
         // **The row and the generation it was accepted at, in one statement**
         // (plan A5.1). The high-water read above is worthless if the value it
@@ -6527,7 +6808,7 @@ impl Daemon {
     /// teardown can run afterwards — removing blindly would detach the
     /// supervisor that had just replaced it, leaving a live session with no way
     /// to be typed into and a `detached` link that never recovers.
-    pub async fn unregister_supervisor(&self, registration: &Registration) {
+    pub async fn unregister_supervisor(self: &Arc<Self>, registration: &Registration) {
         // The same gate the registration path holds, so a disconnect can never
         // interleave with a re-registration's acceptance — the row and the card
         // relabel as much as the park → join → spawn → install.
@@ -7067,6 +7348,15 @@ impl Daemon {
     fn codex_answers_locked(
         inner: &Inner,
         session_uid: &str,
+        // **The answer gate's read guard, by reference, so the ordering is a type
+        // fact**. This function reads the link the answer is about to be
+        // written on; taking it demands the caller already hold the read side of the
+        // answer gate, which is what serializes the write below against a replacement
+        // registration's stake. The parameter is unused except to make "clone the
+        // sender only under the guard" impossible to get wrong — a caller that has not
+        // taken the guard cannot call this, so the "clone before guard" reordering the
+        // mutation battery used to survive no longer type-checks.
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
     ) -> Option<crate::codex_link::LinkAnswers> {
         let owner = inner.registration_epochs.get(session_uid).copied();
         inner
@@ -19684,6 +19974,11 @@ mod tests {
     ) -> (
         protocol::ws::ApprovalCard,
         tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::AnswerRequest>,
+        // **A live clone of the outgoing sender**. A test that keeps
+        // it can distinguish "no ask arrived" (a real timeout on the resolver) from
+        // "the channel closed because the handle left the map" — the collapse the
+        // vacuous post-stake test used to accept.
+        crate::codex_link::LinkAnswers,
     ) {
         let session = SessionKey::new(uid, "cc-1");
         let card = codex_command_card(request_id);
@@ -19701,6 +19996,7 @@ mod tests {
             "the premise: a real card, filed the way the observer files one"
         );
         let (answers, asks) = crate::codex_link::answer_channel();
+        let retained = answers.clone();
         let mut inner = daemon.inner.lock().await;
         let epoch = *inner
             .registration_epochs
@@ -19720,7 +20016,7 @@ mod tests {
             },
         );
         drop(inner);
-        (card, asks)
+        (card, asks, retained)
     }
 
     /// Take the link handle away, leaving the registration standing.
@@ -19739,6 +20035,956 @@ mod tests {
         }
     }
 
+    /// **A replacement registration waits for the outgoing link's admitted answer,
+    /// and never takes the session out from under one.**
+    ///
+    /// # The window this closes, as it was measured
+    ///
+    /// The registration epoch is consulted exactly once on the answer path, by
+    /// [`Daemon::codex_answers_locked`], and what it hands back is a CLONE of the
+    /// outgoing link's sender. The `inner` lock that made that comparison
+    /// trustworthy is released in the same statement, and nothing between there and
+    /// the socket asks again — not the link's own admission (which gates on thread,
+    /// switch, wire id and duplicate, never on a registration), not the durable
+    /// claim, and not the write. Staged, the interleaving ran: an answer admitted
+    /// under one epoch was completed and reported applied while a second
+    /// registration owned the session, with the second registration's own transaction
+    /// having run to completion in between.
+    ///
+    /// # What this asserts instead
+    ///
+    /// The stake now waits. The answer is admitted, the replacement registration is
+    /// started, and it is still not finished while the answer is outstanding —
+    /// **that** is the assertion, because the alternative is the window. Then the
+    /// answer reaches its terminal, the registration completes, and both outcomes are
+    /// what they would have been alone: the answer applied, the session staked to the
+    /// replacement.
+    ///
+    /// An admitted answer is never expired to make room for the handover. By the time
+    /// it is admitted it is durable, and its outcome is the truth about a response
+    /// that may already be on the wire; a registration that cancelled it would be
+    /// choosing a convenient answer over a true one.
+    ///
+    /// **Mutation:** drop the `_quiesced` guard in `register_supervisor` (or the
+    /// `_admitted` one in `answer_codex`) and the registration finishes while the ask
+    /// is still outstanding — the measured window, back.
+    #[tokio::test]
+    async fn a_replacement_registration_waits_for_the_outgoing_links_admitted_answer() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-handover").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Admitted: the epoch matched, the sender was cloned, the ask is with the
+        // outgoing link and its outcome is still open.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+        assert_eq!(ask.request_id, card.request_id);
+        // **Hold the reply and the read guard separately**. The guard
+        // travelled with the ask; splitting it out lets this test show that it — not
+        // the reply — is what the handover waits on, and that the wait ends because the
+        // guard is RELEASED, not because [`ANSWER_QUIESCE_BUDGET`] expired.
+        let crate::codex_link::AnswerRequest { reply, gate, .. } = ask;
+
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+        // Well inside the budget, so a registration that finishes here finished because
+        // nothing held it back — not because it timed out and fell through.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !handover.is_finished(),
+            "the replacement registration completed while an admitted answer still held \
+             the answer gate"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(uid),
+            Some(epoch_before),
+            "and nothing was staked while it waited"
+        );
+
+        // The answer's OWN outcome is reported, exactly as it would be alone.
+        reply
+            .send(crate::codex_link::AnswerReport::Delivered)
+            .expect("the daemon is still waiting on the outgoing link");
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer must return within the budget")
+            .expect("the answering task");
+        assert!(
+            matches!(result, AnswerResult::Applied { .. }),
+            "an admitted answer is never expired by a handover: {result:?}"
+        );
+
+        // **The reply alone does not release the handover** — the guard does. In
+        // production the link drops its `PendingAnswer` (reply and guard together) at
+        // the terminal; here they are separated so the guard's role is provable: the
+        // handover is STILL blocked with the guard held.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !handover.is_finished(),
+            "the handover completed on the reply, before the answer gate's read guard \
+             was released — the guard is not what serializes the stake"
+        );
+
+        // Releasing the guard is what lets the session move, and it moves PROMPTLY —
+        // the 2 s budget is well under the ~4.5 s quiesce budget, so a handover that
+        // only completed here by timing out would fail this.
+        drop(gate);
+        tokio::time::timeout(Duration::from_secs(2), handover)
+            .await
+            .expect("the handover completes promptly once the guard is released, not by timeout")
+            .expect("the registration task")
+            .expect("the replacement registration is accepted");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the replacement staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the handover still happens ({epoch_before} -> {epoch_after})"
+        );
+    }
+
+    /// **Two cards on one session are still answered at once.**
+    ///
+    /// The gate that makes a handover wait is a per-session lock, and the obvious
+    /// form of it — a mutex — would have made every phone answer in a session wait
+    /// for the one before it. The link is built for the opposite: its ask channel
+    /// carries one entry per open card precisely so two approvals can be answered
+    /// together. So the gate is an `RwLock` and answers take the read side, and this
+    /// is what says so: both asks are outstanding **at the same time**, before either
+    /// is replied to.
+    ///
+    /// **Mutation:** make [`Daemon::answer_gates`] a `Mutex` again (and
+    /// `answer_codex` take it exclusively) and the second ask never arrives — the
+    /// gate would have been bought with a concurrency nothing required it to spend.
+    #[tokio::test]
+    async fn two_cards_on_one_session_are_answered_concurrently() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (first, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-one").await;
+        // The second card rides the link the first one installed — the state a session
+        // is in whenever the agent asks two things before either is answered.
+        let session = SessionKey::new(uid, "cc-1");
+        let second = codex_command_card("rq-two");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    second.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-9c0f1f4c-0f0e-4a6d-9a41-1d0b6f2f5a02",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second open card on the same session"
+        );
+
+        let answering: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|card| {
+                let daemon = Arc::clone(&daemon);
+                let request_id = card.request_id.clone();
+                let payload_hash = card.payload_hash.clone();
+                let uid = uid.to_string();
+                tokio::spawn(async move {
+                    daemon
+                        .answer(
+                            &request_id,
+                            &payload_hash,
+                            protocol::ws::AnswerDecision::OptionId {
+                                option_id: "accept".into(),
+                            },
+                            Some(&uid),
+                        )
+                        .await
+                })
+            })
+            .collect();
+
+        // **Both, before either is replied to.** Collecting them first is the whole
+        // assertion: under an exclusive gate the second would not exist yet.
+        let mut outstanding = Vec::new();
+        for _ in 0..2 {
+            outstanding.push(
+                tokio::time::timeout(Duration::from_secs(5), asks.recv())
+                    .await
+                    .expect("both answers must reach the link concurrently")
+                    .expect("the link is handed the answer"),
+            );
+        }
+        let mut ids: Vec<&str> = outstanding
+            .iter()
+            .map(|ask| ask.request_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["rq-one", "rq-two"]);
+
+        for ask in outstanding {
+            ask.reply
+                .send(crate::codex_link::AnswerReport::Delivered)
+                .expect("the daemon is still waiting on the link");
+        }
+        for task in answering {
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("the answer must return within the budget")
+                .expect("the answering task");
+            assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        }
+    }
+
+    /// **The other half of the same two-state claim: an answer that arrives after the
+    /// stake never reaches the outgoing link's sender — and it is the epoch FILTER
+    /// that stops it, not a dropped map entry or a closed channel**.
+    ///
+    /// Together with the gate above there is no third state. Either the answer holds
+    /// the session's answer gate and the stake waits, or the stake holds it and the
+    /// answer that follows re-reads the epoch under the new owner — which is what
+    /// [`Daemon::codex_answers_locked`]'s filter does.
+    ///
+    /// An earlier version was vacuous: it accepted both a timeout AND an `Ok(None)`
+    /// from a channel that had closed because the handover took the sender out of the
+    /// map, and it never checked the answer's terminal. Either outcome passed a build
+    /// that simply drops every post-handover answer. This pins the real thing:
+    ///
+    ///   * a handle is re-inserted at the OLD epoch whose sender is STILL ALIVE and
+    ///     feeds this receiver, so a `None` is impossible and "nothing arrived" can
+    ///     only be the epoch filter refusing a present, live entry;
+    ///   * the wait must be a real timeout, not a closed channel; and
+    ///   * the answer's terminal is asserted — with no link at the current epoch it is
+    ///     `Rejected` (NotApplied), not silently dropped.
+    ///
+    /// **Mutation:** drop the `owner == Some(held.epoch)` filter in
+    /// `codex_answers_locked` and this goes red — the stale-epoch sender is handed the
+    /// ask.
+    #[tokio::test]
+    async fn an_answer_after_the_stake_is_stopped_by_the_epoch_filter_not_a_dropped_entry() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, retained_sender) =
+            codex_card_with_a_link(&daemon, uid, "rq-after-stake").await;
+        let old_epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("the replacement registration is accepted");
+        let new_epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the replacement staked its claim");
+        assert!(new_epoch > old_epoch, "the handover moved the epoch");
+
+        // **Re-insert a handle at the OLD epoch whose sender is still alive.** The
+        // map now HAS an entry for this uid and a live sender feeding `asks`, so if the
+        // answer fails to arrive it can ONLY be the epoch filter — not a missing entry
+        // and not a closed channel.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let repl = inner
+                .codex_links
+                .remove(uid)
+                .expect("the replacement installed a link");
+            repl.task.abort();
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: old_epoch,
+                    generation: repl.generation,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: repl.presence,
+                    answers: retained_sender.clone(),
+                    carry: repl.carry,
+                },
+            );
+        }
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // A REAL timeout — the sender is alive, so `recv` cannot return `None`. An ask
+        // arriving here would mean the stale-epoch entry was handed the answer.
+        let reached = tokio::time::timeout(Duration::from_millis(1000), asks.recv())
+            .await
+            .map(|opt| opt.map(|ask| ask.request_id));
+        assert!(
+            reached.is_err(),
+            "the epoch filter must stop the answer, but an ask reached a live sender at \
+             the stale epoch: {reached:?}"
+        );
+        // And the answer's own terminal: no link at the current epoch is NotApplied.
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer returns a terminal, it is not dropped")
+            .expect("the answering task");
+        assert!(
+            matches!(result, AnswerResult::Rejected { .. }),
+            "an answer with no live link at the current epoch is Rejected: {result:?}"
+        );
+        drop(retained_sender);
+    }
+
+    /// **A registration that cannot quiesce the outgoing answer within the budget
+    /// does NOT refuse — it stakes, aborts the outgoing link, and lets that link's
+    /// teardown settle the stuck answer**.
+    ///
+    /// An earlier version bailed here, and it bailed from *above* the park — the one
+    /// thing that unsticks a wedged answer. That turned a recoverable stall into a
+    /// permanent, self-renewing wedge: the supervisor's reconnect loop re-registers
+    /// forever, and every attempt bailed before reaching the abort. The direction is
+    /// now the safe one: on expiry the registration falls through, stakes a new epoch,
+    /// and the park/abort below aborts the outgoing link — whose teardown ends the
+    /// answer `Unknown` (3b's gate). The session is legible again either way.
+    ///
+    /// The ask carries the answer gate's read guard, so holding it here is what
+    /// makes the write side time out; this is the only path that reaches the expiry
+    /// branch at all, which is why it is exercised with a real held guard rather than
+    /// a shortened budget.
+    ///
+    /// **Mutation:** restore the `bail!` on quiesce timeout and this goes red at the
+    /// `expect(... accepted)` — the wedge is back.
+    #[tokio::test]
+    async fn a_registration_that_cannot_quiesce_the_outgoing_answer_falls_through_and_stakes() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-wedged").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        // **A SECOND answer, admitted on the outgoing link and left in its ledger** —
+        // the state a real answer is in the instant after its durable claim is taken
+        // and its write goes out: an `applying` claim in the store and a
+        // `PendingAnswer` in the link's `open_answers`. The abort below must make it
+        // terminal, not leave it `applying` with a card on a phone. Its gate guard is
+        // moved into the pending answer, so settling it is what releases the guard.
+        let session = SessionKey::new(uid, "cc-1");
+        let admitted = codex_command_card("rq-admitted");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    admitted.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-admitted-0000-0000-000000000000",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second real card is filed"
+        );
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_answer_mutation(
+                        uid.to_string(),
+                        admitted.request_id.clone(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: admitted.payload_hash.clone(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the admitted answer holds an applying claim before the abort"
+        );
+        {
+            let gate = daemon.answer_gate(uid).await.read_owned().await;
+            let open = daemon
+                .inner
+                .lock()
+                .await
+                .codex_links
+                .get(uid)
+                .expect("the outgoing link")
+                .carry
+                .open_answers();
+            crate::codex_link::insert_pending_answer_for_tests(
+                &open,
+                4242,
+                &admitted.request_id,
+                "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                gate,
+            );
+        }
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Held, and never answered: the link that took this ask is the wedged one, and
+        // the ask holds the answer gate's read guard, so the write side cannot acquire.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The replacement cannot quiesce within the budget; it must fall through and
+        // succeed, not refuse. (This waits out ANSWER_QUIESCE_BUDGET, ~4.5 s in test.)
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("a registration that cannot quiesce the answer falls through, not refuses");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the fall-through staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the session moved despite the wedged answer ({epoch_before} -> {epoch_after})"
+        );
+
+        // **And the admitted answer is durably terminal, not left applying.** The
+        // timeout path aborted the outgoing link before staking and settled its open
+        // answers: the claim is `Indeterminate` and the card is retired, so nothing
+        // dangles in `applying` for process-start recovery and no card is left on a
+        // phone that no tap can answer.
+        assert_eq!(
+            daemon
+                .db
+                .answer_status(uid.to_string(), admitted.request_id.clone())
+                .await
+                .expect("the answer status is readable"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the admitted answer is made terminal by the abort, not left applying"
+        );
+        assert!(
+            !open_cards(&daemon, uid)
+                .iter()
+                .any(|row| row.request_id == admitted.request_id),
+            "the admitted answer's card is retired by the abort"
+        );
+
+        // The stuck answer is the aborted link's to settle. This test harness drives
+        // the channel by hand, so dropping the ask (its reply and its read guard)
+        // models the aborted link's teardown; the answer then reaches a terminal
+        // rather than wedging — which is the whole difference this placement buys.
+        drop(ask);
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer reaches a terminal after the link is aborted, it does not wedge")
+            .expect("the answering task");
+        assert!(
+            !matches!(result, AnswerResult::Applied { .. }),
+            "an answer the handover overtook was never confirmed applied: {result:?}"
+        );
+    }
+
+    /// **A claim committed but not yet in the daemon's ledger is still settled by
+    /// the handover.**
+    ///
+    /// A phone answer commits its durable claim BEFORE it enters the link's
+    /// in-memory `open_answers`, and the write that commits it cannot be
+    /// cancelled. There is therefore a window where the claim is `applying` in the
+    /// store and nothing is in `open_answers` — the exact state an abort in that
+    /// gap leaves behind. The quiesce-timeout handover aborts the outgoing link
+    /// and settles that link's `open_answers`, which walks an EMPTY ledger and
+    /// finds nothing to do; only the store sweep reads the authoritative claim row
+    /// and makes it terminal. This is the sibling of the wedged-answer test above,
+    /// with the one difference that isolates the sweep: the admitted claim is
+    /// committed but deliberately NOT inserted into `open_answers`, so the ledger
+    /// walk cannot see it and the sweep is the only thing that can.
+    ///
+    /// **Mutation:** remove the `sweep_stranded_answer_claims` call after the
+    /// join in the quiesce-timeout branch and this goes red — the claim stays
+    /// `applying` and its card stays open, exactly the leak the sweep closes.
+    #[tokio::test]
+    async fn a_claim_committed_before_it_reaches_the_ledger_is_swept_at_the_handover() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-holder").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        // **A second answer whose durable claim is committed but NOT in the link's
+        // ledger** — the state a real answer is in for the window between its claim
+        // reaching the store and its `PendingAnswer` reaching `open_answers`. An
+        // abort in that window is what this covers, so the pending answer is
+        // deliberately never inserted: only the store sweep can see this claim.
+        let session = SessionKey::new(uid, "cc-1");
+        let admitted = codex_command_card("rq-uncharted");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    admitted.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-uncharted-0000-0000-000000000000",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second real card is filed"
+        );
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_answer_mutation(
+                        uid.to_string(),
+                        admitted.request_id.clone(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: admitted.payload_hash.clone(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the admitted answer holds an applying claim before the abort"
+        );
+
+        // A real answer on the FIRST card, held and never returned, is what holds the
+        // answer gate's read guard so the handover's write side times out. Its ask is
+        // intercepted here rather than processed, so nothing about it reaches
+        // `open_answers` either — the ledger the abort walks is genuinely empty.
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The replacement cannot quiesce within the budget; it falls through, aborts
+        // the outgoing link, joins its (empty) ledger, and sweeps the store.
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("a registration that cannot quiesce the answer falls through, not refuses");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the fall-through staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the session moved despite the wedged answer ({epoch_before} -> {epoch_after})"
+        );
+
+        // **The claim the ledger walk never saw is terminal, and its card is gone.**
+        // Nothing was in `open_answers` to settle it, so this is the store sweep's
+        // work alone: `applying` -> `indeterminate`, card retired.
+        assert_eq!(
+            daemon
+                .db
+                .answer_status(uid.to_string(), admitted.request_id.clone())
+                .await
+                .expect("the answer status is readable"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a claim committed but never in the ledger is still made terminal by the sweep"
+        );
+        assert!(
+            store.unsettled_answer_claims().unwrap().is_empty(),
+            "no applying claim is left for the outgoing session after the handover"
+        );
+        assert!(
+            !open_cards(&daemon, uid)
+                .iter()
+                .any(|row| row.request_id == admitted.request_id),
+            "the swept claim's card is retired, not left open on a phone"
+        );
+
+        // Cleanup: dropping the ask (its reply and read guard) models the aborted
+        // link's teardown so the held answer reaches a terminal rather than hanging.
+        drop(ask);
+        let _ = tokio::time::timeout(Duration::from_secs(5), answering).await;
+    }
+
+    /// **A same-session answer is not blocked by the TAIL of a registration.**
+    ///
+    /// The answer quiesce fences the stake against an answer admitted on the old link,
+    /// and once the stake stands its job is done. Held through the rest of the
+    /// registration — the row write, the card relabel, the park/join of the old link,
+    /// the ingest — it would block every same-session answer for all of that, and the
+    /// phone waits on those inline. Dropping it at the stake is what keeps a slow tail
+    /// from wedging an unrelated answer.
+    ///
+    /// The tail is made observably long on purpose: the outgoing link is replaced with
+    /// a task that cannot be cancelled at an await point, so the replacement's
+    /// park→join loops out real time before the registration returns. A same-session
+    /// answer issued into that window must come back promptly, not wait the tail out.
+    ///
+    /// **Mutation:** move the `drop(quiesced)` down to the end of `register_supervisor`
+    /// (hold the guard to return) and this goes red — the answer waits the whole tail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_same_session_answer_is_not_blocked_by_the_tail_of_a_registration() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-tail").await;
+
+        // Replace the outgoing link with a task that runs synchronous work with no await
+        // point, so `abort()` cannot stop it until it returns on its own. The next
+        // registration's park→join of this link therefore takes real time, which is the
+        // window a blocked answer would be forced to wait out.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let held = inner.codex_links.remove(uid).expect("a link was installed");
+            held.task.abort();
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: held.epoch,
+                    generation: held.generation,
+                    task: tokio::spawn(async {
+                        let start = std::time::Instant::now();
+                        while start.elapsed() < Duration::from_millis(1800) {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }),
+                    presence: held.presence,
+                    answers: held.answers,
+                    carry: held.carry,
+                },
+            );
+        }
+
+        // The registration whose tail is now ~1.8 s long.
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+
+        // Let it pass the stake and enter its tail (past the drop of the quiesce guard).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !handover.is_finished(),
+            "the registration should still be in its tail when the answer is issued"
+        );
+
+        // A same-session answer, issued while the registration is in its tail. It must
+        // return promptly: the write guard was released at the stake, so nothing on the
+        // answer path is waiting on the registration to finish.
+        let started = std::time::Instant::now();
+        let answered = tokio::time::timeout(
+            Duration::from_secs(2),
+            daemon.answer(
+                &card.request_id,
+                &card.payload_hash,
+                protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            ),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(
+            answered.is_ok(),
+            "the same-session answer was blocked by the registration tail past its budget"
+        );
+        assert!(
+            waited < Duration::from_millis(1200),
+            "the answer waited on the registration tail rather than proceeding: {waited:?}"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(10), handover).await;
+    }
+
+    /// **Aborting the answer's caller after the ask is enqueued does NOT release the
+    /// gate — the guard travels with the ask**.
+    ///
+    /// The read guard used to live in the answer-path future. Once the ask was
+    /// enqueued the work was the link's, but the guard was still the caller's — so a
+    /// caller aborted after enqueue (a phone WebSocket dropping, say) released the gate
+    /// while the old link still owned the queued response, and a stake could land under
+    /// it. Carrying the guard into the ask closes that: this aborts the caller with the
+    /// ask outstanding and shows a handover is STILL blocked, and only settling the ask
+    /// (dropping it, as the link's teardown does) lets the session move.
+    ///
+    /// **Mutation:** move the guard back to the caller (drop the `gate` field and take
+    /// a borrowed `quiesce.read()` in `answer_codex`) and the first assertion goes red
+    /// — the handover finishes the moment the caller is aborted.
+    #[tokio::test]
+    async fn an_answer_aborted_after_it_is_enqueued_keeps_the_gate_until_its_ask_is_settled() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-abort").await;
+        let epoch_before = daemon.inner.lock().await.owner_of(uid).expect("staked");
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Enqueued: the ask (and the read guard it carries) is now the test's.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The caller goes away — but the guard is in `ask`, not the caller.
+        answering.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), answering).await;
+
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !handover.is_finished(),
+            "aborting the answer's caller released the answer gate while the ask still \
+             held the outgoing response"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(uid),
+            Some(epoch_before),
+            "and nothing was staked while the ask still held the guard"
+        );
+
+        // Settling the ask (the link's teardown drops its PendingAnswer) releases the
+        // guard, and only then does the session move — promptly, not by timeout.
+        drop(ask);
+        tokio::time::timeout(Duration::from_secs(2), handover)
+            .await
+            .expect("the handover completes once the ask is settled, not by timeout")
+            .expect("the registration task")
+            .expect("the replacement registration is accepted");
+    }
+
+    /// **The epoch filter, tested directly: a link whose epoch the owner has moved
+    /// past is not addressable**.
+    ///
+    /// This is the invariant [`Daemon::codex_answers_locked`] exists for, and it used
+    /// to be pinned only through the whole handover machinery — where a false pass had
+    /// several other ways to hide. Here it is exercised on the map alone: a link at the
+    /// owning epoch is handed out; move the owner forward (as a stake does) and leave
+    /// the link where it is, and the same lookup returns `None`.
+    ///
+    /// **Mutation:** drop the `owner == Some(held.epoch)` filter and the second
+    /// assertion goes red.
+    #[tokio::test]
+    async fn codex_answers_locked_hides_a_link_whose_epoch_the_owner_has_left() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (_card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-filter").await;
+        let gate = daemon.answer_gate(uid).await.read_owned().await;
+
+        let epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the registration staked its claim");
+        assert!(
+            Daemon::codex_answers_locked(&*daemon.inner.lock().await, uid, &gate).is_some(),
+            "a link at the owning epoch is addressable"
+        );
+
+        // Move the owner forward, as a replacement stake would, but leave the link at
+        // the old epoch — exactly the split the answer path must read as "no link".
+        daemon
+            .inner
+            .lock()
+            .await
+            .registration_epochs
+            .insert(uid.to_string(), epoch + 1);
+        assert!(
+            Daemon::codex_answers_locked(&*daemon.inner.lock().await, uid, &gate).is_none(),
+            "the filter must hide a link whose epoch the owner has moved past"
+        );
+    }
+
+    /// **The answer gate is per session: one session's held answer does not gate
+    /// another session's handover**.
+    ///
+    /// Every other answer test uses one uid, so a gate accidentally made global — one
+    /// lock shared across sessions — would pass all of them. This is the one that
+    /// would not: session A's answer is held (its read guard outstanding), and a
+    /// registration handover on session B must still complete promptly. Under a global
+    /// lock B's write side would block on A's reader and time out.
+    ///
+    /// **Mutation:** make [`Daemon::answer_gates`] hand back one shared lock for every
+    /// uid and this goes red — B's handover waits on A.
+    #[tokio::test]
+    async fn one_sessions_held_answer_does_not_gate_another_sessions_handover() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Two distinct, valid ULIDs — the daemon adopts a generated one for any uid
+        // that is not ULID-shaped, which would defeat the per-session premise.
+        let uid_a = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let uid_b = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        register_codex_session(&daemon, uid_a, "cc-a").await;
+        register_codex_session(&daemon, uid_b, "cc-b").await;
+        let (card_a, mut asks_a, _sa) = codex_card_with_a_link(&daemon, uid_a, "rq-iso-a").await;
+
+        // Session A's answer is admitted and then held — its read guard is outstanding
+        // for as long as this test keeps `ask_a`.
+        let answering_a = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card_a.request_id.clone();
+            let payload_hash = card_a.payload_hash.clone();
+            let uid = uid_a.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        let ask_a = tokio::time::timeout(Duration::from_secs(5), asks_a.recv())
+            .await
+            .expect("session A's answer must reach its link")
+            .expect("A's link is handed the answer");
+
+        // Session B's handover must not be blocked by A's held answer gate.
+        let handover_b = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { register_codex_over(&daemon, uid_b, "cc-b").await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), handover_b)
+            .await
+            .expect(
+                "session B's handover blocked on session A's answer: the gate is not per-session",
+            )
+            .expect("the registration task")
+            .expect("session B's replacement registration is accepted");
+
+        // Cleanup: release A's held answer.
+        drop(ask_a);
+        answering_a.abort();
+    }
+
     /// **An option the card never offered is refused before anything is claimed.**
     ///
     /// `decline` is in the app-server's own decision grammar and is deliberately in
@@ -19754,7 +21000,7 @@ mod tests {
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-decline").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-decline").await;
         // **Dropped on purpose.** With the receiver gone the ask cannot be parked,
         // so a build that let this option through fails the send and refuses for
         // the WRONG reason — a fast, legible failure instead of a test that hangs
@@ -19806,7 +21052,7 @@ mod tests {
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-stale").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-stale").await;
         drop(asks);
 
         let result = daemon
@@ -19848,7 +21094,7 @@ mod tests {
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, _asks) = codex_card_with_a_link(&daemon, uid, "rq-nolink").await;
+        let (card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-nolink").await;
         unlink_codex(&daemon, uid).await;
 
         let result = daemon
@@ -19899,7 +21145,7 @@ mod tests {
         {
             let seeder = daemon_on(Arc::clone(&store), Config::default());
             register_codex_session(&seeder, uid, "cc-1").await;
-            let (card, _asks) = codex_card_with_a_link(&seeder, uid, request_id).await;
+            let (card, _asks, _sender) = codex_card_with_a_link(&seeder, uid, request_id).await;
             // The claim the dead daemon took, exactly as the link takes it.
             assert_eq!(
                 store
@@ -19985,7 +21231,7 @@ mod tests {
         let uid = TEST_UID;
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
-        let (card, asks) = codex_card_with_a_link(&daemon, uid, "rq-terminal").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-terminal").await;
         drop(asks);
         let now = protocol::time::now_rfc3339();
         let material = crate::store::ClaimedMaterial {

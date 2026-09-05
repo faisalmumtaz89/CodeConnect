@@ -384,6 +384,14 @@ fn serve_once(
     // registration that introduces a session cannot drift from the one that
     // reports it.
     send(&writer, &ClientFrame::Register(registration.clone()))?;
+    // **Wait for the Ack before calling the registration a success**.
+    // The daemon sends `Ack` the instant it accepts and a structured `Error` (then
+    // closes) the instant it refuses. Reading it here is what turns a refused
+    // registration — which used to look identical to a healthy one, because this log
+    // line was written before any answer and a pre-`Ack` EOF ended `read_frames` as
+    // `Ok(())` — into a failure the reconnect loop backs off on. Ordered before the
+    // heartbeat thread is spawned, so a refusal returns with nothing introduced.
+    await_registration_ack(&mut reader, args, config, &writer)?;
     log_line(args, "registered with ccd");
 
     // Heartbeats stop when the connection dies: the send fails, the thread ends,
@@ -567,6 +575,58 @@ fn withhold_unless_hosted(
              ({err}), so it cannot be read as hosting {}",
             agent.as_str()
         ),
+    }
+}
+
+/// **Read the daemon's answer to `Register`, up to and including its `Ack`.**
+///
+/// `Ack` is success; a structured `Error`, a pre-`Ack` EOF, an undecodable line, or a
+/// frame that is neither an `Ack` nor a request is a failed registration, returned as
+/// `Err` so the caller's reconnect loop backs off instead of spinning at 500 ms
+/// against a daemon that has already refused it. Empty keepalive lines are skipped.
+///
+/// **A legitimate `SupervisorRequest` can arrive before the `Ack`.** The daemon
+/// publishes this connection's sender the instant it stakes the claim — an instant
+/// before it enqueues the `Ack` — and a request dispatched in that window is
+/// serialized ahead of the `Ack` on the one socket both travel. Such a request is
+/// serviced here, exactly as the steady-state reader services it, and the wait for
+/// the `Ack` continues: a real registration must not be read as a failure by the
+/// arrival of the very traffic that proves it succeeded.
+fn await_registration_ack(
+    reader: &mut BufReader<UnixStream>,
+    args: &SupervisorArgs,
+    config: &Config,
+    writer: &Arc<Mutex<UnixStream>>,
+) -> Result<()> {
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .context("reading ccd's registration answer")?
+            == 0
+        {
+            bail!("registration failed: ccd closed the connection before acknowledging it");
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<DaemonFrame>(&line) {
+            Ok(DaemonFrame::Ack) => return Ok(()),
+            Ok(DaemonFrame::SupervisorRequest { id, request }) => {
+                let result = handle_request(args, config, request);
+                send(writer, &ClientFrame::SupervisorResponse { id, result })?;
+            }
+            Ok(DaemonFrame::Error { message }) => {
+                log_line(args, &format!("registration refused by ccd: {message}"));
+                bail!("registration refused by ccd: {message}")
+            }
+            Ok(other) => {
+                bail!("registration failed: ccd answered Register with {other:?} instead of an Ack")
+            }
+            Err(err) => {
+                bail!("registration failed: ccd's answer to Register was undecodable ({err})")
+            }
+        };
     }
 }
 
@@ -2772,6 +2832,70 @@ mod tests {
             .expect("the loop ends when the daemon hangs up");
     }
 
+    /// **A request that reaches the wire before the Ack does not fail the
+    /// registration — it is serviced, and the Ack is still awaited.**
+    ///
+    /// The daemon publishes this connection's sender the instant it stakes the claim,
+    /// a step before it enqueues the Ack, so a request dispatched in that window is
+    /// serialized ahead of the Ack on the one socket both travel. The registration
+    /// must survive it, and the raced request must be answered rather than dropped.
+    #[test]
+    fn a_request_that_precedes_the_ack_is_serviced_and_the_registration_still_succeeds() {
+        use std::io::{BufRead, Write};
+        let (daemon_side, supervisor_side) = UnixStream::pair().expect("socketpair");
+        let args = SupervisorArgs {
+            session_id: "cc-preack".into(),
+            session_uid: None,
+            tmux_session: "cc-preack".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+        };
+        let config = Config::load();
+        let mut reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
+        let writer = Arc::new(Mutex::new(supervisor_side));
+
+        // The daemon writes a legitimate request BEFORE the Ack, then the Ack.
+        let mut daemon_writer = daemon_side.try_clone().expect("clone");
+        for frame in [
+            DaemonFrame::SupervisorRequest {
+                id: "pre".into(),
+                request: SupervisorRequest::Ping,
+            },
+            DaemonFrame::Ack,
+        ] {
+            let mut line = serde_json::to_vec(&frame).unwrap();
+            line.push(b'\n');
+            daemon_writer.write_all(&line).unwrap();
+        }
+
+        // The registration succeeds despite the request that raced its Ack.
+        await_registration_ack(&mut reader, &args, &config, &writer)
+            .expect("a request that precedes the Ack does not fail the registration");
+
+        // And the raced request was serviced, not dropped: its response is on the wire.
+        daemon_side
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut answers = std::io::BufReader::new(daemon_side);
+        let mut line = String::new();
+        answers
+            .read_line(&mut line)
+            .expect("the pre-Ack request is answered");
+        match serde_json::from_str::<ClientFrame>(&line).unwrap() {
+            ClientFrame::SupervisorResponse { id, result } => {
+                assert_eq!(id, "pre", "the serviced request keeps its id");
+                assert!(
+                    matches!(result, SupervisorResult::Pong),
+                    "a Ping is answered Pong: {result:?}"
+                );
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_send_without_submit_never_touches_enter() {
         let entered = std::cell::Cell::new(false);
@@ -4511,6 +4635,18 @@ means the full history gets re-read on your next message.
                 if !read_one(&mut reader, &mut frames) {
                     break;
                 }
+            }
+            // **Once a registration has been received, the supervisor waits for the
+            // Ack before it treats itself as registered.** A scripted daemon that read
+            // the register frame must answer it, or `serve_once` now (correctly) reports
+            // a registration that was never acknowledged. Withhold cases never send a
+            // register, so no Ack is owed.
+            if frames
+                .iter()
+                .any(|f| f.get("type").and_then(|t| t.as_str()) == Some("register"))
+            {
+                let _ = writeln!(out, "{}", serde_json::to_string(&DaemonFrame::Ack).unwrap());
+                let _ = out.flush();
             }
             frames
         })

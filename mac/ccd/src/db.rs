@@ -376,6 +376,16 @@ impl Db {
         self.run(|store| store.unsettled_answer_claims()).await
     }
 
+    /// The applying answer claims of one session, for settling its stranded
+    /// claims at a handover rather than the whole store at a restart.
+    pub async fn unsettled_answer_claims_for(
+        &self,
+        session_uid: String,
+    ) -> Result<Vec<crate::store::AnswerClaimRow>> {
+        self.run(move |store| store.unsettled_answer_claims_for(&session_uid))
+            .await
+    }
+
     pub async fn claim_text_mutation(
         &self,
         session_uid: String,

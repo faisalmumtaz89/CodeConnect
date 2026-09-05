@@ -1266,6 +1266,39 @@ impl LiveSandbox {
         }
     }
 
+    /// The pane **including its scrollback**.
+    ///
+    /// [`LiveSandbox::capture_pane`] sees only the visible rows, and a TUI that
+    /// answers a keystroke with one line and then streams three hundred more has
+    /// pushed that line out of the window before anything can read it — which is
+    /// exactly the reading a probe about a REFUSED keystroke must not miss.
+    fn capture_pane_history(&self) -> String {
+        let out = Command::new(&self.tmux)
+            .args([
+                "-S",
+                self.sock.to_str().unwrap(),
+                "-f",
+                "/dev/null",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-400",
+                "-t",
+                "cc-live",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            Ok(o) => format!(
+                "<capture exited {}: {}>",
+                o.status,
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("<capture failed: {e}>"),
+        }
+    }
+
     /// What the host actually left in the run dir — named when an assertion needs
     /// to say why the log it wanted was not there.
     fn run_dir_listing(&self) -> String {
@@ -7644,5 +7677,1710 @@ async fn a_phone_answer_that_lost_to_the_keyboard_is_told_what_the_broker_named(
         "GATE PASS — a phone answer the keyboard beat was dropped by the arbiter, \
          settled `lost`, retired as the Mac's answer, and the phone was told exactly \
          what the broker named"
+    );
+}
+
+// ------------------------------------------------ approval quiescence (D3)
+
+/// **MEASUREMENT: can the wire produce a thread switch while an approval is
+/// unanswered?**
+///
+/// D3 was designed before the approval wire had been measured and before a phone
+/// could answer anything. Its subject is a switch (`/new`, resume, fork) that
+/// crosses an admitted answer, and every gate it enumerates presumes that crossing
+/// exists. Nothing here builds a barrier: this establishes, on the real 0.153 wire,
+/// whether the crossing is producible at all.
+///
+/// The probes run in order of how much they destroy, so a later one can never be
+/// the reason an earlier one had nothing to see:
+///
+///   1. **The overlay's own reading of a keystroke.** `/new` is typed at the
+///      keyboard with the approval prompt up and NOTHING is submitted — the pane
+///      before and after is the whole evidence, because on this TUI `Enter` is the
+///      overlay's own accept and pressing it would answer the very approval the
+///      probe needs pending.
+///   2. **What the broker's TUI leg was handed.** `/new` is `thread/unsubscribe`,
+///      `thread/unsubscribe`, `thread/start` (2e-4c), and the broker logs its
+///      decision for each. A switch that never reached the leg leaves no line.
+///   3. **Only then, the destructive one.** `Enter` is pressed, so whatever the
+///      overlay does with it is recorded rather than guessed at, and the run ends
+///      with the approval settled one way or the other.
+///
+/// It asserts only the premises (an approval really was pending, unanswered, on a
+/// leg that really was subscribed). Everything else is printed: which way the wire
+/// answers is the finding, and a gate that demanded an answer would be asserting
+/// the design rather than measuring the wire.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_a_thread_switch_while_an_approval_is_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("q3c");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-quiesce.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED thread A = {thread_a}");
+
+    // ---- the approval this whole probe is about ---------------------------
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || sub
+                .methods()
+                .iter()
+                .any(|m| m.ends_with("/requestApproval")),
+        )
+        .await,
+        "no approval reached the subscribed ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"]
+        .as_i64()
+        .expect("a server-request carries a numeric id");
+    let pane_pending = sb.capture_pane();
+    println!("PANE WITH THE APPROVAL PENDING:\n{pane_pending}");
+    println!("MEASURED wire id = {wire_id}");
+    assert!(
+        pane_pending.contains("Would you like to run the following command?"),
+        "the premise: the TUI is showing the prompt this probe is about. pane:\n{pane_pending}"
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; nothing below would be about a \
+         PENDING approval"
+    );
+    let methods_before = sub.methods();
+    let broker_log_before = read_file(&sb.run_dir.join("broker.log"));
+
+    // ---- PROBE 1: type `/new` and submit nothing --------------------------
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    let pane_typed = sb.capture_pane();
+    println!("PANE AFTER TYPING `/new` WITH NOTHING SUBMITTED:\n{pane_typed}");
+    let overlay_survived = pane_typed.contains("Would you like to run the following command?");
+    let text_landed = pane_typed.contains("/new");
+    println!(
+        "MEASURED overlay still up = {overlay_survived}, `/new` visible anywhere on the \
+         pane = {text_landed}"
+    );
+
+    // ---- PROBE 2: what the broker's TUI leg was handed --------------------
+    // `/new` is unsubscribe, unsubscribe, thread/start. If the TUI never sent any of
+    // them, the switch never left the terminal emulator and the broker has nothing
+    // to have decided about.
+    let broker_log_typed = read_file(&sb.run_dir.join("broker.log"));
+    let new_lines: Vec<&str> = broker_log_typed
+        .lines()
+        .filter(|line| !broker_log_before.lines().any(|old| old == *line))
+        .collect();
+    println!("BROKER LOG LINES ADDED WHILE `/new` WAS TYPED:\n{new_lines:#?}");
+    println!(
+        "MEASURED ccd-leg methods added while `/new` was typed = {:?}",
+        sub.methods()
+            .into_iter()
+            .skip(methods_before.len())
+            .collect::<Vec<_>>()
+    );
+    let switch_reached_the_broker = new_lines
+        .iter()
+        .any(|line| line.contains("thread/unsubscribe") || line.contains("thread/start"));
+    println!("MEASURED a switch frame reached the broker = {switch_reached_the_broker}");
+
+    // ---- PROBE 3: the destructive one -------------------------------------
+    // Everything above is now recorded, so what `Enter` reaches can be measured
+    // rather than avoided.
+    sb.send_keys(&["Enter"]);
+    let actuated = wait_until(Duration::from_secs(120), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    let resolved = wait_until(Duration::from_secs(60), || {
+        sub.methods().iter().any(|m| m == "serverRequest/resolved")
+    })
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let pane_after_enter = sb.capture_pane();
+    let broker_log_final = read_file(&sb.run_dir.join("broker.log"));
+    println!("PANE AFTER `Enter`:\n{pane_after_enter}");
+    println!("MEASURED command actuated = {actuated}, serverRequest/resolved = {resolved}");
+    println!("FINAL SUB methods: {:?}", sub.methods());
+    println!("BROKER LOG (final):\n{broker_log_final}");
+
+    // ---- the capture -------------------------------------------------------
+    let capture = match std::env::var("CC_CODEX_3C_CAPTURE") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("quiesce-capture.jsonl"),
+    };
+    let mut lines = String::new();
+    for frame in sub.seen() {
+        lines.push_str(
+            &serde_json::json!({"conn": "ccd-subscribed", "dir": "s2c", "frame": frame})
+                .to_string(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&capture, &lines).expect("write the quiescence capture");
+    println!("CAPTURE WRITTEN: {}", capture.display());
+    let panes = capture.with_extension("panes.txt");
+    std::fs::write(
+        &panes,
+        format!(
+            "--- pane: approval pending ---\n{pane_pending}\n\
+             --- pane: after typing /new, nothing submitted ---\n{pane_typed}\n\
+             --- pane: after Enter ---\n{pane_after_enter}\n\
+             --- broker.log lines added while /new was typed ---\n{new_lines:#?}\n"
+        ),
+    )
+    .expect("write the pane record");
+    println!("PANES WRITTEN: {}", panes.display());
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// Every broker-log line written after the first `from` lines.
+///
+/// **Positional, never by content.** A content diff was written first and it was
+/// wrong in the one way that mattered: the switch prefix logs the SAME line twice
+/// (`/new` sends two `thread/unsubscribe` frames), and identical lines already in
+/// the file made a real switch read as no switch at all — which is exactly the
+/// reading a probe like this must never produce by accident.
+fn log_lines_after(log: &str, from: usize) -> Vec<&str> {
+    log.lines().skip(from).collect()
+}
+
+/// The thread ids this leg has been told started, in order.
+fn started_threads(tap: &WireTap) -> Vec<String> {
+    tap.seen()
+        .iter()
+        .filter(|v| v["method"].as_str() == Some("thread/started"))
+        .filter_map(|v| v["params"]["thread"]["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// **MEASUREMENT: is there any producer at all of a thread switch while an approval
+/// is pending?**
+///
+/// The first probe typed `/new` with the prompt up and the approval came back
+/// **declined** — one of those four characters was the prompt's own "No", and the
+/// remainder reached the composer only once the question was already terminal. That
+/// answers "can the operator compose a command", and leaves four things unmeasured.
+/// All four are checked here, on one live session, in an order chosen so that no
+/// probe can be the reason a later one had nothing to see:
+///
+///   1. **Keys the prompt has no use for.** `/` and `z` are neither accept hotkey,
+///      neither `esc`, neither an option number — so what the pane does with them
+///      says whether the composer is reachable at all while the prompt is up, or
+///      merely hostile to the letters `/new` happens to contain.
+///   2. **The ccd leg's own two frames** — `thread/start`, and the
+///      `thread/unsubscribe` that reserves a switch behind it.
+///   3. **A second connection on the TUI leg.** That leg accepts more than one
+///      connection by design (the real `/resume` picker opens a second), so it is
+///      the last position a `thread/start` could arrive from.
+///
+/// The fourth producer — `/new` typed while a turn runs and no approval is up — is
+/// measured on its own session in
+/// [`measure_whether_new_is_offered_while_a_turn_runs`], because it turns out to
+/// take the pane somewhere the probes below cannot be run from.
+///
+/// **The control is the point of the test.** "No switch frames" proves nothing
+/// unless the same detector can see a switch that really happens, so once the
+/// approval is settled the same `/new` is typed into the same pane, and the switch
+/// must show up on both instruments — a `thread/started` naming a new thread on the
+/// ccd leg, and the broker's own forward lines. Without it, an unproducible switch
+/// and a blind probe read identically.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_else_could_switch_a_thread_while_an_approval_is_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p3c");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-producers.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED thread A = {thread_a}");
+
+    // ---- the approval every remaining probe is about ----------------------
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || sub
+                .methods()
+                .iter()
+                .any(|m| m.ends_with("/requestApproval")),
+        )
+        .await,
+        "no approval reached the subscribed ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"]
+        .as_i64()
+        .expect("a server-request carries a numeric id");
+    let pane_pending = sb.capture_pane();
+    println!("PANE WITH THE APPROVAL PENDING:\n{pane_pending}");
+    assert!(
+        pane_pending.contains("Would you like to run the following command?"),
+        "the premise: the TUI is showing the prompt this probe is about. pane:\n{pane_pending}"
+    );
+    let pending_from = read_file(&broker_log).lines().count();
+    let started_at_pending = started_threads(&sub);
+
+    // ---- P1: keys the prompt has no use for -------------------------------
+    sb.send_keys(&["/"]);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let pane_slash = sb.capture_pane();
+    println!("PANE AFTER A BARE `/`:\n{pane_slash}");
+    sb.send_keys(&["z"]);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let pane_z = sb.capture_pane();
+    println!("PANE AFTER `/` THEN `z`:\n{pane_z}");
+    println!(
+        "MEASURED prompt survived `/` = {}, survived `/z` = {}",
+        pane_slash.contains("Would you like to run the following command?"),
+        pane_z.contains("Would you like to run the following command?")
+    );
+
+    // ---- P2: the ccd leg's own two frames ---------------------------------
+    // Smallest well-formed params on purpose: what is measured is the ROLE, and a
+    // refusal naming a bad parameter would be measuring this harness instead.
+    let start_id = 8100;
+    sub.send(serde_json::json!({
+        "id": start_id, "method": "thread/start", "params": {"cwd": "/tmp"}
+    }))
+    .await;
+    let unsub_id = 8101;
+    sub.send(serde_json::json!({
+        "id": unsub_id, "method": "thread/unsubscribe", "params": {"threadId": thread_a}
+    }))
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+    let seen_after_ccd_probes = sub.seen();
+    let answer_to = |id: i64| {
+        seen_after_ccd_probes
+            .iter()
+            .find(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v["method"].is_null())
+            .cloned()
+    };
+    let ccd_start_answer = answer_to(start_id);
+    let ccd_unsub_answer = answer_to(unsub_id);
+    println!("MEASURED ccd thread/start answered: {ccd_start_answer:?}");
+    println!("MEASURED ccd thread/unsubscribe answered: {ccd_unsub_answer:?}");
+
+    // ---- P3: a second connection on the TUI leg ---------------------------
+    let (second_tui_init, second_tui_start) = {
+        let mut raw = RawCcd::connect(&sb.run_dir.join("tui.sock")).await;
+        let init = raw.initialize().await;
+        println!("MEASURED second TUI-leg connection initialize: {init}");
+        raw.notify("initialized", serde_json::json!({})).await;
+        let started = raw
+            .request(
+                "thread/start",
+                serde_json::json!({"cwd": "/tmp"}),
+                Duration::from_secs(30),
+            )
+            .await;
+        println!("MEASURED second TUI-leg connection thread/start: {started}");
+        (init, started)
+    };
+
+    // ---- what the probes did and did not produce --------------------------
+    let pane_before_answer = sb.capture_pane();
+    println!("PANE BEFORE THE ANSWER:\n{pane_before_answer}");
+    let still_pending = pane_before_answer.contains("Would you like to run the following command?");
+    println!("MEASURED the approval was STILL pending through every probe = {still_pending}");
+    let probe_lines: Vec<String> = log_lines_after(&read_file(&broker_log), pending_from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    println!("BROKER LOG LINES ADDED BY THE PROBES:\n{probe_lines:#?}");
+    let started_during_pending: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .skip(started_at_pending.len())
+        .collect();
+    println!(
+        "MEASURED threads started while the approval was pending = {started_during_pending:?}"
+    );
+    let forwarded_during_pending: Vec<&String> = probe_lines
+        .iter()
+        .filter(|line| line.contains("forward"))
+        .collect();
+    println!("MEASURED frames FORWARDED while pending = {forwarded_during_pending:?}");
+
+    // ---- settle it, from the leg the design is about ----------------------
+    sub.send(serde_json::json!({"id": wire_id, "result": {"decision": "accept"}}))
+        .await;
+    let actuated = wait_until(Duration::from_secs(120), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    println!("MEASURED the phone's answer actuated = {actuated}");
+    assert!(
+        wait_until(Duration::from_secs(90), || !sb
+            .capture_pane()
+            .contains("Would you like to run the following command?"))
+        .await,
+        "the prompt never left the pane after the answer. pane:\n{}",
+        sb.capture_pane()
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // ---- THE CONTROL: the same `/new`, on the same pane, now idle ---------
+    let control_from = read_file(&broker_log).lines().count();
+    let started_before_control = started_threads(&sub);
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let pane_control_typed = sb.capture_pane();
+    println!("PANE AFTER TYPING `/new` WITH THE SESSION IDLE:\n{pane_control_typed}");
+    sb.send_keys(&["Enter"]);
+    let switched = wait_until(Duration::from_secs(90), || {
+        started_threads(&sub).len() > started_before_control.len()
+    })
+    .await;
+    let control_lines: Vec<String> = log_lines_after(&read_file(&broker_log), control_from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let pane_after_control = sb.capture_pane();
+    println!("PANE AFTER THE CONTROL `/new`:\n{pane_after_control}");
+    println!("BROKER LOG LINES ADDED BY THE CONTROL `/new`:\n{control_lines:#?}");
+    println!(
+        "MEASURED the control switch was detected = {switched}; threads started = {:?}",
+        started_threads(&sub)
+    );
+
+    let panes = match std::env::var("CC_CODEX_3C_PANES") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("producers-panes.txt"),
+    };
+    std::fs::write(
+        &panes,
+        format!(
+            "--- pane: approval pending ---\n{pane_pending}\n\
+             --- pane: after a bare `/` ---\n{pane_slash}\n\
+             --- pane: after `/` then `z` ---\n{pane_z}\n\
+             --- pane: before the answer ---\n{pane_before_answer}\n\
+             --- ccd thread/start answer ---\n{ccd_start_answer:?}\n\
+             --- ccd thread/unsubscribe answer ---\n{ccd_unsub_answer:?}\n\
+             --- second TUI-leg connection initialize ---\n{second_tui_init}\n\
+             --- second TUI-leg connection thread/start ---\n{second_tui_start}\n\
+             --- broker.log lines added by the probes ---\n{probe_lines:#?}\n\
+             --- threads started while the approval was pending ---\n{started_during_pending:?}\n\
+             --- pane: control `/new` typed, session idle ---\n{pane_control_typed}\n\
+             --- pane: after the control `/new` ---\n{pane_after_control}\n\
+             --- broker.log lines added by the control ---\n{control_lines:#?}\n"
+        ),
+    )
+    .expect("write the producer record");
+    println!("PANES WRITTEN: {}", panes.display());
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(
+        still_pending,
+        "the approval must have survived every probe, or the probes measured a session \
+         that had already answered it"
+    );
+    assert!(
+        started_during_pending.is_empty(),
+        "a thread started while an approval was pending: {started_during_pending:?}"
+    );
+    assert!(
+        switched,
+        "THE CONTROL FAILED: the same `/new`, typed into the same pane with the session \
+         idle, started no thread — so this probe cannot tell an unproducible switch from \
+         a detector that sees nothing"
+    );
+}
+
+/// **MEASUREMENT: is `/new` offered at all while a turn is running?**
+///
+/// This is the leg that decides the whole question of a switch crossing an approval,
+/// and it decides it without reference to the approval prompt: **an approval exists
+/// only inside a turn**. It is raised by a running turn and every one of its
+/// terminals — answered, declined, interrupted — ends with that turn ending. So a
+/// client that will not switch threads during a turn cannot switch during an
+/// approval either, whatever its prompt does with the keyboard.
+///
+/// The claim was measured once, on 0.147, and written into
+/// `codex_broker::session`'s note on the busy mark. This re-measures it on 0.153.2,
+/// on its own session, because the reading is destructive: the pane it leaves is not
+/// one the sibling probes can be run from.
+///
+/// **The scrollback, not the window.** A refusal is one line, and this turn streams
+/// four hundred; a probe reading only the visible rows would miss the answer it came
+/// for and report silence. The TUI's liveness is recorded on both sides of the
+/// keystroke for the same reason — "no switch frames" from a TUI that has exited is
+/// not a measurement of anything.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_whether_new_is_offered_while_a_turn_runs() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("t3c");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (sub, thread_a) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED thread A = {thread_a}");
+
+    let from = read_file(&broker_log).lines().count();
+    sb.send_keys(&["Count from 1 to 400, one number per line, and nothing else."]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let running = wait_until(Duration::from_secs(90), || {
+        sb.capture_pane().contains("esc to interrupt")
+    })
+    .await;
+    println!("MEASURED a turn is visibly running = {running}");
+    println!(
+        "MEASURED the TUI is alive before the keys = {}",
+        sb.tui_running()
+    );
+    assert!(
+        running,
+        "the premise: a turn has to be running for this probe to be about one. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let pane_typed = sb.capture_pane_history();
+    sb.send_keys(&["Enter"]);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let pane_after = sb.capture_pane_history();
+    let alive_after = sb.tui_running();
+    let added: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let started = started_threads(&sub);
+    println!("PANE (with scrollback) AFTER TYPING `/new` MID-TURN:\n{pane_typed}");
+    println!("PANE (with scrollback) AFTER SUBMITTING IT:\n{pane_after}");
+    println!("MEASURED the TUI is alive after the keys = {alive_after}");
+    println!("BROKER LOG LINES ADDED ACROSS THE PROBE:\n{added:#?}");
+    println!("MEASURED threads started = {started:?}");
+    let switch_frames: Vec<&String> = added
+        .iter()
+        .filter(|line| line.contains("thread/unsubscribe") || line.contains("ownership request"))
+        .collect();
+    println!("MEASURED switch frames in the broker log = {switch_frames:?}");
+
+    let panes = match std::env::var("CC_CODEX_3C_MIDTURN") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("midturn-panes.txt"),
+    };
+    std::fs::write(
+        &panes,
+        format!(
+            "--- pane+scrollback: `/new` typed mid-turn, not submitted ---\n{pane_typed}\n\
+             --- pane+scrollback: after submitting it ---\n{pane_after}\n\
+             --- TUI alive after = {alive_after} ---\n\
+             --- broker.log lines added across the probe ---\n{added:#?}\n\
+             --- threads started ---\n{started:?}\n"
+        ),
+    )
+    .expect("write the mid-turn record");
+    println!("PANES WRITTEN: {}", panes.display());
+
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+
+    assert!(
+        started.is_empty(),
+        "a thread started from a `/new` typed while a turn was running: {started:?}"
+    );
+}
+
+/// **A registration handover on the real wire: the replacement waits for the answer
+/// the outgoing link has already put on the socket.**
+///
+/// The scripted gates in `state.rs` stage this interleaving deterministically; what
+/// they cannot show is that the answer they are holding is a real response, claimed
+/// by the real link and written on a real broker leg to a real app-server. This runs
+/// it there: a genuine `commandExecution` approval, answered from the daemon, with
+/// the broker's reply direction held so the response really leaves and really
+/// actuates while its disposition can never come back — and a second production
+/// registration for the same session arriving in exactly that window.
+///
+/// **The assertion is an ORDER, not a clock.** Whatever the budgets are on any
+/// machine, the replacement must not finish while the answer it is replacing is
+/// still outstanding: the loop watches both tasks and fails only if the handover
+/// wins. A timing assertion would be measuring this laptop; this measures the rule.
+///
+/// The answer's own ending is deliberately not pinned here — the reply direction is
+/// held, so it ends the way every unattributable write ends, and `Unknown` is 3b's
+/// gate rather than this one's. What is pinned is that there is exactly ONE of it: a
+/// handover that overtook the answer would be a second writer for a request the
+/// app-server accepts one answer to.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_replacement_registration_waits_for_an_answer_already_on_the_wire() {
+    let Some(codex) = live_gate() else { return };
+    // Capture the daemon's own log, so the replacement link's attach fact can be read
+    // back the way the attach gate reads it. Discarded and re-armed here, then drained
+    // to a checkpoint just before the gate releases the replacement onto the wire.
+    crate::log::capture::install();
+    let sb = LiveSandbox::new("hand3c");
+    let mut coord = sb.spawn_coordinator(&codex);
+    // In the sandbox's own tree, so it goes with the run however the gate ends.
+    let marker = sb
+        .base
+        .join(format!("cc-3c-handover.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let (daemon, db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let registration = register_the_run_on(&daemon, &session, gate.path()).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || !cards().is_empty(),
+        )
+        .await,
+        "the observer never raised a card for the approval. pane:\n{}",
+        sb.capture_pane()
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+
+    // The answer is claimed, written, actuating — and its disposition can never
+    // arrive, so it is outstanding for as long as the link's own budget allows.
+    let answering = stage_an_unanswered_write(&daemon, &gate, &uid, &card, "accept").await;
+
+    // The handover, through the production acceptance, onto the same gated leg.
+    let handover = {
+        let daemon = Arc::clone(&daemon);
+        let session = session.clone();
+        let path = gate.path().to_path_buf();
+        tokio::spawn(async move { register_the_run_on(&daemon, &session, &path).await })
+    };
+
+    // **The gate.** Poll both, and record which finished first.
+    let mut overtaken = false;
+    for _ in 0..1500 {
+        if answering.is_finished() {
+            break;
+        }
+        if handover.is_finished() {
+            overtaken = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    println!("MEASURED the handover overtook the outstanding answer = {overtaken}");
+
+    let result = tokio::time::timeout(Duration::from_secs(60), answering)
+        .await
+        .expect("the answer must reach a terminal")
+        .expect("the answering task");
+    println!("MEASURED the outstanding answer ended as: {result:?}");
+    // Discard the ORIGINAL link's attach history: the warm-up subscribed it long ago,
+    // so any subscribe line after this drain is the REPLACEMENT's — which the gate
+    // below has held off the wire until now.
+    let _ = crate::log::capture::drain();
+    gate.release();
+    // `register_the_run_on` asserts its own acceptance, so a refused handover
+    // surfaces here as a failed join rather than as a value to branch on — which is
+    // the reading this gate wants: the session must still move once the answer has
+    // ended, and a registration that refused is a session left unregistered.
+    let replacement = tokio::time::timeout(Duration::from_secs(60), handover)
+        .await
+        .expect("the replacement registration must complete once the answer has");
+    println!(
+        "MEASURED the replacement registration was accepted = {}",
+        replacement.is_ok()
+    );
+
+    let actuated = wait_until(Duration::from_secs(60), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    let settled = wait_until(Duration::from_secs(60), || {
+        !resolutions(&daemon, &uid).is_empty()
+    })
+    .await;
+    let filed = resolutions(&daemon, &uid);
+    let ledger = answer_ledger(&db, &uid);
+    println!("MEASURED actuated = {actuated}, settled = {settled}");
+    println!("MEASURED resolutions = {filed:?}");
+    println!("MEASURED ledger = {ledger:?}");
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let dispositions = ccd_dispositions(&broker_log);
+    println!("MEASURED dispositions = {dispositions:?}");
+    println!("BROKER LOG:\n{broker_log}");
+
+    // **A healthy replacement link, bound and announced on the session.** The handover
+    // installed a fresh link; once the gate lets it onto the wire it must dial, bind to
+    // the session's thread and announce on its connection — the proof the session moved
+    // to a live observer rather than being left registered and unobserved.
+    //
+    // It is deliberately NOT asserted to be *subscribed*: the answer this gate leaves
+    // outstanding sits in the thread's newest turn, and a link that resumes onto a thread
+    // whose latest turn is an unresolved approval STOP-AND-AMENDs rather than read a state
+    // it was never measured against — which is the link being careful, not the handover
+    // being unhealthy. A subscribe waits on the approval resolving; a bound, announced
+    // replacement is the health the handover itself owes.
+    let mut repl_log: Vec<String> = Vec::new();
+    let replacement_bound = wait_until(Duration::from_secs(90), || {
+        repl_log.extend(crate::log::capture::drain());
+        repl_log
+            .iter()
+            .any(|l| l.contains("announced on this connection"))
+    })
+    .await;
+    println!("MEASURED replacement link bound and announced = {replacement_bound}");
+
+    daemon.unregister_supervisor(&registration).await;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    crate::log::capture::uninstall();
+
+    assert!(
+        !overtaken,
+        "the replacement registration completed while an answer written by the link \
+         it replaces was still outstanding — the window this gate exists to close"
+    );
+    assert!(
+        replacement.is_ok(),
+        "and the handover must still happen once the answer has ended; a refused \
+         registration leaves the session with no supervisor at all"
+    );
+    assert_eq!(
+        ledger.len(),
+        1,
+        "one answer, one ledger row — a handover that overtook it would be a second \
+         writer for a request the app-server accepts one answer to: {ledger:?}"
+    );
+    assert_eq!(
+        filed.len(),
+        1,
+        "and one terminal for the card it was about: {filed:?}"
+    );
+    assert!(
+        actuated,
+        "the answer the link wrote reached Codex and ran the command — its write leaves \
+         the daemon even while its disposition is held, which is the whole reason the \
+         answer is outstanding rather than never sent"
+    );
+    assert_eq!(
+        dispositions.len(),
+        1,
+        "one answer, one broker disposition — a second would mean the response was \
+         accounted for twice: {dispositions:?}"
+    );
+    assert!(
+        replacement_bound,
+        "the replacement link must dial, bind and announce once the gate releases it; a \
+         handover that installs a link which never reaches the session leaves it \
+         registered and observed by nothing"
+    );
+    println!(
+        "GATE PASS — a replacement registration waited for an answer already on the wire, \
+         the answer actuated under exactly one disposition, and the session moved to a \
+         healthy bound-and-announced replacement only after it had ended"
+    );
+}
+
+// ============================================================================
+// The four switch positions that establish the switch half is unproducible.
+//
+// An earlier "switch is unproducible" verdict rested on probes that never
+// reached the switch decision: `/new` typed with the prompt up consumed a key
+// as the prompt's own decision; the second-TUI leg sent `{"cwd":"/tmp"}` and
+// was refused by fingerprint before any busy check; the mid-turn probe carried
+// no approval. The keyboard-interrupt window that A25/A26 say REVERSES the
+// terminal order (`turn/completed{interrupted}` PRECEDES `serverRequest/
+// resolved` on a KEYBOARD interrupt) was never probed at all.
+//
+// These four measure each position as a raw ordered single-session capture, and
+// each asks the two decisive questions outcome (A) is defined by:
+//   (i)  is a NEW thread admitted (thread/started for B, id != A) BEFORE A's
+//        serverRequest/resolved lands? and
+//   (ii) once B is admitted / the window has opened, is A's approval capability
+//        still LATE-ANSWERABLE — does a ccd-leg answer to A's wire id still
+//        actuate the command?
+// A yes to either is outcome (A). No to both across every probe is outcome (B).
+// ============================================================================
+
+/// One decisive frame on the ccd tap, in arrival order.
+/// `(arrival_index, label, thread_id, request_id, app_server_stamp_ms)`.
+#[allow(clippy::type_complexity)]
+fn decisive_timeline(tap: &WireTap) -> Vec<(usize, String, String, Option<i64>, Option<i64>)> {
+    tap.seen()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let method = v["method"].as_str()?;
+            let is_approval = method.ends_with("/requestApproval");
+            let interesting = is_approval
+                || matches!(
+                    method,
+                    "serverRequest/resolved"
+                        | "thread/started"
+                        | "turn/completed"
+                        | "item/completed"
+                );
+            if !interesting {
+                return None;
+            }
+            let thread_id = v["params"]["threadId"]
+                .as_str()
+                .or_else(|| v["params"]["thread"]["id"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let request_id = v["params"]["requestId"]
+                .as_i64()
+                .or_else(|| v["id"].as_i64());
+            let stamp = v["emittedAtMs"]
+                .as_i64()
+                .or_else(|| v["params"]["completedAtMs"].as_i64())
+                .or_else(|| v["params"]["startedAtMs"].as_i64());
+            let label = match method {
+                "turn/completed" => {
+                    let st = v["params"]["turn"]["status"].as_str().unwrap_or("?");
+                    format!("turn/completed[{st}]")
+                }
+                "item/completed" => {
+                    let st = v["params"]["item"]["status"].as_str().unwrap_or("?");
+                    format!("item/completed[{st}]")
+                }
+                other => other.to_string(),
+            };
+            Some((i, label, thread_id, request_id, stamp))
+        })
+        .collect()
+}
+
+/// Print the timeline and return the ordering verdict:
+/// `(b_started_idx, a_resolved_idx, switch_admitted_before_A_resolved)`.
+fn ordering_verdict(
+    tap: &WireTap,
+    thread_a: &str,
+    label: &str,
+) -> (Option<usize>, Option<usize>, bool) {
+    let tl = decisive_timeline(tap);
+    println!(
+        "--- DECISIVE TIMELINE [{label}] (arrival_index | frame | thread | req | stampMs) ---"
+    );
+    for (i, m, t, r, s) in &tl {
+        let tshort = if t.len() > 8 { &t[..8] } else { t.as_str() };
+        println!("  #{i:<3} {m:<26} thread={tshort:<8} req={r:?} stamp={s:?}");
+    }
+    let b_started_idx = tl
+        .iter()
+        .find(|(_, m, t, _, _)| m == "thread/started" && !t.is_empty() && t != thread_a)
+        .map(|(i, _, _, _, _)| *i);
+    let a_resolved_idx = tl
+        .iter()
+        .find(|(_, m, t, _, _)| m == "serverRequest/resolved" && (t == thread_a || t.is_empty()))
+        .map(|(i, _, _, _, _)| *i);
+    let switch_before_resolve = match (b_started_idx, a_resolved_idx) {
+        (Some(b), Some(a)) => b < a,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    println!(
+        "MEASURED [{label}] b_started_idx={b_started_idx:?} a_resolved_idx={a_resolved_idx:?} \
+         switch_admitted_before_A_resolved={switch_before_resolve}"
+    );
+    (b_started_idx, a_resolved_idx, switch_before_resolve)
+}
+
+/// Raise the command approval `touch {marker}` on the subscribed leg and return
+/// `(sub, thread_a, wire_id)` with the prompt confirmed up and the marker absent.
+async fn raise_command_approval(sb: &LiveSandbox, marker: &str) -> (WireTap, String, i64) {
+    let (sub, thread_a) = subscribed_tap(sb, "SUB").await;
+    println!("MEASURED thread A = {thread_a}");
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || sub
+                .methods()
+                .iter()
+                .any(|m| m.ends_with("/requestApproval")),
+        )
+        .await,
+        "no approval reached the subscribed ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"]
+        .as_i64()
+        .expect("a server-request carries a numeric id");
+    // The approval frame reaches the ccd tap a beat before the TUI paints the
+    // overlay; wait for the pane to actually show the prompt so the premise is
+    // a rendered prompt, not a race.
+    let painted = wait_until(Duration::from_secs(30), || {
+        sb.capture_pane()
+            .contains("Would you like to run the following command?")
+    })
+    .await;
+    let pane = sb.capture_pane();
+    assert!(
+        painted,
+        "the premise: the TUI is showing the prompt this probe is about. pane:\n{pane}"
+    );
+    assert!(
+        !std::path::Path::new(marker).exists(),
+        "the command ran before anybody answered; nothing below is about a PENDING approval"
+    );
+    println!("MEASURED wire id = {wire_id}");
+    (sub, thread_a, wire_id)
+}
+
+/// After the producer step, ask A one more time on the ccd leg and see whether
+/// the answer still actuates — the C1/A -> C2/B -> delayed-A late-answerability
+/// test. Returns `(actuated, resolved_seen_before, answer_reply)`.
+async fn late_answer_a(
+    _sb: &LiveSandbox,
+    sub: &mut WireTap,
+    wire_id: i64,
+    marker: &str,
+) -> (bool, bool, Option<Value>) {
+    let already = std::path::Path::new(marker).exists();
+    let resolved_seen_before = sub.methods().iter().any(|m| m == "serverRequest/resolved");
+    println!(
+        "LATE-A: marker already present before the late answer = {already}, \
+         serverRequest/resolved already seen = {resolved_seen_before}"
+    );
+    sub.send(serde_json::json!({"id": wire_id, "result": {"decision": "accept"}}))
+        .await;
+    let actuated = wait_until(Duration::from_secs(45), || {
+        std::path::Path::new(marker).exists()
+    })
+    .await;
+    let _ = sub.barrier(Duration::from_secs(20)).await;
+    let reply = sub
+        .seen()
+        .into_iter()
+        .find(|v| v.get("id").and_then(Value::as_i64) == Some(wire_id) && v["method"].is_null());
+    println!(
+        "LATE-A: after re-answering A wire_id={wire_id}: actuated={actuated} \
+         (already_present={already}) broker_reply={reply:?}"
+    );
+    // The late answer counts as producing a live A-capability only if the marker
+    // was NOT already there and it actuates now.
+    (actuated && !already, resolved_seen_before, reply)
+}
+
+fn write_probe_record(sb: &LiveSandbox, sub: &WireTap, stem: &str, panes: &str) {
+    let dir = std::env::var("CC_CODEX_3C_EVID")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| sb.run_dir.clone());
+    let _ = std::fs::create_dir_all(&dir);
+    let jsonl = dir.join(format!("{stem}.jsonl"));
+    let mut lines = String::new();
+    for frame in sub.seen() {
+        lines.push_str(
+            &serde_json::json!({"conn": "ccd-subscribed", "dir": "s2c", "frame": frame})
+                .to_string(),
+        );
+        lines.push('\n');
+    }
+    std::fs::write(&jsonl, &lines).expect("write the probe capture");
+    let panes_path = dir.join(format!("{stem}.panes.txt"));
+    std::fs::write(&panes_path, panes).expect("write the probe panes");
+    println!(
+        "PROBE RECORD WRITTEN: {} + {}",
+        jsonl.display(),
+        panes_path.display()
+    );
+}
+
+fn teardown(sub: WireTap, mut coord: Child, marker: &str) {
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(marker);
+}
+
+/// **P1 — THE DECISIVE PROBE: a keyboard interrupt, then `/new`, with a command
+/// approval pending.**
+///
+/// A25's `interrupt.jsonl` recorded, on a Ctrl-C of a running turn with NO approval
+/// prompt up, `turn/completed{interrupted}` before `serverRequest/resolved`. This
+/// probes a DIFFERENT scenario — Ctrl-C WHILE the approval prompt is showing — where
+/// the prompt consumes the interrupt as its own decline, so the item IS declined and
+/// `resolved` leads the turn terminal (both orderings are real for their own
+/// scenario; this is not a contradiction of A25). The concern either way is the busy
+/// mark: the broker clears it on ANY `turn/completed`, so if the terminal preceded the
+/// resolution a switch could be admitted while A was unresolved. This types Ctrl-C,
+/// then `/new`+Enter, and watches whether a new thread B is admitted before A resolves,
+/// and whether A stays late-answerable afterward.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p1_ctrl_c_then_new_with_an_approval_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p1cc");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p1.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a, wire_id) = raise_command_approval(&sb, &marker).await;
+    let pane_pending = sb.capture_pane();
+    println!("PANE WITH THE APPROVAL PENDING:\n{pane_pending}");
+    let from = read_file(&broker_log).lines().count();
+
+    // ---- the interrupt window, then /new ----------------------------------
+    sb.send_keys(&["C-c"]);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let pane_after_ctrl_c = sb.capture_pane();
+    println!("PANE AFTER Ctrl-C:\n{pane_after_ctrl_c}");
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    sb.send_keys(&["Enter"]);
+
+    // Wait until BOTH the interrupt's resolution and any new thread have had a
+    // chance to land, so the order between them is the measurement.
+    let _ = wait_until(Duration::from_secs(60), || {
+        let m = sub.methods();
+        m.iter().any(|x| x == "serverRequest/resolved")
+            && started_threads(&sub).iter().any(|t| t != &thread_a)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+
+    let pane_after_new = sb.capture_pane();
+    println!("PANE AFTER Ctrl-C THEN /new:\n{pane_after_new}");
+    let (b_idx, a_idx, switch_before_resolve) = ordering_verdict(&sub, &thread_a, "P1");
+    let started_after: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &thread_a)
+        .collect();
+    println!("MEASURED new threads started after Ctrl-C+/new = {started_after:?}");
+
+    // ---- (ii) is A still late-answerable after the window? ----------------
+    let (late_live, resolved_before, _reply) = late_answer_a(&sb, &mut sub, wire_id, &marker).await;
+
+    let broker_lines: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    println!("BROKER LOG LINES ADDED ACROSS P1:\n{broker_lines:#?}");
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "p1-ctrl-c-then-new",
+        &format!(
+            "--- pane: approval pending ---\n{pane_pending}\n\
+             --- pane: after Ctrl-C ---\n{pane_after_ctrl_c}\n\
+             --- pane: after Ctrl-C then /new ---\n{pane_after_new}\n\
+             --- broker.log added ---\n{broker_lines:#?}\n\
+             --- verdict: b_idx={b_idx:?} a_idx={a_idx:?} switch_before_resolve={switch_before_resolve} late_live={late_live} resolved_before_late={resolved_before} ---\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+    println!(
+        "P1 OUTCOME SIGNALS: switch_admitted_before_A_resolved={switch_before_resolve}, \
+         A_late_answerable={late_live}, new_threads={started_after:?}"
+    );
+}
+
+/// **P1b — the same interrupt window, but the switch is a real `/resume` and a
+/// real `/fork` picker rather than `/new`.** `/resume` and `/fork` are the other
+/// two producers the operator can reach; approval-rebind shows a ccd resume
+/// accepted mid-approval, so this asks whether the TUI's own resume/fork move
+/// the head or leave A late-answerable in the post-interrupt window.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p1b_ctrl_c_then_resume_and_fork_with_an_approval_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p1bcc");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p1b.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (sub, thread_a, _wire_id) = raise_command_approval(&sb, &marker).await;
+    let from = read_file(&broker_log).lines().count();
+
+    // Measurement-only and teardown-tolerant: a real /resume in this parked test
+    // coordinator can re-exec the TUI out from under the pane, so nothing here
+    // asserts — the tap's frames are the record (read-only, captured before any
+    // teardown) and every keystroke is best-effort.
+    let _ = try_send_keys(&sb, &["C-c"]);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let pane_after_ctrl_c = sb.capture_pane();
+
+    let resume_sent = try_send_keys(&sb, &["/resume"]);
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let pane_resume = sb.capture_pane();
+    println!("PANE AFTER Ctrl-C THEN /resume (sent={resume_sent}):\n{pane_resume}");
+    let enter_sent = try_send_keys(&sb, &["Enter"]);
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    let pane_resume_pick = sb.capture_pane();
+    println!("PANE AFTER PICKING A RESUME TARGET (enter_sent={enter_sent}):\n{pane_resume_pick}");
+    let tui_alive_after_resume = sb.tui_running();
+    println!("MEASURED TUI alive after /resume = {tui_alive_after_resume}");
+
+    let mut pane_fork = String::from("<skipped: session not alive after /resume>");
+    if tui_alive_after_resume {
+        let _ = try_send_keys(&sb, &["/fork"]);
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        pane_fork = sb.capture_pane();
+        println!("PANE AFTER /fork:\n{pane_fork}");
+        let _ = try_send_keys(&sb, &["Enter"]);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    let (b_idx, a_idx, switch_before_resolve) = ordering_verdict(&sub, &thread_a, "P1b");
+    let started_after: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &thread_a)
+        .collect();
+    println!("MEASURED new threads started after Ctrl-C+/resume(+/fork) = {started_after:?}");
+    let resolved_seen = sub.methods().iter().any(|m| m == "serverRequest/resolved");
+
+    let broker_lines: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    println!("BROKER LOG LINES ADDED ACROSS P1b:\n{broker_lines:#?}");
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "p1b-ctrl-c-then-resume-fork",
+        &format!(
+            "--- pane: after Ctrl-C ---\n{pane_after_ctrl_c}\n\
+             --- pane: after /resume ---\n{pane_resume}\n\
+             --- pane: after picking resume ---\n{pane_resume_pick}\n\
+             --- TUI alive after /resume = {tui_alive_after_resume} ---\n\
+             --- pane: after /fork ---\n{pane_fork}\n\
+             --- broker.log added ---\n{broker_lines:#?}\n\
+             --- verdict: b_idx={b_idx:?} a_idx={a_idx:?} switch_before_resolve={switch_before_resolve} resolved_seen={resolved_seen} ---\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+    println!(
+        "P1b OUTCOME SIGNALS: switch_admitted_before_A_resolved={switch_before_resolve}, \
+         new_threads={started_after:?}, tui_alive_after_resume={tui_alive_after_resume}, \
+         resolved_seen={resolved_seen}"
+    );
+}
+
+/// Best-effort `tmux send-keys` that reports success instead of panicking, for
+/// probes that deliberately drive a pane which may tear itself down mid-sequence.
+fn try_send_keys(sb: &LiveSandbox, keys: &[&str]) -> bool {
+    Command::new(&sb.tmux)
+        .args([
+            "-S",
+            sb.sock.to_str().unwrap(),
+            "-f",
+            "/dev/null",
+            "send-keys",
+            "-t",
+            "cc-live",
+        ])
+        .args(keys)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// **P2 — the second-TUI-leg switch done right: a fully fingerprinted
+/// `thread/start`.** The prior probe sent `{"cwd":"/tmp"}` and was refused by
+/// fingerprint before reaching any busy/switch decision. A real `/new`'s
+/// `thread/start` carries the launch fingerprint's own dimensions and passes
+/// `assert_fingerprint`. This replays that full shape from a second connection
+/// on the TUI leg, with A's approval pending, and records the broker's verbatim
+/// answer — a fingerprint conflict (did not reach the decision), a session-policy
+/// refusal (reached the decision and was refused), or a `thread/started` (B
+/// admitted). It sends a small matrix so the answer cannot be blamed on one
+/// guessed field.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p2_second_tui_leg_fully_fingerprinted_thread_start() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p2ft");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p2.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a, wire_id) = raise_command_approval(&sb, &marker).await;
+
+    // The launch fingerprint of THIS sandbox: on-request / user / read-only, and
+    // its workspace is the coordinator's --cwd /tmp. The real 0.153 TUI shape
+    // sends cwd:null with runtimeWorkspaceRoots:[workspace]; model is not a
+    // fingerprint dimension. Send several well-formed variants and record each
+    // verbatim answer.
+    let base = |cwd: Value, roots: Value| {
+        serde_json::json!({
+            "approvalPolicy": "on-request",
+            "approvalsReviewer": "user",
+            "baseInstructions": null,
+            "config": {"personality": "pragmatic", "web_search": "cached"},
+            "cwd": cwd,
+            "developerInstructions": null,
+            "dynamicTools": null,
+            "environments": null,
+            "ephemeral": false,
+            "historyMode": "paginated",
+            "mockExperimentalField": null,
+            "model": "gpt-5.6-luna",
+            "modelProvider": null,
+            "multiAgentMode": null,
+            "permissions": null,
+            "personality": null,
+            "runtimeWorkspaceRoots": roots,
+            "sandbox": "read-only",
+            "selectedCapabilityRoots": null,
+            "serviceName": null,
+            "sessionStartSource": null,
+            "threadSource": "user"
+        })
+    };
+    let attempts: Vec<(&str, Value)> = vec![
+        ("baseline_malformed", serde_json::json!({"cwd": "/tmp"})),
+        (
+            "fingerprinted_cwd_null_roots_tmp",
+            base(Value::Null, serde_json::json!(["/tmp"])),
+        ),
+        (
+            "fingerprinted_cwd_tmp_roots_tmp",
+            base(serde_json::json!("/tmp"), serde_json::json!(["/tmp"])),
+        ),
+        (
+            "fingerprinted_cwd_null_roots_null",
+            base(Value::Null, Value::Null),
+        ),
+    ];
+
+    let mut answers: Vec<(String, Value)> = Vec::new();
+    let mut started_any = false;
+    for (name, params) in attempts {
+        let mut raw = RawCcd::connect(&sb.run_dir.join("tui.sock")).await;
+        let init = raw.initialize().await;
+        assert!(
+            init["result"].is_object(),
+            "second TUI init must be answered: {init}"
+        );
+        raw.notify("initialized", serde_json::json!({})).await;
+        let started = raw
+            .request("thread/start", params.clone(), Duration::from_secs(30))
+            .await;
+        println!(
+            "MEASURED second-TUI thread/start [{name}] params={params}\n  -> answer={started}"
+        );
+        if started.get("result").is_some() {
+            started_any = true;
+        }
+        answers.push((name.to_string(), started));
+        // drop raw -> the connection closes
+    }
+
+    let still_pending = sb
+        .capture_pane()
+        .contains("Would you like to run the following command?");
+    println!("MEASURED approval still pending after every second-TUI attempt = {still_pending}");
+    let started_during: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &thread_a)
+        .collect();
+    println!("MEASURED new threads started on the tap during P2 = {started_during:?}");
+
+    let (late_live, resolved_before, _reply) = late_answer_a(&sb, &mut sub, wire_id, &marker).await;
+
+    let answers_dump = answers
+        .iter()
+        .map(|(n, a)| format!("[{n}] {a}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_probe_record(
+        &sb,
+        &sub,
+        "p2-second-tui-fingerprinted",
+        &format!(
+            "--- second-TUI thread/start answers ---\n{answers_dump}\n\
+             --- still_pending_through_P2={still_pending} ---\n\
+             --- new threads started during P2 ---\n{started_during:?}\n\
+             --- verdict: started_any={started_any} late_live={late_live} resolved_before_late={resolved_before} ---\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+    println!(
+        "P2 OUTCOME SIGNALS: any_thread_start_result={started_any}, \
+         new_threads_during_pending={started_during:?}, A_late_answerable={late_live}, \
+         still_pending_through_probe={still_pending}"
+    );
+}
+
+/// **P3 — the ccd leg's one permitted method: `thread/resume` naming a thread
+/// OTHER than the card's, with A's approval pending.** approval-rebind shows a
+/// ccd resume accepted mid-approval onto the SAME thread; this asks whether a
+/// resume aimed elsewhere moves the head or leaves A late-answerable. A fresh
+/// session has only thread A, so this resumes (a) A again (the known rebind) and
+/// (b) a synthetic foreign id, records both answers, and then late-answer-tests A.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p3_ccd_resume_to_another_thread_with_an_approval_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p3rz");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p3.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a, wire_id) = raise_command_approval(&sb, &marker).await;
+    let from = read_file(&broker_log).lines().count();
+
+    let foreign = "01a00000-0000-7000-8000-000000000000";
+    let rz_a_id = 8200;
+    sub.send(serde_json::json!({
+        "id": rz_a_id, "method": "thread/resume", "params": {"threadId": thread_a}
+    }))
+    .await;
+    let rz_foreign_id = 8201;
+    sub.send(serde_json::json!({
+        "id": rz_foreign_id, "method": "thread/resume", "params": {"threadId": foreign}
+    }))
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+    let seen = sub.seen();
+    let answer_to = |id: i64| {
+        seen.iter()
+            .find(|v| v.get("id").and_then(Value::as_i64) == Some(id) && v["method"].is_null())
+            .cloned()
+    };
+    let rz_a = answer_to(rz_a_id);
+    let rz_foreign = answer_to(rz_foreign_id);
+    println!("MEASURED ccd resume->A answer: {rz_a:?}");
+    println!("MEASURED ccd resume->foreign answer: {rz_foreign:?}");
+
+    let (b_idx, a_idx, switch_before_resolve) = ordering_verdict(&sub, &thread_a, "P3");
+    let started_during: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &thread_a)
+        .collect();
+    println!("MEASURED new threads started during P3 = {started_during:?}");
+    let still_pending = sb
+        .capture_pane()
+        .contains("Would you like to run the following command?");
+    println!("MEASURED approval still pending through P3 = {still_pending}");
+
+    let (late_live, resolved_before, _reply) = late_answer_a(&sb, &mut sub, wire_id, &marker).await;
+    let broker_lines: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    println!("BROKER LOG LINES ADDED ACROSS P3:\n{broker_lines:#?}");
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "p3-ccd-resume-other",
+        &format!(
+            "--- ccd resume->A ---\n{rz_a:?}\n\
+             --- ccd resume->foreign ---\n{rz_foreign:?}\n\
+             --- still_pending={still_pending} new_threads={started_during:?} ---\n\
+             --- broker.log added ---\n{broker_lines:#?}\n\
+             --- verdict: b_idx={b_idx:?} a_idx={a_idx:?} switch_before_resolve={switch_before_resolve} late_live={late_live} resolved_before_late={resolved_before} ---\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+    println!(
+        "P3 OUTCOME SIGNALS: switch_admitted_before_A_resolved={switch_before_resolve}, \
+         new_threads_during_pending={started_during:?}, A_late_answerable={late_live}, \
+         still_pending_through_probe={still_pending}"
+    );
+}
+
+/// **P4 — the Esc position: the approval is dismissed by Esc, then `/new`.** Esc
+/// cancels the pending request (its own serverRequest/resolved) and interrupts
+/// the turn; `/new` immediately after asks whether B is admitted before A's
+/// resolution lands, and whether A stays late-answerable across the dismissal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p4_esc_then_new_with_an_approval_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p4esc");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p4.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (mut sub, thread_a, wire_id) = raise_command_approval(&sb, &marker).await;
+    let from = read_file(&broker_log).lines().count();
+
+    sb.send_keys(&["Escape"]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let pane_after_esc = sb.capture_pane();
+    println!("PANE AFTER Esc:\n{pane_after_esc}");
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    sb.send_keys(&["Enter"]);
+
+    let _ = wait_until(Duration::from_secs(60), || {
+        let m = sub.methods();
+        m.iter().any(|x| x == "serverRequest/resolved")
+            && started_threads(&sub).iter().any(|t| t != &thread_a)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+
+    let pane_after_new = sb.capture_pane();
+    println!("PANE AFTER Esc THEN /new:\n{pane_after_new}");
+    let (b_idx, a_idx, switch_before_resolve) = ordering_verdict(&sub, &thread_a, "P4");
+    let started_after: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &thread_a)
+        .collect();
+    println!("MEASURED new threads started after Esc+/new = {started_after:?}");
+
+    let (late_live, resolved_before, _reply) = late_answer_a(&sb, &mut sub, wire_id, &marker).await;
+    let broker_lines: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    println!("BROKER LOG LINES ADDED ACROSS P4:\n{broker_lines:#?}");
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "p4-esc-then-new",
+        &format!(
+            "--- pane: after Esc ---\n{pane_after_esc}\n\
+             --- pane: after Esc then /new ---\n{pane_after_new}\n\
+             --- broker.log added ---\n{broker_lines:#?}\n\
+             --- verdict: b_idx={b_idx:?} a_idx={a_idx:?} switch_before_resolve={switch_before_resolve} late_live={late_live} resolved_before_late={resolved_before} ---\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+    println!(
+        "P4 OUTCOME SIGNALS: switch_admitted_before_A_resolved={switch_before_resolve}, \
+         A_late_answerable={late_live}, new_threads={started_after:?}"
+    );
+}
+
+/// **P5 — the ccd leg resumes a DIFFERENT session-bound thread while an approval is
+/// pending on the head, and the head does not move.**
+///
+/// P3 could only resume the card's OWN thread (a rebind, head unmoved) and a FOREIGN
+/// id (refused "not bound to this session"), because a fresh session has exactly one
+/// bound thread. This builds the missing state: a first thread T1 is bound and given a
+/// rollout, `/new` retires it while binding a second thread T2 as the head, and the
+/// command approval is raised on T2. Then the ccd leg sends `thread/resume` naming
+/// T1 — a thread that IS session-bound (retired-but-bound, so its resume binding check
+/// passes) but is NOT the head the approval sits on.
+///
+/// The measured verdict is the module's two questions, and both are `no`: the resume is
+/// ACCEPTED but returns T1 idle, no new thread is admitted before T2 resolves, and T2's
+/// approval stays the ccd leg's to answer (a late ccd answer still actuates). A
+/// `thread/resume` subscribes; only a head-moving `thread/start` moves the head, and the
+/// live-turn/approval gate fences that — so a bound resume is not a switch producer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn p5_ccd_resume_to_a_second_bound_thread_with_an_approval_pending() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("p5rz");
+    let coord = sb.spawn_coordinator(&codex);
+    let marker = format!("/tmp/cc-3c-p5.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+
+    // T1: first bound thread with a rollout on disk (a thread with no rollout is
+    // refused by thread/resume, so a retired thread must have run a turn first).
+    run_the_warm_up_turn(&sb).await;
+
+    // Subscribe the tap. Only T1 is loaded, so it resumes onto T1 = the head.
+    let (mut sub, t1) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED T1 (first bound thread) = {t1}");
+
+    // /new retires T1 and binds a fresh head T2. /new does not re-exec the TUI, but it
+    // is refused client-side ("'/new' is disabled while a task is in progress") if the
+    // warm-up turn's terminal has not fully landed — the composer can paint the answer a
+    // beat before the TUI leaves its task state. So wait for a genuinely idle composer
+    // and retry until a distinct second thread actually appears on the tap.
+    let mut got_two = false;
+    for _ in 0..6 {
+        let _ = wait_until(Duration::from_secs(30), || {
+            let pane = sb.capture_pane();
+            pane.contains("Ask Codex to do anything")
+                && !pane.contains("is disabled while a task is in progress")
+        })
+        .await;
+        sb.send_keys(&["/new"]);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        sb.send_keys(&["Enter"]);
+        got_two = wait_until(Duration::from_secs(20), || {
+            started_threads(&sub).iter().any(|t| t != &t1)
+        })
+        .await;
+        if got_two {
+            break;
+        }
+    }
+    let mut t2 = started_threads(&sub)
+        .into_iter()
+        .find(|t| t != &t1)
+        .unwrap_or_default();
+    if t2.is_empty() {
+        let ll_id = 8290;
+        sub.send(serde_json::json!({
+            "id": ll_id, "method": "thread/loaded/list", "params": {}
+        }))
+        .await;
+        let _ = sub.barrier(Duration::from_secs(20)).await;
+        if let Some(ans) = sub
+            .seen()
+            .into_iter()
+            .find(|v| v.get("id").and_then(Value::as_i64) == Some(ll_id) && v["method"].is_null())
+        {
+            if let Some(arr) = ans["result"]["data"].as_array() {
+                t2 = arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|id| *id != t1)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+        }
+    }
+    println!("MEASURED T2 (second bound thread, new head) = {t2} (got_two={got_two})");
+    assert!(
+        !t2.is_empty() && t2 != t1,
+        "the /new must bind a distinct second thread, or there is no two-bound-thread \
+         state to measure. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // T2 has no rollout until a turn runs on it, and thread/resume refuses a
+    // rollout-less thread — so a warm-up turn on the new head first, with a sentinel
+    // distinct from T1's ("amber") so a leftover line cannot pass this check for a
+    // turn that never ran on T2.
+    assert!(
+        sb.submit_until(
+            "Reply with the single word cobalt and nothing else.",
+            Duration::from_secs(180),
+            || sb.capture_pane().to_lowercase().contains("• cobalt"),
+        )
+        .await,
+        "the warm-up turn on the new head T2 never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // Follow the switch onto the new head, the way the production ccd link does, so
+    // the tap is subscribed to T2 where the approval will be raised and answered.
+    let follow_id = 8291;
+    sub.send(serde_json::json!({
+        "id": follow_id, "method": "thread/resume", "params": {"threadId": t2}
+    }))
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+
+    // Raise the command approval on T2 (the current head).
+    assert!(
+        sb.submit_until(
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(240),
+            || sub
+                .methods()
+                .iter()
+                .any(|m| m.ends_with("/requestApproval")),
+        )
+        .await,
+        "no approval reached the subscribed ccd leg. pane:\n{}",
+        sb.capture_pane()
+    );
+    let request = sub
+        .first("item/commandExecution/requestApproval")
+        .expect("the command-execution approval frame");
+    let wire_id = request["id"]
+        .as_i64()
+        .expect("a server-request carries a numeric id");
+    let painted = wait_until(Duration::from_secs(30), || {
+        sb.capture_pane()
+            .contains("Would you like to run the following command?")
+    })
+    .await;
+    assert!(
+        painted,
+        "the premise: the TUI is showing the prompt this probe is about. pane:\n{}",
+        sb.capture_pane()
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; nothing below is about a PENDING approval"
+    );
+
+    let from = read_file(&broker_log).lines().count();
+
+    // THE PRODUCER: the ccd leg resumes T1 — a session-bound (retired) thread that is
+    // NOT the head the approval sits on — while T2's approval is pending.
+    let rz_t1_id = 8300;
+    sub.send(serde_json::json!({
+        "id": rz_t1_id, "method": "thread/resume", "params": {"threadId": t1}
+    }))
+    .await;
+    let _ = sub.barrier(Duration::from_secs(30)).await;
+    let rz_t1 = sub
+        .seen()
+        .into_iter()
+        .find(|v| v.get("id").and_then(Value::as_i64) == Some(rz_t1_id) && v["method"].is_null());
+    let rz_t1_accepted = rz_t1
+        .as_ref()
+        .map(|v| v.get("result").is_some())
+        .unwrap_or(false);
+    println!("MEASURED ccd resume->T1 (retired, other bound thread) answer: {rz_t1:?}");
+
+    let (b_idx, a_idx, switch_before_resolve) = ordering_verdict(&sub, &t2, "P5");
+    let started_extra: Vec<String> = started_threads(&sub)
+        .into_iter()
+        .filter(|t| t != &t1 && t != &t2)
+        .collect();
+    let still_pending = sb
+        .capture_pane()
+        .contains("Would you like to run the following command?");
+
+    // Is T2's capability still the ccd leg's? Re-answer T2's wire id and see whether it
+    // still actuates the command.
+    let (late_live, resolved_before, _reply) = late_answer_a(&sb, &mut sub, wire_id, &marker).await;
+
+    let broker_lines: Vec<String> = log_lines_after(&read_file(&broker_log), from)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "p5-ccd-resume-second-bound",
+        &format!(
+            "--- T1(retired)={t1} T2(head)={t2} wire_id={wire_id} ---\n\
+             --- PRODUCER ccd resume->T1 ---\n{rz_t1:?}\n\
+             --- resume->T1 accepted={rz_t1_accepted} still_pending={still_pending} \
+             brand_new_threads={started_extra:?} ---\n\
+             --- verdict: b_idx={b_idx:?} a_idx={a_idx:?} \
+             switch_before_resolve={switch_before_resolve} \
+             T2_late_answerable={late_live} resolved_before_late={resolved_before} ---\n\
+             --- broker.log added ---\n{broker_lines:#?}\n"
+        ),
+    );
+
+    teardown(sub, coord, &marker);
+
+    // **The verdict, asserted.** A bound resume to another session thread is admitted
+    // as a subscription/read (accepted), it moves no head (no brand-new thread, none
+    // admitted before T2 resolved), and it leaves T2's approval the ccd leg's to answer
+    // (the late answer still actuates). This is outcome (B): the switch is not
+    // producible through a `thread/resume`.
+    assert!(
+        rz_t1_accepted,
+        "a resume to a retired-but-bound thread passes the binding check and is accepted"
+    );
+    assert!(
+        started_extra.is_empty(),
+        "no brand-new thread is admitted by a resume: {started_extra:?}"
+    );
+    assert!(
+        !switch_before_resolve,
+        "no head-move is admitted before the approval resolves"
+    );
+    assert!(
+        late_live,
+        "the head does not move: T2's approval stays the ccd leg's to answer, and the \
+         late ccd answer still actuates the command"
     );
 }

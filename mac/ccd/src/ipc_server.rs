@@ -201,11 +201,34 @@ async fn read_loop(
                 }
             }
             ClientFrame::Register(info) => {
-                let registration = daemon
+                match daemon
                     .register_supervisor(info, tx.clone(), Arc::clone(inflight))
-                    .await?;
-                *registered = Some(registration);
-                let _ = tx.send(DaemonFrame::Ack).await;
+                    .await
+                {
+                    Ok(registration) => {
+                        *registered = Some(registration);
+                        let _ = tx.send(DaemonFrame::Ack).await;
+                    }
+                    // **A refused registration is told, not silently dropped**
+                    //. Propagating with `?` closed the connection with no
+                    // frame at all, so the launcher — which read a bare EOF as success
+                    // — reset its reconnect classification as though it had registered.
+                    // The reason is sent as a structured `Error` and logged at error;
+                    // the writer task drains the channel after this loop returns
+                    // (`serve` does `drop(tx); writer.await`), so the frame reaches the
+                    // socket before it closes. Then the loop ends by returning the
+                    // error, exactly as `?` did, and the launcher treats a pre-`Ack`
+                    // `Error` (or EOF) as a failed registration eligible for backoff.
+                    Err(err) => {
+                        crate::log_error!("ipc: refused a session registration: {err:#}");
+                        let _ = tx
+                            .send(DaemonFrame::Error {
+                                message: format!("{err:#}"),
+                            })
+                            .await;
+                        return Err(err);
+                    }
+                }
             }
             // Pre-`Register` support negotiation. The daemon answers honestly
             // with the agents it can host and the specific verdict for the asked
@@ -574,6 +597,73 @@ mod tests {
         let devices = daemon.list_devices().await.unwrap();
         assert_eq!(devices.len(), 1, "the pairing code must buy one device");
         devices.into_iter().next().unwrap()
+    }
+
+    /// A registration frame for `uid` running `agent`, built through the real type so
+    /// its shape cannot drift from what the launcher sends.
+    fn register_frame(uid: &str, name: &str, agent: protocol::agent::AgentKind) -> String {
+        let is_codex = matches!(agent, protocol::agent::AgentKind::Codex);
+        let frame = ClientFrame::Register(protocol::ipc::RegisterSession {
+            session_id: name.into(),
+            session_uid: Some(uid.into()),
+            tmux_session: name.into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: is_codex.then(|| {
+                std::env::temp_dir()
+                    .join(format!("ccd-ipc-{uid}-nothing-listens.sock"))
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            codex_generation: is_codex.then_some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        });
+        serde_json::to_string(&frame).unwrap()
+    }
+
+    /// **A refused registration is told over the socket, not silently closed**
+    ///. The `?`-propagation an earlier version used ended the connection
+    /// with no frame, which the launcher read as success. A Claude run claims the uid,
+    /// then a Codex run for the same uid is refused — a run does not change agents —
+    /// and the refusal must arrive as a structured `Error` on the wire.
+    ///
+    /// **Mutation:** restore `register_supervisor(...).await?` and this goes red — the
+    /// second `exchange` reads a closed connection instead of an `Error`.
+    #[tokio::test]
+    async fn a_refused_registration_is_told_over_the_socket_not_silently_closed() {
+        let (_daemon, socket) = served_daemon().await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        // The Claude run claims the uid durably.
+        assert!(
+            matches!(
+                exchange(
+                    &socket,
+                    &register_frame(uid, "cc-1", protocol::agent::AgentKind::Claude)
+                )
+                .await,
+                DaemonFrame::Ack
+            ),
+            "the first registration is accepted"
+        );
+        // The Codex run for the same uid is refused, and the refusal is a frame.
+        let message = error_message(
+            exchange(
+                &socket,
+                &register_frame(uid, "cc-1", protocol::agent::AgentKind::Codex),
+            )
+            .await,
+        );
+        assert!(
+            message.contains("does not change agents"),
+            "the refusal must say why, over the wire: {message}"
+        );
     }
 
     #[tokio::test]

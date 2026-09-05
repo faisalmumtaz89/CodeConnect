@@ -1,0 +1,7 @@
+{"note":"===== the other two switch producers, refused before they could switch, while an approval was pending (P2 second-TUI workspace boundary, P3 ccd resume elsewhere). Evidence, not refuse_message() pins. ====="}
+{"note":"--- P2: a fingerprinted second-TUI thread/start naming a non-launch workspace ---"}
+{"conn":"tui-second","dir":"c2s","frame":{"id":101,"method":"thread/start","params":{"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","cwd":null,"runtimeWorkspaceRoots":["/work"],"threadSource":"user"}}}
+{"conn":"tui-second","dir":"s2c","frame":{"error":{"code":-32001,"message":"request refused: it names a workspace other than the session's launch workspace"},"id":101}}
+{"note":"--- P3: the ccd leg resumes a thread OTHER than the card's \u2014 refused, not bound ---"}
+{"conn":"ccd-subscribed","dir":"c2s","frame":{"id":8201,"method":"thread/resume","params":{"threadId":"01a00000-0000-7000-8000-000000000000"}}}
+{"conn":"ccd-subscribed","dir":"s2c","frame":{"id":8201,"error":{"code":-32001,"message":"resume refused: target thread is not bound to this session"}}}

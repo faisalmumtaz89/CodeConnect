@@ -1,0 +1,69 @@
+codex 0.153.2 — what the pane does with `/new` while a command approval is
+unanswered, and while a turn is running. `tmux capture-pane -p -J` against a live
+`codeconnect codex` session driven by `ccd/src/codex_link_live.rs`. The probe
+file's nonce is zeroed length-preservingly and nothing else is altered, so the
+pane geometry is byte-identical to what was captured.
+
+===== 1. the command-approval prompt, unanswered =====
+• amber
+
+
+› Run the shell command `touch /tmp/cc-3c-quiesce.0000000000000000000.txt` now.
+  Do not explain, just run it.
+
+ 
+• Running touch /tmp/cc-3c-quiesce.0000000000000000000.txt
+ 
+ 
+  Would you like to run the following command?
+ 
+  Environment: local
+ 
+  Reason: Allow creating the requested empty file in /tmp?
+ 
+  $ touch /tmp/cc-3c-quiesce.0000000000000000000.txt
+ 
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch` (p)
+  3. No, and tell Codex what to do differently (esc)
+ 
+  Press enter to confirm or esc to cancel                                       
+
+===== 2. the same pane after `/new` was typed into it, with nothing submitted =====
+• amber
+
+
+› Run the shell command `touch /tmp/cc-3c-quiesce.0000000000000000000.txt` now.
+  Do not explain, just run it.
+
+
+✗ You canceled the request to run touch /tmp/cc-3c-
+  quiesce.0000000000000000000.txt
+
+• Ran touch /tmp/cc-3c-quiesce.0000000000000000000.txt
+  └ (no output)
+
+■ Conversation interrupted - tell the model what to do differently. Something
+went wrong? Hit `/feedback` to report the issue.
+ 
+ 
+› ew
+ 
+  gpt-5.6-luna default · /private/tmp
+
+===== 3. `/new` typed AND submitted while a turn was running, with no approval
+         anywhere — from the scrollback, because the answer is one line under
+         four hundred =====
+
+› Count from 1 to 400, one number per line, and nothing else.
+
+
+• 1
+  2
+  3
+
+■ '/new' is disabled while a task is in progress.
+  4
+  5
+  6
+  7

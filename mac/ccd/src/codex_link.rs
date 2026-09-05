@@ -151,7 +151,17 @@ const UPGRADE_BUDGET: Duration = Duration::from_secs(15);
 /// How long any single write to the leg may block. A peer that stops reading
 /// applies backpressure, and an unbounded write parks the task where no other
 /// deadline can reach it.
-const SEND_BUDGET: Duration = Duration::from_secs(15);
+///
+/// **`pub(crate)` and split, so `state.rs` can derive `ANSWER_QUIESCE_BUDGET`
+/// from the answer's real worst case rather than restate it**. An
+/// answer's whole passage is this write plus [`DISPOSITION_BUDGET`]; the quiesce
+/// a registration waits is that sum plus a margin, computed from these two so the
+/// invariant "above the answer's worst case" is true by construction in both
+/// builds instead of a hand-copied literal that was below it under `cfg(test)`.
+#[cfg(not(test))]
+pub(crate) const SEND_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub(crate) const SEND_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the `initialize` handshake may take. The app-server answers it
 /// immediately; a connection that does not is not a usable observation path.
@@ -1469,6 +1479,14 @@ pub(crate) struct AnswerRequest {
     pub(crate) claimed: crate::store::ClaimedMaterial,
     /// Where the outcome goes.
     pub(crate) reply: tokio::sync::oneshot::Sender<AnswerReport>,
+    /// **The answer gate's read guard, owned and travelling with the ask.** It is taken in the answer path before the link is looked up, and it must
+    /// outlive the write so a replacement registration's stake cannot land while this
+    /// response is being claimed and written. Carrying it here rather than leaving it
+    /// in the caller future is what makes an abort-after-enqueue safe: dropping the
+    /// caller no longer releases the gate, because the gate is in the ask. It moves
+    /// into [`PendingAnswer`] at the moment of the write and is released only at a
+    /// pre-write refusal or when the terminal teardown drains that map.
+    pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
 /// The daemon's end of [`AnswerRequest`]: hand a live connection an answer to send.
@@ -1507,6 +1525,9 @@ impl LinkAnswers {
         request_id: &str,
         decision: Value,
         claimed: crate::store::ClaimedMaterial,
+        // The owned answer-gate read guard, moved in so it travels with the ask and is
+        // released only at a pre-write refusal or terminal teardown.
+        gate: tokio::sync::OwnedRwLockReadGuard<()>,
     ) -> AnswerReport {
         let (reply, outcome) = tokio::sync::oneshot::channel();
         if self
@@ -1516,6 +1537,7 @@ impl LinkAnswers {
                 decision,
                 claimed,
                 reply,
+                gate,
             })
             .is_err()
         {
@@ -1548,7 +1570,7 @@ impl LinkAnswers {
 /// tidied up by the next daemon restart would leave a question standing that nothing
 /// can answer. `run` drains whatever the connection left, so the reply is always
 /// sent and the ledger always reaches a terminal.
-type OpenAnswers = Arc<Mutex<std::collections::BTreeMap<i64, PendingAnswer>>>;
+pub(crate) type OpenAnswers = Arc<Mutex<std::collections::BTreeMap<i64, PendingAnswer>>>;
 
 /// **How long an answer waits to be told what became of it.**
 ///
@@ -1573,10 +1595,11 @@ type OpenAnswers = Arc<Mutex<std::collections::BTreeMap<i64, PendingAnswer>>>;
 ///
 /// Either way the wait is bounded, because a claim that waits for ever holds a card on a
 /// phone that can never be answered.
+// `pub(crate)` so `state.rs`'s `ANSWER_QUIESCE_BUDGET` is derived from it.
 #[cfg(not(test))]
-const DISPOSITION_BUDGET: Duration = Duration::from_secs(15);
+pub(crate) const DISPOSITION_BUDGET: Duration = Duration::from_secs(15);
 #[cfg(test)]
-const DISPOSITION_BUDGET: Duration = Duration::from_millis(750);
+pub(crate) const DISPOSITION_BUDGET: Duration = Duration::from_millis(750);
 
 /// **A winning phone answer's terminal, filed before another frame is read.**
 ///
@@ -1737,7 +1760,35 @@ const LEDGER_NOT_RECORDED: &str =
 /// what became of it — so the claim goes terminal, the card is retired saying exactly
 /// that, and the caller is told rather than left holding a sender that will never
 /// fire. The alternative is a card on a phone that no tap can ever answer again.
-async fn settle_open_answers(
+/// **Test-only.** Put an admitted answer into an open-answers ledger without
+/// standing up a connection, so a caller can prove that aborting the link settles
+/// it durably. The fields are this module's; the guard is the caller's, moved in the
+/// way a real write moves it from the ask.
+#[cfg(test)]
+pub(crate) fn insert_pending_answer_for_tests(
+    open: &OpenAnswers,
+    wire_id: i64,
+    request_id: &str,
+    thread_id: &str,
+    gate: tokio::sync::OwnedRwLockReadGuard<()>,
+) {
+    let (reply, _rx) = tokio::sync::oneshot::channel();
+    open.lock().expect("open answers").insert(
+        wire_id,
+        PendingAnswer {
+            request_id: request_id.to_string(),
+            decision: protocol::ws::AnswerDecision::OptionId {
+                option_id: "accept".into(),
+            },
+            thread_id: thread_id.to_string(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+            reply,
+            _gate: gate,
+        },
+    );
+}
+
+pub(crate) async fn settle_open_answers(
     daemon: &Arc<Daemon>,
     session: &SessionKey,
     open: &OpenAnswers,
@@ -1925,7 +1976,20 @@ async fn retire_answer_as_unknown(
 /// section is a handful of `Option<String>` moves, and the daemon reads it while
 /// already holding `Inner`.
 #[derive(Clone, Default)]
-pub struct LinkCarry(Arc<Mutex<Carried>>);
+pub struct LinkCarry {
+    /// The thread-chase state this link learns and a replacement resumes from.
+    carried: Arc<Mutex<Carried>>,
+    /// **The answers this link has written and is still waiting to hear about.**
+    ///
+    /// It rides the carry so it reaches the one place a link is stopped without
+    /// running any code of its own: an abort. A link's own teardown settles every
+    /// open answer when [`run`]'s connection loop ends, but an aborted task never
+    /// reaches that line — so the daemon, holding this same cell, settles them
+    /// instead ([`crate::state::Daemon::join_parked_codex_links`]). A fresh link
+    /// starts with an empty ledger, and [`LinkCarry::resume_from`] copies only the
+    /// chase, so a replacement never inherits a predecessor's in-flight answers.
+    open_answers: OpenAnswers,
+}
 
 impl LinkCarry {
     pub fn new() -> LinkCarry {
@@ -1934,12 +1998,19 @@ impl LinkCarry {
 
     /// The cell itself, for [`run`] and the connection loop that writes it.
     fn shared(&self) -> Arc<Mutex<Carried>> {
-        Arc::clone(&self.0)
+        Arc::clone(&self.carried)
+    }
+
+    /// **The open-answers ledger this carry rides**, shared with the link task that
+    /// writes it. Read by the daemon to settle a link it aborted, and by [`run`] as
+    /// the ledger its connection loop fills and drains.
+    pub(crate) fn open_answers(&self) -> OpenAnswers {
+        Arc::clone(&self.open_answers)
     }
 
     /// **What this link knows, taken by value.** The one thing retention reads.
     pub fn snapshot(&self) -> Carried {
-        self.0.lock().expect("the carried link state").clone()
+        self.carried.lock().expect("the carried link state").clone()
     }
 
     /// **Start this link from what its predecessor knew.**
@@ -1957,13 +2028,13 @@ impl LinkCarry {
     /// the hint is what *this* registration was told, so seeding it here would be a
     /// second source for a fact the frame already carries.
     pub fn resume_from(&self, retained: &Carried) {
-        *self.0.lock().expect("the carried link state") = retained.clone();
+        *self.carried.lock().expect("the carried link state") = retained.clone();
     }
 
     /// The thread a link started from this cell would resume first — asked before
     /// [`run`] writes the hint, so it answers only out of what was retained.
     pub fn first_target(&self) -> Option<String> {
-        self.0
+        self.carried
             .lock()
             .expect("the carried link state")
             .first_target()
@@ -1978,7 +2049,7 @@ impl LinkCarry {
     /// candidate alone would describe a state no connection reaches.
     #[cfg(test)]
     pub fn set_for_tests(&self, adopted: Option<&str>, pending: Option<&str>) {
-        let mut carried = self.0.lock().expect("the carried link state");
+        let mut carried = self.carried.lock().expect("the carried link state");
         carried.adopted = adopted.map(str::to_string);
         carried.pending_candidate = pending.map(str::to_string);
         carried.fallback = pending.and(carried.adopted.clone());
@@ -1989,7 +2060,7 @@ impl LinkCarry {
     /// candidate, and the fallback that keeps the chase from stranding it.
     #[cfg(test)]
     pub fn slots_for_tests(&self) -> (Option<String>, Option<String>, Option<String>) {
-        let carried = self.0.lock().expect("the carried link state");
+        let carried = self.carried.lock().expect("the carried link state");
         (
             carried.adopted.clone(),
             carried.pending_candidate.clone(),
@@ -2034,7 +2105,12 @@ pub async fn run(
     // A written answer holds a durable claim and an approval card on somebody's
     // phone; a connection that dies mid-answer must not leave either for the next
     // restart to tidy up. See [`OpenAnswers`].
-    let open_answers: OpenAnswers = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    //
+    // **Owned by the daemon, through the carry.** It is the same cell the daemon
+    // holds, so the one ending this loop cannot settle — an abort, which stops the
+    // task before it reaches the settle below — is settled by the daemon instead,
+    // out of this very map. See [`LinkCarry::open_answers`].
+    let open_answers: OpenAnswers = carry.open_answers();
 
     crate::log_info!(
         "codex link for {} ({}) attaching to {} at generation {}",
@@ -3108,7 +3184,7 @@ struct Connection<'a> {
 }
 
 /// An answer written on this socket, waiting to be told what became of it.
-struct PendingAnswer {
+pub(crate) struct PendingAnswer {
     /// The card's durable id, so the terminal this answer earns names the card
     /// rather than the socket.
     request_id: String,
@@ -3121,6 +3197,13 @@ struct PendingAnswer {
     /// When this wait stops being a wait and becomes an unknown.
     deadline: tokio::time::Instant,
     reply: tokio::sync::oneshot::Sender<AnswerReport>,
+    /// **The answer-gate read guard, held from the ask until this answer reaches a
+    /// terminal**. It arrives on the [`AnswerRequest`] and is moved here
+    /// at the moment of the write; it is dropped when this entry leaves `open_answers`
+    /// — a disposition, a deadline, or the teardown drain — so a replacement
+    /// registration's write side cannot stake the session while the response this
+    /// answer wrote is still outstanding on the old link.
+    _gate: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
 /// Where one turn stands in the follow-up settlement.
@@ -4186,6 +4269,9 @@ impl Connection<'_> {
                 thread_id: ask.claimed.thread_id.clone(),
                 deadline: tokio::time::Instant::now() + DISPOSITION_BUDGET,
                 reply: ask.reply,
+                // The write is happening now; the guard moves from the ask to the
+                // pending answer and is released only when this entry is drained.
+                _gate: ask.gate,
             },
         );
         self.send(

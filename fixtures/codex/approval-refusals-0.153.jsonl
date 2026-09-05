@@ -1,0 +1,9 @@
+{"note":"===== the three refuse_message() refusals a switch producer meets, one per FRAME ID, pinned by the_captured_switch_refusals_are_the_ones_this_module_still_writes. If a refusal is reworded, update the const in refusal.rs \u2014 never edit this .jsonl. ====="}
+{"note":"--- the ccd leg asks for the two frames a switch is made of ---"}
+{"conn":"ccd-subscribed","dir":"c2s","frame":{"id":8100,"method":"thread/start","params":{"cwd":"/work"}}}
+{"conn":"ccd-subscribed","dir":"s2c","frame":{"id":8100,"error":{"code":-32001,"message":"method refused: not permitted for this endpoint role"}}}
+{"conn":"ccd-subscribed","dir":"c2s","frame":{"id":8101,"method":"thread/unsubscribe","params":{"threadId":"01a06db1-1f8e-7db2-8fd5-10f13af55d1b"}}}
+{"conn":"ccd-subscribed","dir":"s2c","frame":{"id":8101,"error":{"code":-32001,"message":"method refused: not permitted for this connection"}}}
+{"note":"--- a second TUI-leg connection, fully fingerprinted (P2): session policy refuses the switch ---"}
+{"conn":"tui-second","dir":"c2s","frame":{"id":101,"method":"thread/start","params":{"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","cwd":null,"runtimeWorkspaceRoots":null,"threadSource":"user"}}}
+{"conn":"tui-second","dir":"s2c","frame":{"error":{"code":-32001,"message":"request refused by session policy"},"id":101}}

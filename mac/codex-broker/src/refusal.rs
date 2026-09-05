@@ -298,6 +298,17 @@ fn classify_request(
     }
 }
 
+/// **The client-visible `(code, message)` a closed creation slot is refused with.**
+///
+/// A fully fingerprinted second creation reaches the session-policy decision and is
+/// refused there because the session already holds its one thread — a switch, which is
+/// not this endpoint's to make. The DETAIL differs per cause, but the client sees
+/// exactly this pair. Spelled once so [`ledger_refusal`] and the captured-refusal pin
+/// cannot drift apart about what a busy session tells a second creation.
+pub(crate) fn creation_slot_closed_refusal() -> (i64, &'static str) {
+    (E_POLICY_REFUSED, "request refused by session policy")
+}
+
 /// Render one id-ledger verdict as a relay action. Shared by the generic request path and
 /// by `turn/start`'s atomic admission (round-1 P1), so the two can never disagree about
 /// what a full ledger or a reused id looks like to a client.
@@ -318,10 +329,11 @@ fn ledger_refusal(
                 "this session already has a thread bound, a creation in flight, or a spent \
                  request id on this connection; a second thread is a switch, which D2 owns",
             );
+            let (code, message) = creation_slot_closed_refusal();
             refuse_request(
                 id,
-                E_POLICY_REFUSED,
-                "request refused by session policy",
+                code,
+                message,
                 format!("{CREATION_METHOD}: creation slot unavailable — {why}"),
             )
         }
@@ -1394,6 +1406,89 @@ mod tests {
     use super::*;
     use crate::response_capability::NoCapabilities;
     use crate::session::{NoThreads, SessionThreads, ThreadBinding};
+
+    /// **The refusals a switch producer was actually given, read back from the
+    /// capture and pinned by FRAME ID.**
+    ///
+    /// `fixtures/codex/approval-refusals-0.153.jsonl` holds the three refusals this
+    /// module writes to a thread-switch producer while an approval is pending: the ccd
+    /// leg asking for `thread/start` (id 8100) and for the `thread/unsubscribe` that
+    /// would reserve a switch behind it (id 8101), and a fully fingerprinted second
+    /// TUI-leg connection asking for a creation (id 101). The first two are
+    /// [`refuse_message`] refusals; the third is not — its fingerprint PASSES and it
+    /// reaches the session-policy decision, where the closed creation slot refuses it,
+    /// so it is pinned against [`creation_slot_closed_refusal`], the producer that
+    /// actually answered it. What makes the frames evidence rather than anecdote is
+    /// that each is compared, BY THE REQUEST ID IT ANSWERED, against what its producer
+    /// writes today.
+    ///
+    /// **Keyed on the id, never on zip position**: keying error frames by request id
+    /// rather than by capture order keeps a reordering — or a fourth refusal — from
+    /// silently re-pairing them. The id is the request the broker answered, and it must
+    /// appear exactly once: a switch refusal is answered a single time, so a second
+    /// error frame for the same id is a fault this rejects rather than collapses.
+    ///
+    /// **If a refusal is reworded, update the const at its producer — never edit the
+    /// .jsonl.** The .jsonl is measured bytes; the producer is the source of truth, and
+    /// this test exists to fail when they drift so the producer is what moves.
+    ///
+    /// It pins the CODE and the MESSAGE together, because a client reads the message
+    /// and the code is what it branches on.
+    #[test]
+    fn the_captured_switch_refusals_are_the_ones_this_module_still_writes() {
+        let capture = include_str!("../../../fixtures/codex/approval-refusals-0.153.jsonl");
+        // id -> the (code, message) the producer that answered it still writes. Pinned
+        // per producer, not by a message that several refusals happen to share.
+        let expected: &[(i64, (i64, &str))] = &[
+            (8100, refuse_message(RefuseReason::RoleNotPermitted)),
+            (8101, refuse_message(RefuseReason::NotAllowlisted)),
+            (101, creation_slot_closed_refusal()),
+        ];
+        // Built rejecting duplicates: a `HashMap` collect would overwrite a second
+        // frame for an id and let a capture with two errors for one id pass the count
+        // check below, so "exactly one error per id" would not be enforced at all.
+        let mut errors: std::collections::HashMap<i64, serde_json::Value> =
+            std::collections::HashMap::new();
+        for frame in capture
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|row| row.get("frame").cloned())
+            .filter(|frame| frame.get("error").is_some())
+        {
+            let id = frame
+                .get("id")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_else(|| panic!("an error frame with no numeric id: {frame}"));
+            assert!(
+                errors.insert(id, frame).is_none(),
+                "the capture holds a second error for id {id}; a switch refusal is \
+                 answered once, so one-per-id must hold — update the producer, never \
+                 the .jsonl"
+            );
+        }
+        assert_eq!(
+            errors.len(),
+            expected.len(),
+            "the refusals capture holds exactly one error per pinned id; a change in \
+             shape means update the producer, never the .jsonl: {errors:#?}"
+        );
+        for (id, (code, message)) in expected {
+            let frame = errors
+                .get(id)
+                .unwrap_or_else(|| panic!("no refusal frame for id {id} in the capture"));
+            assert_eq!(
+                frame["error"]["message"].as_str(),
+                Some(*message),
+                "id {id} was given a different refusal than this build writes — update \
+                 the producer, never edit the .jsonl: {frame}"
+            );
+            assert_eq!(
+                frame["error"]["code"].as_i64(),
+                Some(*code),
+                "and a client branches on the code: {frame}"
+            );
+        }
+    }
 
     /// Two distinct client connections. `CONN_A` is the one every single-connection test
     /// uses; `CONN_B` is the SAME-ROLE sibling (the TUI `/resume` picker's second

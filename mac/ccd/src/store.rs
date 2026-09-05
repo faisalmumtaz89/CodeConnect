@@ -3538,6 +3538,45 @@ impl Store {
         Ok(out)
     }
 
+    /// **The applying answer claims that belong to one session.**
+    ///
+    /// The scoped twin of [`Store::unsettled_answer_claims`], for settling the
+    /// claims of a single outgoing session at a handover rather than the whole
+    /// store at a restart. The claim row is the authoritative record of an answer
+    /// in flight — it is committed before the answer enters any in-memory ledger,
+    /// and the write that commits it cannot be cancelled — so a handover that has
+    /// to abandon a session reads its claims from here and makes each terminal,
+    /// catching one that was committed but never reached the daemon's own ledger.
+    pub fn unsettled_answer_claims_for(&self, session_uid: &str) -> Result<Vec<AnswerClaimRow>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
+                    route, target_turn_id, started_at
+               FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2 AND status = 'applying'
+              ORDER BY started_at ASC",
+        )?;
+        let rows = stmt.query_map(params![OPERATION_ANSWER, session_uid], |row| {
+            Ok(AnswerClaimRow {
+                session_uid: row.get(0)?,
+                client_request_id: row.get(1)?,
+                claimed: ClaimedMaterial {
+                    thread_id: row.get(3)?,
+                    generation: row.get::<_, i64>(4)? as u64,
+                    route: row.get(5)?,
+                    target_turn_id: row.get(6)?,
+                    claimed_hash: row.get(2)?,
+                },
+                started_at: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn load_cursor(&self, session_uid: &str) -> Result<Option<TailCursor>> {
         let conn = self.read();
         let cursor = conn
