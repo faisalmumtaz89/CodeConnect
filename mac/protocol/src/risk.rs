@@ -113,6 +113,26 @@ const PROTECTED_BRANCHES: &[&str] = &[
 /// pathological payload; the daemon runs this on the hook's critical path.
 const MAX_SCAN_BYTES: usize = 16 * 1024;
 
+/// The reason a command that could not be read whole is `high`.
+///
+/// **A bound on what is read is not a licence to conclude "nothing found".** A
+/// command longer than [`MAX_SCAN_BYTES`] is classified on a prefix, and the
+/// bytes past that prefix are exactly where a destructive tail would sit — after
+/// enough benign setup to push it out of view. Reporting `medium` for one would
+/// be the classifier saying "I looked and saw nothing" about text it never
+/// looked at, and the surface that reads the class then offers its lightest
+/// friction for the one command a person can least check by eye.
+///
+/// So the bound fails closed: too long to read is `high`, with this as the
+/// reason, and the phone says so instead of implying a clean scan.
+///
+/// **The bulk-content keys are a different case and stay `medium`.** A `diff` or
+/// a `content` is not scanned AT ALL — see [`BULK_CONTENT_KEYS`] — because a
+/// patch whose body contains `rm -rf` is a file being edited rather than a disk
+/// being erased. Nothing about its length changes what it is, so an enormous one
+/// is not an unread command; it is a large edit, and it is classified as one.
+pub const SCAN_BOUND_EXCEEDED: &str = "command exceeds the scan bound";
+
 /// Depth limit when collecting strings out of a nested (MCP) tool input.
 const MAX_SCAN_DEPTH: u32 = 4;
 
@@ -169,10 +189,32 @@ pub fn classify(tool_name: &str, tool_input: &serde_json::Value) -> RiskAssessme
     if let Some(pattern) = destructive_pattern(&text) {
         return RiskAssessment::high(pattern);
     }
+    // Nothing was found in what could be read. If there was more command than
+    // that, "nothing was found" is not a finding — see [`SCAN_BOUND_EXCEEDED`].
+    // Named second so a pattern that DID match still names itself: a person is
+    // better served by `rm -rf` than by the reason the rest went unread.
+    if command_exceeds_scan_bound(tool_input) {
+        return RiskAssessment::high(SCAN_BOUND_EXCEEDED);
+    }
     if READ_ONLY_TOOLS.contains(&tool_name.to_ascii_lowercase().as_str()) {
         return RiskAssessment::plain(RiskClass::Low);
     }
     RiskAssessment::plain(RiskClass::Medium)
+}
+
+/// Was there more explicit command than [`scan_text`] could read?
+///
+/// Only the `command` key, and deliberately: that key is a command verbatim, so
+/// its unread tail is unread COMMAND. The collected-strings path can also stop at
+/// the bound, but what it stops in the middle of is a bag of unrelated fields
+/// from a tool nobody here recognises — already `medium` for that reason — and
+/// promoting every large MCP payload to `high` would spend the loudest signal
+/// this classifier has on payload size.
+fn command_exceeds_scan_bound(tool_input: &serde_json::Value) -> bool {
+    tool_input
+        .get("command")
+        .and_then(|value| value.as_str())
+        .is_some_and(|command| command.len() > MAX_SCAN_BYTES)
 }
 
 /// The text a destructive pattern could hide in.
@@ -556,6 +598,60 @@ mod tests {
         );
     }
 
+    /// **A command too long to read is `high`, and says so.**
+    ///
+    /// The scan bound is a cost bound, and a cost bound that returned `medium`
+    /// would be reporting a clean scan of text nobody scanned — with the
+    /// destructive part sitting exactly where a padded command puts it. The
+    /// surface that reads this class leads with its lightest friction on
+    /// `medium`, so the one command a person cannot check by eye would get the
+    /// smallest prompt to check it.
+    ///
+    /// The three cases are the ones that differ: a long command whose readable
+    /// prefix is clean (the bound is the whole finding), one whose prefix is
+    /// destructive (the pattern is more useful than the bound, so it wins), and
+    /// one exactly at the bound (nothing was missed, so nothing is claimed).
+    ///
+    /// **Mutation:** drop the `command_exceeds_scan_bound` arm from `classify`
+    /// and the first case falls back to `medium`; hoist it above the pattern
+    /// check and the second stops naming `rm -rf`.
+    #[test]
+    fn a_command_past_the_scan_bound_fails_closed_and_names_the_bound() {
+        let pad = |extra: usize| "a".repeat(MAX_SCAN_BYTES + extra);
+
+        let past = bash(&format!("echo {}", pad(1)));
+        assert_eq!(past.class, RiskClass::High);
+        assert_eq!(past.matched_pattern.as_deref(), Some(SCAN_BOUND_EXCEEDED));
+
+        // A tail beyond the bound is precisely what cannot be seen, so the
+        // shape the bound exists to refuse is asserted whole.
+        let hidden = bash(&format!("echo {} ; rm -rf /", pad(8 * 1024)));
+        assert_eq!(hidden.class, RiskClass::High);
+        assert_eq!(hidden.matched_pattern.as_deref(), Some(SCAN_BOUND_EXCEEDED));
+
+        // A pattern in the part that WAS read names itself: the bound is the
+        // reason of last resort, not a label that replaces evidence.
+        let visible = bash(&format!("rm -rf /work ; echo {}", pad(1)));
+        assert_eq!(visible.class, RiskClass::High);
+        assert_eq!(visible.matched_pattern.as_deref(), Some("rm -rf"));
+
+        // At the bound nothing is unread, so nothing is claimed.
+        let exactly = format!("echo {}", "a".repeat(MAX_SCAN_BYTES - "echo ".len()));
+        assert_eq!(exactly.len(), MAX_SCAN_BYTES);
+        assert_eq!(bash(&exactly).class, RiskClass::Medium);
+
+        // **And bulk content is not a command, however large.** A diff is never
+        // scanned at all, so its length says nothing about what went unread.
+        let enormous_diff = json!({
+            "path": "/work/hello.txt",
+            "diff": "rm -rf /\n".repeat(32 * 1024),
+        });
+        assert_eq!(
+            classify("Edit", &enormous_diff),
+            RiskAssessment::plain(RiskClass::Medium)
+        );
+    }
+
     #[test]
     fn destructive_deletes_are_high() {
         assert_high("rm -rf /tmp/build");
@@ -790,9 +886,20 @@ mod tests {
         assert_eq!(bash("|||&&&>>><<<```").class, RiskClass::Medium);
         assert_eq!(bash("rm").class, RiskClass::Medium);
         assert_eq!(bash("--").class, RiskClass::Medium);
-        // Multi-byte input must not panic on the scan truncation path.
+        // Multi-byte input must not panic on the scan truncation path. Two of
+        // them: one that fits, which is `medium` because it really was read
+        // whole, and one that does not, which is the bound failing closed —
+        // reaching that verdict is itself the proof that the truncation did not
+        // panic on a character boundary.
+        let fits = "é".repeat(MAX_SCAN_BYTES / 4);
+        assert!(fits.len() < MAX_SCAN_BYTES);
+        assert_eq!(bash(&fits).class, RiskClass::Medium);
         let long = "é".repeat(MAX_SCAN_BYTES);
-        assert_eq!(bash(&long).class, RiskClass::Medium);
+        assert!(long.len() > MAX_SCAN_BYTES);
+        assert_eq!(
+            bash(&long).matched_pattern.as_deref(),
+            Some(SCAN_BOUND_EXCEEDED)
+        );
     }
 
     #[test]

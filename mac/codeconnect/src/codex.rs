@@ -295,6 +295,65 @@ const LAUNCH_SANDBOX: &str = "read-only";
 /// See [`LAUNCH_APPROVAL_POLICY`]. Rendered as the charter's `true`/`false`.
 const LAUNCH_HOOKS_ENABLED: bool = true;
 
+/// The one codex feature CodeConnect pins **off**, and the only launch dimension
+/// carried as a config override rather than as a flag.
+///
+/// `features.request_permissions_tool` exposes a model-callable tool whose approval
+/// arrives as `item/permissions/requestApproval`. What that request asks for is a
+/// permission *profile* — a filesystem and network shape — rather than a yes/no
+/// about one action, so there is no set of buttons a phone could honestly be
+/// offered for it, and the grant is bound to the terminal: a session driven from
+/// the phone would park on a question only the Mac can close. Every other approval
+/// CodeConnect claims is answerable from the phone, and this is the one that would
+/// not be, so it is removed rather than half-supported.
+///
+/// **Measured on the installed codex, which is why the pin is on an argv rather
+/// than a sentence.** `codex features list` reports the feature `under development`
+/// and `false`; an operator `config.toml` carrying `[features]
+/// request_permissions_tool = true` flips it to `true`; and a
+/// `-c features.request_permissions_tool=false` on the same invocation puts it back
+/// to `false`. Since a shipping launch hands both codex processes the operator's own
+/// `CODEX_HOME` (see [`codex_home`]), the config value is the operator's to set —
+/// so the absence is made structural at each `execve` instead of being assumed.
+///
+/// [`path_is_owned`] owns the same key from the other direction, so a caller's own
+/// `-c` (or `--enable`/`--disable`) for it is refused at the terminal with a reason
+/// rather than silently losing to the pin.
+///
+/// # What the pin does not reach: a managed configuration layer
+///
+/// The `-c` above is a command-line override, and codex ranks a MANAGED (MDM /
+/// administrator-pushed) configuration layer ABOVE command-line overrides. An
+/// administrator who pushes `[features] request_permissions_tool = true` through
+/// that layer therefore wins against this pin, and nothing here reads the
+/// EFFECTIVE configuration back to notice: the argv is asserted, the outcome is
+/// not.
+///
+/// **Recorded rather than defended against, and the shape of the exposure is why.**
+/// The actor is above the user's own uid — outside the same-uid boundary every
+/// other guard here is drawn at, where an actor who can push a managed profile can
+/// already replace the binary this launches. And the consequence is degraded but
+/// honest: the family that becomes producible is bound to the terminal, so the
+/// question lands on the Mac's screen and the phone is offered nothing to actuate.
+/// A session driven from the phone parks on it; nothing is granted from the phone
+/// that would not have been.
+///
+/// The hardening, when it is worth its cost, is an EFFECTIVE-CONFIG POSTCHECK at
+/// launch rather than a second override: read the feature back out of the codex the
+/// launch is about to use — the harness already reads `codex features list`, which
+/// is the seam — and refuse the launch with a reason when it does not answer
+/// `false`. That turns a pin on the input into a check on the result, which is the
+/// only form that can survive a layer ranked above the input.
+pub(crate) const PINNED_OFF_FEATURE: &str = "request_permissions_tool";
+
+/// The `-c` value that pins [`PINNED_OFF_FEATURE`] off.
+///
+/// Built from the constant rather than written out, so the key the launch writes
+/// and the key the grammar owns cannot drift apart.
+pub(crate) fn pinned_off_feature_override() -> String {
+    format!("features.{PINNED_OFF_FEATURE}=false")
+}
+
 /// How long the coordinator has to reach a terminal launch outcome.
 ///
 /// 60s, which is what every live gate in this repo runs with, rather than the
@@ -1605,6 +1664,28 @@ pub enum CodexRefusal {
     Unclassifiable { detail: String },
 }
 
+/// The extra clause an owned key earns when "CodeConnect owns it" is true but does
+/// not say what the caller loses by it.
+///
+/// Most owned keys need nothing: `approval_policy` and `sandbox` are visibly the
+/// session's policy, and a reader who reached for one knows what they were reaching
+/// for. The pinned-off feature is different — it is refused not because CodeConnect
+/// set it to something else it prefers, but because the request it would turn on has
+/// nowhere to be answered from, and a bare "we own this" would read as a permission
+/// problem instead of a missing surface.
+///
+/// Matched on the key's last segment so both spellings of the same setting reach it:
+/// `-c` reports the dotted path (`features.request_permissions_tool`) and
+/// `--enable`/`--disable` report the bare feature name.
+fn why_owned(key: &str) -> Option<&'static str> {
+    let leaf = key.rsplit('.').next().unwrap_or(key);
+    (leaf == PINNED_OFF_FEATURE).then_some(
+        "CodeConnect answers approvals from the phone, and this one asks for a \
+         permission profile that only the terminal can grant, so the session is \
+         launched without it",
+    )
+}
+
 impl std::fmt::Display for CodexRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1621,10 +1702,17 @@ impl std::fmt::Display for CodexRefusal {
                 f,
                 "`{flag}` is refused: CodeConnect owns approval and hook-trust policy for the session"
             ),
-            CodexRefusal::OwnedConfigKey { key, via } => write!(
-                f,
-                "`{via} {key}` is refused: `{key}` is a configuration key CodeConnect owns for the session"
-            ),
+            CodexRefusal::OwnedConfigKey { key, via } => match why_owned(key) {
+                Some(because) => write!(
+                    f,
+                    "`{via} {key}` is refused: `{key}` is a configuration key CodeConnect owns \
+                     for the session — {because}"
+                ),
+                None => write!(
+                    f,
+                    "`{via} {key}` is refused: `{key}` is a configuration key CodeConnect owns for the session"
+                ),
+            },
             CodexRefusal::Subcommand { name } => write!(
                 f,
                 "`codex {name}` is a subcommand; `codeconnect codex` supports only the interactive \
@@ -2332,6 +2420,12 @@ fn owned_in_subtree(path: &mut Vec<String>, value: Option<&toml::Value>) -> Opti
 ///     write scope CodeConnect never named in its launch fingerprint — the same
 ///     ownership escape as `-s`/`--sandbox`, wearing a different config key;
 ///   * `features.hooks` (and below) and `features.codex_hooks` — hook enablement;
+///   * `features.request_permissions_tool` — the one feature the launch pins off,
+///     because the request it turns on can only be answered at the terminal. Owned
+///     in BOTH directions on purpose: the launch already pins the value, so this
+///     refusal buys legibility rather than safety — a caller who asks for the tool
+///     is told why they cannot have it instead of watching the pin quietly win.
+///     See [`PINNED_OFF_FEATURE`];
 ///   * `auto_review.policy` — selecting the automatic reviewer;
 ///   * per-app: `apps.<id>.default_tools_approval_mode`,
 ///     `apps.<id>.approvals_reviewer`, `apps.<id>.tools.<tool>.approval_mode`;
@@ -2361,7 +2455,10 @@ fn path_is_owned(path: &[String]) -> bool {
     }
 
     match seg(0) {
-        Some("features") => matches!(seg(1), Some("hooks") | Some("codex_hooks")),
+        Some("features") => {
+            matches!(seg(1), Some("hooks") | Some("codex_hooks"))
+                || seg(1) == Some(PINNED_OFF_FEATURE)
+        }
         Some("auto_review") => seg(1) == Some("policy"),
         Some("apps") if path.len() >= 3 => match (seg(2), path.len()) {
             (Some("default_tools_approval_mode"), 3) => true,
@@ -2380,7 +2477,8 @@ fn path_is_owned(path: &[String]) -> bool {
 
 /// The verdict on an `--enable`/`--disable <FEATURE>` name.
 enum FeatureVerdict {
-    /// A hook feature CodeConnect owns.
+    /// A feature CodeConnect owns: either half of hook enablement, or the one
+    /// feature the launch pins off ([`PINNED_OFF_FEATURE`]).
     Owned,
     /// Not a plain bare feature identifier — quotes, dots, escapes, whitespace,
     /// or anything a bare name never has. Refuse (A7): codex takes only bare
@@ -2398,7 +2496,11 @@ enum FeatureVerdict {
 /// `--enable web_search` are accepted bare; `--enable '"hooks"'` is rejected as an
 /// unknown flag — the quotes are literal, not decoded). So the allowlist is: a
 /// plain bare identifier (`[A-Za-z0-9_-]+`); anything else fails closed; the
-/// bare owned hook features are refused.
+/// bare owned features — both halves of hook enablement and the one the launch
+/// pins off — are refused. `--enable X` and `--disable X` are codex's own
+/// spellings of `-c features.X=true|false`, so they are judged on the same axis
+/// as the `-c` and refused in both directions: what is owned is the setting, not
+/// a direction to move it in.
 fn feature_verdict(feature: &str) -> FeatureVerdict {
     // Validate the RAW, untrimmed value: any leading/trailing/embedded whitespace
     // or newline means it is not a bare identifier, so it fails closed — never
@@ -2410,7 +2512,7 @@ fn feature_verdict(feature: &str) -> FeatureVerdict {
     if !is_bare {
         return FeatureVerdict::Unclassifiable;
     }
-    if matches!(feature, "hooks" | "codex_hooks") {
+    if matches!(feature, "hooks" | "codex_hooks") || feature == PINNED_OFF_FEATURE {
         return FeatureVerdict::Owned;
     }
     FeatureVerdict::Benign
@@ -3874,10 +3976,74 @@ mod tests {
             &["--enable", "hooks"][..],
             &["--disable", "hooks"][..],
             &["--disable", "codex_hooks"][..],
+            // The feature the launch pins off, in every spelling that reaches it.
+            // Both directions: what is owned is the setting, not a direction.
+            &["-c", "features.request_permissions_tool=true"][..],
+            &["-c", "features.request_permissions_tool=false"][..],
+            &["--config", "features={request_permissions_tool=true}"][..],
+            &["-c", "features.\"request_permissions_tool\"=true"][..],
+            &["--enable", "request_permissions_tool"][..],
+            &["--disable", "request_permissions_tool"][..],
         ] {
             assert!(
                 matches!(refuse(parts), CodexRefusal::OwnedConfigKey { .. }),
                 "{parts:?} should be an owned-config-key refusal"
+            );
+        }
+    }
+
+    /// **The refusal that costs the caller a feature says what it costs them.**
+    ///
+    /// Every other owned key is visibly the session's policy: somebody who reached
+    /// for `sandbox` knows what they were reaching for, and "CodeConnect owns this"
+    /// is the whole answer. The pinned-off feature is not like that — nothing about
+    /// the key says the request it turns on has nowhere to be answered from — so the
+    /// bare sentence would read as a permission problem and send the reader looking
+    /// for a way around it. This pins the extra clause, in both spellings that reach
+    /// it, and pins that the ordinary owned keys did NOT grow one.
+    ///
+    /// **Mutation:** return `None` from `why_owned` and the first two go red;
+    /// return the clause for every key and the last one does.
+    #[test]
+    fn the_pinned_off_feature_is_refused_with_the_reason_it_is_pinned() {
+        for parts in [
+            &["-c", "features.request_permissions_tool=true"][..],
+            &["--enable", "request_permissions_tool"][..],
+        ] {
+            let said = refuse(parts).to_string();
+            assert!(
+                said.contains("answers approvals from the phone")
+                    && said.contains("only the terminal can grant"),
+                "{parts:?} must say why the feature is not available: {said}"
+            );
+        }
+        let sandbox = refuse(&["-c", "sandbox=danger-full-access"]).to_string();
+        assert!(
+            !sandbox.contains("answers approvals from the phone"),
+            "a key that speaks for itself gets no extra clause: {sandbox}"
+        );
+    }
+
+    /// **Owning one feature is not owning the namespace it lives in.**
+    ///
+    /// `features.*` is a large table of unrelated switches, and refusing all of it
+    /// would take a launch the grammar has no reason to refuse. The three owned
+    /// names are the two halves of hook enablement and the one the launch pins off;
+    /// everything else forwards.
+    ///
+    /// **Mutation:** widen the `features` arm to `seg(1).is_some()` and these fail.
+    #[test]
+    fn a_feature_the_launch_does_not_own_still_forwards() {
+        for parts in [
+            &["-c", "features.web_search=true"][..],
+            &["--enable", "web_search"][..],
+            // Near neighbours of the pinned name, which are different settings.
+            &["-c", "features.default_mode_request_user_input=true"][..],
+            &["--enable", "exec_permission_approvals"][..],
+        ] {
+            assert!(
+                validate_codex_argv(&argv(parts)).is_ok(),
+                "{parts:?} names no setting CodeConnect owns and must forward"
             );
         }
     }

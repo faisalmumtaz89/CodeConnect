@@ -229,6 +229,52 @@ pub struct PushRegistration {
     pub features: DeviceFeatures,
 }
 
+/// The columns a [`PushRegistration`] is decoded from, in the order
+/// [`push_registration`] reads them.
+///
+/// Shared by the fleet read and the per-device lookup so the two cannot drift:
+/// a column added to one and not the other would be a decode that reads a
+/// different row than it thinks it does.
+const PUSH_TARGET_COLUMNS: &str = "SELECT device_id, push_token, \
+     COALESCE(push_environment, 'sandbox'), push_credential, features, features_epoch \
+     FROM devices";
+
+/// Who may be pushed to at all — the authorization predicate, shared for the
+/// same reason as the columns. A revoked device is excluded here rather than at
+/// a call site, so revocation cannot leak through whichever read forgot it.
+const PUSH_TARGET_ELIGIBLE: &str =
+    "WHERE push_token IS NOT NULL AND push_token <> '' AND revoked_at IS NULL";
+
+/// One row of [`PUSH_TARGET_COLUMNS`], decoded under this run's feature epoch.
+fn push_registration(row: &rusqlite::Row<'_>, epoch: &str) -> rusqlite::Result<PushRegistration> {
+    let features: Option<String> = row.get(4)?;
+    let features_epoch: Option<String> = row.get(5)?;
+    Ok(PushRegistration {
+        device_id: row.get(0)?,
+        token: row.get(1)?,
+        environment: row.get(2)?,
+        // Wrapped the instant it leaves the database, so the raw bearer
+        // exists as a bare `String` only inside this function.
+        credential: row.get::<_, Option<String>>(3)?.map(Redacted::from),
+        // **The column's three states, kept as the two answers they
+        // are** — see [`DeviceFeatures`]. `NULL` is the genuine floor: a
+        // device that has advertised nothing gets Claude, which is what
+        // every phone predating the field has always got. A set that IS
+        // stored and this run cannot vouch for — another process's epoch,
+        // or bytes that will not decode — is not a quieter version of
+        // that; it is a claim this run cannot read, and reading it as
+        // "advertised nothing" would hand a `[Codex]`-only phone back the
+        // Claude doorbells its own claim excluded.
+        features: match features {
+            None => DeviceFeatures::Advertised(Default::default()),
+            Some(json) if features_epoch.as_deref() == Some(epoch) => serde_json::from_str(&json)
+                .map(DeviceFeatures::Advertised)
+                .unwrap_or(DeviceFeatures::Unconfirmable),
+            Some(_) => DeviceFeatures::Unconfirmable,
+        },
+    })
+}
+
 /// What a device's stored feature set authorizes **this run** — the decode of
 /// `devices.features` beside the token it rides with.
 ///
@@ -2659,43 +2705,41 @@ impl Store {
     /// cannot vouch for — not at one that has to be taught to.
     pub fn push_targets(&self, epoch: &str) -> Result<Vec<PushRegistration>> {
         let conn = self.read();
-        let mut stmt = conn.prepare(
-            "SELECT device_id, push_token, COALESCE(push_environment, 'sandbox'), \
-                    push_credential, features, features_epoch
-               FROM devices
-              WHERE push_token IS NOT NULL AND push_token <> '' AND revoked_at IS NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let features: Option<String> = row.get(4)?;
-            let features_epoch: Option<String> = row.get(5)?;
-            Ok(PushRegistration {
-                device_id: row.get(0)?,
-                token: row.get(1)?,
-                environment: row.get(2)?,
-                // Wrapped the instant it leaves the database, so the raw bearer
-                // exists as a bare `String` only inside this closure.
-                credential: row.get::<_, Option<String>>(3)?.map(Redacted::from),
-                // **The column's three states, kept as the two answers they
-                // are** — see [`DeviceFeatures`]. `NULL` is the genuine floor: a
-                // device that has advertised nothing gets Claude, which is what
-                // every phone predating the field has always got. A set that IS
-                // stored and this run cannot vouch for — another process's epoch,
-                // or bytes that will not decode — is not a quieter version of
-                // that; it is a claim this run cannot read, and reading it as
-                // "advertised nothing" would hand a `[Codex]`-only phone back the
-                // Claude doorbells its own claim excluded.
-                features: match features {
-                    None => DeviceFeatures::Advertised(Default::default()),
-                    Some(json) if features_epoch.as_deref() == Some(epoch) => {
-                        serde_json::from_str(&json)
-                            .map(DeviceFeatures::Advertised)
-                            .unwrap_or(DeviceFeatures::Unconfirmable)
-                    }
-                    Some(_) => DeviceFeatures::Unconfirmable,
-                },
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!("{PUSH_TARGET_COLUMNS} {PUSH_TARGET_ELIGIBLE}"))?;
+        let rows = stmt.query_map([], |row| push_registration(row, epoch))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One device's push registration, or `None` when it has none to offer.
+    ///
+    /// **The same question [`Store::push_targets`] answers, asked about one row.**
+    /// The predicate is the same and so is the decode — both come from the
+    /// constants below, so the fan-out's list and this lookup cannot come to
+    /// disagree about who may be pushed to or about what a stored feature set
+    /// means. A device that is revoked, has no token, or does not exist answers
+    /// `None`, which is the same "nothing to vouch for" the fan-out reads as an
+    /// absence from its list.
+    ///
+    /// **Why a second read exists at all.** The authorization re-check before a
+    /// transport attempt is about ONE device id. Answering it out of the fleet
+    /// list would make the cost of a single push proportional to the number of
+    /// registered phones — a whole-table scan per attempt, on the blocking pool,
+    /// with as many attempts in flight as there are devices with work. This is
+    /// the indexed lookup that question deserves. See
+    /// [`crate::push_queue::still_authorized`].
+    pub fn push_target_for(
+        &self,
+        device_id: &str,
+        epoch: &str,
+    ) -> Result<Option<PushRegistration>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                &format!("{PUSH_TARGET_COLUMNS} {PUSH_TARGET_ELIGIBLE} AND device_id = ?1"),
+                params![device_id],
+                |row| push_registration(row, epoch),
+            )
+            .optional()?)
     }
 
     /// The environment this device's registered token lives at, or `None` when
@@ -11884,14 +11928,30 @@ mod tests {
             agents: vec![protocol::agent::AgentKind::Codex],
         })
         .unwrap();
+        // **Both reads, every time.** The fleet list and the per-device lookup
+        // are two statements of one rule, and the second exists so a push
+        // worker need not scan the fleet — so a decode that drifted between
+        // them would be a device authorized differently depending on which
+        // question was asked. Asserting they agree HERE, over the four shapes
+        // below, is what keeps them one rule.
         let features_of = |device: &str| {
-            store
+            let from_fleet = store
                 .push_targets(TEST_FEATURE_EPOCH)
                 .unwrap()
                 .into_iter()
                 .find(|t| t.device_id == device)
                 .expect("the device is registered for push")
-                .features
+                .features;
+            let from_lookup = store
+                .push_target_for(device, TEST_FEATURE_EPOCH)
+                .unwrap()
+                .expect("the per-device lookup finds the same registration")
+                .features;
+            assert_eq!(
+                from_fleet, from_lookup,
+                "{device}: the fleet read and the per-device lookup disagree"
+            );
+            from_fleet
         };
         let codex_kind = protocol::agent::AgentKind::Codex;
 
@@ -11960,6 +12020,49 @@ mod tests {
                  the broadening this split exists to prevent"
             );
         }
+
+        // **And the per-device lookup carries the same ELIGIBILITY predicate, not
+        // only the same decode.** A row the fleet read refuses to offer must be
+        // absent from the lookup too — otherwise the re-check before a transport
+        // attempt would vouch for a phone the fan-out would never have rung.
+        // A device that does not exist is the same answer, for the same reason:
+        // nothing to vouch for.
+        assert!(
+            store
+                .push_target_for("never-paired", TEST_FEATURE_EPOCH)
+                .unwrap()
+                .is_none(),
+            "a device that does not exist has no registration to offer"
+        );
+        store
+            .revoke_device("confirmed", "2026-08-04T00:00:00Z")
+            .unwrap();
+        assert!(
+            store
+                .push_target_for("confirmed", TEST_FEATURE_EPOCH)
+                .unwrap()
+                .is_none(),
+            "a revoked device is refused by the lookup exactly as the fleet read \
+             refuses it; revocation must not survive only in the list"
+        );
+        assert!(
+            store
+                .push_targets(TEST_FEATURE_EPOCH)
+                .unwrap()
+                .iter()
+                .all(|t| t.device_id != "confirmed"),
+            "the premise: the fleet read refuses it too"
+        );
+        store
+            .clear_push_token("silent", "tok-silent", None)
+            .unwrap();
+        assert!(
+            store
+                .push_target_for("silent", TEST_FEATURE_EPOCH)
+                .unwrap()
+                .is_none(),
+            "a device with no token has no registration to offer either"
+        );
     }
 
     /// **The credential is a bearer secret and does not render.**

@@ -488,6 +488,30 @@ enum FrameKind {
     Malformed,
 }
 
+/// What the log says when a request this leg is handed is deliberately not
+/// carded.
+///
+/// A free function so the sentence itself can be asserted: the whole value of
+/// this line is that a person reading a log beside a TUI that is showing a
+/// question finds out why no card appeared, and a sentence nothing checks is
+/// one that can quietly stop saying it.
+///
+/// **The reason is the method's, not this line's.** A named family carries the
+/// account somebody established for it; one that merely has the delivered shape
+/// carries the true thing that can be said about an unrecognised approval. Either
+/// way the line reports an ARRIVAL: it says the request must be answered at the
+/// Mac, never that it was, because nothing on this leg watches the answer.
+fn observe_only_sentence(session: &str, method: &str, params: &Value) -> String {
+    let item = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or("<unnamed>");
+    format!(
+        "codex link for {session}: {method} for item {item} is observed and not carded — {}",
+        crate::codex_approval::observe_only_reason(method)
+    )
+}
+
 fn frame_kind(frame: &Value) -> FrameKind {
     match frame.get("method") {
         None => FrameKind::Response,
@@ -4030,9 +4054,42 @@ impl Connection<'_> {
             _ => {
                 if let Some(family) = crate::codex_approval::Family::of_method(method) {
                     self.note_approval_request(family, frame, params).await;
+                } else if crate::codex_approval::is_observe_only(method) {
+                    self.note_observe_only_request(method, params);
                 }
             }
         }
+    }
+
+    /// **An approval this leg is handed and is not this daemon's to ask.**
+    ///
+    /// It is delivered — the broker binds every `*/requestApproval` and relays
+    /// it, so the frame is really here — and it is not carded. Before this it was
+    /// dropped by the `_` arm above and left no trace, which reads exactly like a
+    /// method nobody had thought about; saying so once is what makes the silence
+    /// deliberate and readable in a log beside the TUI that is showing the
+    /// question.
+    ///
+    /// **Reached by shape, so a family nobody has named still lands here.** The
+    /// broker's delivery rule is the suffix, not a list, and a sibling introduced
+    /// by a later release would otherwise arrive and vanish. It is logged with the
+    /// honest sentence for a request this build does not recognise, which is worth
+    /// more than the exact words for a family somebody thought about — the reader
+    /// who needs it is looking at a terminal asking a question their phone never
+    /// showed them.
+    ///
+    /// **No card, and that is measured.** Every position that could make a real
+    /// app-server ask for a permission profile was driven on a live session
+    /// launched the way CodeConnect launches one, and none does; the feature that
+    /// exposes the tool behind it is one the launcher pins off. So a card, a row,
+    /// a doorbell and an answer path would be machinery for an input this build's
+    /// own sessions cannot produce. See
+    /// [`crate::codex_approval::is_observe_only`].
+    fn note_observe_only_request(&mut self, method: &str, params: &Value) {
+        crate::log_info!(
+            "{}",
+            observe_only_sentence(&self.session.name, method, params)
+        );
     }
 
     /// One request the operator is being asked at the keyboard, mirrored to the
@@ -4573,6 +4630,14 @@ impl Connection<'_> {
     /// card of every abandoned visit open for the life of the connection, with
     /// nothing that would ever look again. Now a failed read leaves the
     /// generation unmarked and the next idle moment retries it.
+    ///
+    /// **What this sweep does not cover, and why nothing was built for it.** The
+    /// crossing this cause was written for — a switch admitted while an approval
+    /// is still unresolved — was driven live on a real app-server from every
+    /// position that could produce it, and none does. This sweep is therefore
+    /// the handler for a generation that moved between visits, which is real,
+    /// and not for a pending approval overtaken by a switch, which is not
+    /// reachable. See [`protocol::ws::ClearCause::Superseded`].
     async fn retire_superseded_cards(&mut self) {
         if self.swept_generation == Some(self.visit.generation) {
             return;
@@ -14038,13 +14103,31 @@ mod tests {
         );
     }
 
-    /// **The permissions family is observed and never carded.**
+    /// **An approval family with no card is observed, named, and never carded.**
     ///
     /// `item/permissions/requestApproval` answers with a permission *profile*,
     /// not a yes/no about one action, so there is no decision for a phone to
-    /// render and no card to raise. It reaches this leg and mints nothing —
-    /// which is what "observed" means here, and is different from a frame the
+    /// render and no card to raise. It reaches this leg — the broker binds and
+    /// relays it, which is asserted on the broker side — and mints nothing,
+    /// which is what "observed" means here and is different from a frame the
     /// link never sees.
+    ///
+    /// **And the declining is said out loud.** It used to fall off the end of the
+    /// dispatch and leave no trace, which reads exactly like a method nobody had
+    /// considered; the sentence is asserted here because a log line nothing checks
+    /// is one that can quietly stop being written.
+    ///
+    /// **Reached by shape, so the same is true of a family nobody has named.**
+    /// The broker delivers by suffix, and a sibling a later release introduces
+    /// arrives here identically. Both are driven below: the named one gets the
+    /// account somebody established, the unnamed one gets the honest sentence for
+    /// a request this build does not recognise — and neither vanishes.
+    ///
+    /// **Mutation:** drop the `is_observe_only` arm from `observe_approval` and
+    /// the card assertions stay green while both frames go back to being
+    /// invisible — which is why the sentences are part of this test. Narrow
+    /// `is_observe_only` back to a list of known methods and only the second
+    /// half goes red.
     #[tokio::test]
     async fn a_permissions_request_is_observed_and_never_carded() {
         let session = SessionKey {
@@ -14063,24 +14146,106 @@ mod tests {
             1,
         );
 
+        // The item id is what this test selects its own line by: the sink is
+        // process-global and every other test in this binary logs into it.
+        const ITEM: &str = "perm-OBSERVED-AND-NOT-CARDED";
+        const FUTURE_ITEM: &str = "future-OBSERVED-AND-NOT-CARDED";
+        // **Schema-valid, not merely method-shaped.** The vendored bundle requires
+        // `cwd` and `permissions` on this request, and a frame missing them is one
+        // the wire cannot deliver — an observer proved against it is proved against
+        // a shape that does not exist. The profile below is the bundle's own:
+        // additional filesystem writes and network access, which is what a
+        // permission escalation asks for and what makes "there is no yes/no here"
+        // visible rather than asserted.
         let profile = json!({
             "id": 0,
             "method": "item/permissions/requestApproval",
             "params": {
                 "threadId": LIFECYCLE_THREAD,
                 "turnId": APPROVAL_TURN,
-                "itemId": "perm-1",
-                "startedAtMs": 1787016966352i64
+                "itemId": ITEM,
+                "cwd": "/work/p-accept",
+                "startedAtMs": 1787016966352i64,
+                "reason": "the sandbox is read-only",
+                "permissions": {
+                    "fileSystem": {
+                        "write": ["/work"],
+                        "entries": [{
+                            "access": "write",
+                            "path": {"type": "path", "path": "/work"}
+                        }]
+                    },
+                    "network": {"enabled": true}
+                }
             }
         });
+        // **And a sibling this build has never heard of, delivered the same way.**
+        // The broker binds by suffix, so a family a later release introduces
+        // arrives on this leg exactly like the one above — and the whole reason
+        // this observer exists is that such a frame must not vanish. It is not in
+        // any list here; only its shape puts it on the record.
+        let future = json!({
+            "id": 1,
+            "method": "item/somethingNew/requestApproval",
+            "params": {
+                "threadId": LIFECYCLE_THREAD,
+                "turnId": APPROVAL_TURN,
+                "itemId": FUTURE_ITEM,
+                "startedAtMs": 1787016966353i64
+            }
+        });
+        crate::log::capture::install();
         conn.observe_notification(&profile).await;
+        conn.observe_notification(&future).await;
+        let captured = crate::log::capture::drain();
+        crate::log::capture::uninstall();
         assert!(open_cards(&daemon, &session.uid).is_empty());
         assert!(approval_requests(&daemon, &session.uid).is_empty());
         assert_eq!(
             conn.filtered, 0,
-            "it was admitted by the filter and then declined by the observer, which \
-             is a different thing from never arriving"
+            "both were admitted by the filter and then declined by the observer, \
+             which is a different thing from never arriving"
         );
+
+        let said = |frame: &Value| {
+            observe_only_sentence(
+                &session.name,
+                frame["method"].as_str().expect("the frame names a method"),
+                &frame["params"],
+            )
+        };
+        let expected = format!(
+            "codex link for cc-1: item/permissions/requestApproval for item {ITEM} is \
+             observed and not carded — it asks for a permission profile rather than a \
+             decision about one action, so there is nothing a card could offer and it \
+             must be answered at the Mac"
+        );
+        assert_eq!(said(&profile), expected);
+        // **"must be answered", never "is answered".** This leg observes the
+        // arrival and nothing else: no answer to it crosses here, so a line
+        // claiming one would be reporting something nobody looked at.
+        assert!(!expected.contains("it is answered at the Mac"));
+
+        let expected_future = format!(
+            "codex link for cc-1: item/somethingNew/requestApproval for item \
+             {FUTURE_ITEM} is observed and not carded — this build has no card for it \
+             — it is an approval family that arrived after the two a phone answers, \
+             so nothing here knows what to offer for it and it must be answered at \
+             the Mac"
+        );
+        assert_eq!(said(&future), expected_future);
+
+        for expected in [&expected, &expected_future] {
+            assert!(
+                captured.iter().any(|line| line.ends_with(expected)),
+                "the observer must SAY it declined, or the frame is invisible again. \
+                 Wanted: {expected}\nCaptured: {:?}",
+                captured
+                    .iter()
+                    .filter(|line| line.contains(ITEM) || line.contains(FUTURE_ITEM))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     /// **A card the observer raised is answered on the Codex path, and that path

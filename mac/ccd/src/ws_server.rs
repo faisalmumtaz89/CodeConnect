@@ -3536,7 +3536,10 @@ mod tests {
     ///
     /// Both halves are the same rule stated twice: the registration succeeds, and
     /// the row it wrote is at the Claude floor — the same row a phone that named
-    /// nothing leaves, because the column is never written at all.
+    /// nothing leaves, because no shipping handler writes the column. The store's
+    /// writer is still there — compiled into every build, called by nothing but
+    /// tests — which is how the fixtures and the rollback captures carry non-NULL
+    /// values; what is gone is any path from the wire to it.
     ///
     /// **Mutation:** make the handler refuse or persist an advertised set and one
     /// of the two assertions fails.

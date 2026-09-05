@@ -1,0 +1,199 @@
+codex 0.153 (`codex --version` reported `codex-cli 0.153.4`) — what the TUI
+calls each decision, and what the wire said the decision was. `tmux capture-pane
+-p -J` against a live `codeconnect codex` session driven by
+`ccd/src/codex_link_live.rs`, in a 200-column window so no option row is
+clipped. The probe file's nanosecond stamp is zeroed length-preservingly and each
+row's trailing padding is trimmed; the text of every row is otherwise exactly
+what the terminal painted.
+
+It exists because one of the words is a function of the offer. The
+`acceptWithExecpolicyAmendment` option names the argv it would whitelist, and two
+separate questions had to be settled about it.
+
+**Which part of the request the label names.** One measurement cannot say:
+`["touch"]` alone — the single-token amendment in `approval-0.153.jsonl` — is
+equally consistent with "the first token", "the whole argv" and "the parsed
+command". Its painted row is section 1 of `approval-switch-panes-0.153.txt`,
+where the command was `touch /tmp/cc-3c-quiesce.….txt` and the row reads only
+`touch`: that row alone refutes "the parsed command". Sections 1 to 3 here
+separate the remaining two: a two-token amendment, a three-token one, and one whose first
+token is an absolute path. The answer is the amendment's own
+`execpolicy_amendment` tokens — not the request's `command` (the `/bin/zsh -lc
+'…'` wrapper the amendment is precisely not about), not `commandActions[0]`, and
+not a basename.
+
+**How those tokens are spelled.** Sections 1 to 3 hold only tokens a shell leaves
+alone, so "joined by spaces" and "escaped, then joined" render identically and
+cannot be told apart. Sections 4 to 6 separate them:
+
+  * a token holding a SPACE is single-quoted (section 4);
+  * a token holding a METACHARACTER is single-quoted (section 5);
+  * an argv that is a `<shell> -lc <script>` wrapper is UNWRAPPED, and the script
+    it carries is printed verbatim — spaces, `$'…'` and all — rather than escaped
+    as one token (section 6).
+
+So the rule is: unwrap a login-shell wrapper to its script; otherwise spell each
+token the way a shell would have to be given it, and join with single spaces.
+
+**And the amendment is not a function of the command.** An earlier run of the same
+six prompts, on the same binary, came back with ONE-token amendments for the first
+five — `["mkdir"]` where this capture has `["mkdir","/tmp/cc-label-a.…"]`,
+`["touch"]` where this one has `["touch","/tmp/… spaced.txt"]` — and the TUI
+painted `mkdir` and `touch` for them, exactly the amendment it was given. So the
+same command text can be offered a narrow amendment on one turn and the whole argv
+on the next. That is the strongest reason the label must be read off the
+amendment body and never re-derived from the request's own `command`: a derivation
+from the command would have been right on one of those runs and wrong on the other,
+with nothing to say which.
+
+**What is not here.** No amendment token carrying a real CR or LF was produced:
+section 6 asked for one and codex passed the `$'…'` through unexpanded, so what
+the argv holds is a backslash and an `n`. A token needing a quote spliced into
+its own quoting was not produced either. `ccd/src/codex_approval.rs` therefore
+renders neither: an unmeasured spelling falls back to the generic words, and a
+token with a line break withdraws the decision altogether, because a permanent
+grant nobody can read the terms of is not one to offer.
+
+Each section shows the request's own wire fields — including the
+`availableDecisions` entry that carries the amendment body the label is derived
+from, which is the value production actually reads — followed by the prompt the
+terminal painted for it. `ccd/src/codex_approval.rs` derives the label that way
+and pins it against this file.
+
+The file-change family's words are unchanged and carry nothing command-specific:
+its request declares no decisions at all, and the TUI offers the same three every
+time (section 7).
+
+===== 1 =====
+asked for                        = mkdir /tmp/cc-label-a.0000000000000000000
+wire command                     = "/bin/zsh -lc 'mkdir /tmp/cc-label-a.0000000000000000000'"
+wire commandActions              = [{"command":"mkdir /tmp/cc-label-a.0000000000000000000","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["mkdir","/tmp/cc-label-a.0000000000000000000"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["mkdir","/tmp/cc-label-a.0000000000000000000"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating the requested directory in /tmp?
+
+  $ mkdir /tmp/cc-label-a.0000000000000000000
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `mkdir /tmp/cc-label-a.0000000000000000000` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 2 =====
+asked for                        = cp /etc/hosts /tmp/cc-label-b.0000000000000000000
+wire command                     = "/bin/zsh -lc 'cp /etc/hosts /tmp/cc-label-b.0000000000000000000'"
+wire commandActions              = [{"command":"cp /etc/hosts /tmp/cc-label-b.0000000000000000000","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["cp","/etc/hosts","/tmp/cc-label-b.0000000000000000000"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["cp","/etc/hosts","/tmp/cc-label-b.0000000000000000000"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow copying /etc/hosts to the requested /tmp path?
+
+  $ cp /etc/hosts /tmp/cc-label-b.0000000000000000000
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `cp /etc/hosts /tmp/cc-label-b.0000000000000000000` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 3 =====
+asked for                        = /bin/mkdir /tmp/cc-label-c.0000000000000000000
+wire command                     = "/bin/zsh -lc '/bin/mkdir /tmp/cc-label-c.0000000000000000000'"
+wire commandActions              = [{"command":"/bin/mkdir /tmp/cc-label-c.0000000000000000000","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["/bin/mkdir","/tmp/cc-label-c.0000000000000000000"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/bin/mkdir","/tmp/cc-label-c.0000000000000000000"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating the requested directory in /tmp?
+
+  $ /bin/mkdir /tmp/cc-label-c.0000000000000000000
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `/bin/mkdir /tmp/cc-label-c.0000000000000000000` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 4 =====
+asked for                        = touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'
+wire command                     = "/bin/zsh -lc \"touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'\""
+wire commandActions              = [{"command":"touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["touch","/tmp/cc-label-d.0000000000000000000 spaced.txt"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","/tmp/cc-label-d.0000000000000000000 spaced.txt"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating the requested file in /tmp?
+
+  $ touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 5 =====
+asked for                        = touch '/tmp/cc-label-e.0000000000000000000;semi.txt'
+wire command                     = "/bin/zsh -lc \"touch '/tmp/cc-label-e.0000000000000000000;semi.txt'\""
+wire commandActions              = [{"command":"touch '/tmp/cc-label-e.0000000000000000000;semi.txt'","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["touch","/tmp/cc-label-e.0000000000000000000;semi.txt"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","/tmp/cc-label-e.0000000000000000000;semi.txt"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating the requested file in /tmp?
+
+  $ touch '/tmp/cc-label-e.0000000000000000000;semi.txt'
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch '/tmp/cc-label-e.0000000000000000000;semi.txt'` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 6 =====
+asked for                        = touch $'/tmp/cc-label-f.0000000000000000000\nnewline.txt'
+wire command                     = "/bin/zsh -lc 'touch $'\"'/tmp/cc-label-f.0000000000000000000\\\\nnewline.txt'\""
+wire commandActions              = [{"command":"touch $'/tmp/cc-label-f.0000000000000000000\\nnewline.txt'","type":"unknown"}]
+wire proposedExecpolicyAmendment = ["/bin/zsh","-lc","touch $'/tmp/cc-label-f.0000000000000000000\\nnewline.txt'"]
+wire availableDecisions          = ["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["/bin/zsh","-lc","touch $'/tmp/cc-label-f.0000000000000000000\\nnewline.txt'"]}},"cancel"]
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating the requested file in /tmp?
+
+  $ touch $'/tmp/cc-label-f.0000000000000000000\nnewline.txt'
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch $'/tmp/cc-label-f.0000000000000000000\nnewline.txt'` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
+
+===== 7 (the other family, whose words name no command) =====
+asked for                        = an edit to /tmp/cc-label-fc.0000000000000000000.txt
+wire proposedExecpolicyAmendment = (this family declares no decisions)
+  Would you like to make the following edits?
+
+  Description: Apply proposed file edits
+  Destination: /tmp/cc-label-fc.0000000000000000000.txt
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for these files (a)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

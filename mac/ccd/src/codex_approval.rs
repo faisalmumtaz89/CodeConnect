@@ -2,10 +2,65 @@
 //!
 //! Two request families reach a subscribed ccd leg and are worth a human's
 //! attention: `item/commandExecution/requestApproval` and
-//! `item/fileChange/requestApproval`. A third,
-//! `item/permissions/requestApproval`, returns a permission *profile* rather
-//! than a yes/no about one action; it is observed and never carded, so it has
-//! no arm here.
+//! `item/fileChange/requestApproval`.
+//!
+//! # The other families, and why none of them is a card
+//!
+//! The vendored bundle declares three more server→client requests, and what
+//! each of them can ever be to this daemon was measured rather than reasoned
+//! about — once against the broker, which decides what a ccd leg is handed at
+//! all, and once against a live app-server, which decides whether the frame
+//! exists. The record is `fixtures/codex/nonphone-families-0.153.txt`.
+//!
+//! * `item/permissions/requestApproval` — **delivered, and not a card.** It ends
+//!   in `/requestApproval`, so the broker binds it and relays it; the grant is
+//!   TUI-only, so a ccd answer to it would forward zero bytes. What it asks for
+//!   is a permission *profile* — a filesystem and network shape — and not a
+//!   yes/no about one action, so it carries no `availableDecisions` and there is
+//!   no set of buttons a phone could be honestly offered. It is named as
+//!   observed and logged where it arrives; see [`is_observe_only`].
+//! * `item/tool/requestUserInput` and `mcpServer/elicitation/request` — **never
+//!   delivered.** Neither ends in `/requestApproval`, so the broker tombstones
+//!   the id and answers the app-server itself with a method-unavailable error
+//!   rather than handing a client an exchange it may not reply to. A ccd leg
+//!   cannot observe what it is never sent, so nothing here could read them even
+//!   if the wire produced them.
+//!
+//! # The permissions producer exists, and the launch removes it
+//!
+//! **It would be false to say nothing produces one.** Codex has a
+//! model-callable permissions tool, and turning it on is a config key away:
+//! measured, `features.request_permissions_tool` reads `false` by default, an
+//! operator `config.toml` setting it reads `true`, and a
+//! `-c features.request_permissions_tool=false` on the argv reads `false`
+//! again. A shipping launch hands the codex processes the operator's own
+//! `CODEX_HOME`, so that key is the operator's to set.
+//!
+//! What is true is that a CodeConnect session is launched without it. The
+//! launcher writes that override onto both spawns and its reserved argv grammar
+//! refuses a caller's own `-c` for the same key, with a message saying why. So
+//! the absence is a property of the launch rather than a hope about defaults —
+//! and on a live session with the pin verified on the running app-server's argv,
+//! driven from five positions that could each produce one (a question put to the
+//! user, a network escalation, a filesystem escalation with the command
+//! approved, the same with it declined, and an MCP form with a real MCP server
+//! connected and a tool on it called), **the app-server emitted none of the
+//! three.** The escalation the model reaches for instead is the command family
+//! itself: it re-asks by running the command, and the approval that arrives is a
+//! `commandExecution` one.
+//!
+//! So no card, row, doorbell or answer path exists for any of them, and building
+//! one would be machinery for an input this build's own sessions cannot produce.
+//!
+//! **Two honest limits on that.** The zero for `requestUserInput` and for
+//! elicitation is a fact about what this model did on these prompts, not a wire
+//! property: nothing structural stops a codex build emitting either, and the
+//! reason they would still not reach a card is the broker's, not the
+//! app-server's. And the broker's refusal of `requestUserInput` has a cost worth
+//! naming: inside a CodeConnect session the model cannot put a question to the
+//! keyboard through that family, because the exchange is answered upstream with
+//! a method-unavailable error rather than delivered to the terminal. That is a
+//! recorded product limitation of running codex behind this broker.
 //!
 //! # The wire wins over the bundle label
 //!
@@ -96,6 +151,65 @@ use serde_json::{Map, Value};
 pub(crate) const COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 /// `item/fileChange/requestApproval` — an edit wants to be written.
 pub(crate) const FILE_CHANGE_METHOD: &str = "item/fileChange/requestApproval";
+/// The ending that makes a server request one the broker will hand to this leg.
+///
+/// The broker binds and relays **any** method with this suffix, named or not, so
+/// this is the shape of everything a subscribed leg can be given.
+pub(crate) const REQUEST_APPROVAL_SUFFIX: &str = "/requestApproval";
+
+/// The requests that reach this leg, are deliberately not carded, and have a
+/// sentence of their own for why.
+///
+/// The list does not decide WHETHER a request is observed — the shape does, see
+/// [`is_observe_only`] — it decides what is said about it. An entry here is a
+/// family somebody looked at and declined; anything a phone could answer belongs
+/// in [`Family`] instead. See this module's header for what was measured.
+const OBSERVE_ONLY_REASONS: &[(&str, &str)] = &[(
+    "item/permissions/requestApproval",
+    "it asks for a permission profile rather than a decision about one action, so \
+     there is nothing a card could offer and it must be answered at the Mac",
+)];
+
+/// Is this a request this leg is handed and this daemon does not card?
+///
+/// **Shape, not membership, and that is the whole point.** The broker delivers
+/// every `*/requestApproval` it sees, including one this build has never heard
+/// of, so a list-shaped test would send a future sibling down the dispatch's
+/// unmatched arm — where it is dropped without a trace, which is precisely the
+/// silence this observer exists to end. A method with the right shape and no
+/// [`Family`] is therefore observed whether it is named below or not; being
+/// named only changes the sentence.
+///
+/// **A residual, recorded where it belongs rather than fixed here.** The broker
+/// binds these to the terminal, so the exchange the app-server opened is one only
+/// a TUI leg can close. If the TUI leg goes while a ccd leg is still subscribed,
+/// nothing left can answer, and the request can stay pending upstream until the
+/// host tears the session down. That is the broker's existing terminal-only
+/// semantics, not something this observer introduces or could repair — a card
+/// here would not close it either, since a phone answer to a terminal-only grant
+/// forwards zero bytes.
+pub(crate) fn is_observe_only(method: &str) -> bool {
+    method.ends_with(REQUEST_APPROVAL_SUFFIX) && Family::of_method(method).is_none()
+}
+
+/// Why this particular request is not carded.
+///
+/// A named family gets the reason somebody established for it. An unnamed one
+/// gets the true thing that can be said without having looked at it: this build
+/// does not know what to offer for it. Both sentences say the request must be
+/// answered at the Mac, because both are true of a request nothing here answers
+/// — and neither says it *was* answered there, which this leg cannot observe.
+pub(crate) fn observe_only_reason(method: &str) -> &'static str {
+    OBSERVE_ONLY_REASONS
+        .iter()
+        .find(|(known, _)| *known == method)
+        .map(|(_, why)| *why)
+        .unwrap_or(
+            "this build has no card for it — it is an approval family that arrived \
+             after the two a phone answers, so nothing here knows what to offer for \
+             it and it must be answered at the Mac",
+        )
+}
 
 /// How much of one command may ride in a card.
 ///
@@ -129,6 +243,18 @@ const MAX_REASON_BYTES: usize = 4 * 1024;
 /// The only `environmentId` any capture has ever carried, and therefore the only
 /// one a card may describe. See the field rulings in this module's header.
 const LOCAL_ENVIRONMENT: &str = "local";
+/// The one decision whose words name what it would grant rather than what it
+/// does. See [`Family::label_for`].
+const AMENDMENT_DECISION: &str = "acceptWithExecpolicyAmendment";
+/// The key the amendment's own body carries its argv under.
+const AMENDMENT_ARGV: &str = "execpolicy_amendment";
+/// How much of that argv the label may print.
+///
+/// The whole of it is already on the card twice — in the option's `payload` and
+/// in `proposed_amendment` — and both are hashed, so a label cut here hides
+/// nothing the hash does not cover and nothing the phone cannot read in full.
+/// This bounds only the sentence a person skims.
+const MAX_LABEL_ARGV_BYTES: usize = 512;
 
 /// Which request family this is.
 ///
@@ -222,12 +348,232 @@ impl Family {
         }
     }
 
-    fn label_for(self, id: &str) -> Option<&'static str> {
-        self.labels()
+    /// The words this build puts on one decision, given the body the wire
+    /// attached to it.
+    ///
+    /// **Most decisions are named by the table; one is named by what it would
+    /// grant.** The TUI renders `acceptWithExecpolicyAmendment` as *"Yes, and
+    /// don't ask again for commands that start with `<argv>`"*, where `<argv>`
+    /// is the amendment's own tokens — never the `command` the request carries,
+    /// which is the `/bin/zsh -lc '…'` wrapper the amendment is precisely *not*
+    /// about, and never argv[0] alone or its basename. How those tokens are
+    /// spelled is [`amendment_words`]'s subject, and it was measured rather than
+    /// assumed: a shell-safe token is printed bare, one a shell would have to
+    /// quote is quoted, and a login-shell wrapper is unwrapped to the script it
+    /// carries.
+    ///
+    /// A generic label here would be a card that says less than the screen
+    /// beside it: two requests offering the same decision id are two different
+    /// offers, and "don't ask again for this command" does not say which.
+    ///
+    /// **The fallback is the table, not a guess**, and for one shape there is no
+    /// decision at all. An amendment with no argv, an empty one, one holding
+    /// anything but strings, or one spelled in a way no pane has shown gets the
+    /// generic words, which are true of any amendment. One whose tokens carry a
+    /// line break gets no option: see [`amendment_words`].
+    fn label_for(self, id: &str, payload: Option<&Value>) -> Option<String> {
+        let generic = self
+            .labels()
             .iter()
             .find(|(known, _)| *known == id)
-            .map(|(_, label)| *label)
+            .map(|(_, label)| *label)?;
+        if id != AMENDMENT_DECISION {
+            return Some(generic.to_string());
+        }
+        match amendment_words(payload) {
+            AmendmentWords::Naming(argv) => Some(format!(
+                "Yes, and don't ask again for commands that start with `{}`",
+                elided(&argv, MAX_LABEL_ARGV_BYTES)
+            )),
+            AmendmentWords::Generic => Some(generic.to_string()),
+            AmendmentWords::Withhold => None,
+        }
     }
+}
+
+/// What this build can honestly put on the amendment decision.
+#[derive(Debug, PartialEq)]
+enum AmendmentWords {
+    /// The argv the terminal names, spelled the way the terminal spells it.
+    Naming(String),
+    /// A shape no measurement covers: say the generic thing, which is true of
+    /// every amendment, rather than a specific thing that might not be.
+    Generic,
+    /// Do not offer this decision at all. See [`amendment_words`].
+    Withhold,
+}
+
+/// The tokens a shell leaves alone, beyond letters and digits.
+///
+/// Every token in every measured amendment falls inside this set — program names
+/// and absolute paths — and every token the terminal was seen to QUOTE falls
+/// outside it. It is the ordinary shell-safe set, not a set invented here.
+const UNQUOTED_TOKEN_CHARS: &str = "_@%+=:,./-";
+
+/// The wrapper flag whose unwrapping was measured.
+const MEASURED_WRAPPER_FLAG: &str = "-lc";
+/// The wrapper shell whose unwrapping was measured.
+const MEASURED_WRAPPER_SHELL: &str = "zsh";
+/// Names that make a token a shell rather than a program being whitelisted.
+const SHELL_NAMES: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// How the terminal spells the argv an `acceptWithExecpolicyAmendment` would
+/// whitelist.
+///
+/// **Two rules, both read off panes rather than reasoned about.** Driven live
+/// against prompts written so that the candidate derivations disagree:
+///
+/// * `["mkdir", "/tmp/…"]`, `["cp", "/etc/hosts", "/tmp/…"]` and
+///   `["/bin/mkdir", "/tmp/…"]` render as their tokens joined by single spaces,
+///   argv[0] kept verbatim rather than reduced to a basename.
+/// * `["touch", "/tmp/… spaced.txt"]` renders as
+///   ``touch '/tmp/… spaced.txt'`` and `["touch", "/tmp/…;semi.txt"]` as
+///   ``touch '/tmp/…;semi.txt'`` — so the join is over SHELL-ESCAPED tokens, and
+///   the earlier samples agreed with a plain join only because every token in
+///   them was one a shell leaves alone.
+/// * `["/bin/zsh", "-lc", "touch $'…'"]` renders as ``touch $'…'`` — the login
+///   shell wrapper is stripped and the script it carries is printed verbatim,
+///   spaces and all, rather than escaped as one token.
+///
+/// **Everything outside that is refused rather than guessed**, because a label
+/// is a claim about what the Mac's screen says and a wrong one is worse than a
+/// vague one:
+///
+/// * an argv that is wrapper-SHAPED but not the measured wrapper — another
+///   shell, another flag, a different token count — takes the generic words. It
+///   is not joined, because a build that printed `/bin/bash -lc 'touch x'` beside
+///   a terminal showing `touch x` would be confidently wrong.
+/// * a token needing more than a plain single-quote wrap (one that contains a
+///   quote of its own, or an empty one) takes the generic words: the splice a
+///   shell needs there was never measured.
+/// * the measured wrapper around a script that is empty or nothing but
+///   whitespace takes the generic words as well. The script is printed
+///   verbatim rather than spelled token by token, so it does not meet the
+///   empty-token rule above on its own, and a label naming nothing would offer
+///   a permanent grant described by an empty pair of backticks.
+/// * a token carrying a CR or LF makes the whole decision **disappear**. This is
+///   the one option on the card that outlives the request — it whitelists a
+///   command shape for the rest of the session — and its words are the only
+///   account of what it would whitelist. A token that cannot be shown on one row
+///   cannot be described, and a permanent grant nobody can read the terms of is
+///   not one this card will offer.
+fn amendment_words(payload: Option<&Value>) -> AmendmentWords {
+    let Some(tokens) = payload
+        .and_then(|body| body.get(AMENDMENT_ARGV))
+        .and_then(Value::as_array)
+    else {
+        return AmendmentWords::Generic;
+    };
+    let mut argv: Vec<&str> = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        match token.as_str() {
+            Some(token) => argv.push(token),
+            None => return AmendmentWords::Generic,
+        }
+    }
+    if argv.is_empty() {
+        return AmendmentWords::Generic;
+    }
+    if argv.iter().any(|token| token.contains(['\r', '\n'])) {
+        return AmendmentWords::Withhold;
+    }
+    match wrapper(&argv) {
+        // **The unwrapped script has to name something.** It is printed
+        // verbatim rather than spelled token by token, so it never reaches the
+        // empty-token refusal below — and the measured wrapper around an empty
+        // or blank script is wire-legal, because the schema constrains an
+        // amendment's elements no further than "string". Printed, it would put
+        // an empty pair of backticks on the one option that outlives the
+        // request. Nothing to name is not a spelling; it takes the generic
+        // words, on the same terms as every other shape no pane has shown.
+        Wrapper::Measured(script) if !script.trim().is_empty() => {
+            return AmendmentWords::Naming(script.to_string())
+        }
+        Wrapper::Measured(_) | Wrapper::Unmeasured => return AmendmentWords::Generic,
+        Wrapper::None => {}
+    }
+    let mut out = String::new();
+    for token in &argv {
+        let Some(spelled) = shell_spelling(token) else {
+            return AmendmentWords::Generic;
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&spelled);
+    }
+    AmendmentWords::Naming(out)
+}
+
+/// Whether an amendment argv is a login-shell wrapper around one script.
+enum Wrapper<'a> {
+    /// The measured shape: the script it carries, printed as it stands.
+    Measured(&'a str),
+    /// A wrapper this build has not seen rendered.
+    Unmeasured,
+    /// Not a wrapper: a program and its arguments.
+    None,
+}
+
+/// Classify an amendment argv as a wrapper or not.
+///
+/// A token is a shell when its last path segment is one — `/bin/zsh` and `zsh`
+/// are the same program, and the measured wrapper carries the absolute form.
+fn wrapper<'a>(argv: &[&'a str]) -> Wrapper<'a> {
+    let basename = |token: &str| token.rsplit('/').next().unwrap_or(token).to_string();
+    if !argv
+        .first()
+        .is_some_and(|first| SHELL_NAMES.contains(&basename(first).as_str()))
+    {
+        return Wrapper::None;
+    }
+    match argv {
+        [shell, flag, script]
+            if *flag == MEASURED_WRAPPER_FLAG && basename(shell) == MEASURED_WRAPPER_SHELL =>
+        {
+            Wrapper::Measured(script)
+        }
+        _ => Wrapper::Unmeasured,
+    }
+}
+
+/// One token the way the terminal spells it, or `None` for a spelling no
+/// measurement covers.
+///
+/// Bare when a shell would leave it alone; wrapped in single quotes otherwise —
+/// both measured. A token holding a quote of its own would need the splice
+/// (`'\''`) that no pane here has shown, and an empty token likewise, so those
+/// are refused instead.
+fn shell_spelling(token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    if token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || UNQUOTED_TOKEN_CHARS.contains(c))
+    {
+        return Some(token.to_string());
+    }
+    if token.contains('\'') || token.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!("'{token}'"))
+}
+
+/// Cut on a character boundary and say so with an ellipsis, nothing more.
+///
+/// Unlike [`bounded`], this needs no digest: what it cuts is a projection of a
+/// value that is already on the card whole and already hashed, so the hash
+/// still commits to every byte and the phone can still read all of them.
+fn elided(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// One decision a human is being offered.
@@ -238,7 +584,12 @@ pub(crate) struct Choice {
     /// what an answer names, and it is deliberately *not* the whole decision —
     /// see `payload`.
     pub(crate) id: String,
-    pub(crate) label: &'static str,
+    /// The words a person reads, as the TUI renders them.
+    ///
+    /// Owned rather than borrowed from the table, because one of them is a
+    /// function of the offer: the amendment decision names the argv it would
+    /// whitelist. See [`Family::label_for`].
+    pub(crate) label: String,
     /// The object decision's own body, verbatim off the wire.
     ///
     /// **Carried opaquely and never re-derived.** An
@@ -257,7 +608,7 @@ impl Choice {
     fn to_json(&self) -> Value {
         let mut out = Map::new();
         out.insert("id".into(), Value::String(self.id.clone()));
-        out.insert("label".into(), Value::String(self.label.into()));
+        out.insert("label".into(), Value::String(self.label.clone()));
         if let Some(payload) = &self.payload {
             out.insert("payload".into(), payload.clone());
         }
@@ -383,12 +734,24 @@ fn non_empty(params: &Value, key: &'static str) -> Result<String, Refusal> {
     }
 }
 
-/// A nullable string field: absent, `null` and `""` are all "not said".
+/// A nullable string field: absent, `null`, `""` and whitespace are all "not
+/// said".
+///
+/// **Whitespace counts as nothing because these fields are read by a person.**
+/// The card puts `command`, `cwd` and `reason` in front of somebody deciding
+/// whether to allow something, and a `command` of `" \t "` renders as a blank
+/// line — a card asking "approve this?" about nothing at all, which is worse
+/// than no card. The value that survives is the wire's own, untrimmed: what is
+/// judged here is whether anything was said, not how it was spelled.
+///
+/// The required identifiers go through [`non_empty`] instead, and deliberately
+/// keep the narrower test: an id is matched, never read, so its shape is not
+/// this question's business.
 fn optional(params: &Value, key: &str) -> Option<String> {
     params
         .get(key)
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
 }
 
@@ -485,7 +848,7 @@ fn choices(family: Family, params: &Value) -> Vec<Choice> {
             .iter()
             .map(|(id, label)| Choice {
                 id: (*id).to_string(),
-                label,
+                label: (*label).to_string(),
                 payload: None,
             })
             .collect(),
@@ -497,9 +860,11 @@ fn choices(family: Family, params: &Value) -> Vec<Choice> {
                     .iter()
                     .filter_map(decision)
                     .filter_map(|(id, payload)| {
-                        family
-                            .label_for(&id)
-                            .map(|label| Choice { id, label, payload })
+                        family.label_for(&id, payload.as_ref()).map(|label| Choice {
+                            id,
+                            label,
+                            payload,
+                        })
                     })
                     .collect()
             })
@@ -724,9 +1089,12 @@ impl Approval {
             Context::Command { command, .. } => {
                 serde_json::json!({ "command": command })
             }
-            // No `command` key, so the classifier collects the string values —
-            // the paths and the diffs — and those are already whole in the
-            // context.
+            // No `command` key, so the classifier collects the string values it
+            // does not treat as bulk content — the paths, and not the diffs:
+            // `diff` is on `risk`'s bulk-content list and is skipped, because a
+            // patch whose body happens to contain `rm -rf` is a file being
+            // written rather than a disk being erased. What it does read is
+            // already whole in the context.
             Context::FileChange { changes, .. } => {
                 serde_json::json!({ "changes": changes })
             }
@@ -758,9 +1126,21 @@ impl Approval {
             // half sits past that was classified on its benign prefix —
             // measured: `echo <8 KiB> ; rm -rf /` came back `Medium` while the
             // bare `rm -rf /` came back `High`. What the classifier must read is
-            // what would run. Its own `MAX_SCAN_BYTES` still stops the scan at
-            // 16 KiB, which is the same protocol-level bound a 16 KiB Claude
-            // `Bash` command meets, and is not this module's to move.
+            // what would run. Its own `MAX_SCAN_BYTES` still stops the scan, and
+            // a command longer than that is `high` for that reason alone —
+            // `protocol::risk::SCAN_BOUND_EXCEEDED` — so the bound cuts what is
+            // read without ever making an unread tail look clean.
+            //
+            // **A path outside this session's workspace is not a signal here,
+            // and that is the design rather than a gap.** The classifier knows
+            // shell patterns, not policy: it has no idea where this session may
+            // write, so a `cat /etc/passwd` and a `cat ./notes` are the same
+            // `medium`. What bounds where a command can actually reach is the
+            // sandbox CodeConnect pins on the launch; what a person is being
+            // asked is this approval. A lexical hint that started guessing at
+            // policy would be wrong in both directions — loud about a read the
+            // sandbox already permits, silent about a write inside the workspace
+            // that destroys a week of work.
             risk: Some(protocol::risk::classify(tool_name, &self.classified())),
             tool_name: tool_name.to_string(),
             tool_input,
@@ -851,9 +1231,9 @@ mod tests {
     /// proposed.
     ///
     /// **Mutation:** make `choices` return `family.labels()` for
-    /// `Family::Command` too and the payload assertion goes red — the wire's
-    /// amendment argv is gone, and with it the only thing that makes
-    /// "don't ask again for this command" mean one specific command.
+    /// `Family::Command` too and both the label and the payload assertions go
+    /// red — the wire's amendment argv is gone, and with it the only thing that
+    /// makes "don't ask again" name one specific command.
     #[test]
     fn a_command_reads_its_options_off_the_wire_and_keeps_the_amendment_whole() {
         let approval = Approval::read(Family::Command, &command_params(), None).unwrap();
@@ -867,7 +1247,9 @@ mod tests {
         );
         assert_eq!(
             approval.choices[1].label,
-            "Yes, and don't ask again for this command"
+            "Yes, and don't ask again for commands that start with `touch marker.txt`",
+            "the words the TUI puts on this offer, which name the argv it would \
+             whitelist rather than describing it generically"
         );
         assert_eq!(
             approval.choices[1].payload,
@@ -901,7 +1283,7 @@ mod tests {
             approval
                 .choices
                 .iter()
-                .map(|c| (c.id.as_str(), c.label))
+                .map(|c| (c.id.as_str(), c.label.as_str()))
                 .collect::<Vec<_>>(),
             [
                 ("accept", "Yes, proceed"),
@@ -916,6 +1298,261 @@ mod tests {
             approval.choices.iter().all(|c| c.payload.is_none()),
             "no decision in this family carries a body"
         );
+    }
+
+    /// **The words on the card are the words on the screen, pinned against the
+    /// screen.**
+    ///
+    /// The option labels are daemon-owned because the wire carries none, which
+    /// makes them the one part of a card that can drift from what the Mac shows
+    /// without anything failing. One of them varies with the offer, and it
+    /// varies in two ways a single pane could not separate — which part of the
+    /// request it names, and how those tokens are spelled — so this reads seven
+    /// captured prompts and requires production's own [`choices`] to reproduce
+    /// the rows the terminal painted for each.
+    ///
+    /// **The derivation runs off `availableDecisions`, which is what production
+    /// reads.** The top-level `proposedExecpolicyAmendment` carries the same
+    /// argv today, and a test that reconstructed the offer from it would pass
+    /// while the label was derived from a field the card never sees.
+    ///
+    /// **Mutation:** derive the label from `command` (or from its first token,
+    /// or from `commandActions`) and every command section goes red, each naming
+    /// the row it failed to reproduce; drop the shell quoting and sections four
+    /// and five go red; drop the wrapper unwrapping and section six does.
+    #[test]
+    fn the_option_labels_are_the_ones_the_tui_paints() {
+        const PANES: &str =
+            include_str!("../../../fixtures/codex/approval-amendment-labels-0.153.txt");
+
+        // Each captured section is the request's wire fields followed by the
+        // rows it painted. A command section names its `availableDecisions`; the
+        // file-change section declares none, which is the point of it.
+        let mut sections: Vec<(Option<Value>, Vec<String>)> = Vec::new();
+        let mut decisions: Option<Value> = None;
+        let mut rows: Vec<String> = Vec::new();
+        for line in PANES.lines() {
+            if let Some(offered) = line.strip_prefix("wire availableDecisions          = ") {
+                decisions = serde_json::from_str(offered.trim()).ok();
+            }
+            // The selection marker rides the highlighted row.
+            let row = line.trim().trim_start_matches(['\u{203a}', ' ']);
+            for ordinal in ["1. ", "2. ", "3. "] {
+                let Some(text) = row.strip_prefix(ordinal) else {
+                    continue;
+                };
+                // The hotkey the TUI appends: `(y)`, `(p)`, `(a)`, `(esc)`.
+                let text = match text.rfind(" (") {
+                    Some(open) if text.ends_with(')') => &text[..open],
+                    _ => text,
+                };
+                rows.push(text.to_string());
+                if ordinal == "3. " {
+                    sections.push((decisions.take(), std::mem::take(&mut rows)));
+                }
+            }
+        }
+        assert_eq!(
+            sections.len(),
+            7,
+            "seven captured prompts, three option rows each"
+        );
+        assert_eq!(
+            sections.iter().filter(|(d, _)| d.is_none()).count(),
+            1,
+            "exactly one of them is the family that declares no decisions"
+        );
+
+        for (index, (decisions, painted)) in sections.into_iter().enumerate() {
+            let (family, params) = match decisions {
+                Some(offered) => (Family::Command, json!({ "availableDecisions": offered })),
+                None => (Family::FileChange, json!({})),
+            };
+            let derived: Vec<String> = choices(family, &params)
+                .into_iter()
+                .map(|choice| choice.label)
+                .collect();
+            assert_eq!(
+                derived,
+                painted,
+                "section {} of the capture: the card must say what the screen says",
+                index + 1
+            );
+        }
+
+        // **And the fourth discriminator, read from the capture rather than
+        // written out here.** The committed wire capture holds a single-token
+        // amendment, `["touch"]`, and its painted row is in
+        // `approval-switch-panes-0.153.txt` — where the command was
+        // `touch /tmp/cc-3c-quiesce….txt` and the row says only `touch`. That
+        // one row is what refutes "the label is the parsed command", and taking
+        // it from the file rather than from a literal is what keeps the
+        // refutation tied to its evidence.
+        const SWITCH_PANES: &str =
+            include_str!("../../../fixtures/codex/approval-switch-panes-0.153.txt");
+        let painted_amendment_row = SWITCH_PANES
+            .lines()
+            .find_map(|line| {
+                let row = line.trim().trim_start_matches(['\u{203a}', ' ']);
+                let text = row.strip_prefix("2. ")?;
+                Some(match text.rfind(" (") {
+                    Some(open) if text.ends_with(')') => &text[..open],
+                    _ => text,
+                })
+            })
+            .expect("the capture paints an amendment row");
+        assert_eq!(
+            Family::Command
+                .label_for(
+                    AMENDMENT_DECISION,
+                    Some(&json!({AMENDMENT_ARGV: ["touch"]}))
+                )
+                .unwrap(),
+            painted_amendment_row
+        );
+    }
+
+    /// **A spelling no pane has shown is not invented, and one nobody could read
+    /// is not offered.**
+    ///
+    /// Specialising the label requires an argv this build knows how to spell.
+    /// Three outcomes, and the difference between them is the whole point:
+    ///
+    /// * a body with no argv, an empty one, or one holding something that is not
+    ///   a string gets the generic words — true of any amendment;
+    /// * an argv this build cannot spell — a token carrying a quote of its own,
+    ///   an empty token, or a wrapper that is not the measured one — gets the
+    ///   generic words too, rather than a guess a screen would contradict;
+    /// * an argv whose tokens carry a line break gets NO DECISION. It is the one
+    ///   option that outlives the request, and its words are the only account of
+    ///   what it would permanently whitelist.
+    ///
+    /// **Mutation:** make `amendment_words` fall back to `format!("{payload}")`
+    /// and the card starts printing raw JSON at a person; return `Generic`
+    /// instead of `Withhold` and the line-break amendment becomes a permanent
+    /// grant described by a row that cannot hold it.
+    #[test]
+    fn an_unspellable_amendment_falls_back_and_an_unreadable_one_is_not_offered() {
+        let generic = "Yes, and don't ask again for this command";
+        let words = |argv: Value| {
+            Family::Command.label_for(AMENDMENT_DECISION, Some(&json!({ AMENDMENT_ARGV: argv })))
+        };
+
+        for body in [
+            json!({}),
+            json!({ AMENDMENT_ARGV: [] }),
+            json!({ AMENDMENT_ARGV: ["ok", 7] }),
+            json!({ AMENDMENT_ARGV: "touch" }),
+            json!({ "some_other_amendment": ["touch"] }),
+        ] {
+            assert_eq!(
+                Family::Command
+                    .label_for(AMENDMENT_DECISION, Some(&body))
+                    .unwrap(),
+                generic,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            Family::Command.label_for(AMENDMENT_DECISION, None).unwrap(),
+            generic
+        );
+
+        // Spellings no pane has shown.
+        for unspellable in [
+            // A quote inside a token needs a splice into its own quoting.
+            json!(["touch", "/tmp/it's here.txt"]),
+            // An empty token has a spelling (`''`) that was never measured.
+            json!(["touch", ""]),
+            // Wrapper-shaped, but not the wrapper that was measured: another
+            // shell, another flag, another token count.
+            json!(["/bin/bash", "-lc", "touch /tmp/x"]),
+            json!(["/bin/zsh", "-c", "touch /tmp/x"]),
+            json!(["/bin/zsh", "-lc", "touch /tmp/x", "extra"]),
+            json!(["zsh"]),
+            // The measured wrapper around NOTHING. The schema constrains
+            // amendment elements no further than "string", so this argv is
+            // wire-legal, and an unwrapped script with no words in it names no
+            // command — a label saying "commands that start with ``" describes
+            // a permanent grant by showing an empty pair of backticks.
+            json!(["/bin/zsh", "-lc", ""]),
+            json!(["/bin/zsh", "-lc", "   "]),
+            json!(["/bin/zsh", "-lc", "\t"]),
+        ] {
+            assert_eq!(
+                words(unspellable.clone()).as_deref(),
+                Some(generic),
+                "{unspellable} is a spelling no measurement covers"
+            );
+        }
+
+        // The measured spellings, so the fallbacks above are read against
+        // something that does work rather than against a function that always
+        // falls back.
+        for (argv, expected) in [
+            (json!(["mkdir", "/tmp/a"]), "mkdir /tmp/a"),
+            (json!(["/bin/mkdir", "/tmp/a"]), "/bin/mkdir /tmp/a"),
+            (json!(["touch", "/tmp/a b.txt"]), "touch '/tmp/a b.txt'"),
+            (json!(["touch", "/tmp/a;b.txt"]), "touch '/tmp/a;b.txt'"),
+            (
+                json!(["/bin/zsh", "-lc", "touch /tmp/a b"]),
+                "touch /tmp/a b",
+            ),
+        ] {
+            assert_eq!(
+                words(argv.clone()).as_deref(),
+                Some(
+                    format!("Yes, and don't ask again for commands that start with `{expected}`")
+                        .as_str()
+                ),
+                "{argv}"
+            );
+        }
+
+        // A line break withdraws the decision rather than mis-describing it.
+        for unreadable in [
+            json!(["touch", "/tmp/a\nb.txt"]),
+            json!(["touch", "/tmp/a\rb.txt"]),
+            json!(["/bin/zsh", "-lc", "touch a\nrm -rf /"]),
+        ] {
+            assert_eq!(
+                words(unreadable.clone()),
+                None,
+                "{unreadable} cannot be described on one row, so it is not offered"
+            );
+        }
+        // And the card really loses the option, not just its words.
+        let offered = choices(
+            Family::Command,
+            &json!({"availableDecisions": [
+                "accept",
+                {"acceptWithExecpolicyAmendment": {AMENDMENT_ARGV: ["touch", "/tmp/a\nb"]}},
+                "cancel",
+            ]}),
+        );
+        assert_eq!(
+            offered.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["accept", "cancel"]
+        );
+
+        // A pathological argv is cut rather than printed whole, and the cut
+        // lands on a character boundary. Nothing is hidden by it: the argv is
+        // on the card twice over, in the option's own payload and in
+        // `proposed_amendment`, and both are inside the hash. This is the one
+        // place the label is deliberately NOT what the terminal paints — a row
+        // is not a place to read half a kilobyte — so it is pinned separately
+        // from the pane comparison above rather than folded into it.
+        let long = json!({ AMENDMENT_ARGV: ["e".repeat(MAX_LABEL_ARGV_BYTES + 64)] });
+        let label = Family::Command
+            .label_for(AMENDMENT_DECISION, Some(&long))
+            .unwrap();
+        assert!(label.contains('\u{2026}') && label.len() < MAX_LABEL_ARGV_BYTES + 128);
+        // On a character boundary, with multi-byte text.
+        let wide = json!({ AMENDMENT_ARGV: ["\u{e9}".repeat(MAX_LABEL_ARGV_BYTES)] });
+        let label = Family::Command
+            .label_for(AMENDMENT_DECISION, Some(&wide))
+            .unwrap();
+        assert!(label.contains('\u{2026}') && label.len() < MAX_LABEL_ARGV_BYTES + 128);
     }
 
     /// **The content rides the preceding `item/started`, and without it there
@@ -1430,6 +2067,53 @@ mod tests {
             assert_eq!(Family::of_method(other), None);
         }
 
+        // **And an approval with no card is observed, named or not.** A frame
+        // that falls off the end of the dispatch reads in a log exactly like one
+        // nobody has considered; this is what keeps the two apart. The test is
+        // the SHAPE the broker delivers by, so a sibling this build has never
+        // heard of is observed too — being named only picks the sentence.
+        assert!(is_observe_only("item/permissions/requestApproval"));
+        assert!(
+            is_observe_only("some/future/requestApproval"),
+            "the broker binds every request with this suffix, so one nobody has \
+             named still arrives here — and a list-shaped test would drop it"
+        );
+        assert_ne!(
+            observe_only_reason("item/permissions/requestApproval"),
+            observe_only_reason("some/future/requestApproval"),
+            "a family somebody looked at says why; one nobody has says so"
+        );
+        for reason in [
+            observe_only_reason("item/permissions/requestApproval"),
+            observe_only_reason("some/future/requestApproval"),
+        ] {
+            assert!(
+                reason.contains("must be answered at the Mac"),
+                "an arrival is all this leg sees, so the sentence may not claim an \
+                 answer it never watched: {reason}"
+            );
+        }
+        // The other two families the bundle declares do not have the delivered
+        // shape: the broker answers them upstream, so nothing here can receive
+        // one and an opinion about them would describe a frame this code cannot
+        // see.
+        for delivered_to_nobody in [
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+        ] {
+            assert!(
+                !is_observe_only(delivered_to_nobody),
+                "{delivered_to_nobody} never reaches this leg, so it is not this \
+                 module's to declare an opinion about"
+            );
+        }
+        for carded in [COMMAND_METHOD, FILE_CHANGE_METHOD] {
+            assert!(
+                !is_observe_only(carded),
+                "a family with a card is not an observe-only one"
+            );
+        }
+
         // **And `of_item_type` is the exact inverse of `as_str`**, which is what
         // lets an item's terminal be matched against a card's family without a
         // second vocabulary. The item types a turn is mostly made of retire
@@ -1442,6 +2126,312 @@ mod tests {
             assert_eq!(Family::of_item_type(other), None);
         }
     }
+    // ------------------------------------------- what the risk class is, pinned
+    //
+    // The classifier is Claude's, pointed at the Codex wire. What that means for
+    // a Codex request was asserted on one hand-written `rm -rf` and nothing
+    // else, so the shapes the wire has actually produced were unpinned: a
+    // release that changed what a command looks like on the wire could change
+    // every class without failing anything. These read the captures.
+
+    /// One card's verdict, as a comparable pair.
+    fn verdict(card: &protocol::ws::ApprovalCard) -> (protocol::risk::RiskClass, Option<String>) {
+        let risk = card
+            .risk
+            .as_ref()
+            .expect("every Codex card carries a real classification");
+        (risk.class, risk.matched_pattern.clone())
+    }
+
+    /// Read one capture into the cards this build raises from it, in wire order.
+    ///
+    /// Both capture shapes are accepted — the tapped `{conn,dir,frame}` rows of
+    /// the 0.153 files and the bare frames of the 0.147 ones — because the point
+    /// is to cover every approval this repository has ever recorded, not one
+    /// era's recording convention.
+    fn cards_of(capture: &str) -> Vec<(&'static str, String, protocol::ws::ApprovalCard)> {
+        let rows: Vec<Value> = capture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one JSON row"))
+            .collect();
+        let frame_of =
+            |row: &Value| -> Value { row.get("frame").cloned().unwrap_or_else(|| row.clone()) };
+        let started: std::collections::HashMap<String, Value> = rows
+            .iter()
+            .map(frame_of)
+            .filter(|frame| frame["method"] == "item/started")
+            .filter_map(|frame| {
+                let item = frame.pointer("/params/item")?;
+                Some((item["id"].as_str()?.to_string(), item.clone()))
+            })
+            .collect();
+        let mut out = Vec::new();
+        for row in &rows {
+            let frame = frame_of(row);
+            let Some(method) = frame["method"].as_str() else {
+                continue;
+            };
+            let Some(family) = Family::of_method(method) else {
+                continue;
+            };
+            let params = &frame["params"];
+            let item = params["itemId"].as_str().and_then(|id| started.get(id));
+            let approval = Approval::read(family, params, item)
+                .unwrap_or_else(|why| panic!("the captured {method} must read: {why}"));
+            let card = approval.card(
+                approval
+                    .request_id("01K1B3XQ8ZC0DE5FGH7JKMNPCX", 1)
+                    .expect("a captured item id fits the composite id"),
+                1,
+            );
+            // What a person would say the card is about: the command, or the
+            // first path the patch touches.
+            let principal = card.tool_input["command"]
+                .as_str()
+                .or_else(|| card.tool_input["path"].as_str())
+                .expect("a card names either a command or a path")
+                .to_string();
+            let name: &'static str = match family {
+                Family::Command => "commandExecution",
+                Family::FileChange => "fileChange",
+            };
+            out.push((name, principal, card));
+        }
+        out
+    }
+
+    /// **Every approval shape this repository has captured, and the class each
+    /// one gets.**
+    ///
+    /// Eight captures across two codex releases — every committed one that
+    /// carries an approval, which is a property the census above checks rather
+    /// than a count this comment asserts — replayed through the production card
+    /// builder. The list is exact: a changed command, or a classifier whose
+    /// verdict moves, fails here naming the shape that moved.
+    ///
+    /// They are all `medium` today, and that is the finding rather than a
+    /// weakness of the pin: nothing this repository has ever captured was
+    /// dangerous. The shapes that are not, and cannot be captured because no
+    /// real turn produced one, are driven by hand in the boundary test below.
+    ///
+    /// **Mutation:** point `Approval::classified` at `tool_input()` instead of
+    /// the whole context and the file-change rows keep their class while the
+    /// long-command gate below goes red — which is the shape of the bug that
+    /// classified a command on its benign prefix.
+    /// Every committed capture this build raises a card from, and its bytes.
+    ///
+    /// The list is the pin AND the census's expected answer: a capture added to
+    /// the fixture directory that carries an approval and is not named here fails
+    /// [`every_committed_capture_bearing_an_approval_is_pinned`], so a new shape
+    /// cannot arrive unclassified.
+    const CLASSIFIED_CAPTURES: &[(&str, &str)] = &[
+        (
+            "approval-0.153.jsonl",
+            include_str!("../../../fixtures/codex/approval-0.153.jsonl"),
+        ),
+        (
+            "approval-rebind-0.153.jsonl",
+            include_str!("../../../fixtures/codex/approval-rebind-0.153.jsonl"),
+        ),
+        (
+            "approval-switch-p1-ctrlc-new-0.153.jsonl",
+            include_str!("../../../fixtures/codex/approval-switch-p1-ctrlc-new-0.153.jsonl"),
+        ),
+        (
+            "approval-switch-p4-esc-new-0.153.jsonl",
+            include_str!("../../../fixtures/codex/approval-switch-p4-esc-new-0.153.jsonl"),
+        ),
+        (
+            "approval-switch-p5-ccd-resume-bound-0.153.jsonl",
+            include_str!("../../../fixtures/codex/approval-switch-p5-ccd-resume-bound-0.153.jsonl"),
+        ),
+        (
+            "command-execution.jsonl",
+            include_str!("../../../fixtures/codex/command-execution.jsonl"),
+        ),
+        (
+            "file-change.jsonl",
+            include_str!("../../../fixtures/codex/file-change.jsonl"),
+        ),
+        (
+            "interrupt.jsonl",
+            include_str!("../../../fixtures/codex/interrupt.jsonl"),
+        ),
+    ];
+
+    /// **No capture bearing an approval is left out of the pin above.**
+    ///
+    /// The pin is a list of file names, and a list is only exhaustive on the day
+    /// it is written: the next capture committed beside these is one nothing
+    /// replays, and its shape could be anything. So the directory itself is read
+    /// and every file this build raises a card from must be named — which turns
+    /// "we pinned every capture" from a claim into a check.
+    ///
+    /// **Mutation:** drop any entry from [`CLASSIFIED_CAPTURES`] and this names
+    /// the file that stopped being classified.
+    #[test]
+    fn every_committed_capture_bearing_an_approval_is_pinned() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/codex");
+        let mut bearing: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|why| panic!("read {}: {why}", dir.display()))
+            .map(|entry| entry.expect("a directory entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".jsonl"))
+            .filter(|name| {
+                let capture = std::fs::read_to_string(dir.join(name)).expect("read the capture");
+                !cards_of(&capture).is_empty()
+            })
+            .collect();
+        bearing.sort();
+        let mut pinned: Vec<String> = CLASSIFIED_CAPTURES
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        pinned.sort();
+        assert_eq!(
+            bearing, pinned,
+            "every committed capture that carries an approval must be replayed by \
+             the class pin; one that is not is a shape nothing watches"
+        );
+    }
+
+    #[test]
+    fn every_captured_approval_shape_gets_the_class_this_build_gives_it() {
+        let mut seen: Vec<String> = Vec::new();
+        for (name, capture) in CLASSIFIED_CAPTURES.iter().copied() {
+            for (family, principal, card) in cards_of(capture) {
+                let (class, pattern) = verdict(&card);
+                seen.push(format!(
+                    "{name} {family} {principal:?} -> {}{}",
+                    class.as_str(),
+                    pattern.map(|p| format!(" ({p})")).unwrap_or_default()
+                ));
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                "approval-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/marker.txt'\" -> medium",
+                "approval-0.153.jsonl fileChange \"/work/hello.txt\" -> medium",
+                "approval-rebind-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/marker.txt'\" -> medium",
+                "approval-rebind-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/marker.txt'\" -> medium",
+                "approval-switch-p1-ctrlc-new-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/probe.txt'\" -> medium",
+                "approval-switch-p4-esc-new-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/probe.txt'\" -> medium",
+                "approval-switch-p5-ccd-resume-bound-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/probe.txt'\" -> medium",
+                "command-execution.jsonl commandExecution \"/bin/zsh -lc 'touch marker.txt'\" -> medium",
+                "file-change.jsonl fileChange \"/work/hello.txt\" -> medium",
+                "interrupt.jsonl commandExecution \"/bin/zsh -lc 'touch marker.txt'\" -> medium",
+            ],
+            "the captured shapes, and what this build says about each of them"
+        );
+    }
+
+    /// **The boundaries, in the shapes the wire would deliver them.**
+    ///
+    /// Each of these is a question the captures cannot answer because no
+    /// captured turn was dangerous: what a command with nothing in it does, what
+    /// the ordering of two destructive patterns reports, whether a path outside
+    /// the workspace is a signal at all, and what happens to the class when a
+    /// diff is far past the card's own cap.
+    ///
+    /// **Mutation:** drop the `changes.is_empty()`/`NoContent` refusal and the
+    /// empty-command case stops being a refusal and becomes a `medium` card
+    /// about nothing.
+    #[test]
+    fn the_boundary_shapes_are_classified_as_they_would_arrive() {
+        use protocol::risk::RiskClass::{High, Medium};
+
+        // A command with nothing in it is refused before anything classifies
+        // it — a card reading "approve something" is worse than no card. And
+        // whitespace is nothing: the card renders it as a blank line, so a
+        // build that accepted it would put an empty question on a phone.
+        for empty in [json!(""), Value::Null, json!(" \t "), json!("\n")] {
+            let mut params = command_params();
+            params["command"] = empty;
+            assert_eq!(
+                Approval::read(Family::Command, &params, None),
+                Err(Refusal::NoContent)
+            );
+        }
+
+        let commanded = |command: &str| {
+            let mut params = command_params();
+            params["command"] = json!(command);
+            verdict(
+                &Approval::read(Family::Command, &params, None)
+                    .unwrap()
+                    .card("rq".into(), 1),
+            )
+        };
+
+        // Two patterns in one command: the one that destroys data is the one
+        // named, because that is what a person needs told first.
+        assert_eq!(
+            commanded("/bin/zsh -lc 'sudo rm -rf /work'"),
+            (High, Some("rm -rf".into()))
+        );
+        // And the escalation on its own still is one.
+        assert_eq!(
+            commanded("/bin/zsh -lc 'sudo tee /etc/hosts'"),
+            (High, Some("sudo".into()))
+        );
+
+        // **A path outside the workspace is not a risk signal, and saying so is
+        // the point.** The classifier knows patterns, not policy: it has no
+        // notion of where this session may write, so a read of `/etc` is the
+        // same `medium` as a read of anything else. The sandbox is what bounds
+        // where a command may reach, and the approval is what a person answers.
+        assert_eq!(commanded("/bin/zsh -lc 'cat /etc/passwd'"), (Medium, None));
+
+        let changed = |path: &str, diff: &str| {
+            let mut started = file_change_started();
+            started["changes"][0]["path"] = json!(path);
+            started["changes"][0]["diff"] = json!(diff);
+            let card = Approval::read(Family::FileChange, &file_change_params(), Some(&started))
+                .unwrap()
+                .card("rq".into(), 1);
+            (verdict(&card), card)
+        };
+        assert_eq!(
+            changed("/etc/hosts", "@@ -1 +1 @@\n-a\n+b\n").0,
+            (Medium, None),
+            "a file change outside the workspace is classified like any other"
+        );
+
+        // **A diff far past the card's own cap does not move the class, because
+        // the class never reads a diff.** `diff` is a bulk-content key, so a
+        // patch whose body happens to contain a destructive-looking line is a
+        // file being edited rather than a disk being erased — and the display
+        // bound that cuts it is therefore not a hole in the classification.
+        let enormous = "rm -rf /\n".repeat(MAX_TOTAL_DIFF_BYTES / 8);
+        assert!(enormous.len() > MAX_TOTAL_DIFF_BYTES);
+        let (class, card) = changed("/work/hello.txt", &enormous);
+        assert_eq!(class, (Medium, None));
+        let shown = card.tool_input["changes"][0]["diff"]
+            .as_str()
+            .expect("the diff rides the card");
+        assert!(
+            shown.len() < enormous.len() && shown.contains("bytes elided"),
+            "the diff really was cut, or this proves nothing about the cap"
+        );
+
+        // **A command too long for the classifier to read whole is `high`, and
+        // the card carries the reason.** The tail past the scan bound is exactly
+        // where a destructive line would sit, so `medium` would be this card
+        // telling a phone that a clean scan found nothing in text nobody read —
+        // and `medium` is the class the phone gives its lightest friction. The
+        // rule lives in `protocol::risk`; it is mirrored here because this is the
+        // path a Codex command actually takes to a phone.
+        let past_the_scan = format!("echo {} ; rm -rf /", "a".repeat(24 * 1024));
+        assert_eq!(
+            commanded(&past_the_scan),
+            (High, Some(protocol::risk::SCAN_BOUND_EXCEEDED.to_string())),
+            "a destructive tail past the classifier's scan bound is not seen, so \
+             the bound itself is the finding"
+        );
+    }
+
     /// Regenerate `fixtures/codex/approval-card-0.153.json`. Run with
     /// `cargo test -p ccd --bin ccd -- --ignored --nocapture regenerate_the`.
     #[test]

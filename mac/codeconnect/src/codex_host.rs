@@ -1408,6 +1408,19 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", paths.as_sock.display()))
+        // **The one feature CodeConnect pins off, on the process that decides
+        // whether the model has the tool.** The conversation lives here — the TUI
+        // is a `--remote` client of this server — so this is where a feature that
+        // adds a model-callable tool takes effect, and it is set on the argv rather
+        // than assumed from the default because a shipping launch hands this
+        // process the operator's own `CODEX_HOME`, whose `config.toml` may turn it
+        // on. See `codex::PINNED_OFF_FEATURE` for the measurement and the reason.
+        //
+        // It rides ahead of nothing user-supplied: the app-server's argv is
+        // entirely this function's, so there is no passthrough that could restate
+        // the key after it.
+        .arg("-c")
+        .arg(crate::codex::pinned_off_feature_override())
         .env("CODEX_HOME", &args.codex_home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2426,6 +2439,18 @@ async fn drive(
         // could be read as one of the TUI's own positionals.
         .arg("--sandbox")
         .arg(&args.fingerprint.sandbox)
+        // **The same feature pin as the app-server's, on the other process that
+        // loads the same config.** The tool the feature exposes is the app-server's
+        // to offer, so this half buys no additional safety on its own; what it buys
+        // is that neither process can read an operator's value for a key
+        // CodeConnect's grammar refuses at the command line, which is what makes
+        // "the launch is without it" a property of the launch rather than of one
+        // spawn's reading of where the tool list is built.
+        //
+        // Before the fenced passthrough, like `--sandbox` and for the extra reason
+        // that the fence's `--` turns everything behind it into prompt content.
+        .arg("-c")
+        .arg(crate::codex::pinned_off_feature_override())
         .args(&fenced)
         .env("CODEX_HOME", &args.codex_home)
         // Inherit stdio (the pane's tty) so this IS the session the user drives —
@@ -3551,6 +3576,52 @@ mod tests {
             "the flag must carry the fingerprint's own value, so it cannot drift from \
              the pin the broker enforces: {spawn}"
         );
+    }
+
+    /// **THE FEATURE THE GRAMMAR REFUSES IS THE FEATURE BOTH SPAWNS PIN OFF.**
+    ///
+    /// `codex::validate_codex_argv` refuses a caller's own
+    /// `-c features.request_permissions_tool=…` by saying the session is launched
+    /// without it. That sentence is a claim about these two argvs: the operator's
+    /// `config.toml` is read by both processes and can set the key, so without the
+    /// pin the refusal would only stop the caller from asking for something the
+    /// config had already granted.
+    ///
+    /// Read from source for the same reason as the sandbox test above — what has to
+    /// be proven is a property of the call sites, and no unit test reaches them —
+    /// and the value is asserted to be the shared builder rather than a literal, so
+    /// the key the launch writes cannot drift from the key the grammar owns.
+    ///
+    /// **Mutation:** delete either `-c` pair, or spell the value as a literal
+    /// `"features.request_permissions_tool=false"`, and this fails.
+    #[test]
+    fn both_spawns_pin_the_permissions_feature_off() {
+        let src = include_str!("codex_host.rs");
+        for (site, marker) in [
+            (
+                "app-server",
+                "let mut appserver_cmd = Command::new(&args.codex);",
+            ),
+            ("TUI", "let mut tui_cmd = Command::new(&args.codex);"),
+        ] {
+            let spawn = src
+                .split(marker)
+                .nth(1)
+                .unwrap_or_else(|| panic!("the {site} spawn is in this file"));
+            // Cut at the `.env` call rather than at the first mention of the
+            // name, so a comment that explains WHY the pin is there cannot end
+            // the window before the pin itself.
+            let spawn = &spawn[..spawn.find(".env(\"CODEX_HOME\"").unwrap_or(spawn.len())];
+            assert!(
+                spawn.contains(".arg(\"-c\")"),
+                "the {site} spawn must pin the feature CodeConnect claims to own: {spawn}"
+            );
+            assert!(
+                spawn.contains(".arg(crate::codex::pinned_off_feature_override())"),
+                "the {site} pin must carry the shared override, so it cannot drift from \
+                 the key the grammar refuses: {spawn}"
+            );
+        }
     }
 
     /// The main race polls the broker's `JoinHandle` to completion on its

@@ -20019,6 +20019,96 @@ mod tests {
         (card, asks, retained)
     }
 
+    /// **One Codex approval rings one doorbell, and a re-delivery rings none.**
+    ///
+    /// The app-server re-delivers an outstanding request to a reconnecting leg,
+    /// with the same item id and therefore the same derived request id, so "the
+    /// same approval filed twice" is an ordinary event rather than a fault. The
+    /// doorbell must not be an ordinary event twice: a phone buzzing again for a
+    /// question it is already holding is the fleet telling the same news twice.
+    ///
+    /// **Two independent layers hold it, and this asserts them together**, which
+    /// is deliberate and was measured: breaking either one alone still rings
+    /// once, so a test that named only one of them would be satisfied by a build
+    /// that had lost it.
+    ///
+    /// * The doorbell hangs off the FILED event, and a re-delivery files none —
+    ///   the event carries `perm:{request_id}`, and the events table refuses a
+    ///   second row under the same source id, so `dispatch_push` is not reached.
+    /// * The push gate admits one decision per `(session, request_id)` for the
+    ///   life of the run, so even an event that were filed twice rings once.
+    ///
+    /// A third layer sits below both, in the per-device queue that replaces a
+    /// waiting doorbell rather than joining it; that one is asserted in
+    /// `apns_sender`, because it is about a device rather than about a question.
+    ///
+    /// The hint is asserted whole, because what it says is what the fan-out then
+    /// authorizes: `agent: Codex` is what narrows the fleet to phones that can
+    /// open a Codex run, and `kind: Approval` is what makes a tap open the
+    /// decision list rather than the timeline.
+    ///
+    /// **Mutation:** make the event's source id unique per raise AND make
+    /// `PushGate::admit_decision` always hand back a ticket. Either alone leaves
+    /// this green — which is the point of asserting them together — and both
+    /// together ring the phone twice for one question.
+    #[tokio::test]
+    async fn a_codex_approval_rings_one_doorbell_and_a_redelivery_rings_none() {
+        let (daemon, capture) = capture_daemon();
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let session = SessionKey::new(uid, "cc-1");
+        let card = codex_command_card("rq-ring-once");
+        let raise = || {
+            let card = card.clone();
+            let session = session.clone();
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .raise_codex_approval(
+                        &session,
+                        card,
+                        "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                        "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                        "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                        "commandExecution",
+                    )
+                    .await
+            }
+        };
+
+        assert!(raise().await, "the first delivery files the card");
+        // Byte-identical, under the same item id: what a reconnecting leg is
+        // handed. It rebinds onto the card already standing.
+        assert!(
+            raise().await,
+            "the re-delivery rebinds rather than refusing"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the premise: one question, one card"
+        );
+
+        // The dispatch grace: a doorbell describes the world at the moment it
+        // rings, not the moment it was admitted, so it is read after that window.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings: Vec<(crate::apns::PushKind, protocol::agent::AgentKind)> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(hint, _)| (hint.kind, hint.agent.clone()))
+            .collect();
+        assert_eq!(
+            rings,
+            vec![(
+                crate::apns::PushKind::Approval,
+                protocol::agent::AgentKind::Codex
+            )],
+            "one approval, one doorbell, about the run that raised it"
+        );
+    }
+
     /// Take the link handle away, leaving the registration standing.
     ///
     /// The state a daemon is in when the wrapper is gone but the run is not: an

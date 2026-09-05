@@ -1430,6 +1430,66 @@ mod tests {
         );
     }
 
+    /// **What a ccd leg can and cannot be handed, for every non-phone family the
+    /// bundle declares.**
+    ///
+    /// The daemon's approval observer can only ever see what this decides, and
+    /// the two halves of the decision are easy to conflate: whether a request is
+    /// DELIVERED, and whether the leg that receives it may ANSWER. They differ
+    /// exactly here — the permissions family is delivered to both legs and
+    /// answerable only at the TUI — and a reader who assumed delivery followed
+    /// the grant would conclude the daemon never sees it, while one who assumed
+    /// the grant followed delivery would build a phone answer for it.
+    ///
+    /// So all three are asserted together, on a ccd leg, in one place:
+    ///
+    /// * `item/permissions/requestApproval` ends in `/requestApproval`, so it
+    ///   binds and is DELIVERED; its grant is TUI-only, so a ccd answer forwards
+    ///   nothing.
+    /// * `item/tool/requestUserInput` and `mcpServer/elicitation/request` do
+    ///   not, so they are tombstoned and answered UPSTREAM — never delivered to
+    ///   any client, which is what stops the exchange the server opened being
+    ///   stranded on a client that may not reply.
+    ///
+    /// **Mutation:** widen `classify_request`'s family test to any method
+    /// containing `request` and the last two become `Deliver`, handing the
+    /// client two exchanges whose answers this leg would discard.
+    #[test]
+    fn a_ccd_leg_is_handed_the_permissions_family_and_never_the_other_two() {
+        let arb = Arc::new(ResponseArbiter::new());
+        let mut ccd = LegCapabilities::new(Arc::clone(&arb), silent());
+        assert_eq!(
+            ccd.observe_server_frame(
+                &no_session(),
+                &approval_frame("item/permissions/requestApproval", "thread-P", 0)
+            ),
+            S2cDisposition::Deliver,
+            "a permissions request reaches the ccd leg; the daemon's observer can \
+             only decline to card a frame it is actually handed"
+        );
+
+        for never_delivered in [
+            "item/tool/requestUserInput",
+            "mcpServer/elicitation/request",
+        ] {
+            let mut ccd = LegCapabilities::new(Arc::new(ResponseArbiter::new()), silent());
+            let frame = format!(
+                r#"{{"id":0,"method":"{never_delivered}","params":{{"threadId":"thread-P","turnId":"t","itemId":"i"}}}}"#
+            );
+            match ccd.observe_server_frame(&no_session(), &frame) {
+                S2cDisposition::AnswerUpstream(answer) => {
+                    let v: serde_json::Value = serde_json::from_str(&answer).unwrap();
+                    assert_eq!(v["error"]["code"], -32601);
+                }
+                other => panic!("{never_delivered} must not reach a client: {other:?}"),
+            }
+            assert!(
+                !ccd.authorize(Role::Ccd, &RequestId::Int(0), false),
+                "and nothing it was never handed is answerable by it either"
+            );
+        }
+    }
+
     #[test]
     fn observe_only_family_refuses_ccd_authorizes_tui() {
         let arb = Arc::new(ResponseArbiter::new());

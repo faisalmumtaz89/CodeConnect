@@ -1241,6 +1241,37 @@ impl LiveSandbox {
         !tagged_pids(&format!("--remote unix://{}/tui.sock", self.tag())).is_empty()
     }
 
+    /// Widen the window so a long option row is read whole.
+    ///
+    /// The pane is 80 columns by default and the TUI clips an option to it, so a
+    /// label longer than the row comes back with its tail — and any closing
+    /// punctuation — missing. A reader that took that for the label would pin a
+    /// string the terminal invented.
+    fn widen(&self, columns: u16) {
+        let out = Command::new(&self.tmux)
+            .args([
+                "-S",
+                self.sock.to_str().unwrap(),
+                "-f",
+                "/dev/null",
+                "resize-window",
+                "-t",
+                "cc-live",
+                "-x",
+                &columns.to_string(),
+                "-y",
+                "50",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tmux resize-window");
+        println!(
+            "tmux resize-window -x {columns}: status {} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
     fn capture_pane(&self) -> String {
         let out = Command::new(&self.tmux)
             .args([
@@ -9383,4 +9414,701 @@ async fn p5_ccd_resume_to_a_second_bound_thread_with_an_approval_pending() {
         "the head does not move: T2's approval stays the ccd leg's to answer, and the \
          late ccd answer still actuates the command"
     );
+}
+
+// ======================================== MEASUREMENT: THE NON-PHONE FAMILIES
+//
+// Grounding for the observe-only work, NOT a gate. The vendored 0.153 bundle
+// declares three server→client request families besides the two a phone answers:
+// `item/permissions/requestApproval`, `item/tool/requestUserInput` and
+// `mcpServer/elicitation/request`. What a schema declares and what a wire emits
+// are different facts, and what a wire emits and what a ccd leg is HANDED are a
+// third — the broker answers an unadmitted server request upstream and never
+// delivers it. This reads all three off a live session rather than reasoning
+// about them.
+
+/// The three families this probe is about, as the bundle spells them.
+const NON_PHONE_FAMILIES: [&str; 3] = [
+    "item/permissions/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+];
+
+/// The pane text the command-approval prompt paints, which is also the signal
+/// that a probe's turn is parked on a question this probe is not about.
+const COMMAND_PROMPT: &str = "Would you like to run the following command?";
+/// The file-change prompt's own sentence, as 0.153.2 paints it.
+const FILE_CHANGE_PROMPT: &str = "Would you like to make the following edits?";
+
+/// Drive one prompt and wait until either a watched family reaches the tapped
+/// leg or the turn ends, accepting at the keyboard any ordinary approval that
+/// parks the turn on the way.
+///
+/// A read-only sandbox turns almost every useful producer prompt into a command
+/// approval first, and a probe that let the turn sit there would measure the
+/// approval it already understands instead of the family it is asking about.
+/// Answering it at the keyboard is what lets the turn reach the point where a
+/// permission or a question could be asked.
+async fn drive_looking_for(
+    sb: &LiveSandbox,
+    sub: &WireTap,
+    prompt: &str,
+    answer: &str,
+    budget: Duration,
+) -> (bool, usize) {
+    let watched = |sub: &WireTap| {
+        sub.methods()
+            .into_iter()
+            .filter(|m| NON_PHONE_FAMILIES.contains(&m.as_str()))
+            .count()
+    };
+    let before = watched(sub);
+    let terminals_before = sub
+        .methods()
+        .iter()
+        .filter(|m| *m == "turn/completed")
+        .count();
+    sb.send_keys(&[prompt]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let deadline = std::time::Instant::now() + budget;
+    let mut accepted = 0usize;
+    while std::time::Instant::now() < deadline {
+        if watched(sub) > before {
+            return (true, accepted);
+        }
+        let pane = sb.capture_pane();
+        if pane.contains(COMMAND_PROMPT) || pane.contains(FILE_CHANGE_PROMPT) {
+            // Accept it and let the turn go on. This probe is not about this
+            // question, and a parked turn asks nothing else.
+            sb.send_keys(&[answer]);
+            accepted += 1;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        let terminals = sub
+            .methods()
+            .iter()
+            .filter(|m| *m == "turn/completed")
+            .count();
+        if terminals > terminals_before {
+            return (watched(sub) > before, accepted);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    (watched(sub) > before, accepted)
+}
+
+/// Every broker-log line that names one of the three families, whichever verdict
+/// it records. The capability observer logs the method verbatim, so the log is
+/// the witness for a frame the app-server EMITTED and the broker did not deliver
+/// — the one thing a tap on the delivered side structurally cannot see.
+fn capability_lines_naming_a_non_phone_family(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|line| {
+            line.contains(ANSWERED_UPSTREAM)
+                || NON_PHONE_FAMILIES
+                    .iter()
+                    .any(|method| line.contains(method))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The broker's own words for "this was emitted and not handed on".
+const ANSWERED_UPSTREAM: &str = "answer upstream";
+
+/// The feature that turns the permissions producer on, and that a CodeConnect
+/// launch pins off.
+///
+/// Restated here rather than shared with the launcher, which is a different crate
+/// this harness does not depend on. The pin itself is asserted from the running
+/// app-server's own argv below, so a launcher that stopped writing it fails this
+/// probe rather than quietly changing what the probe measures.
+const PERMISSIONS_FEATURE: &str = "request_permissions_tool";
+
+/// What the codex under test says about one feature in a given `CODEX_HOME`: the
+/// value the config yields on its own, and the value the launcher's override
+/// yields on top of it.
+///
+/// A zero from this probe is a fact about a LAUNCH, and a launch is a config plus
+/// an argv. Reading the effective registry both ways is what turns "the feature is
+/// off" from an assumption about defaults into a measurement of the override — and
+/// it is also the only place the two are recorded together, which is what a reader
+/// needs to tell "nothing produces this" from "this launch does not".
+fn feature_registry_rows(codex: &Path, codex_home: &Path, feature: &str) -> String {
+    let read = |extra: &[&str]| -> String {
+        let out = Command::new(codex)
+            .args(extra)
+            .args(["features", "list"])
+            .env("CODEX_HOME", codex_home)
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find(|line| line.starts_with(feature))
+                .map(|line| line.trim_end().to_string())
+                .unwrap_or_else(|| format!("<{feature} is not in this registry>")),
+            Ok(o) => format!(
+                "<exited {}: {}>",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => format!("<could not run: {e}>"),
+        }
+    };
+    format!(
+        "  as the config leaves it : {}\n  with the launch's pin   : {}",
+        read(&[]),
+        read(&["-c", &format!("features.{feature}=false")]),
+    )
+}
+
+/// The instrument is a parser, so it is tested rather than trusted.
+///
+/// A zero from it is the whole finding, and a filter that matched nothing would
+/// produce the same zero as a wire that emitted nothing — opposite conclusions
+/// from identical output.
+#[test]
+fn the_broker_log_reader_finds_a_family_it_refused_and_ignores_the_traffic() {
+    let log = "\
+2026-01-01T00:00:00Z INFO  Ccd: capability tombstoned (id-bearing non-answerable frame): id=Int(0) method=\"item/tool/requestUserInput\"
+2026-01-01T00:00:00Z INFO  Ccd: answer upstream (server request not serviceable through this broker; not delivered) (conn 3)
+2026-01-01T00:00:00Z INFO  Ccd: capability tombstoned (ambiguous bare id): id=Int(1) method=\"item/tool/call\"
+2026-01-01T00:00:00Z INFO  Tui leg ended (conn 2): closed
+";
+    let found = capability_lines_naming_a_non_phone_family(log);
+    assert_eq!(
+        found.len(),
+        2,
+        "the refused family and the upstream answer, and nothing else: {found:#?}"
+    );
+    assert!(found[0].contains("item/tool/requestUserInput"));
+    assert!(found[1].contains(ANSWERED_UPSTREAM));
+    assert!(
+        capability_lines_naming_a_non_phone_family("").is_empty(),
+        "and an empty log finds nothing, which is why the probe asserts the log \
+         is not empty before it believes a zero"
+    );
+}
+
+/// **MEASUREMENT: which non-phone server-request families reach the ccd leg, and
+/// with what shape.**
+///
+/// Three questions, answered on one live session:
+///
+///   1. Does a real 0.153 app-server EMIT any of the three at all, under prompts
+///      written to ask for exactly what each family is for — a permission
+///      profile, a question put to the user, an MCP elicitation?
+///   2. Of the ones it emits, which are DELIVERED to a subscribed ccd leg? The
+///      broker binds `*/requestApproval` and tombstones everything else, so the
+///      two answers can differ, and only the delivered ones are a card this
+///      daemon could ever raise.
+///   3. What is on the frame, verbatim, for the ones that arrive?
+///
+/// The delivered side is the tap; the emitted side is the broker's own
+/// capability log, which names the method of every id-bearing s2c request it
+/// refuses to hand on. A family absent from both is a family with no producer
+/// this probe could find.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_which_non_phone_families_reach_the_ccd_leg() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("nonph");
+    let coord = sb.spawn_coordinator(&codex);
+    let broker_log = sb.run_dir.join("broker.log");
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+
+    // ------------------------------------------------------------- the premise
+    //
+    // **What this probe measures is a LAUNCH, and the launch's own terms are read
+    // first.** The permissions family has a producer — a model-callable tool the
+    // app-server exposes when `features.request_permissions_tool` is on — so a
+    // session in which nothing produces it is telling you about this session's
+    // configuration unless the configuration is on the record. Two readings go on
+    // the record: what the registry says with the config alone, and what it says
+    // with the override a CodeConnect launch writes.
+    let feature_rows = feature_registry_rows(&codex, &sb.codex_home, PERMISSIONS_FEATURE);
+    println!("FEATURE REGISTRY (this sandbox's CODEX_HOME):\n{feature_rows}");
+    assert!(
+        feature_rows
+            .lines()
+            .last()
+            .is_some_and(|pinned| pinned.ends_with("false")),
+        "the launch's own override must leave the feature off, or the zero below \
+         is a measurement of nothing: {feature_rows}"
+    );
+
+    // And the pin is on the argv of the process that is actually running, read
+    // back from the process table rather than from the launcher's source. The
+    // app-server is where a model-callable tool is offered from, so this is the
+    // spawn the finding rests on.
+    let app_server_argv: Vec<String> =
+        tagged_processes(&format!("app-server --listen unix://{}/as.sock", sb.tag()))
+            .into_iter()
+            .map(|(_, command)| command)
+            .collect();
+    println!("APP-SERVER ARGV: {app_server_argv:#?}");
+    assert!(
+        app_server_argv
+            .iter()
+            .any(|argv| argv.contains(&format!("features.{PERMISSIONS_FEATURE}=false"))),
+        "the running app-server must carry the launch's feature pin; without it \
+         this probe measures a default rather than a launch: {app_server_argv:#?}"
+    );
+
+    run_the_warm_up_turn(&sb).await;
+    let (sub, thread_a) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED thread = {thread_a}");
+
+    // One prompt per family, each written to ask for the thing that family is
+    // the wire's word for. They are deliberately explicit: the question is
+    // whether a producer EXISTS, so a prompt that leaves the model room to do
+    // something else measures the model rather than the wire.
+    let probes: [(&str, &str, &str); 5] = [
+        (
+            "user-input",
+            "Enter",
+            "Before you do anything else, ask me a clarifying multiple-choice question \
+             about what I want, using whatever tool you have for putting a question to \
+             the user. Do not run any shell commands.",
+        ),
+        (
+            "network-permission",
+            "Enter",
+            "Fetch https://example.com and print its first line. Your sandbox has no \
+             network access: when the fetch is refused, request the additional network \
+             permission you need rather than giving up.",
+        ),
+        (
+            "filesystem-permission-approved",
+            "Enter",
+            "Write the word hello into /etc/codeconnect-probe-does-not-exist. Your \
+             sandbox is read-only: when the write is refused, request the additional \
+             filesystem permission you need rather than giving up.",
+        ),
+        (
+            "filesystem-permission-denied",
+            "Escape",
+            "Write the word hello into /etc/codeconnect-probe-two. When the command \
+             approval is declined, do not run another command: ask for the additional \
+             filesystem permission itself.",
+        ),
+        (
+            "elicitation",
+            "Enter",
+            "If any MCP server is connected, call a tool on it that asks me to fill in \
+             a form. If no MCP server is connected, say exactly: no mcp server.",
+        ),
+    ];
+
+    let mut table: Vec<String> = Vec::new();
+    let mut compact: Vec<String> = Vec::new();
+    for (label, answer, prompt) in probes {
+        let from = read_file(&broker_log).lines().count();
+        let before: Vec<String> = sub.methods();
+        let (hit, accepted) =
+            drive_looking_for(&sb, &sub, prompt, answer, Duration::from_secs(240)).await;
+        let after = sub.methods();
+        let added: Vec<String> = after[before.len().min(after.len())..].to_vec();
+        let broker_added = log_lines_after(&read_file(&broker_log), from).join("\n");
+        let capability_lines = capability_lines_naming_a_non_phone_family(&broker_added);
+        println!("---- PROBE {label} ----");
+        println!("  watched family arrived on the ccd leg = {hit}");
+        println!(
+            "  ordinary approvals answered ({answer}) at the keyboard on the way = {accepted}"
+        );
+        println!("  methods added to the ccd leg: {added:?}");
+        println!("  broker capability/upstream lines: {capability_lines:#?}");
+        println!("  pane:\n{}", sb.capture_pane());
+        table.push(format!(
+            "{label}: delivered_to_ccd={hit} approvals_answered={accepted} \
+             ccd_methods={added:?} broker_lines={capability_lines:?}"
+        ));
+        // The same row without the transcript. A turn puts hundreds of ordinary
+        // frames on the leg and none of them is the finding; what a reader needs
+        // is how far the turn got and whether any watched family appeared.
+        compact.push(format!(
+            "{label:34} watched_family_delivered={hit:5} ordinary_approvals_answered={accepted} \
+             frames_on_the_ccd_leg={} broker_refusals_naming_one={}",
+            added.len(),
+            capability_lines.len(),
+        ));
+    }
+
+    // The verbatim frames, for every watched family that actually arrived.
+    for method in NON_PHONE_FAMILIES {
+        match sub.first(method) {
+            Some(frame) => println!(
+                "MEASURED {method} VERBATIM:\n{}",
+                serde_json::to_string_pretty(&frame).expect("pretty")
+            ),
+            None => println!("MEASURED {method}: never delivered to the ccd leg"),
+        }
+    }
+    let whole_log = read_file(&broker_log);
+    // **The zero below is only a fact about the wire if the instrument is live.**
+    // An unreadable or empty broker.log produces the same empty list as a run in
+    // which the app-server emitted none of these families, and the two are
+    // opposite conclusions.
+    assert!(
+        whole_log.lines().count() > 10,
+        "the broker log is the witness for a frame that was EMITTED and not \
+         delivered; an empty one makes every count below meaningless. {}",
+        broker_log.display()
+    );
+    println!(
+        "INSTRUMENT: broker.log has {} lines, {} of them capability rulings",
+        whole_log.lines().count(),
+        whole_log
+            .lines()
+            .filter(|l| l.contains("capability "))
+            .count()
+    );
+    println!(
+        "ALL broker capability/answer-upstream lines for the run:\n{:#?}",
+        capability_lines_naming_a_non_phone_family(&whole_log)
+    );
+    println!("MEASUREMENT TABLE:\n{}", table.join("\n"));
+
+    write_probe_record(
+        &sb,
+        &sub,
+        "nonphone-families",
+        &format!(
+            "--- thread={thread_a} ---\n--- feature registry ---\n{feature_rows}\n\
+             --- app-server argv ---\n{}\n\
+             --- table ---\n{}\n--- broker capability lines naming a watched family ---\n{:#?}\n\
+             --- final pane ---\n{}\n",
+            app_server_argv.join("\n"),
+            compact.join("\n"),
+            capability_lines_naming_a_non_phone_family(&whole_log),
+            sb.capture_pane()
+        ),
+    );
+
+    // ------------------------------------------------------ and now the assertion
+    //
+    // **The zero is asserted, not printed.** A probe that only prints leaves the
+    // reading to whoever ran it, and the reading is the finding: what this session
+    // establishes is that a CodeConnect launch produces none of these families, and
+    // a later release that starts producing one must fail here rather than change a
+    // number in somebody's terminal scrollback.
+    //
+    // It is a claim about a launch, not about codex: the permissions family has a
+    // producer, behind a feature this launch pins off (asserted above, before the
+    // session was driven). What is measured is the pinned launch.
+    let delivered: Vec<&str> = NON_PHONE_FAMILIES
+        .into_iter()
+        .filter(|method| sub.first(method).is_some())
+        .collect();
+    assert!(
+        delivered.is_empty(),
+        "a non-phone family reached the ccd leg: {delivered:?}. The daemon cards \
+         none of them, so a delivered one is a question a phone will never be \
+         shown — see the verbatim frames printed above."
+    );
+    // And the other half of the same fact: nothing was emitted-and-refused either.
+    // The tap sees only what the broker delivered, so a family the app-server sent
+    // and the broker answered upstream would be invisible to the check above; the
+    // broker's own capability log is the witness for it, and it names the method of
+    // every id-bearing server request it declines to hand on.
+    let emitted_and_refused: Vec<String> = capability_lines_naming_a_non_phone_family(&whole_log)
+        .into_iter()
+        .filter(|line| NON_PHONE_FAMILIES.iter().any(|m| line.contains(m)))
+        .collect();
+    assert!(
+        emitted_and_refused.is_empty(),
+        "the app-server emitted a non-phone family and the broker refused it: \
+         {emitted_and_refused:#?}. That is a producer, and this daemon's account of \
+         these families has to say so."
+    );
+
+    teardown(sub, coord, "/tmp/cc-nonphone-probe-unused");
+}
+
+// ================================== MEASUREMENT: WHAT THE TUI CALLS THE OPTIONS
+//
+// The option words this daemon puts on a card are pane-measured, because the
+// wire carries no labels. One of them turned out to be command-SPECIFIC: the TUI
+// renders the amendment option as "Yes, and don't ask again for commands that
+// start with `<argv>`". A single measurement cannot say what `<argv>` is a
+// function of, and a set of measurements that AGREE cannot say how its tokens
+// are spelled — so this drives programs chosen to disagree on both, and reads
+// the rendered row beside the wire body that produced it.
+
+/// The numbered option lines the approval prompt paints, as labels.
+///
+/// The pane rows look like `› 1. Yes, proceed (y)` and `  2. … (p)`; this strips
+/// the selection marker, the ordinal and the hotkey so what is left is the words
+/// a person reads. Measured against
+/// `fixtures/codex/approval-switch-panes-0.153.txt`.
+fn rendered_option_labels(pane: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in pane.lines() {
+        let row = row.trim_start_matches(['›', ' ']).trim_end();
+        let Some(dot) = row.find(". ") else { continue };
+        if dot == 0 || !row[..dot].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut label = row[dot + 2..].trim().to_string();
+        // The hotkey the TUI appends, e.g. ` (y)` / ` (p)` / ` (esc)`.
+        if label.ends_with(')') {
+            if let Some(open) = label.rfind(" (") {
+                label.truncate(open);
+            }
+        }
+        if !label.is_empty() {
+            out.push(label);
+        }
+    }
+    out
+}
+
+/// The approval prompt itself, cut out of a pane that also holds the transcript.
+///
+/// A pane capture is the whole visible screen, so most of it is earlier turns; the
+/// part worth recording is the question and the rows under it. Starts at the
+/// prompt's own sentence and runs to the confirm line, with each row's trailing
+/// padding trimmed so the record is the text rather than the terminal's width.
+fn prompt_section(pane: &str) -> String {
+    let start = pane
+        .lines()
+        .position(|line| line.contains(COMMAND_PROMPT) || line.contains(FILE_CHANGE_PROMPT));
+    let Some(start) = start else {
+        return format!("<no prompt on the pane>\n{pane}");
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in pane.lines().skip(start) {
+        out.push(line.trim_end().to_string());
+        if line.contains("Press enter to confirm") {
+            break;
+        }
+    }
+    out.join("\n")
+}
+
+/// The pane parser is a parser, so it is tested on the committed capture rather
+/// than only on whatever a live run happens to paint.
+#[test]
+fn the_option_rows_of_a_captured_prompt_are_read_as_labels() {
+    const PANES: &str = include_str!("../../../fixtures/codex/approval-switch-panes-0.153.txt");
+    let first = PANES
+        .split("===== 2.")
+        .next()
+        .expect("the capture's first section");
+    assert_eq!(
+        rendered_option_labels(first),
+        [
+            "Yes, proceed",
+            "Yes, and don't ask again for commands that start with `touch`",
+            "No, and tell Codex what to do differently",
+        ]
+    );
+}
+
+/// **MEASUREMENT: is the amendment label a function of the command, of which part
+/// of it, and does the rendering survive a token a shell would have to quote?**
+///
+/// One capture showed `touch`, which is equally consistent with the first token
+/// of the wire's `command`, the first token of its `commandActions`, and the
+/// first element of `proposedExecpolicyAmendment` — they agreed on that one
+/// frame. The first three prompts here disagree on all three candidates, so the
+/// derivation is read off disagreement rather than assumed from agreement.
+///
+/// The last three ask the harder question. Every token in the first three is one
+/// a shell would leave alone, so "join with spaces" and "escape each token"
+/// render identically and the samples cannot tell them apart. These drive a token
+/// with a space in it, one with a metacharacter, and one with a newline, and
+/// print the painted row beside the wire body that produced it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_the_tui_calls_the_amendment_option() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("label");
+    let coord = sb.spawn_coordinator(&codex);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    // Wide enough that no option row is clipped: the label is what the TUI
+    // renders, not what an eighty-column pane leaves of it.
+    sb.widen(200);
+    run_the_warm_up_turn(&sb).await;
+    let (sub, thread_a) = subscribed_tap(&sb, "SUB").await;
+    println!("MEASURED thread = {thread_a}");
+
+    let stamp = nanos();
+    // Different programs, so a label that names one of them says which.
+    //
+    // The first three separate the candidate derivations: two tokens, three
+    // tokens, and one whose argv[0] is an absolute path (if the label carries
+    // `/bin/mkdir` the derivation keeps argv[0] verbatim, and if it carries
+    // `mkdir` it takes a basename).
+    //
+    // The last three ask a different question. Every token above is shell-safe,
+    // so "the tokens joined by spaces" and "the tokens rendered the way a shell
+    // would have to be given them" agree on all of them, and a rule read off
+    // agreement is not a rule. These three disagree: a token holding a SPACE, a
+    // token holding a shell METACHARACTER, and a token holding a NEWLINE. What
+    // the terminal paints for each is the whole point of driving them.
+    let commands = [
+        format!("mkdir /tmp/cc-label-a.{stamp}"),
+        format!("cp /etc/hosts /tmp/cc-label-b.{stamp}"),
+        format!("/bin/mkdir /tmp/cc-label-c.{stamp}"),
+        format!("touch '/tmp/cc-label-d.{stamp} spaced.txt'"),
+        format!("touch '/tmp/cc-label-e.{stamp};semi.txt'"),
+        // ANSI-C quoting, so the token really carries a newline rather than a
+        // backslash and an `n`. Whether an amendment for it exists at all is
+        // part of the measurement.
+        format!("touch $'/tmp/cc-label-f.{stamp}\\nnewline.txt'"),
+    ];
+
+    let mut rows: Vec<String> = Vec::new();
+    for (index, command) in commands.iter().enumerate() {
+        let before = sub
+            .methods()
+            .iter()
+            .filter(|m| m.ends_with("/requestApproval"))
+            .count();
+        sb.send_keys(&[&format!(
+            "Run the shell command `{command}` now. Do not explain, just run it."
+        )]);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        sb.send_keys(&["Enter"]);
+        let asked = wait_until(Duration::from_secs(240), || {
+            sub.methods()
+                .iter()
+                .filter(|m| m.ends_with("/requestApproval"))
+                .count()
+                > before
+        })
+        .await;
+        let painted = wait_until(Duration::from_secs(30), || {
+            sb.capture_pane().contains(COMMAND_PROMPT)
+        })
+        .await;
+        let pane = sb.capture_pane();
+        let frames: Vec<Value> = sub
+            .seen()
+            .into_iter()
+            .filter(|v| v["method"].as_str() == Some("item/commandExecution/requestApproval"))
+            .collect();
+        let frame = frames.last().cloned().unwrap_or(Value::Null);
+        let params = &frame["params"];
+        let labels = rendered_option_labels(&pane);
+        println!("---- LABEL PROBE {index}: {command} ----");
+        println!("  asked={asked} painted={painted}");
+        println!("  wire command                     = {}", params["command"]);
+        println!(
+            "  wire commandActions              = {}",
+            params["commandActions"]
+        );
+        println!(
+            "  wire proposedExecpolicyAmendment = {}",
+            params["proposedExecpolicyAmendment"]
+        );
+        println!(
+            "  wire availableDecisions          = {}",
+            params["availableDecisions"]
+        );
+        println!("  RENDERED OPTION LABELS           = {labels:#?}");
+        println!("  pane:\n{pane}");
+        rows.push(format!(
+            "===== {} =====\n\
+             asked for                        = {command}\n\
+             wire command                     = {}\n\
+             wire commandActions              = {}\n\
+             wire proposedExecpolicyAmendment = {}\n\
+             wire availableDecisions          = {}\n\
+             {}",
+            index + 1,
+            params["command"],
+            params["commandActions"],
+            params["proposedExecpolicyAmendment"],
+            params["availableDecisions"],
+            // The prompt as the terminal painted it, cut to the prompt itself:
+            // the pane also carries every earlier turn's transcript, and a
+            // record of the row this prompt painted is what a reader needs.
+            prompt_section(&pane),
+        ));
+
+        // Esc dismisses the prompt without running anything, so the next probe
+        // starts from an idle composer rather than from a turn that is still
+        // waiting on this question.
+        sb.send_keys(&["Escape"]);
+        let cleared = wait_until(Duration::from_secs(60), || {
+            !sb.capture_pane().contains(COMMAND_PROMPT)
+        })
+        .await;
+        println!("  prompt cleared by Escape = {cleared}");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    // And the other family, whose words the wire says nothing about at all.
+    let target = format!("/tmp/cc-label-fc.{stamp}.txt");
+    std::fs::write(&target, "hello from the label probe\n").expect("seed the target");
+    sb.send_keys(&[&format!(
+        "Edit the file {target} so that it says goodbye instead of hello. Use your \
+         file-editing tool, not a shell command."
+    )]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let fc_asked = wait_until(Duration::from_secs(240), || {
+        sub.methods()
+            .iter()
+            .any(|m| m == "item/fileChange/requestApproval")
+    })
+    .await;
+    let fc_painted = wait_until(Duration::from_secs(30), || {
+        let pane = sb.capture_pane();
+        pane.contains(FILE_CHANGE_PROMPT) || pane.contains("Would you like to")
+    })
+    .await;
+    let fc_pane = sb.capture_pane();
+    let fc_labels = rendered_option_labels(&fc_pane);
+    println!("---- LABEL PROBE fileChange ----");
+    println!("  asked={fc_asked} painted={fc_painted}");
+    println!(
+        "  wire request = {}",
+        sub.first("item/fileChange/requestApproval")
+            .unwrap_or(Value::Null)
+    );
+    println!("  RENDERED OPTION LABELS = {fc_labels:#?}");
+    println!("  pane:\n{fc_pane}");
+    rows.push(format!(
+        "===== {} (the other family, whose words name no command) =====\n\
+         asked for                        = an edit to {target}\n\
+         wire proposedExecpolicyAmendment = (this family declares no decisions)\n\
+         {}",
+        commands.len() + 1,
+        prompt_section(&fc_pane),
+    ));
+    sb.send_keys(&["Escape"]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    println!("LABEL MEASUREMENT TABLE:\n{}", rows.join("\n\n"));
+    write_probe_record(&sb, &sub, "amendment-labels", &rows.join("\n\n"));
+
+    let _ = std::fs::remove_file(&target);
+    // **Swept by reading the directory, not by re-parsing the commands.** Some of
+    // these commands quote their argument precisely because it holds a space or a
+    // metacharacter, so a last-token split of the command text names a fragment
+    // rather than a path — and a relative fragment handed to `remove_dir_all` is a
+    // deletion aimed at whatever the working directory happens to be. Every path
+    // this probe can create is `/tmp/cc-label-*` bearing this run's own stamp, so
+    // that is what is removed.
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("cc-label-") && name.contains(&stamp.to_string()) {
+                let path = entry.path();
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+    teardown(sub, coord, "/tmp/cc-label-probe-unused");
 }

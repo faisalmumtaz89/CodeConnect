@@ -546,25 +546,36 @@ impl RelayPushSender {
         transport: Arc<dyn RelayTransport>,
         registry: Arc<dyn PushRegistry>,
     ) {
-        serve_with(queue, move |target, document, _collapse| {
-            let transport = Arc::clone(&transport);
-            let registry = Arc::clone(&registry);
-            async move {
-                // The same outer bound the direct sender keeps. The relay does
-                // its own APNs work inside it and answers only once Apple has;
-                // this is what stops one stalled attempt from holding up every
-                // later push to the same phone.
-                match tokio::time::timeout(
-                    DELIVERY_DEADLINE,
-                    Self::deliver(transport, registry, target, document),
-                )
-                .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(_) => bail!("the relay did not answer within {DELIVERY_DEADLINE:?}"),
+        let gate = Arc::clone(&registry);
+        serve_with(
+            queue,
+            // The relay makes exactly one post per delivery — there is no retry
+            // here, deliberately — so the subject the loop already checked has
+            // nothing further to guard and is not carried into the attempt.
+            move |target, document, _collapse, _authorized_for| {
+                let transport = Arc::clone(&transport);
+                let registry = Arc::clone(&registry);
+                async move {
+                    // The same outer bound the direct sender keeps. The relay does
+                    // its own APNs work inside it and answers only once Apple has;
+                    // this is what stops one stalled attempt from holding up every
+                    // later push to the same phone.
+                    match tokio::time::timeout(
+                        DELIVERY_DEADLINE,
+                        Self::deliver(transport, registry, target, document),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(_) => bail!("the relay did not answer within {DELIVERY_DEADLINE:?}"),
+                    }
                 }
-            }
-        })
+            },
+            move |device_id, agent| {
+                let gate = Arc::clone(&gate);
+                async move { crate::push_queue::still_authorized(&*gate, &device_id, &agent).await }
+            },
+        )
         .await
     }
 }
@@ -589,6 +600,9 @@ impl PushSender for RelayPushSender {
                 payload: document,
                 collapse: COLLAPSE_ID,
                 respond: None,
+                // The subject the fan-out above just authorized, carried so the
+                // worker can ask again immediately before it posts.
+                authorized_for: Some(hint.agent.clone()),
             });
         }
     }
@@ -610,6 +624,8 @@ impl PushSender for RelayPushSender {
             payload: document,
             collapse: TEST_COLLAPSE_ID,
             respond: Some(tx),
+            // Not about any run; see the direct sender's twin of this.
+            authorized_for: None,
         });
         rx
     }
@@ -934,6 +950,20 @@ mod tests {
     impl PushRegistry for FakeRegistry {
         fn targets(&self) -> Vec<PushTarget> {
             self.targets.clone()
+        }
+        /// The per-device answer, read off the same fleet this fake was built
+        /// from — one device, not the list, because that is the question.
+        fn eligible<'a>(
+            &'a self,
+            device_id: String,
+            agent: protocol::agent::AgentKind,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let answer = self
+                .targets
+                .iter()
+                .find(|target| target.device_id == device_id)
+                .is_some_and(|target| target.features.supports(&agent));
+            Box::pin(std::future::ready(answer))
         }
         fn forget(
             &self,
@@ -1335,17 +1365,16 @@ mod tests {
     /// The relay is given exactly as many answers as there are eligible phones:
     /// the count is a claim, not a convenience.
     ///
-    /// **The hint is the shape production can actually raise** (round-9 F6). It used
-    /// to be `codex_hint(2)` — Codex, `Approval`, two runs blocked — and that hint
-    /// cannot exist: the only production caller of `send` passes a
-    /// [`crate::apns::PushHint::describing`] result, and `describing` forces the
-    /// subject to Claude whenever `blocked > 0`, a Codex approval deck being
-    /// unraisable in this build. So every Codex-carrying hint is `Completed` with
-    /// zero blocked — the shape the direct sender's twin of this test already uses,
-    /// and mirrored here for the reason a test over an unreachable shape is worth
-    /// less than it looks: a sender that chose Claude *except* when
-    /// `blocked_sessions == 0` passed the old assertion while misrouting every Codex
-    /// push the build can produce.
+    /// **The hint is a shape production actually raises**, and it is deliberately
+    /// the completed turn rather than the approval. It is no longer the only one —
+    /// a Codex approval deck is raisable now, and `describing` keeps the ringing
+    /// run's own agent rather than forcing the subject to Claude — so the approval
+    /// shape has a matrix of its own
+    /// ([`a_codex_approval_doorbell_is_relayed_with_a_count_per_device`]) and the
+    /// two doorbell kinds are asserted separately. Keeping this one on the shape
+    /// with zero blocked is what makes the pair worth having: a sender that chose
+    /// Claude *except* when `blocked_sessions == 0` would pass one of them and
+    /// misroute the other.
     ///
     /// **Mutations:** filter on a hard-coded `AgentKind::Claude` at this sender's
     /// call to [`crate::push_queue::recipients`], filter on Claude only when
@@ -1419,6 +1448,255 @@ mod tests {
              Either Claude phone appearing here means the sender asked about an agent \
              the run is not, and paid a relay to tell a device about a session it has \
              no screen to open"
+        );
+    }
+
+    /// **The Codex APPROVAL doorbell over the relay, with a per-device count.**
+    ///
+    /// Two independent senders carry every doorbell, and a filter narrowed at one
+    /// of them is a fleet-wide authorization change the other's tests survive
+    /// untouched — which is why the direct sender's approval matrix is not enough
+    /// on its own. This is the relay half, and it counts POSTS rather than
+    /// queues: the relay fake records one entry per request it is actually asked
+    /// to make, so `0` here means no bytes were ever addressed to that phone.
+    ///
+    /// The counts run 0 → 1 → many over the same fleet. The second doorbell is
+    /// sent only once the first has been posted, and that ordering is the claim
+    /// rather than a convenience: a doorbell filed while another is still waiting
+    /// REPLACES it, on purpose — the phone has one notification slot and the
+    /// newer doorbell describes the world better — so two sent back to back are
+    /// one buzz and would say nothing about routing. Two decisions, each rung in
+    /// its own right, is what "many" honestly means here. The unauthorized phones
+    /// stay at `0` through both.
+    ///
+    /// **This matrix is deliberately thinner than the direct sender's.** It has
+    /// the fleet shapes and the counts, and it does not repeat the boundary cases
+    /// that are about the fan-out filter itself rather than about this transport —
+    /// those live once, beside the filter, in `apns_sender`. What has to be
+    /// duplicated here is only what a change to THIS sender could break on its
+    /// own: which phones it addresses, and how many times.
+    ///
+    /// **Mutation:** hard-code `&AgentKind::Claude` at this sender's call to
+    /// [`recipients`] and the two Claude phones join, taking the reply deque past
+    /// its end and failing the post.
+    #[tokio::test]
+    async fn a_codex_approval_doorbell_is_relayed_with_a_count_per_device() {
+        let phone = |device: &str, features: crate::store::DeviceFeatures| PushTarget {
+            token: TOKEN.into(),
+            environment: ApnsEnvironment::Sandbox,
+            device_id: device.into(),
+            credential: Some(Redacted::from(format!("bearer-{device}"))),
+            features,
+        };
+        let advertising = |agents: Vec<protocol::agent::AgentKind>| {
+            crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures { agents })
+        };
+        let claude = protocol::agent::AgentKind::Claude;
+        let codex = protocol::agent::AgentKind::Codex;
+        // Four accepted replies: two authorized phones, two doorbells each. A
+        // fifth request — which is what a widened filter produces — is refused by
+        // the fake with "asked one time too many".
+        let relay = FakeRelay::answering(
+            (0..4)
+                .map(|_| reply(200, r#"{"outcome":"accepted","environment":"sandbox"}"#))
+                .collect(),
+        );
+        let sender = RelayPushSender::new(
+            Arc::clone(&relay) as Arc<dyn RelayTransport>,
+            FakeRegistry::over_all(vec![
+                phone("claude-floor", Default::default()),
+                phone("claude-only", advertising(vec![claude.clone()])),
+                phone("codex-only", advertising(vec![codex.clone()])),
+                phone("both", advertising(vec![claude, codex])),
+            ]),
+        );
+
+        let approval = |uid: &str| PushHint {
+            kind: PushKind::Approval,
+            session_uid: uid.into(),
+            ..codex_hint(1)
+        };
+        let counts = |expected: usize| {
+            let mut per_device: std::collections::BTreeMap<String, usize> = [
+                ("bearer-claude-floor", 0usize),
+                ("bearer-claude-only", 0),
+                ("bearer-codex-only", 0),
+                ("bearer-both", 0),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+            for (bearer, _) in relay.asked.lock().unwrap().iter() {
+                *per_device.entry(bearer.clone()).or_default() += 1;
+            }
+            assert_eq!(
+                per_device,
+                [
+                    ("bearer-both".to_string(), expected),
+                    ("bearer-claude-floor".to_string(), 0),
+                    ("bearer-claude-only".to_string(), 0),
+                    ("bearer-codex-only".to_string(), expected),
+                ]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+                "a Codex approval doorbell reaches exactly the two phones that said \
+                 the word; a Claude phone at anything but zero is a phone paid for \
+                 and told about a session it has no screen to open"
+            );
+        };
+        let settle = |target: usize| {
+            let relay = Arc::clone(&relay);
+            async move {
+                for _ in 0..400 {
+                    if relay.asked.lock().unwrap().len() >= target {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                // **Settled before it is read.** `send` files every recipient in
+                // one synchronous pass, so a widened filter puts four workers on
+                // the runtime rather than two — and stopping at the first instant
+                // `target` requests exist could read the wrong ones and call that
+                // a pass.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        };
+
+        sender.send(&approval("01K1B3XQ8ZC0DE5FGH7JKMNPQR"), &[]);
+        settle(2).await;
+        counts(1);
+
+        // **A second doorbell is a second post only once the first has left.**
+        // The per-device queue holds one doorbell at a time and a newer one
+        // replaces the one waiting, so two filed back to back are one buzz on
+        // purpose — the phone has one notification slot and the newer doorbell
+        // describes the world better. Waiting for the first to be posted is what
+        // makes this "a second approval, later" rather than "the same news
+        // twice", and it is the only way the count reaches two.
+        sender.send(&approval("01K1B3XQ8ZC0DE5FGH7JKMNPQS"), &[]);
+        settle(4).await;
+        counts(2);
+    }
+
+    /// **A relayed doorbell that waited out a withdrawal is not posted.**
+    ///
+    /// The relay is the second of two independent senders, and a dequeue-time
+    /// check added at one of them is a fleet-wide authorization property the
+    /// other's tests survive untouched — which is why the direct sender's twin of
+    /// this is not enough on its own. This one goes through the real transport
+    /// seam: the relay's own post is HELD, so the worker is genuinely stuck
+    /// inside its first attempt while the second doorbell is filed and the
+    /// authorization is withdrawn, and `asked` counts the requests the relay was
+    /// actually made.
+    ///
+    /// **Mutation:** pass a gate that always answers `true` from
+    /// `RelayPushSender::serve` and the relay is asked a second time, for a phone
+    /// that stopped being a recipient while it waited.
+    #[tokio::test]
+    async fn a_relayed_doorbell_that_waited_out_a_withdrawal_is_not_posted() {
+        /// Advertises Codex until a test says otherwise.
+        struct Switchable(std::sync::atomic::AtomicBool);
+        impl Switchable {
+            /// What this phone can render right now — the one fact both answers
+            /// are built from, so the fan-out list and the per-device re-check
+            /// cannot disagree about the switch.
+            fn features(&self) -> crate::store::DeviceFeatures {
+                if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
+                        agents: vec![protocol::agent::AgentKind::Codex],
+                    })
+                } else {
+                    Default::default()
+                }
+            }
+        }
+        impl PushRegistry for Switchable {
+            fn targets(&self) -> Vec<PushTarget> {
+                vec![PushTarget {
+                    token: TOKEN.into(),
+                    environment: ApnsEnvironment::Sandbox,
+                    device_id: "waiting-phone".into(),
+                    credential: Some(Redacted::from("bearer-waiting-phone")),
+                    features: self.features(),
+                }]
+            }
+            fn eligible<'a>(
+                &'a self,
+                device_id: String,
+                agent: protocol::agent::AgentKind,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
+            {
+                let answer = device_id == "waiting-phone" && self.features().supports(&agent);
+                Box::pin(std::future::ready(answer))
+            }
+            fn forget(
+                &self,
+                _device_id: &str,
+                _refused_token: &str,
+                _refused_credential: Option<&Redacted>,
+                _reason: &str,
+            ) -> bool {
+                unreachable!("the relay below accepts; nothing is refused")
+            }
+            fn correct_environment(
+                &self,
+                _device_id: &str,
+                _token: &str,
+                _credential: Option<&Redacted>,
+                _environment: ApnsEnvironment,
+            ) {
+                unreachable!("the relay below accepts; no environment is corrected")
+            }
+        }
+
+        let hold = Arc::new(tokio::sync::Notify::new());
+        // Two replies are stocked. If only one delivery is posted the second is
+        // never taken, and if two are the count says so — the fake refuses a
+        // third, so a wider filter fails loudly rather than silently.
+        let relay = Arc::new(FakeRelay {
+            replies: std::sync::Mutex::new(
+                (0..2)
+                    .map(|_| reply(200, r#"{"outcome":"accepted","environment":"sandbox"}"#))
+                    .collect(),
+            ),
+            asked: std::sync::Mutex::new(Vec::new()),
+            gate: Some(Arc::clone(&hold)),
+        });
+        let registry = Arc::new(Switchable(std::sync::atomic::AtomicBool::new(true)));
+        let sender = RelayPushSender::new(
+            Arc::clone(&relay) as Arc<dyn RelayTransport>,
+            Arc::clone(&registry) as Arc<dyn PushRegistry>,
+        );
+
+        let approval = |uid: &str| PushHint {
+            kind: PushKind::Approval,
+            session_uid: uid.into(),
+            ..codex_hint(1)
+        };
+
+        sender.send(&approval("01K1B3XQ8ZC0DE5FGH7JKMNPQR"), &[]);
+        // The worker has taken the first delivery and is parked inside the
+        // relay's post, which is what makes the rest of this deterministic.
+        for _ in 0..400 {
+            if relay.asked.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(relay.asked.lock().unwrap().len(), 1, "the premise");
+
+        // A second doorbell, filed while the phone is STILL eligible.
+        sender.send(&approval("01K1B3XQ8ZC0DE5FGH7JKMNPQS"), &[]);
+        // The world moves while it waits its turn.
+        registry.0.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        hold.notify_waiters();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            relay.asked.lock().unwrap().len(),
+            1,
+            "the doorbell that waited out the withdrawal must never be posted; \
+             authorization is read at the dequeue, not only at the fan-out"
         );
     }
 

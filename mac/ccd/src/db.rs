@@ -136,6 +136,15 @@ db_ops! {
     fn device_is_active(device_id: String) -> bool;
     /// Where this device's token is registered, or `None` when it has none.
     fn push_environment_for(device_id: String) -> Option<String>;
+    /// One device's push registration under this run's feature epoch, or `None`
+    /// when it has nothing to offer. The per-device form of
+    /// [`crate::store::Store::push_targets`], and the read behind the
+    /// authorization re-check a push worker makes before each transport attempt
+    /// — which is about one device id and must not pay for the whole fleet.
+    fn push_target_for(
+        device_id: String,
+        epoch: String,
+    ) -> Option<crate::store::PushRegistration>;
     fn recover_text_mutations(at: String) -> usize;
     fn orphan_event_count() -> u64;
 }

@@ -817,7 +817,26 @@ pub enum ClearCause {
     TurnAborted,
     /// The turn completed and took the pending with it.
     TurnCompleted,
-    /// A thread switch retired the old visit's pending (D4).
+    /// **A thread switch retired the old visit's pending — and no measured
+    /// crossing produces one.**
+    ///
+    /// The sweep behind this is real and runs whenever the visit generation
+    /// moves: a card filed under an earlier visit of the same thread is not the
+    /// current visit's to hold, so it is cleared rather than left standing. What
+    /// has no producer is the case this cause was written for — a switch
+    /// admitted while an approval is still unresolved. Every wire position that
+    /// could admit one was driven on a real 0.153.2 session, and none does: with
+    /// a prompt showing, an interrupt is consumed by the prompt as its own
+    /// decline, so the approval reaches a terminal of its own before any new
+    /// thread is born; a resume only subscribes and never moves the head; and
+    /// the only frame that does move it is refused while a turn or an approval
+    /// is live.
+    ///
+    /// So this variant is kept as the honest handler for a crossing the wire has
+    /// not been shown to produce, not deleted and not given an invented
+    /// producer. It stays on the wire because the enum is decoded by clients
+    /// that must not meet an unknown value, and it costs nothing to leave a
+    /// truthful word ready for a release that starts admitting the crossing.
     Superseded,
     /// **The item the card was about finished, and no answer to it was ever
     /// observed.**

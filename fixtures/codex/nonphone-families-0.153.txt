@@ -1,0 +1,83 @@
+codex 0.153 (`codex --version` reported `codex-cli 0.153.4`) — the server
+request families a phone does not answer, and what a real session does with them.
+Driven by `measure_which_non_phone_families_reach_the_ccd_leg` in
+`ccd/src/codex_link_live.rs` against a live `codeconnect codex` session; the run
+dir, the home path and the thread id are scrubbed and nothing else is altered.
+
+The vendored bundle declares three server→client request families besides the two
+a phone answers: `item/permissions/requestApproval`, `item/tool/requestUserInput`
+and `mcpServer/elicitation/request`. This is the evidence for what a CodeConnect
+session does with each — a claim about a LAUNCH, not about codex, which is why
+the launch's own terms are on the record first.
+
+**The permissions family has a producer, and CodeConnect pins it off.** Codex
+exposes a model-callable permissions tool behind `features.request_permissions_tool`.
+Measured on this binary: the feature registry reports it `under development` and
+`false`; an operator `config.toml` carrying `[features] request_permissions_tool =
+true` flips it to `true`; and `-c features.request_permissions_tool=false` on the
+argv puts it back to `false`. A shipping launch hands both codex processes the
+operator's own `CODEX_HOME`, so the launcher writes that override onto the
+app-server and the TUI, and the reserved argv grammar refuses a caller's own `-c`
+for the same key. The app-server argv below is read back out of the process table
+during the run, so the pin is the running process's, not the source's.
+
+**With the flag pinned off, five positions produced none of the three.** One
+prompt per family, each written to ask for exactly what that family is the wire's
+word for: a multiple-choice question put to the user, a network escalation, a
+filesystem escalation with the command approved, the same with the command
+declined, and an MCP form. `watched_family_delivered=false` is the tap on the
+subscribed ccd leg; `broker_refusals_naming_one=0` is the broker's own capability
+log, which is the witness for a frame the app-server EMITTED and the broker
+answered upstream rather than delivering — the half a tap on the delivered side
+structurally cannot see. An MCP server WAS connected and a tool on it WAS called
+during the last probe (see the pane), so the elicitation zero is a driven zero
+rather than an absent server.
+
+**What the two undelivered families are, and are not.** Neither
+`item/tool/requestUserInput` nor `mcpServer/elicitation/request` ends in
+`/requestApproval`, so the broker tombstones the id and answers the app-server
+itself rather than handing a client an exchange it may not reply to. That is why
+the daemon has no opinion about them: it cannot receive one. Their absence here
+is therefore a fact about this session's model behaviour, not a wire-level proof
+that no codex build emits them.
+
+--- thread=THREAD ---
+--- feature registry ---
+  as the config leaves it : request_permissions_tool                 under development  false
+  with the launch's pin   : request_permissions_tool                 under development  false
+--- app-server argv ---
+/HOME/.local/bin/codex app-server --listen unix:///tmp/cch.RUNDIR/as.sock -c features.request_permissions_tool=false
+--- table ---
+user-input                         watched_family_delivered=false ordinary_approvals_answered=0 frames_on_the_ccd_leg=35 broker_refusals_naming_one=0
+network-permission                 watched_family_delivered=false ordinary_approvals_answered=0 frames_on_the_ccd_leg=21 broker_refusals_naming_one=0
+filesystem-permission-approved     watched_family_delivered=false ordinary_approvals_answered=1 frames_on_the_ccd_leg=42 broker_refusals_naming_one=0
+filesystem-permission-denied       watched_family_delivered=false ordinary_approvals_answered=1 frames_on_the_ccd_leg=16 broker_refusals_naming_one=0
+elicitation                        watched_family_delivered=false ordinary_approvals_answered=0 frames_on_the_ccd_leg=66 broker_refusals_naming_one=0
+--- broker capability lines naming a watched family ---
+[]
+--- final pane ---
+
+› If any MCP server is connected, call a tool on it that asks me to fill in a
+  form. If no MCP server is connected, say exactly: no mcp server.
+
+
+• Called codex_apps.workspace_agents.list_agents({})
+  └ Parameters failed connector schema validation: limit [required]: Missing
+        required property (does not match constraints configured by your ChatGPT
+        workspace admin. If the issue persists, instruct the user to contact
+        their workspace admin.); page_token [required]: Missing required
+        property (does not match constraints configured by your ChatGPT
+        workspace admin. If the issu...
+
+────────────────────────────────────────────────────────────────────────────────
+
+• An MCP server is connected, but none of its available tools asks you to fill
+  in a form.
+
+────────────────────────────────────────────────────────────────────────────────
+ 
+ 
+› Ask Codex to do anything
+ 
+  gpt-5.6-luna default · /private/tmp
+
