@@ -1,4 +1,4 @@
-//! What may be written to `broker.log`, and in what form (round-3 P3 / P4).
+//! What may be written to `broker.log`, and in what form.
 //!
 //! Every refusal this broker takes is reported through an audit sink that production wires
 //! to a durable `broker.log`, read by operators and by the live gates. The classifier's
@@ -48,7 +48,7 @@ pub const MAX_LOGGED_METHOD_BYTES: usize = 64;
 
 /// A JSON value's SHAPE for an audit-log refusal detail: its JSON type plus a size, never
 /// the value itself. Workspace paths, ownership tokens and instruction blobs are exactly
-/// the things that must not be logged (P7, and round-3 P3).
+/// the things that must not be logged.
 pub fn value_shape(v: Option<&Value>) -> String {
     match v {
         None => "absent".to_string(),
@@ -108,7 +108,7 @@ pub fn is_wire_thread_id(s: &str) -> bool {
     parts.next().is_none()
 }
 
-/// A THREAD id, safe to write to the audit log (round-3 P4).
+/// A THREAD id, safe to write to the audit log.
 ///
 /// A conforming id is echoed; anything else reports only its byte length, never its text —
 /// a `threadId` is client-chosen on `turn/start` and `thread/resume`, so it is a direct

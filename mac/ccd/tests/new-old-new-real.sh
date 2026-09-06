@@ -126,8 +126,12 @@ CX_REQ=AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gACXRoX0FCQzEyMwEAKWV4ZWMtY2Y3YjY3Y
 # stayed up for its whole window, so `timeout` is the measuring instrument, not a
 # convenience that could be swapped for a background kill. A machine without it
 # cannot run this gate, and that is a sentence, not a silent skip.
-# `tmux` is deliberately NOT in this list: step 7(g)'s leftover-session check is
-# already guarded on its presence and skips cleanly without it.
+# `codex` is deliberately NOT in this list, and neither is `tmux`. Both are needed by
+# ONE arm each, and requiring them here made the other thirteen arms — every one of
+# which tests the daemon, the store or the wire and touches no codex at all —
+# unrunnable on a machine that has no codex installed. The requirement belongs where
+# the need is, so `codex` is checked immediately before step 7(g) records its
+# answers, and step 7(g)'s leftover-session check already guards on `tmux` itself.
 for tool in timeout python3 sqlite3 cc lsof; do
   command -v "$tool" >/dev/null 2>&1 \
     || { echo "FAIL: this harness needs \`$tool\` and it is not on PATH."; \
@@ -1202,20 +1206,113 @@ echo "      connection at a time through the whole reconnect backoff, and none l
 # **Why a stub codex, and what it does not stand in for.** The launcher resolves
 # and version-pins its binary before it asks the daemon anything, so reaching the
 # preflight at all needs *a* codex on the path — and a native one: a `#!` script
-# is refused as a wrapper by design. The stub is a four-line C program that
-# answers `--version` with a pinned version and nothing else, which is all the
-# steps before the preflight ask of it. It stands in for the binary, never for
-# the daemon: both daemons below are real, and the answers they give are their
-# own. `cc` is present by construction — cargo linked the binaries this harness
-# is running a few hundred lines above.
+# is refused as a wrapper by design. It stands in for the binary, never for the
+# daemon: both daemons below are real, and the answers they give are their own.
+# `cc` is present by construction — cargo linked the binaries this harness is
+# running a few hundred lines above.
+#
+# **The stub replays a real codex's answers, and it has to.** It used to be four
+# lines that printed a version string, which was everything the launcher asked
+# before it asked the daemon. That stopped being true when the launch grew its
+# guarded-surface gate: the launcher now also reads the binary's root command
+# surface, BOTH app-server schema bundles, and the effective value of the one
+# feature the launch pins off, and projects the first three onto the surface
+# CodeConnect is grounded against. Those answers cannot be invented and cannot be
+# lifted from `schema-0.153/guarded-wire-*.json` either — the vendored files are
+# the gate's own PROJECTION of a bundle, not a bundle, so nothing can hand them
+# back to it. With a version-only stub the arm died reading a `ClientRequest.json`
+# nobody had written, hundreds of lines before the refusal it exists to assert.
+#
+# So the answers are recorded once, here, from the installed codex — five local
+# invocations that print or write files and start nothing (`--version`,
+# `completion bash`, `features list`, and both `generate-json-schema` bundles);
+# none of them opens a network connection or spends account quota — and the stub
+# hands them back. That makes it a more faithful prop than the hand-written one
+# ever was: what the gate reads is what a real codex says. It is still not a codex.
+# It cannot serve `app-server`, which is exactly why the falsifiability arm below
+# gets a launch that fails fast instead of a session.
+#
+# **This is the one place the harness needs `codex`**, which is why it is asked for
+# here and not in the tool check at the top: the other arms test the daemon, the
+# store and the wire, and requiring codex for all of them made a machine without one
+# unable to run any of the gate.
+command -v codex >/dev/null 2>&1 \
+  || { echo "FAIL: step 7(g) needs \`codex\` on PATH to record the answers its stub replays, and it is not there."; exit 1; }
 STUB="$H/stub"
-mkdir -p "$STUB"
+ANS="$H/stub-answers"
+mkdir -p "$STUB" "$ANS"
+codex --version > "$ANS/version.txt" 2>"$H/stub-answers.log" \
+  && codex completion bash > "$ANS/completion.bash" 2>>"$H/stub-answers.log" \
+  && codex features list -c features.request_permissions_tool=false > "$ANS/features.txt" 2>>"$H/stub-answers.log" \
+  && codex app-server generate-json-schema --out "$ANS/stable" 2>>"$H/stub-answers.log" \
+  && codex app-server generate-json-schema --out "$ANS/experimental" --experimental 2>>"$H/stub-answers.log" \
+  || { echo "FAIL: could not record the installed codex's answers, so the preflight arm cannot run"; cat "$H/stub-answers.log"; exit 1; }
+# The answers directory is baked in at compile time rather than read from the
+# environment: the launcher spawns this binary with an environment of its own
+# choosing, and a prop that depended on a variable the launcher does not set would
+# fail in a way that looks like the gate refusing it.
 cat > "$STUB/codex.c" <<'STUBC'
+#include <string.h>
 #include <stdio.h>
-int main(void) { printf("codex-cli 0.147.0\n"); return 0; }
+#include <unistd.h>
+#include <sys/wait.h>
+
+/* Run one command to completion and hand back its exit status. `execv` rather
+   than `system`, so no part of an argv the launcher chose is ever handed to a
+   shell to re-interpret. */
+static int run(char *const av[]) {
+  pid_t p = fork();
+  if (p == 0) { execv(av[0], av); _exit(127); }
+  if (p < 0) return 1;
+  int st = 0;
+  if (waitpid(p, &st, 0) < 0) return 1;
+  return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+}
+
+static int replay(const char *name) {
+  char path[4096];
+  snprintf(path, sizeof path, "%s/%s", ANSWERS, name);
+  char *av[] = { (char *)"/bin/cat", path, 0 };
+  return run(av);
+}
+
+int main(int argc, char **argv) {
+  if (argc >= 2 && strcmp(argv[1], "--version") == 0) return replay("version.txt");
+  if (argc >= 2 && strcmp(argv[1], "completion") == 0) return replay("completion.bash");
+  if (argc >= 3 && strcmp(argv[1], "features") == 0 && strcmp(argv[2], "list") == 0)
+    return replay("features.txt");
+  if (argc >= 3 && strcmp(argv[1], "app-server") == 0
+      && strcmp(argv[2], "generate-json-schema") == 0) {
+    const char *out = 0;
+    const char *which = "stable";
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) out = argv[++i];
+      else if (strcmp(argv[i], "--experimental") == 0) which = "experimental";
+    }
+    if (!out) return 1;
+    char src[4096];
+    snprintf(src, sizeof src, "%s/%s/.", ANSWERS, which);
+    char *mk[] = { (char *)"/bin/mkdir", (char *)"-p", (char *)out, 0 };
+    if (run(mk) != 0) return 1;
+    char *cp[] = { (char *)"/bin/cp", (char *)"-R", src, (char *)out, 0 };
+    return run(cp);
+  }
+  /* Everything else — `app-server --listen` above all — succeeds at nothing and
+     exits, which is what makes the launch below fail fast and honestly. */
+  return 0;
+}
 STUBC
-cc -o "$STUB/codex" "$STUB/codex.c" 2>"$H/stub-cc.log" \
+cc -DANSWERS="\"$ANS\"" -o "$STUB/codex" "$STUB/codex.c" 2>"$H/stub-cc.log" \
   || { echo "FAIL: could not build the stub codex, so the preflight arm cannot run"; cat "$H/stub-cc.log"; exit 1; }
+# **The recording has to still describe the installed codex.** A package update that
+# lands between the recording above and the arm below would leave the stub replaying
+# one build's answers while the guarded-surface gate is grounded against another —
+# and the arm would fail on a mismatch that is nothing to do with what it tests,
+# reported as a rollback regression. Asked of the cheapest answer that changes when
+# the install does.
+[ "$(codex --version 2>/dev/null)" = "$(cat "$ANS/version.txt")" ] \
+  || { echo "FAIL: the installed codex changed after its answers were recorded, so the step 7(g) stub replays a build that is no longer there. Re-run the harness."; \
+       echo "      recorded: $(cat "$ANS/version.txt")"; echo "      installed: $(codex --version 2>/dev/null)"; exit 1; }
 
 CODECONNECT_HOME="$H" "$OLD" > "$H/old-live6.log" 2>&1 &
 OLDPID=$!
@@ -1237,8 +1334,13 @@ CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
   "$NEWCC" codex > "$H/preflight-old.log" 2>&1 || PRE_RC=$?
 [ "$PRE_RC" -ne 0 ] \
   || { echo "FAIL: the launcher started a Codex session against a daemon that cannot host one"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
-grep -q "refusing to launch" "$H/preflight-old.log" \
-  || { echo "FAIL: the launcher's refusal is not the preflight's:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
+# **Discriminating, because "refusing to launch" no longer is.** The launcher has a
+# second producer of that prefix upstream of this preflight — the effective-config
+# postcheck for the feature it pins off — so a refusal for an operator's `config.toml`
+# would satisfy a bare grep for it and be reported as the daemon-support refusal this
+# arm exists to prove. The tail below belongs to the daemon-support refusal alone.
+grep -q "this daemon could never be told about it" "$H/preflight-old.log" \
+  || { echo "FAIL: the launcher refused, but not with the daemon-support preflight's refusal — this arm proves nothing about the daemon:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
 grep -q "predates the agent seam" "$H/preflight-old.log" \
   || { echo "FAIL: the refusal does not name what the daemon actually answered:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
 # Non-mutating, and measured rather than argued: the question is one frame on a
@@ -1326,8 +1428,15 @@ kill $NEWPID 2>/dev/null; wait $NEWPID 2>/dev/null; NEWPID=""
 # finds nothing is a compound statement that returned non-zero, so the script
 # would exit HERE — on the PASSING path, with every assertion below silently
 # unrun. The same shape as the `timeout`/143 note above.
+# Any refusal at all falsifies this control — the affirmative claim is that the
+# launcher got past every gate — but the message says WHICH, because the prefix now
+# has two producers and "the preflight refused" would be a guess about half of them.
 if grep -q "refusing to launch" "$H/preflight-new.log"; then
-  echo "FAIL: the preflight refused a daemon that hosts Codex, so the refusal above proves nothing about the daemon"
+  if grep -q "this daemon could never be told about it" "$H/preflight-new.log"; then
+    echo "FAIL: the daemon-support preflight refused a daemon that hosts Codex, so the refusal above proves nothing about the daemon"
+  else
+    echo "FAIL: the launcher refused this control for a reason that is not the daemon's, so the arm cannot isolate the preflight"
+  fi
   cat "$H/preflight-new.log"
   exit 1
 fi
@@ -1340,7 +1449,7 @@ GREC="$(ls "$H"/sessions/*/launch.json 2>/dev/null | head -1)"
 [ -n "$GREC" ] \
   || { echo "FAIL: against a hosting daemon the launcher never started a launch; it stopped somewhere else:"; cat "$H/preflight-new.log"; exit 1; }
 # And it reached a TERMINAL outcome rather than being abandoned mid-flight. The
-# stub answers `--version` and nothing else, so it cannot host a session: the
+# stub replays answers about a codex but is not one, so it cannot host a session: the
 # app-server it is exec'd as exits immediately, bring-up fails, and the coordinator
 # terminalizes the record. `Failed` here is the honest end of a real launch, not a
 # refusal — which is exactly the distinction this arm exists to draw.
@@ -1352,7 +1461,7 @@ grep -q '"Failed"' "$GREC" \
 #
 # Taken FROM the record rather than written down here, because the stub produces
 # several failure shapes and which one lands is a property of the machine. The stub
-# answers `--version` and exits, so the pane's command dies within milliseconds of
+# exits without serving anything, so the pane's command dies within milliseconds of
 # its `execve`; whether the coordinator notices during the bookkeeping that follows
 # `new-session` ("the created tmux session could not be made safe: remain-on-exit
 # could not be cleared…"), later in the bring-up wait ("wrapper bring-up failed: the

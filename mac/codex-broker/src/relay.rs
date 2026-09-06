@@ -6,7 +6,7 @@
 //! pure security core before **any** byte is forwarded; the server→client direction is a
 //! byte-exact passthrough.
 //!
-//! Every accepted connection is stamped with a monotonic [`ConnId`] (round-2 P1). It is
+//! Every accepted connection is stamped with a monotonic [`ConnId`]. It is
 //! threaded into BOTH directions — the c2s classifier reads it through
 //! [`crate::refusal::Env::conn`], and the s2c thread-binding observer takes it as a
 //! parameter — so thread-creation correlation is CONNECTION-scoped rather than role-scoped
@@ -78,9 +78,9 @@ struct Ctx<F: UpstreamFactory> {
     /// resume and turn paths read it.
     threads: SessionThreads,
     /// Mints the per-connection instance id ([`ConnId`]) handed to each accepted
-    /// connection's task (round-2 P1). A monotonic counter is enough: it never wraps in any
-    /// realistic session (2^64 accepts), and it only has to distinguish connections that
-    /// are alive at the same time from one another and from every earlier one.
+    /// connection's task. A monotonic counter is enough: it never wraps in any realistic
+    /// session (2^64 accepts), and it only has to distinguish connections that are alive
+    /// at the same time from one another and from every earlier one.
     next_conn: AtomicU64,
     /// **The head fan-out repair**: the last `thread/started` this broker forwarded,
     /// kept verbatim, and every `ccd` leg that is owed one.
@@ -115,7 +115,7 @@ struct Ctx<F: UpstreamFactory> {
 }
 
 /// The announcement, the legs owed it, and nothing else — **deliberately one
-/// mutex** (round-2 F1).
+/// mutex**.
 ///
 /// The decision "this leg is owed *this* frame" is a joint statement about three
 /// facts: the broker's verified head, the announcement it last forwarded, and what
@@ -131,11 +131,11 @@ struct HeadFanout {
     /// The `thread/started` frames this broker forwarded, **keyed by the thread each
     /// one names**, newest last.
     ///
-    /// **Why not one slot** (round-3 F2). A single last-one-wins slot follows task
-    /// scheduling, not the head's progression. The same broadcast reaches every leg
-    /// on its own upstream socket, so two legs can process announcements A and B in
-    /// opposite orders: leg 1 records B, leg 2 is descheduled and records A *after*
-    /// it, and the slot is left naming a thread the session has already left. That is
+    /// **Why not one slot.** A single last-one-wins slot follows task scheduling,
+    /// not the head's progression. The same broadcast reaches every leg on its own
+    /// upstream socket, so two legs can process announcements A and B in opposite
+    /// orders: leg 1 records B, leg 2 is descheduled and records A *after* it, and
+    /// the slot is left naming a thread the session has already left. That is
     /// not merely a stale read — [`deliver_head`] then refuses to say anything at all
     /// (the announcement no longer names the head), and since no further announcement
     /// of B is coming, B is denied to every later `ccd` subscriber for the rest of the
@@ -295,9 +295,9 @@ fn response_disposition(
 ///
 /// The margin is deliberate: `sink.send` is a feed plus a flush on a socket the
 /// app-server may legitimately be slow to drain while it is doing something else, and
-/// this bound is for a peer that has STOPPED, not one that is busy. Since R5 the broker
-/// really does wait on the app-server, so a missing disposition can be a slow peer —
-/// which is exactly why the expiry reports `unconfirmed` rather than a proven failure.
+/// this bound is for a peer that has STOPPED, not one that is busy. The broker really
+/// does wait on the app-server, so a missing disposition can be a slow peer — which is
+/// exactly why the expiry reports `unconfirmed` rather than a proven failure.
 const UPSTREAM_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// **The write was refused — at the socket, or one step before it.**
@@ -374,8 +374,7 @@ struct CcdSubscriber {
     replayed: Option<String>,
 }
 
-/// A replay waiting in a leg's queue, **tagged with the head it was queued for**
-/// (round-3 F1).
+/// A replay waiting in a leg's queue, **tagged with the head it was queued for**.
 ///
 /// Enqueueing is not sending. The replay arm is the last of the three in
 /// [`handle_connection`]'s `select!`, so between the enqueue and the send this leg
@@ -408,8 +407,8 @@ impl<F: UpstreamFactory> Broker<F> {
         fingerprint: LaunchFingerprint,
         factory: F,
     ) -> Self {
-        // The session thread store is anchored to the launch cwd carried in the fingerprint
-        // (round-2 P4): a creation response naming any other workspace binds nothing.
+        // The session thread store is anchored to the launch cwd carried in the
+        // fingerprint: a creation response naming any other workspace binds nothing.
         let threads = SessionThreads::new(fingerprint.launch_cwd.clone());
         Self {
             tui_sock: tui_sock.into(),
@@ -497,17 +496,17 @@ fn spawn_leg<F: UpstreamFactory>(
     match accepted {
         Ok((stream, _)) => {
             let ctx = Arc::clone(ctx);
-            // Mint this connection's instance id (round-2 P1) and announce it. The OPEN
-            // marker is what lets a log reader attribute every later `(conn N)` line — and
-            // the close/error lines below — to one connection.
+            // Mint this connection's instance id and announce it. The OPEN marker is what
+            // lets a log reader attribute every later `(conn N)` line — and the close/error
+            // lines below — to one connection.
             let conn = ConnId(ctx.next_conn.fetch_add(1, Ordering::Relaxed));
             (ctx.log)(&format!("{role:?}: leg opened (conn {conn})"));
             tokio::spawn(async move {
                 let outcome = handle_connection(role, conn, stream, ctx.clone()).await;
                 // The owning connection is gone. A creation still pending on it DID reach
                 // the server, so it lands in the indeterminate closed state rather than
-                // being stranded in flight for ever (round-2 P3); the connection's
-                // reservation/tombstone sets are released at the same time.
+                // being stranded in flight for ever; the connection's reservation/tombstone
+                // sets are released at the same time.
                 ctx.threads.close_connection(conn);
                 // The head fan-out's own release: a leg that is gone is owed nothing,
                 // and its queue must not keep a slot in the table for the life of the
@@ -560,13 +559,12 @@ async fn handle_connection<F: UpstreamFactory>(
             biased;
             // server -> client: byte-exact passthrough (classification is c2s-only), but
             // observed to verify this leg's pending thread creation (thread binding), to
-            // release the outstanding request ids this leg's responses answer (round-3 P1),
-            // and to register one-use response capabilities (approval fanout). Both
-            // observers are PER CONNECTION — each correlates a bare response id against what
-            // THIS connection solicited, keyed by the relay-minted `ConnId`. (O12: the
-            // thread-binding key was `(Role, RequestId)` in round 1; it is
-            // `(ConnId, RequestId)` now, so two connections of the same role cannot answer
-            // each other's requests.)
+            // release the outstanding request ids this leg's responses answer, and to
+            // register one-use response capabilities (approval fanout). Both observers are
+            // PER CONNECTION — each correlates a bare response id against what THIS
+            // connection solicited, keyed by the relay-minted `ConnId`. (O12: the
+            // thread-binding key is `(ConnId, RequestId)`, never `(Role, RequestId)`, so two
+            // connections of the same role cannot answer each other's requests.)
             outbound = up.from_upstream.recv() => match outbound {
                 Some(msg) => {
                     let mut deliver = true;
@@ -664,7 +662,7 @@ async fn handle_connection<F: UpstreamFactory>(
             // arms deliberately: a live server frame is never stale, so when both are
             // ready the passthrough goes first and the repair follows it.
             replay = head_rx.recv() => match replay {
-                // **Revalidated HERE, not where it was queued** (round-3 F1). Between
+                // **Revalidated HERE, not where it was queued.** Between
                 // the enqueue and this moment the two arms above can have carried a
                 // whole `/new` past this leg; a queued predecessor sent now would read
                 // as a switch BACK to it. Only the head still verified at send time
@@ -728,11 +726,11 @@ where
         }
     }
 
-    // Round-2 P3 — the creation slot is claimed inside `decide` (it must be atomic with the
-    // decision), but the claim is only sound if the bytes actually GO OUT. The relay is the
-    // only place that knows both the parsed shape and whether the upstream write succeeded,
-    // so it remembers which id a `thread/start` would have claimed and rolls the claim back
-    // if the write fails. A refused `thread/start` never reaches the `Forward` arm, so the
+    // The creation slot is claimed inside `decide` (it must be atomic with the decision),
+    // but the claim is only sound if the bytes actually GO OUT. The relay is the only place
+    // that knows both the parsed shape and whether the upstream write succeeded, so it
+    // remembers which id a `thread/start` would have claimed and rolls the claim back if
+    // the write fails. A refused `thread/start` never reaches the `Forward` arm, so the
     // rollback below can only ever un-claim a claim this very message made.
     let creation_id: Option<RequestId> = match &shape {
         Shape::Request {
@@ -814,7 +812,7 @@ where
     let mut handoff_expired = false;
     match action {
         RelayAction::Forward { note } => {
-            // M8 — the connection id is APPENDED AFTER the existing parenthesised note, never
+            // The connection id is APPENDED AFTER the existing parenthesised note, never
             // spliced into it. Live gates assert the exact substrings
             // `Tui: forward (ownership request: fingerprint asserted)`,
             // `Ccd: forward (request allowlisted)`, `Ccd: forward (notification allowlisted)`,
@@ -925,7 +923,7 @@ where
                 }
             }
         }
-        // The same M8 rule for the three refusal dispositions: note first, `(conn N)` after.
+        // The same rule for the three refusal dispositions: note first, `(conn N)` after.
         RelayAction::SyntheticError { frame, note } => {
             (ctx.log)(&format!(
                 "{role:?}: refuse->synthetic error ({note}) (conn {conn})"
@@ -1128,11 +1126,11 @@ fn note_announcement<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, conn: ConnId, text: 
         .head_fanout
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // **Keyed by thread, first bytes win** (round-3 F2). A leg descheduled across a
-    // `/new` re-presents an announcement another leg recorded already; recording it
-    // again would be this task's arrival order overwriting the head's progression.
-    // Having it change nothing is what makes a delayed leg inert rather than
-    // destructive. See [`HeadFanout::announced`].
+    // **Keyed by thread, first bytes win.** A leg descheduled across a `/new`
+    // re-presents an announcement another leg recorded already; recording it again
+    // would be this task's arrival order overwriting the head's progression. Having
+    // it change nothing is what makes a delayed leg inert rather than destructive.
+    // See [`HeadFanout::announced`].
     if !fanout.announced.iter().any(|a| a.thread_id == thread_id) {
         fanout.announced.push(Announcement {
             thread_id,
@@ -1225,7 +1223,7 @@ fn announced_thread_id(obj: &serde_json::Value) -> Option<String> {
 /// reconnect path re-announces, and the bind is idempotent under the adapter's
 /// thread-namespaced identity keys).
 ///
-/// **Delivered when the head BINDS, not only when a leg subscribes** (round-2 F1).
+/// **Delivered when the head BINDS, not only when a leg subscribes.**
 ///
 /// Replaying once, at subscribe time, closed only half the hole. A leg forwards
 /// `initialize` and is registered here, but the app-server adds it to the broadcast
@@ -1254,8 +1252,8 @@ fn announced_thread_id(obj: &serde_json::Value) -> Option<String> {
 ///
 /// **They are read as one snapshot.** The head is read *inside* the [`HeadFanout`]
 /// guard, which is the guard the announcement's only writer also takes. Reading
-/// them apart admits the stale pair the round-2 review names: head observed as A,
-/// then B binds and replaces the announcement, and the leg is handed A. The lock
+/// them apart admits a stale pair: head observed as A, then B binds and replaces
+/// the announcement, and the leg is handed A. The lock
 /// order is `head_fanout` → `threads` and never the reverse — `note_announcement`
 /// touches only the former, `observe_server_frame` only the latter.
 ///
@@ -1278,11 +1276,11 @@ fn deliver_head<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>) {
         let Some(head) = ctx.threads.bound_thread() else {
             return;
         };
-        // Selected BY THE HEAD, not by arrival order (round-3 F2). Nothing is said
-        // when no announcement names it: either none has arrived yet, or the ones
-        // held name threads this broker has not bound — a `/new` whose creation
-        // response has not landed. Not evidence about where the session is; the bind
-        // that follows will ask again.
+        // Selected BY THE HEAD, not by arrival order. Nothing is said when no
+        // announcement names it: either none has arrived yet, or the ones held name
+        // threads this broker has not bound — a `/new` whose creation response has
+        // not landed. Not evidence about where the session is; the bind that follows
+        // will ask again.
         let Some(raw) = fanout
             .announced
             .iter()

@@ -260,7 +260,7 @@ fn resolve_codex() -> Option<PathBuf> {
 /// exercised from a unit test here. A missing launcher is a **failure** with the
 /// command that fixes it, never a skip.
 fn resolve_codeconnect() -> PathBuf {
-    // Round-1 M13: build it before looking for it.
+    // Build it before looking for it.
     build_launcher();
     let exe = std::env::current_exe().expect("this test binary's own path");
     let profile_dir = exe
@@ -277,7 +277,7 @@ fn resolve_codeconnect() -> PathBuf {
     bin
 }
 
-/// **Build the launcher, then use it** (round-1 M13).
+/// **Build the launcher, then use it.**
 ///
 /// Found the hard way, in 2e-4c, while mutation-testing a live gate: `cargo test -p ccd`
 /// does not rebuild `codeconnect`, and this harness drives `codeconnect` — which is what
@@ -897,11 +897,11 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
     //    turn, so the attach backs off and asks again on the same connection. It must
     //    read as a healthy in-flight connection, NOT as disorder.
     //
-    //    **This expectation was inverted for one round**, when an announcement
-    //    discharged the attach and a link therefore asked at most once per connection.
-    //    Under that rule a second resume really was anomalous; now it is the norm, and a
-    //    walker that still called it disorder would fail every live run before the first
-    //    turn.
+    //    **The opposite expectation belongs to a rule this build does not have**: if an
+    //    announcement discharged the attach, a link would ask at most once per
+    //    connection, and under that rule a second resume really would be anomalous. Here
+    //    it is the norm, and a walker that called it disorder would fail every live run
+    //    before the first turn.
     assert_eq!(
         verdict(&[
             "Ccd: leg opened (conn 1)",
@@ -2674,7 +2674,7 @@ async fn a_session_launched_on_an_uncaptured_model_still_runs_a_turn() {
          turn nevertheless completed — that combination needs explaining before this \
          gate can be believed. broker.log:\n{broker_log}"
     );
-    // **M12 — the turn actually carried the uncaptured PAIR, and HIGH effort.**
+    // **The turn actually carried the uncaptured PAIR, and HIGH effort.**
     //
     // "The turn completed" alone is compatible with a codex that silently ignored the
     // config and ran the captured model, in which case this gate would prove nothing about
@@ -3131,9 +3131,9 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // fact, and it is broadcast to merely-initialized connections by design (A1/D2).
     // That is the one delivery an unsubscribed connection is *supposed* to get.
     //
-    // **`skills/changed` was added in round 3, and its provenance is recorded rather
-    // than assumed.** It began appearing when a `~/.codex/skills` directory came to
-    // exist on this machine; the app-server broadcasts it and this position receives
+    // **`skills/changed` is in the set by measurement, and its provenance is recorded
+    // rather than assumed.** It began appearing when a `~/.codex/skills` directory came
+    // to exist on this machine; the app-server broadcasts it and this position receives
     // it, intermittently, depending on when the watcher fires relative to the run.
     // Two things were checked before widening the set, because this comment is the
     // only thing standing between "measured" and "whatever showed up":
@@ -3143,11 +3143,11 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     //     drop, so it mints NO fact. Note the weaker footing — the other four are
     //     listed there explicitly as observation noise, this one is merely unknown —
     //     which is why it is called out here instead of being quietly appended.
-    //   * **Against this round's diff**: with the broker's head fan-out neutralized
-    //     back to its round-2 behaviour, `skills/changed` still arrived on 5 of 8
-    //     runs. It is environment drift, not something the fan-out change produced —
-    //     and it could not be, since the only frame that change can add to this
-    //     position is the `thread/started` already named above.
+    //   * **Against the broker's head fan-out**: with that fan-out neutralized back to
+    //     its pre-change behaviour, `skills/changed` still arrived on 5 of 8 runs. It
+    //     is environment drift, not something the fan-out change produced — and it
+    //     could not be, since the only frame that change can add to this position is
+    //     the `thread/started` already named above.
     let measured_fanout: std::collections::BTreeSet<&str> = [
         "thread/started",
         "thread/status/changed",
@@ -3299,7 +3299,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // **The link is deliberately NOT restarted here.** An earlier version of this gate
     // aborted it and pointed a fresh one at the thread id, which made the acceptance
     // claim true of a link that had just been handed its target — and quietly hid the
-    // defect P1 fixes, that a link which bound from the broadcast never asked at all.
+    // defect the gate is for: a link which bound from the broadcast never asked at all.
     // The milestone has to hold on the connection that has been watching since before
     // the TUI existed, so that is the connection every claim below is about.
     println!(
@@ -3461,7 +3461,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
          an item where it did not, or `turns[0].id` is a copy of something else: \
          {post_turn_resume}"
     );
-    // **M9: an expectation computed INDEPENDENTLY of the answer.** Reading `cwd` out
+    // **An expectation computed INDEPENDENTLY of the answer.** Reading `cwd` out
     // of the frame and comparing it to the frame is a tautology, and comparing it to
     // the fixture's would be worse — the fixture's `cwd` is per-run content this gate
     // deliberately does not pin. But the test KNOWS what it launched: the coordinator
@@ -8283,7 +8283,7 @@ async fn measure_what_else_could_switch_a_thread_while_an_approval_is_pending() 
     let pending_from = read_file(&broker_log).lines().count();
     let started_at_pending = started_threads(&sub);
 
-    // ---- P1: keys the prompt has no use for -------------------------------
+    // ---- keys the prompt has no use for -----------------------------------
     sb.send_keys(&["/"]);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let pane_slash = sb.capture_pane();
@@ -8298,7 +8298,7 @@ async fn measure_what_else_could_switch_a_thread_while_an_approval_is_pending() 
         pane_z.contains("Would you like to run the following command?")
     );
 
-    // ---- P2: the ccd leg's own two frames ---------------------------------
+    // ---- the ccd leg's own two frames -------------------------------------
     // Smallest well-formed params on purpose: what is measured is the ROLE, and a
     // refusal naming a bad parameter would be measuring this harness instead.
     let start_id = 8100;
@@ -8324,7 +8324,7 @@ async fn measure_what_else_could_switch_a_thread_while_an_approval_is_pending() 
     println!("MEASURED ccd thread/start answered: {ccd_start_answer:?}");
     println!("MEASURED ccd thread/unsubscribe answered: {ccd_unsub_answer:?}");
 
-    // ---- P3: a second connection on the TUI leg ---------------------------
+    // ---- a second connection on the TUI leg -------------------------------
     let (second_tui_init, second_tui_start) = {
         let mut raw = RawCcd::connect(&sb.run_dir.join("tui.sock")).await;
         let init = raw.initialize().await;

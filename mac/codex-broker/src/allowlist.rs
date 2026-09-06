@@ -46,7 +46,7 @@
 ///
 /// O12 — the role is NOT part of any correlation key. The session thread binding correlates
 /// an admitted creation to its response by `(ConnId, RequestId)` — the relay-minted
-/// per-connection instance id, not the role (round-2 P1; see [`crate::session`]). `Hash` is
+/// per-connection instance id, not the role (see [`crate::session`]). `Hash` is
 /// kept because [`crate::response_capability`] keys a capability's grant by role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -107,7 +107,7 @@ pub enum Disposition {
     /// encode (so the golden matrix does not move):
     /// * `thread/start` additionally claims the session's single creation slot at the
     ///   moment it is admitted, and is refused when that slot is closed (one thread bound
-    ///   or one creation already pending — [`crate::session`], P3).
+    ///   or one creation already pending — [`crate::session`]).
     /// * `thread/fork` is **refused outright pre-2e-4c**: a fork's lineage rule is that its
     ///   SOURCE thread must be session-bound, and no fork frame exists in the wire capture,
     ///   so the source-thread field is unprovable. See [`crate::refusal`].

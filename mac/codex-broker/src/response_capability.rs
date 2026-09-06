@@ -24,7 +24,7 @@
 //!   tombstones the id for the life of the leg** — it never rebinds, never evicts, and
 //!   never resurrects. A `Tombstoned` (or `Unseen`) id **cannot authorize**, so *even the
 //!   original binding becomes unanswerable* (fail closed). This is what closes the three
-//!   bare-id alias routes a security review found:
+//!   bare-id alias routes:
 //!   * **reverse alias** — bind phone-capable A(id=0), leave it live, then observe TUI-only
 //!     B(id=0): the collision tombstones id=0, so a later `{id:0}` response can no longer
 //!     resolve to A's (CcdAndTui) capability;
@@ -120,7 +120,7 @@
 //!   answerable — which is correct, they are genuinely different approvals. The *same
 //!   logical approval* fanned to both legs is the arbiter's job (one winner across legs).
 //!   A canonical cross-leg incarnation of a bare id is the D4/2e generation seam.
-//!   **Finding 7 (2e dependency, NOT solved here):** full cross-leg soundness additionally
+//!   **Full cross-leg soundness is a 2e dependency, NOT solved here:** it additionally
 //!   requires a single continuously-lived [`LegCapabilities`] per leg across leg recreation
 //!   (so a recreated leg does not forget its tombstones), a sealed switch, and a shared
 //!   arbiter identity with convergent cross-leg fanout keys (the D2/D3/2e wiring). Leg
@@ -232,8 +232,8 @@ const MAX_WINNERS: usize = 64 * 1024;
 /// suppressed.
 const AMBIGUITY_LOG_BUDGET: u32 = 64;
 
-/// Bounded retention (finding 5): the maximum stored `threadId` length. Real codex thread
-/// ids are UUIDs (~36 chars), so this is orders of magnitude of slack; an approval whose
+/// Bounded retention: the maximum stored `threadId` length. Real codex thread ids are
+/// UUIDs (~36 chars), so this is orders of magnitude of slack; an approval whose
 /// `threadId` exceeds it is **tombstoned** (the id is occupied but stores no string), so
 /// per-entry memory stays bounded even under a hostile/broken upstream. This closes the
 /// only unbounded per-entry field — the id key and grant are already fixed-size.
@@ -675,7 +675,7 @@ impl LegCapabilities {
     /// `Bind`s the id; any other id-bearing frame `Tombstone`s it. This is the invariant
     /// that makes the bare-id space fully fail-closed — no id-bearing server-request frame is
     /// ever silently skipped, so a later/earlier `Bound` at the same id can never be aliased
-    /// through a frame the observer failed to occupy (findings 1 & 2).
+    /// through a frame the observer failed to occupy.
     ///
     /// Two UNCLASSIFIABLE pre-filters, both fail-closed by **poisoning the whole leg**: a frame
     /// above [`MAX_OBSERVE_FRAME_BYTES`] (cannot be parsed to know if it is a request / which id
@@ -830,8 +830,8 @@ impl LegCapabilities {
             return Occupancy::Tombstone;
         }
         // Both families are server→client *requests* keyed in the arbiter by their
-        // `params.threadId`. A missing threadId (no arbiter key) or an over-long one
-        // (finding 5 memory bound) still occupies the id ⇒ tombstone rather than skip.
+        // `params.threadId`. A missing threadId (no arbiter key) or one over the stored-id
+        // memory bound still occupies the id ⇒ tombstone rather than skip.
         match v
             .get("params")
             .and_then(|p| p.get("threadId"))
@@ -861,12 +861,12 @@ impl LegCapabilities {
     /// [`MAX_TRACKED_IDS`] is not inserted (stays `Unseen` ⇒ unanswerable), so the view is
     /// code-bounded.
     ///
-    /// Finding 6 (exception safety): the `Tombstoned` state is committed to the view **before**
-    /// the log/event sink runs, so a panicking sink can never leave the old `Bound` alive.
+    /// Exception safety: the `Tombstoned` state is committed to the view **before** the
+    /// log/event sink runs, so a panicking sink can never leave the old `Bound` alive.
     fn register(&mut self, id: RequestId, occupancy: Occupancy, method: &str) {
         if self.view.contains_key(&id) {
             // A SECOND occupant of any kind is a collision: the bare id is now permanently
-            // ambiguous on this leg. Install Tombstoned FIRST (finding 6), then log.
+            // ambiguous on this leg. Install Tombstoned FIRST, then log.
             self.view.insert(id.clone(), IdState::Tombstoned);
             self.log_ambiguous("tombstoned (ambiguous bare id)", &id, method);
             return;
@@ -895,7 +895,7 @@ impl LegCapabilities {
             }
             Occupancy::Tombstone => {
                 // A first occupant that is not clean-answerable still OCCUPIES the id so it can
-                // never be aliased. Install Tombstoned FIRST (finding 6), then log.
+                // never be aliased. Install Tombstoned FIRST, then log.
                 self.view.insert(id.clone(), IdState::Tombstoned);
                 self.log_ambiguous("tombstoned (id-bearing non-answerable frame)", &id, method);
             }
@@ -1509,7 +1509,7 @@ mod tests {
         tool_call_with(namespace, thread, TOOL_TURN, "list_threads", id)
     }
 
-    /// One `item/tool/call`, with every field the finding-4 rules read made explicit.
+    /// One `item/tool/call`, with every field the tool-dispatch rules read made explicit.
     fn tool_call_with(namespace: &str, thread: &str, turn: &str, tool: &str, id: i64) -> String {
         let ns = if namespace == "null" {
             "null".to_string()
@@ -2328,8 +2328,8 @@ mod tests {
         // ADAPTED from `hybrid_result_bearing_approval_frame_is_not_registered`, which
         // asserted the view stayed EMPTY (the old skip). A hybrid (method-bearing frame that
         // also carries `result`/`error`) is not a clean serverRequest, but it has a readable
-        // top-level id, so it OCCUPIES that id ⇒ Tombstoned (findings 1/2). It never grants a
-        // capability, and a later same-id approval can never alias through it.
+        // top-level id, so it OCCUPIES that id ⇒ Tombstoned. It never grants a capability,
+        // and a later same-id approval can never alias through it.
         let arb = Arc::new(ResponseArbiter::new());
         let mut leg = LegCapabilities::new(arb, silent());
         leg.observe_server_frame(&no_session(), &format!(
@@ -2520,10 +2520,10 @@ mod tests {
         );
     }
 
-    // --- Occupy every id-bearing server-request frame (findings 1, 2, 5, 6) ------
+    // --- Occupy every id-bearing server-request frame ----------------------
 
     /// A non-approval, id-bearing server→client REQUEST (a `method`+top-level-`id` frame that
-    /// is NOT a `*/requestApproval`). This is the finding-1 shape: a valid server-request that
+    /// is NOT a `*/requestApproval`). The shape that matters: a valid server-request that
     /// occupies a bare id but is not an approval — e.g. `tool/requestUserInput`.
     fn request_frame(method: &str, id: i64) -> String {
         format!(r#"{{"method":"{method}","id":{id},"params":{{"prompt":"?"}}}}"#)
@@ -2531,7 +2531,7 @@ mod tests {
 
     #[test]
     fn phone_then_request_user_input_same_id_tombstones_zero_bytes() {
-        // THE EXACT FINDING-1 CASE. Phone approval A (thread-A, id=0) ⇒ Bound(CcdAndTui).
+        // THE EXACT ALIASING CASE. Phone approval A (thread-A, id=0) ⇒ Bound(CcdAndTui).
         // Then a valid `tool/requestUserInput` B (thread-B, id=0) — previously SKIPPED by the
         // `/requestApproval` suffix check, leaving A live and aliasable. Now B occupies id=0
         // ⇒ collision ⇒ tombstone, so a ccd/tui `{id:0,result}` intended for B can NOT
@@ -2646,7 +2646,7 @@ mod tests {
 
     #[test]
     fn over_long_thread_id_approval_tombstones_and_stores_nothing() {
-        // Finding 5 (memory bound): an approval whose threadId exceeds MAX_THREAD_ID_BYTES is
+        // The memory bound: an approval whose threadId exceeds MAX_THREAD_ID_BYTES is
         // tombstoned (the id is occupied but no oversized string is retained), so per-entry
         // memory stays bounded. It is unanswerable.
         let arb = Arc::new(ResponseArbiter::new());
@@ -2676,8 +2676,8 @@ mod tests {
 
     #[test]
     fn tombstone_is_installed_before_a_panicking_sink_runs() {
-        // Finding 6 (exception safety): the Tombstoned state is committed to the view BEFORE
-        // the log/event sink is invoked, so a panicking sink can never leave the old Bound
+        // Exception safety: the Tombstoned state is committed to the view BEFORE the
+        // log/event sink is invoked, so a panicking sink can never leave the old Bound
         // alive (resurrectable). A sink that panics on its first call models the hostile case.
         use std::panic::{catch_unwind, AssertUnwindSafe};
         let sink: EventSink = Arc::new(|_: &str| panic!("event sink panicked"));

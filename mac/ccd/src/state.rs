@@ -3942,6 +3942,61 @@ impl Daemon {
     /// whether it still owes this card anything — and the one that could not,
     /// [`Connection::retire_codex_cards`], threw away the wire mapping on both,
     /// which is how a failed retirement quietly became a permanent one.
+    /// **Record the thread this session's control link has adopted.**
+    ///
+    /// The link is the only process that learns it: a registration is written before
+    /// the app-server has announced a thread, so the row's `codex_thread_id` stayed
+    /// empty for the whole life of every healthy Codex run and every reader that
+    /// went to the row rather than the live link saw a session on no thread at all.
+    ///
+    /// **Never fatal to the connection, and the OUTCOME is returned.** This is the
+    /// daemon writing down something it already knows, on a path whose real job is
+    /// serving the link's frames; a failed write costs the row its freshness and
+    /// costs the session nothing, so it must not be able to drop a connection. But
+    /// it must also not be able to look like a success: the caller memoizes what it
+    /// has recorded so it does not make a store round trip per frame, and a failure
+    /// swallowed here was memoized as done. One `database is locked` then meant the
+    /// column stayed empty for the whole life of that connection, with nothing that
+    /// would ever look again — the exact emptiness this write was added to fix.
+    ///
+    /// `true` means the row is up to date: written now, or already carrying this
+    /// thread, or at a generation this link does not speak for. All three are
+    /// finished states. `false` is the store failing, and only that.
+    ///
+    /// See [`crate::store::Store::bind_codex_thread`] for why the write is scoped to
+    /// the generation.
+    pub(crate) async fn note_codex_thread(
+        &self,
+        session: &SessionKey,
+        generation: u64,
+        thread_id: &str,
+    ) -> bool {
+        match self
+            .db
+            .bind_codex_thread(session.uid.clone(), generation, thread_id.to_string())
+            .await
+        {
+            Ok(true) => {
+                crate::log_info!(
+                    "codex link for {}: the session row now names thread {thread_id}",
+                    session.name
+                );
+                true
+            }
+            // Nothing owed: already recorded, or a generation this link does not
+            // speak for. Both are ordinary and neither is worth a line.
+            Ok(false) => true,
+            Err(err) => {
+                crate::log_warn!(
+                    "codex link for {}: could not record thread {thread_id} on the session \
+                     row: {err:#}",
+                    session.name
+                );
+                false
+            }
+        }
+    }
+
     pub(crate) async fn retire_codex_approval(
         &self,
         session: &SessionKey,
@@ -6742,14 +6797,37 @@ impl Daemon {
                 //
                 // **Asked of the durable binding, and only when the durable
                 // generation IS the incoming one.** That equality is what makes
-                // the row's `codex_thread_id` the thread *this* generation was
-                // registered with rather than some earlier one's: the two
-                // columns are written by the same statement, by the same
-                // acceptance, so a row reading `(G, T)` is the record of a
-                // registration at G that named T. Reading the thread without
-                // checking the generation would compare against whatever the
-                // last accepted registration left, whichever visit it belonged
-                // to.
+                // the row's `codex_thread_id` *this* generation's thread rather
+                // than some earlier one's: every writer of that column writes it
+                // against a generation — the registration through the same
+                // statement that sets one, the control link through
+                // [`crate::store::Store::bind_codex_thread`], which refuses any
+                // generation but its own — so a row reading `(G, T)` says the
+                // registration recorded at G is currently on T. Reading the
+                // thread without checking the generation would compare against
+                // whatever the last registration left, whichever visit it
+                // belonged to.
+                //
+                // **"Currently on", not "started on", and the difference is a
+                // latent refusal worth naming.** The link's own visit generation
+                // moves with every thread it adopts while its REGISTRATION
+                // generation does not, so after a `/new` the row reads `(G, B)`
+                // where the registration at G came up on A. A re-registration at
+                // G offering A would then be refused here as a second thread
+                // under one visit. Nothing produces that today — the only
+                // registration producer hard-codes no thread at all, which is
+                // why this arm is unreachable on every real run — but the day one
+                // fills the field, this is the sentence that says what will
+                // happen and why.
+                //
+                // **The bound side is now the strongest evidence there is, and
+                // that makes this refusal stronger rather than different.** It
+                // used to be a launch-time claim and is now, on a healthy run,
+                // the thread the link actually adopted. A registration offering
+                // a different thread under the same generation is still a second
+                // thread under one visit, which is still a relaunch that forgot
+                // to advance its generation — the reasoning is unchanged, and
+                // the fact it rests on is better.
                 //
                 // Both sides must be present to disagree, and neither absence is
                 // a violation. An incoming `None` claims no thread — the launch

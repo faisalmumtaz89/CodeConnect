@@ -145,7 +145,7 @@ pub struct ResolvedCodex {
 /// about to `execve`, revoke the `UF_IMMUTABLE` freeze
 /// ([`protocol::hash::FrozenExecutable`]) on the pinned executable, or hold a
 /// writable descriptor opened before that freeze was ever set. None of those has a
-/// userland answer on macOS: the mechanism a review would prescribe — hashing a
+/// userland answer on macOS: the mechanism that would close them — hashing a
 /// descriptor and then executing *that descriptor* — does not exist on this
 /// platform, and its absence was measured rather than assumed (`fexecve` is not
 /// declared in the SDK; `execve("/dev/fd/N", …)` returns `EACCES` for a readable
@@ -182,12 +182,13 @@ pub struct ResolvedCodex {
 ///     group id, with nobody attacking anything (`codex_custodian::group_warrant`
 ///     carries the measurement). Closing it needs env-nonce provenance via
 ///     `KERN_PROCARGS2`.
-///   * **F7**, a benign package update: the native `--codex` dispatcher is pinned
-///     faithfully and completely, but the subordinates it selects for `--version`,
-///     `app-server` and the TUI are not, so an ordinary update can change what
-///     actually runs while the pinned dispatcher's own bytes are unchanged and every
-///     gate here passes. Closing it needs a package-layout specification, which is a
-///     scoping decision about what a supported install is; see [`is_native_magic`].
+///   * **F7**, a benign package update: the native `--codex`
+///     dispatcher is pinned faithfully and completely, but the subordinates it
+///     selects for `--version`, `app-server` and the TUI are not, so an ordinary
+///     update can change what actually runs while the pinned dispatcher's own bytes
+///     are unchanged and every gate here passes. Closing it needs a package-layout
+///     specification, which is a scoping decision about what a supported install is;
+///     see [`is_native_magic`].
 pub fn start(passthrough: &[String]) -> Result<()> {
     let config = Config::load();
 
@@ -199,7 +200,8 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // in a refusal. What decides whether this build may be hosted is the guarded-surface
     // gate below — see [`ensure_guarded_surface`] for why a version string was the wrong
     // question to ask.
-    // ONE freeze, four probes: version, root command surface, both schema bundles.
+    // ONE freeze, five probes: version, root command surface, both schema bundles, and
+    // the effective value of the one feature this launch pins off.
     // See `probe_codex` for why they share a freeze rather than taking one each.
     let scratch = ScratchDir::new()?;
     let probe = probe_codex(&resolved, &scratch.0)?;
@@ -212,6 +214,13 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // than the gate pretending it has nowhere to report from.
     let _admitted_surface = ensure_guarded_surface(&probe)
         .with_context(|| format!("checking codex {version} against CodeConnect's grounding"))?;
+
+    // **What the launch SETS is the argv; what this checks is the outcome.** The one
+    // feature CodeConnect pins off is pinned with a `-c`, and codex ranks a managed
+    // configuration layer above `-c` — so the pin is airtight for an operator and
+    // beatable by an administrator. Read back from the same frozen bytes, under the
+    // same override, in the same `CODEX_HOME` the spawns will use.
+    refuse_unless_pinned_feature_is_off(&String::from_utf8_lossy(&probe.features))?;
 
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
     // was refused and why, before anything is created.
@@ -352,6 +361,87 @@ pub(crate) const PINNED_OFF_FEATURE: &str = "request_permissions_tool";
 /// and the key the grammar owns cannot drift apart.
 pub(crate) fn pinned_off_feature_override() -> String {
     format!("features.{PINNED_OFF_FEATURE}=false")
+}
+
+/// Ask the codex about to be used what [`PINNED_OFF_FEATURE`] will actually be, with
+/// the launch's own override applied and in the `CODEX_HOME` the launch will name.
+///
+/// **This is a read, and it starts nothing.** `features list` prints the resolved
+/// registry and exits; it opens no session, contacts no account and spends no quota
+/// (measured). It is the seam A28 named for turning "we set the argv" into "we know
+/// the answer".
+///
+/// The home is passed explicitly rather than inherited, for the same reason the
+/// charter names it rather than defaulting it: the value the app-server runs under
+/// is a decision, and a probe that read a different one would be answering about
+/// somebody else's configuration.
+fn read_effective_features(bin: &Path, codex_home: &Path) -> Result<Vec<u8>> {
+    run_bounded_in_home(
+        bin,
+        &["features", "list", "-c", &pinned_off_feature_override()],
+        codex_home,
+        PROBE_BUDGET,
+    )
+}
+
+/// Refuse the launch unless the feature the launch pins off is **effectively** off.
+///
+/// **The pin is a `-c`, and codex ranks a managed configuration layer above `-c`.**
+/// So an administrator who pushes `[features] request_permissions_tool = true`
+/// through that layer beats the value every spawn carries, and CodeConnect would be
+/// asserting the argv while the app-server ran with the feature on — handing the
+/// model a tool that asks for a permission profile only the terminal can grant, in a
+/// product whose whole proposition is that the phone answers. The argv is what we
+/// set; this is what we got.
+///
+/// **An unreadable answer refuses, exactly as [`verify_codex_identity`] does.** "I
+/// could not check" and "it is off" are different answers and only one of them
+/// licenses a spawn. A listing that never names the feature is unreadable in that
+/// sense too: on a build where the key has moved or been renamed, the guarded-surface
+/// gate has re-grounding to demand anyway, so nothing is lost by saying so here.
+///
+/// **This is a PREFLIGHT, and the difference is worth stating rather than leaving to
+/// be inferred.** What it reads is the effective value at probe time — the same
+/// frozen bytes, the same `-c`, the same `CODEX_HOME` the spawns will name — from a
+/// `codex features list` run before anything is created. It is not a reading of the
+/// running app-server's own configuration: nothing here asks the process that will
+/// host the conversation what it ended up with. The gap between them is a managed
+/// layer that changes underneath after the probe and before the spawn, which is
+/// seconds wide and is not the case this exists for.
+///
+/// **That a managed/MDM layer outranks `-c` is UNVERIFIED here.** Staging
+/// `/etc/codex/managed_config.toml` is a system path and needs root, so the premise
+/// rests on corroboration from the binary's own strings; the refusing half of this
+/// function is driven by a stub rather than by that layer. What IS measured is the
+/// half that matters for not breaking launches: `-c` beats an ordinary
+/// `config.toml`, so an operator's `true` there is handled by the pin and does not
+/// reach this refusal.
+fn refuse_unless_pinned_feature_is_off(listing: &str) -> Result<()> {
+    let stated = listing.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next() == Some(PINNED_OFF_FEATURE)).then(|| fields.last().unwrap_or("").to_string())
+    });
+    match stated.as_deref() {
+        Some("false") => Ok(()),
+        Some("true") => bail!(
+            "refusing to launch: this codex reports `{PINNED_OFF_FEATURE}` as ON even with the \
+             override this launch applies. CodeConnect answers approvals from the phone, and \
+             that feature gives the model a tool that asks for a permission profile only the \
+             terminal can grant — so a session under it would stall on a question nothing in \
+             this product can answer. An override ranked above the command line is what does \
+             this: a managed or MDM configuration layer. Clearing it there, or launching codex \
+             directly, are the two ways on."
+        ),
+        other => bail!(
+            "refusing to launch: this codex did not say whether `{PINNED_OFF_FEATURE}` is on \
+             or off — `codex features list` answered {}. The launch pins that feature off and \
+             checks the result, and an answer it cannot read is not an answer of `off`.",
+            match other {
+                None => "without naming it at all".to_string(),
+                Some(value) => format!("`{value}`, which is neither `true` nor `false`"),
+            }
+        ),
+    }
 }
 
 /// How long the coordinator has to reach a terminal launch outcome.
@@ -820,12 +910,12 @@ fn inspect_candidate(path: &Path) -> CandidateIdentity {
 /// nowhere.
 ///
 /// **This is F7, and it is an accepted residual rather than a blocker** — the owner
-/// ruled that at the 2e-7d ungate, and [`start`] records it as one of the two
-/// residuals that are separate from the A22 boundary. It stays open because no
-/// layout verifier can be invented here: "e.g." in the plan is an example rather
-/// than a specification, and picking one unilaterally would silently narrow which
-/// installs CodeConnect supports — a scoping decision, not an implementation detail.
-/// Closing it needs that ruling first.
+/// ruled that at the 2e-7d ungate, and [`start`] records it as one of the two residuals that are
+/// separate from the A22 boundary. It stays open because no layout verifier can be
+/// invented here: "e.g." in the plan is an example rather than a specification, and
+/// picking one unilaterally would silently narrow which installs CodeConnect
+/// supports — a scoping decision, not an implementation detail. Closing it needs
+/// that ruling first.
 fn is_native_magic(magic: [u8; 4]) -> bool {
     matches!(
         u32::from_be_bytes(magic),
@@ -940,17 +1030,39 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 /// file that is not the one that runs, which is the whole gate lost to a spelling.
 /// The host enforces it (`codex_host::require_absolute_codex`) and resolution
 /// produces only canonical absolute paths.
-pub(crate) fn verify_codex_identity(
+/// **`on_frozen` is where the freeze gets written down, and it runs while the hash
+/// is still being taken.** The digest is a whole-file read of a 210 MB executable —
+/// measured at 0.46 s in a release build and about eight seconds unoptimised — and
+/// the flag is on for all of it, so a caller that recorded the freeze from the
+/// return value left that whole interval with the bytes immutable and nothing
+/// durable saying so. A `SIGKILL` there, which is exactly the load-induced ending
+/// that produced the two real leaks, left a frozen binary with no claim for the
+/// custodian to act on. The callback runs with the flag already set and the digest
+/// not yet started, so every freeze site has to say what it records rather than
+/// being able to forget.
+///
+/// It runs even on the paths that go on to refuse: a freeze that is about to be
+/// dropped for a hash mismatch is still a freeze this process is holding, and a
+/// record written and withdrawn a moment later costs one file write. Being wrong in
+/// that direction is a stale claim the janitor's own checks discard; being wrong in
+/// the other is the leak.
+pub(crate) fn verify_codex_identity<F>(
     path: &Path,
     expected: &str,
     when: &str,
-) -> Result<protocol::hash::FrozenExecutable> {
-    let (actual, frozen) = protocol::hash::freeze_and_hash(path).with_context(|| {
-        format!(
-            "re-reading the codex binary at {} to verify its identity {when}",
-            path.display()
-        )
-    })?;
+    hold: protocol::hash::LockHold,
+    on_frozen: F,
+) -> Result<protocol::hash::FrozenExecutable>
+where
+    F: FnOnce(&protocol::hash::FrozenExecutable) -> std::result::Result<(), String>,
+{
+    let (actual, frozen) = protocol::hash::freeze_and_hash_recording(path, hold, on_frozen)
+        .with_context(|| {
+            format!(
+                "re-reading the codex binary at {} to verify its identity {when}",
+                path.display()
+            )
+        })?;
     if actual != expected {
         // `frozen` drops here, clearing the freeze: nothing was spawned, and the
         // file this launch will not touch is left exactly as it was found.
@@ -1036,7 +1148,7 @@ fn codex_candidates(
 /// verify-by-content scheme can see, and the post-clear demand-paging residual — both
 /// stated on [`ResolvedCodex`] and [`protocol::hash::FrozenExecutable`].
 /// **Superseded on the launch path by [`probe_codex`]**, which reads the version as one
-/// of four answers under a single held freeze. Kept because it is the narrowest possible
+/// of five answers under a single held freeze. Kept because it is the narrowest possible
 /// statement of the freeze-then-exec discipline and its tests pin exactly that: a binary
 /// swapped or moved between resolution and exec is refused. `probe_codex` inherits the
 /// discipline; these tests are what prove it is the right one.
@@ -1049,7 +1161,15 @@ fn read_codex_version(resolved: &ResolvedCodex) -> Result<String> {
     // before anything checked. Now the bytes are pinned immutable and verified first,
     // and stay frozen while the child runs, so the version pinned below is reported
     // by the pinned bytes and no unverified binary is reachable here at all.
-    let frozen = verify_codex_identity(bin, &resolved.sha256, "before `codex --version`")?;
+    // Nothing is recorded: this is a test-only narrowing of the discipline, run in
+    // a process with no launch record to write into.
+    let frozen = verify_codex_identity(
+        bin,
+        &resolved.sha256,
+        "before `codex --version`",
+        protocol::hash::LockHold::UntilReleased,
+        |_| Ok(()),
+    )?;
     let output = Command::new(bin)
         .arg("--version")
         .output()
@@ -1098,9 +1218,10 @@ fn parse_codex_version(text: &str) -> Option<String> {
 
 /// The wall-clock budget for one launch probe.
 ///
-/// Generous against the measurement — the four probes together take ~150 ms on the real
-/// binary — because the number is not a performance target, it is the point past which
-/// the gate stops waiting for an answer it is never going to get.
+/// Generous against the measurement — the four probes that were timed take ~150 ms on
+/// the real binary, and the fifth is one more exec of the same already-frozen,
+/// already-hashed bytes — because the number is not a performance target, it is the
+/// point past which the gate stops waiting for an answer it is never going to get.
 const PROBE_BUDGET: Duration = Duration::from_secs(30);
 
 /// How long to spend reaping a probe after its process group has been SIGKILLed.
@@ -1242,9 +1363,33 @@ fn run_under_freeze(bin: &Path, args: &[&str]) -> Result<Vec<u8>> {
 /// [`run_under_freeze`]'s body, with the budget a parameter so the boundedness itself can
 /// be tested without the test paying the production budget to observe it.
 fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
+    run_bounded_inner(bin, args, None, budget)
+}
+
+/// [`run_bounded`] with the `CODEX_HOME` the launch will use named explicitly, for
+/// the one probe whose answer depends on which configuration is being resolved.
+fn run_bounded_in_home(
+    bin: &Path,
+    args: &[&str],
+    codex_home: &Path,
+    budget: Duration,
+) -> Result<Vec<u8>> {
+    run_bounded_inner(bin, args, Some(codex_home), budget)
+}
+
+fn run_bounded_inner(
+    bin: &Path,
+    args: &[&str],
+    codex_home: Option<&Path>,
+    budget: Duration,
+) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt;
     let what = format!("{} {}", bin.display(), args.join(" "));
-    let child = Command::new(bin)
+    let mut command = Command::new(bin);
+    if let Some(home) = codex_home {
+        command.env("CODEX_HOME", home);
+    }
+    let child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1348,16 +1493,18 @@ fn read_generated(path: &Path) -> Result<Vec<u8>> {
 /// Everything the launch gate asks the installed codex about itself, read under a
 /// **single** held freeze.
 ///
-/// # One freeze, four execs — stronger and faster than four freezes
+/// # One freeze, five execs — stronger and faster than one freeze each
 ///
-/// The launcher asks the binary four questions before it will host it: its version, its
-/// root command surface (`completion bash`), and its two app-server schema bundles. Each
-/// used to take its own freeze-and-verify.
+/// The launcher asks the binary five questions before it will host it: its version, its
+/// root command surface (`completion bash`), its two app-server schema bundles, and the
+/// effective value of the one feature this launch pins off. Each of the first four used
+/// to take its own freeze-and-verify; the fifth is affordable only because it rides this
+/// one.
 ///
-/// **Stronger:** four separate freezes leave three gaps between them. A version read
-/// under freeze A and a schema read under freeze D are two statements about two moments,
-/// and nothing said the bytes were the same in between — which is exactly the reasoning
-/// [`verify_codex_identity`] exists to refuse. One freeze held across all four makes them
+/// **Stronger:** separate freezes leave gaps between them. A version read under freeze A
+/// and a schema read under freeze D are two statements about two moments, and nothing
+/// said the bytes were the same in between — which is exactly the reasoning
+/// [`verify_codex_identity`] exists to refuse. One freeze held across all five makes them
 /// one statement about one set of bytes, which is what the gate's conclusion actually
 /// claims.
 ///
@@ -1369,11 +1516,45 @@ fn read_generated(path: &Path) -> Result<Vec<u8>> {
 fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
     use codex_broker::guarded_surface as gs;
     let bin = resolved.path.as_path();
-    let frozen = verify_codex_identity(bin, &resolved.sha256, "before the launch probes")?;
+    // **The launcher's freeze has no record behind it, so the signal handler is the
+    // record.** This runs before a uid is minted: there is no launch record for a
+    // janitor to read, and the only thing that would put the flag back is the
+    // guard's own `Drop`. `SIGINT` runs no `Drop` — and with `panic = "abort"`
+    // neither would an unwind — so `Ctrl-C` here left `UF_IMMUTABLE` on the real
+    // codex binary every single time, invisibly, until the next update failed with
+    // `Operation not permitted`. Installed before the freeze is taken and armed from
+    // inside the verify, so the whole interval is covered: the flag goes on, the
+    // handler already knows how to take it off, and the hash — most of a second in a
+    // release build — happens under that cover rather than beside it.
+    protocol::hash::install_freeze_signal_release();
+    let frozen = verify_codex_identity(
+        bin,
+        &resolved.sha256,
+        "before the launch probes",
+        // **The lock is held for the whole probe, and it is standing in for the record
+        // this site cannot write.** There is no uid yet, so nothing a custodian scans
+        // will ever name this freeze — and a custodian's scan-and-clear takes this same
+        // lock, so while it is held the clear cannot happen at all. Released at the
+        // empty record, the interval that follows (the 210 MB hash plus the five execs
+        // below) was a freeze every custodian on the machine was free to undo, and a
+        // peer's stale record was enough to make one do it.
+        protocol::hash::LockHold::UntilReleased,
+        // Nothing durable to write: there is no uid yet, which is the whole reason
+        // this site needs the handler. The freeze arms the release itself, from
+        // inside `arm_then_freeze` and BEFORE the flag goes on, so the interval this
+        // callback used to be responsible for no longer exists.
+        |_| Ok(()),
+    )?;
 
     let probe = (|| -> Result<CodexProbe> {
         let version_out = run_under_freeze(bin, &["--version"])?;
         let completion = run_under_freeze(bin, &["completion", "bash"])?;
+        // **The fifth question under the same freeze, and that is what makes it
+        // affordable.** The postcheck A28 named was deferred for the launch latency a
+        // separate freeze-and-hash of a 210 MB binary would cost; asked here it costs
+        // one more exec of bytes already frozen and already hashed, and it is one
+        // statement about one set of bytes along with the other four.
+        let features = read_effective_features(bin, &codex_home())?;
         let mut bundles = Vec::new();
         for bundle in codex_broker::guarded_surface::BUNDLES {
             let out = scratch.join(bundle);
@@ -1423,13 +1604,91 @@ fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
             version_out,
             completion,
             bundles,
+            features,
         })
     })();
 
-    // Cleared only after every child has exited, so all four answers are attributable to
+    // Cleared only after every child has exited, so all five answers are attributable to
     // the frozen bytes. A failure clears it too, with nothing having been admitted.
     drop(frozen);
     probe
+}
+
+/// A **test-only stand-in for the launcher's probe freeze**
+/// (`internal-freeze-probe <path> <marker>`).
+///
+/// It does exactly what [`probe_codex`] does to the flag and nothing else: install
+/// the signal release, freeze `<path>` (which arms the release itself, before the
+/// flag goes on), touch `<marker>` so the test knows the freeze is on, and then
+/// block. The test sends a
+/// `SIGINT` — the ending that runs no `Drop`, and the one a `Ctrl-C` during a real
+/// launch delivers — and reads the file's flags afterwards.
+///
+/// A real launcher run cannot stand in for this: it needs a codex whose answers get
+/// past the guarded-surface gate, and the flag would then be cleared by the ordinary
+/// path rather than by the handler. This is the smallest process that has the
+/// property under test. Hidden machinery, never a human command.
+pub fn run_freeze_probe(args: &[String]) -> ! {
+    let (Some(path), Some(marker)) = (args.first(), args.get(1)) else {
+        eprintln!("internal-freeze-probe needs <path> <marker>");
+        std::process::exit(64);
+    };
+    protocol::hash::install_freeze_signal_release();
+    let frozen = match protocol::hash::freeze_and_hash_recording(
+        Path::new(path),
+        protocol::hash::LockHold::UntilReleased,
+        |_| Ok(()),
+    ) {
+        Ok((_digest, frozen)) => frozen,
+        Err(err) => {
+            eprintln!("internal-freeze-probe could not freeze {path}: {err}");
+            std::process::exit(65);
+        }
+    };
+    if !frozen.is_frozen() {
+        eprintln!("internal-freeze-probe could not set the flag on {path}");
+        std::process::exit(66);
+    }
+    // Only now: the marker means "the flag is on and armed", which is the state the
+    // test is about to interrupt.
+    let _ = std::fs::File::create(marker);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A **test-only stand-in for a freezer holding the freeze lock**
+/// (`internal-freeze-lock-hold <path> <marker> <seconds>`).
+///
+/// A freezer holds `flock(LOCK_EX)` on the executable across its freeze and its
+/// record write; a custodian holds the same lock across its scan and its clear. The
+/// whole safety of the second depends on the first actually excluding it, and the two
+/// are always different PROCESSES — so an in-process test of the lock (which
+/// `protocol::hash` has) cannot say the thing that matters. This is the other half:
+/// a real second process that takes the lock, says so, and holds it.
+///
+/// It carries its own deadline rather than blocking forever: a hidden helper that
+/// outlived its test would be a lock nobody could see holding up every later launch on
+/// the machine. Hidden machinery, never a human command.
+pub fn run_freeze_lock_hold(args: &[String]) -> ! {
+    let (Some(path), Some(marker), Some(seconds)) = (args.first(), args.get(1), args.get(2)) else {
+        eprintln!("internal-freeze-lock-hold needs <path> <marker> <seconds>");
+        std::process::exit(64);
+    };
+    let held = match protocol::hash::FreezeLock::acquire(Path::new(path)) {
+        Ok(held) => held,
+        Err(why) => {
+            eprintln!("internal-freeze-lock-hold could not lock {path}: {why}");
+            std::process::exit(65);
+        }
+    };
+    // Only now: the marker means "the lock is held", which is the state the test is
+    // about to try to take it away from.
+    let _ = std::fs::File::create(marker);
+    let secs: u64 = seconds.parse().unwrap_or(5);
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    drop(held);
+    std::process::exit(0)
 }
 
 /// What [`probe_codex`] read, all of it from one frozen set of bytes.
@@ -1437,6 +1696,10 @@ struct CodexProbe {
     version_out: Vec<u8>,
     completion: Vec<u8>,
     bundles: Vec<ProbedBundle>,
+    /// `codex features list` with the launch's own override applied, in the
+    /// `CODEX_HOME` the launch will name — the EFFECTIVE value of the one feature
+    /// this launch pins off. See [`refuse_unless_pinned_feature_is_off`].
+    features: Vec<u8>,
 }
 
 /// One schema bundle as the probe read it, **as bytes rather than paths** — see
@@ -2398,11 +2661,11 @@ fn owned_in_subtree(path: &mut Vec<String>, value: Option<&toml::Value>) -> Opti
 ///     as benign, but a read-scope widening is a mutation of the very dimension
 ///     CodeConnect claims, so it belongs on this axis and is now refused.
 ///     Refusal needs no knowledge of what a key expands to — that a token reaches
-///     an owned root is the whole finding — so an unenforced or renamed spelling
+///     an owned root is the whole test — so an unenforced or renamed spelling
 ///     costs an over-refusal (acceptable under A7), never an escape;
-///   * the top-level **permission-profile** controls (round-4 finding 1) —
-///     `permissions` and `default_permissions` — owned at and below their root.
-///     These are a SECOND, independent sandbox channel, not a spelling of the
+///   * the top-level **permission-profile** controls — `permissions` and
+///     `default_permissions` — owned at and below their root. These are a SECOND,
+///     independent sandbox channel, not a spelling of the
 ///     first, and the list above missed them. Probed on the installed 0.147 with
 ///     the same invalid-value technique: `-c permissions=5` ⇒ "invalid type:
 ///     integer `5`, expected struct PermissionsToml in `permissions`";
@@ -2811,6 +3074,50 @@ mod tests {
         );
     }
 
+    /// **The launcher's own freeze is armed for the ending that runs no `Drop`.**
+    ///
+    /// `probe_codex` takes a freeze before a uid exists, so no launch record names
+    /// it and no janitor can ever act on it; the guard's `Drop` is the whole of its
+    /// safety, and `SIGINT` — a keystroke away during a launch — runs no `Drop`. That
+    /// leaked `UF_IMMUTABLE` on the real binary on demand, every time.
+    ///
+    /// `exec_freeze_signal.rs` proves the mechanism end-to-end against a real process
+    /// and a real signal; what it cannot see is whether the PRODUCTION probe uses it.
+    /// This is that half: a source read, for the same reason
+    /// [`the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken`] is one — an
+    /// ordering inside a function that shells out to a real codex is not reachable
+    /// from a unit test, and a probe that quietly stopped installing the handler
+    /// would otherwise regress in silence.
+    #[test]
+    fn the_launch_probe_installs_the_signal_release_before_it_takes_the_freeze() {
+        let source = include_str!("codex.rs");
+        let at = source
+            .find(
+                "fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {",
+            )
+            .expect("probe_codex must exist");
+        let rest = &source[at..];
+        let probe = &rest[..rest.find("\n}\n").expect("a closed function body")];
+
+        let install = probe
+            .find("install_freeze_signal_release()")
+            .expect("the launch probe must install the signal release");
+        let freeze = probe
+            .find("verify_codex_identity(")
+            .expect("the launch probe must take the freeze");
+        assert!(
+            install < freeze,
+            "the handler must be installed before the flag goes on, or the window \
+             between them is uncovered"
+        );
+        // The arming itself is no longer spelled here, and that is the fix rather
+        // than a gap: it used to be a call this callback had to remember, which left
+        // the interval between `fchflags` and the call uncovered. It now happens
+        // inside the freeze primitive, before the flag goes on, and is pinned there
+        // by `protocol::hash`'s own
+        // `the_freeze_arms_the_release_before_it_sets_the_flag`.
+    }
+
     /// The daemon preflight runs before ANY identity is minted.
     ///
     /// **This pins an ordering that only a source read can see.** `new-old-new-real.sh`
@@ -2879,6 +3186,95 @@ mod tests {
             Some(explicit) => assert_eq!(observed, PathBuf::from(explicit)),
             None => assert_eq!(observed, home),
         }
+    }
+
+    /// **The pin is an argv override, and something can outrank an argv override.**
+    ///
+    /// codex ranks a managed configuration layer above `-c`, so an administrator who
+    /// pushes `[features] request_permissions_tool = true` through it beats the value
+    /// every spawn carries. What the launch asserts today is the argv; what this
+    /// asserts is the outcome — the feature read back out of the codex about to be
+    /// used, with the launch's own override applied, exactly as the app-server will
+    /// see it.
+    ///
+    /// Three answers, and only one of them launches.
+    #[test]
+    fn the_effective_feature_is_read_back_and_only_off_launches() {
+        let off = "\
+apply_patch_freeform                     removed            false
+request_permissions_tool                 under development  false
+web_search                               stable             true
+";
+        refuse_unless_pinned_feature_is_off(off).expect("an effective false is the launch case");
+
+        let on = off.replace(
+            "request_permissions_tool                 under development  false",
+            "request_permissions_tool                 under development  true",
+        );
+        let refused = refuse_unless_pinned_feature_is_off(&on)
+            .expect_err("an effective true must refuse the launch");
+        let text = format!("{refused:#}");
+        for expected in [PINNED_OFF_FEATURE, "managed", "refusing to launch"] {
+            assert!(
+                text.contains(expected),
+                "the refusal must say what was found and why: {text}"
+            );
+        }
+
+        // **A listing that does not answer is not an answer of `false`.** The same
+        // rule `verify_codex_identity` states: could-not-check and it-is-off are
+        // different answers and only one licenses a spawn.
+        let silent = off.replace("request_permissions_tool", "some_other_feature");
+        assert!(
+            refuse_unless_pinned_feature_is_off(&silent).is_err(),
+            "a listing that never names the feature must refuse rather than assume"
+        );
+        assert!(
+            refuse_unless_pinned_feature_is_off(
+                "request_permissions_tool  under development  maybe"
+            )
+            .is_err(),
+            "a value that is neither true nor false must refuse rather than be guessed at"
+        );
+    }
+
+    /// **Driven against the real installed codex, in a scratch `CODEX_HOME`.**
+    ///
+    /// The parse above is about strings; this is about whether the launch's override
+    /// actually wins where it has to. Measured here rather than asserted from the
+    /// documentation: an operator `config.toml` turning the feature on is the case
+    /// the pin was built for, and the launch must still go through.
+    ///
+    /// The managed layer that outranks the override lives at a system path, so the
+    /// refusing half cannot be staged without changing the machine — it is covered
+    /// by the parse above, on the answer such a layer would produce.
+    #[test]
+    fn the_launch_override_beats_an_operator_config_on_the_real_binary() {
+        let Ok(resolved) = resolve_codex_bin(&Config::default()) else {
+            return; // no codex installed; the parse test above still holds
+        };
+        let home = std::env::temp_dir().join(format!(
+            "cc-features-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[features]\nrequest_permissions_tool = true\n",
+        )
+        .unwrap();
+
+        let listing = read_effective_features(&resolved.path, &home)
+            .expect("`codex features list` is a local command and answers without an account");
+        let listing = String::from_utf8_lossy(&listing);
+        assert!(
+            listing.contains(PINNED_OFF_FEATURE),
+            "the installed codex still has to know the feature this launch pins: {listing}"
+        );
+        refuse_unless_pinned_feature_is_off(&listing)
+            .expect("the launch's own override must beat an operator config.toml that turns it on");
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -3091,8 +3487,14 @@ mod tests {
         let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
 
         // Unchanged: every exec site is free to proceed.
-        verify_codex_identity(&resolved.path, &resolved.sha256, "in the unchanged case")
-            .expect("an untouched binary must verify");
+        verify_codex_identity(
+            &resolved.path,
+            &resolved.sha256,
+            "in the unchanged case",
+            protocol::hash::LockHold::UntilReleased,
+            |_| Ok(()),
+        )
+        .expect("an untouched binary must verify");
 
         // The swap. Same path, same canonical name, different bytes — and still a
         // perfectly valid native Mach-O, so the magic check alone would wave it
@@ -3102,6 +3504,8 @@ mod tests {
             &resolved.path,
             &resolved.sha256,
             "immediately before the app-server spawn",
+            protocol::hash::LockHold::UntilReleased,
+            |_| Ok(()),
         )
         .expect_err("a replaced binary must be refused");
         let text = format!("{err:#}");
@@ -3127,15 +3531,26 @@ mod tests {
         // A truncation is a swap too — the digest covers the whole file, not a
         // prefix, so a binary that keeps its magic and loses its tail is refused.
         std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE]).unwrap();
-        assert!(
-            verify_codex_identity(&resolved.path, &resolved.sha256, "after truncation").is_err()
-        );
+        assert!(verify_codex_identity(
+            &resolved.path,
+            &resolved.sha256,
+            "after truncation",
+            protocol::hash::LockHold::UntilReleased,
+            |_| Ok(())
+        )
+        .is_err());
 
         // And a file that is gone is a refusal, never a pass: "I could not check"
         // and "it is unchanged" must not share an answer.
         std::fs::remove_file(&bin).unwrap();
-        let err = verify_codex_identity(&resolved.path, &resolved.sha256, "after deletion")
-            .expect_err("an unreadable binary must be refused");
+        let err = verify_codex_identity(
+            &resolved.path,
+            &resolved.sha256,
+            "after deletion",
+            protocol::hash::LockHold::UntilReleased,
+            |_| Ok(()),
+        )
+        .expect_err("an unreadable binary must be refused");
         assert!(
             format!("{err:#}").contains("re-reading"),
             "the refusal must say the check itself failed: {err:#}"
@@ -3191,10 +3606,10 @@ mod tests {
         cleanup(&root);
     }
 
-    /// **Finding 1 at the resolution site.** The verification sites are not the only
-    /// place a 220 MB read happens: resolution takes one too, and the digest it mints
-    /// is the pin everything downstream compares against. A rename landing inside
-    /// *that* read produces a `ResolvedCodex` whose digest describes bytes the
+    /// **The rename window at the resolution site.** The verification sites are not
+    /// the only place a 220 MB read happens: resolution takes one too, and the digest
+    /// it mints is the pin everything downstream compares against. A rename landing
+    /// inside *that* read produces a `ResolvedCodex` whose digest describes bytes the
     /// pathname no longer reaches — and because the replacement has settled by the
     /// time any verify runs, every later check confirms it as "unchanged". The whole
     /// chain would be internally consistent and about the wrong file.
@@ -3317,11 +3732,10 @@ mod tests {
     /// carry. Against the **real** installed codex: the launch is refused because the
     /// file does not match what was pinned.
     ///
-    /// Round 2: the refusal now lands **before** the exec rather than after it. The
-    /// bytes are frozen and verified first, so a binary that does not match the pin
-    /// never runs as `codex --version` at all — the pre-gate exec of unpinned bytes
-    /// that finding 1 named is gone. The `when` assertion below is what pins that
-    /// ordering.
+    /// The refusal lands **before** the exec rather than after it. The bytes are
+    /// frozen and verified first, so a binary that does not match the pin never runs
+    /// as `codex --version` at all — no unpinned bytes are exec'd pre-gate. The
+    /// `when` assertion below is what pins that ordering.
     ///
     /// A digest that never matched stands in for a swap that happened before the
     /// check — which `read_codex_version` cannot tell apart from any other mismatch,
@@ -3456,7 +3870,7 @@ mod tests {
         assert!(
             start.contains("probe_codex(") && start.contains("parse_codex_version("),
             "the version must still be READ — it names what ran, and it is one of the \
-             four answers `probe_codex` reads under a single held freeze"
+             five answers `probe_codex` reads under a single held freeze"
         );
         for gate in ["ensure_pinned_version", "is_pinned_codex_version"] {
             assert!(
@@ -3961,10 +4375,10 @@ mod tests {
             // and a quoted (dot-bearing) leaf under one.
             &["-c", "\"sandbox_mode\"=danger-full-access"][..],
             &["-c", "sandbox_workspace_write.\"odd.key\"=1"][..],
-            // Round-4 finding 1 — the PERMISSION-PROFILE axis. The exact pair
-            // measured ACCEPTED and activated by the installed codex 0.147 (see
-            // `path_is_owned`), plus each half alone and the spellings a `-c`
-            // can wear: structural, dotted, quoted and `--config` long form.
+            // The PERMISSION-PROFILE axis. The exact pair measured ACCEPTED and
+            // activated by the installed codex 0.147 (see `path_is_owned`), plus each
+            // half alone and the spellings a `-c` can wear: structural, dotted, quoted
+            // and `--config` long form.
             &["-c", "permissions={wide={filesystem={\"/\"=\"write\"}}}"][..],
             &["-c", "default_permissions=\"wide\""][..],
             &["--config", "default_permissions=\"wide\""][..],
@@ -4075,7 +4489,7 @@ mod tests {
             &["--enable", "\"hooks\""][..],
             &["--disable", "\"codex_hooks\""][..],
             &["--enable", "hooks.trust"][..],
-            // Round-7: security checks must see the RAW, untrimmed argument.
+            // Security checks must see the RAW, untrimmed argument.
             // (1) A table/array-header-shaped KEY whose synthetic sentinel is
             //     commented/displaced — its terminal is not the `= 0` leaf.
             &["-c", "[[benign]] #"][..],
@@ -4111,7 +4525,7 @@ mod tests {
         // forwards — the grammar matches codex, so this is not falsely refused.
         accept(&["-c", "mcp_servers={s={command=\"x\"},}"]);
         // Path-aware: an owned-*named* key that is arbitrary data in an unowned
-        // container is not refused (finding 5).
+        // container is not refused.
         accept(&["-c", "mcp_servers.s.env.approval_mode=literal"]);
         accept(&["-c", "mcp_servers.s.env={approval_mode=\"literal\"}"]);
         // An MCP server (or app) literally named after an owned control.
@@ -4121,10 +4535,10 @@ mod tests {
         // only: a server or app literally named `sandbox` is still just a name.
         accept(&["-c", "mcp_servers.sandbox.command=x"]);
         accept(&["-c", "apps.sandbox_mode.command=x"]);
-        // Same for the permission-profile roots (round-4 finding 1): owned by
-        // exact top-level segment, so an MCP server or app that happens to be
-        // NAMED `permissions`/`default_permissions` still forwards. This is the
-        // over-refusal direction — the new roots must not swallow the namespace.
+        // Same for the permission-profile roots: owned by exact top-level segment,
+        // so an MCP server or app that happens to be NAMED
+        // `permissions`/`default_permissions` still forwards. This is the over-refusal
+        // direction — the new roots must not swallow the namespace.
         accept(&["-c", "mcp_servers.permissions.command=x"]);
         accept(&["-c", "apps.default_permissions.command=x"]);
         accept(&["-c", "mcp_servers.s.env.permissions=literal"]);
@@ -4339,11 +4753,11 @@ mod tests {
     /// **The escape class, closed structurally — proven against a binary that DISPATCHES
     /// a token no list in this repository knows.**
     ///
-    /// This is the test the finding asked for, and it carries its own mutation: the same
-    /// shim is run with the fence and without it. Unfenced, the never-seen alias reaches
-    /// dispatch; fenced, it cannot. No real codex is needed, and that is the point — the
-    /// property under test is about a FUTURE binary, so it must be provable against one
-    /// that behaves like the future rather than like today's install.
+    /// The test carries its own mutation: the same shim is run with the fence and
+    /// without it. Unfenced, the never-seen alias reaches dispatch; fenced, it cannot.
+    /// No real codex is needed, and that is the point — the property under test is
+    /// about a FUTURE binary, so it must be provable against one that behaves like the
+    /// future rather than like today's install.
     ///
     /// The shim mimics what was MEASURED of clap: a bare first token is matched against
     /// the subcommand set (aliases included, whether or not any `--help` or completion
@@ -4390,11 +4804,12 @@ mod tests {
 
     /// **A future codex that changed a flag's ARITY still cannot be made to dispatch.**
     ///
-    /// The reviewer's case, staged exactly: a binary whose `-i` consumes ONE value, given
-    /// `-i a.png features`. Our walk still believes `-i` is greedy — nothing gates option
-    /// arity, and the guarded-surface gate compares spellings, not how many values a flag
-    /// eats — so under the old passthrough it swept both tokens, saw no positional,
-    /// inserted no fence, and handed the binary a bare `features` to dispatch.
+    /// The case, staged exactly: a binary whose `-i` consumes ONE value, given
+    /// `-i a.png features`. Our walk still believes `-i` is greedy — nothing gates
+    /// option arity, and the guarded-surface gate compares spellings, not how many
+    /// values a flag eats — so under the old passthrough it swept both tokens, saw no
+    /// positional, inserted no fence, and handed the binary a bare `features` to
+    /// dispatch.
     ///
     /// The mutation is carried inside the test: the same shim is run with the emitted argv
     /// and with the raw one. Raw dispatches; emitted cannot, because every value is glued

@@ -233,9 +233,10 @@ pub struct ResumeSeed {
     /// item's turn is alive, and confirms nothing else about it.
     running_turns: Vec<String>,
     /// The `(thread, turn)` usage totals held for turns the answer reports finished.
-    /// They are **dropped** by the rebuild, never emitted — see the P4 note in
-    /// [`CodexAdapter::plan_resume_seed`]: a total held for a turn whose completion was
-    /// missed is a mid-turn snapshot, and the dedup key is first-wins.
+    /// They are **dropped** by the rebuild, never emitted — see the note on discarding
+    /// a held usage total in [`CodexAdapter::plan_resume_seed`]: a total held for a turn
+    /// whose completion was missed is a mid-turn snapshot, and the dedup key is
+    /// first-wins.
     discarded_usage: Vec<(String, String)>,
     /// How many turns the answer described, and how many of those had finished —
     /// reported by the caller, never inferred from the event count.
@@ -456,7 +457,7 @@ impl CodexAdapter {
         if !absent_or_equal(result, "threadId", requested_thread) {
             return None;
         }
-        // **P4: `sessionId` is a second name for the same thread, and it must agree.**
+        // **`sessionId` is a second name for the same thread, and it must agree.**
         // Measured equal to `thread.id` on every captured answer. It is checked because
         // it is an *alias*: a reader that trusted it over `id` — or a future field that
         // starts being read — would file this session's facts under whatever it says, and
@@ -496,7 +497,7 @@ impl CodexAdapter {
         if turns.is_empty() {
             return None;
         }
-        // **P3: an answer that is a PAGE of history is refused.** Every captured answer
+        // **An answer that is a PAGE of history is refused.** Every captured answer
         // carried `initialTurnsPage: null`, and `turns[]` complete for the whole thread
         // (1→1, 2→2, 3→3 turns). A non-null page is the shape a paged history would
         // arrive as, and attaching on one would mean subscribing while older turns stay
@@ -525,7 +526,7 @@ impl CodexAdapter {
         // that restarted mid-session — records the session at all.
         events.push(self.thread_identity_event(thread)?);
 
-        // **P7: identities must be unique within one answer.** A turn that appears
+        // **Identities must be unique within one answer.** A turn that appears
         // twice — once `completed` and once `inProgress` — is a contradiction, and
         // reading it would both seed a terminal and hold the same turn open. Item ids
         // are tracked across the whole answer for the same reason one layer down: two
@@ -533,7 +534,7 @@ impl CodexAdapter {
         // whichever was written first would silently swallow the other.
         let mut seen_turns = std::collections::HashSet::new();
         let mut seen_items = std::collections::HashSet::new();
-        // **P3: oldest-first, validated rather than assumed.** Measured on every
+        // **Oldest-first, validated rather than assumed.** Measured on every
         // captured answer (startedAt 1787654880 → …885 → …890). The order is what a
         // reader would rely on to decide which turn is current, so it is checked.
         let mut previous_started_at = i64::MIN;
@@ -566,7 +567,7 @@ impl CodexAdapter {
             }) {
                 return None;
             }
-            // **P5: a tool-bearing answer is refused outright.** No resume answer
+            // **A tool-bearing answer is refused outright.** No resume answer
             // describing a `commandExecution` or a `fileChange` has ever been captured
             // — the live gate's sandbox is read-only with approvals on-request, so a
             // tool call needs an approval nobody answers. The live path guards these
@@ -620,14 +621,14 @@ impl CodexAdapter {
                         else {
                             return None;
                         };
-                        // P7: only the ids that BECOME facts are checked for
+                        // Only the ids that BECOME facts are checked for
                         // uniqueness. A running turn's placeholders (`item-1`) are
                         // never read, and two running turns would legitimately carry
                         // the same one.
                         if !seen_items.insert(item_id) {
                             return None;
                         }
-                        // P3: type-checked BEFORE the fact is minted, because the key it
+                        // Type-checked BEFORE the fact is minted, because the key it
                         // would take is first-wins.
                         if !seeded_item_shape_is_measured(item, item_type) {
                             return None;
@@ -643,7 +644,7 @@ impl CodexAdapter {
                             events.push(event);
                         }
                     }
-                    // **P4: a held usage total is DISCARDED here, never promoted.**
+                    // **A held usage total is DISCARDED here, never promoted.**
                     //
                     // `latest_usage` holds the newest cumulative total this adapter has
                     // *seen*, and a turn whose completion it missed is exactly a turn
@@ -687,8 +688,8 @@ impl CodexAdapter {
     /// Rebuild in-flight state from a seed whose facts are **already durable**.
     ///
     /// Called only after every event in the seed has been recorded, because this is
-    /// where the adapter forgets things. Three rules, each of them a constraint the
-    /// review rounds paid for:
+    /// where the adapter forgets things. Three rules, each of them a constraint that
+    /// has to hold here:
     ///
     ///   * **Never fabricate.** An open item the answer does not confirm still running
     ///     is dropped **without a terminal**. It may have completed while the link was
@@ -1923,7 +1924,7 @@ mod tests {
 
     /// **A held usage total is DISCARDED by a recovered terminal, never promoted.**
     ///
-    /// This test asserted the opposite for one round, and the defect it blessed is worth
+    /// Asserting the opposite is an easy mistake, and the defect it would bless is worth
     /// spelling out. `latest_usage` holds the newest cumulative total the adapter has
     /// *seen*. A turn whose completion it missed is precisely a turn whose final total
     /// it never saw — what it holds is some mid-turn snapshot U1, while the turn really
@@ -2276,7 +2277,7 @@ mod tests {
                 .remove("type");
         });
 
-        // P3 — pagination. A page of history must never attach: the seed would look
+        // Pagination: a page of history must never attach, because the seed would look
         // complete and be a window, with older turns silently unrecovered.
         refused("a non-null initialTurnsPage", &|r| {
             r["initialTurnsPage"] = json!({"turns": [], "nextCursor": "x"});
@@ -2288,7 +2289,7 @@ mod tests {
             r["itemsBackwardsCursor"] = json!(7);
         });
 
-        // P3 — ordering. Oldest-first is what a reader relies on to know which turn is
+        // Ordering: oldest-first is what a reader relies on to know which turn is
         // current, so it is validated rather than assumed.
         // **Fresh ids on the clone, or this case proves nothing.** Cloning a turn keeps
         // its item ids too, and the uniqueness guard below would then refuse the answer
@@ -2316,7 +2317,7 @@ mod tests {
                 .remove("startedAt");
         });
 
-        // P5 — a tool-bearing answer has never been captured, and the live path's own
+        // A tool-bearing answer has never been captured, and the live path's own
         // tool guard (a terminal with no `status` is dropped rather than rendered as a
         // success) has no counterpart here. Refuse rather than fabricate an outcome.
         for tool in ["commandExecution", "fileChange"] {
@@ -2330,7 +2331,7 @@ mod tests {
             });
         }
 
-        // P7 — an identity that appears twice in one answer is a contradiction.
+        // An identity that appears twice in one answer is a contradiction.
         refused("the same turn twice", &|r| {
             let turn = r["thread"]["turns"][0].clone();
             r["thread"]["turns"] = json!([turn.clone(), turn]);
@@ -2347,12 +2348,12 @@ mod tests {
             r["thread"]["turns"][0]["items"][1]["id"] = first;
         });
 
-        // P4 — `sessionId` is a second name for the same thread and may not disagree.
+        // `sessionId` is a second name for the same thread and may not disagree.
         refused("a sessionId naming a different thread", &|r| {
             r["thread"]["sessionId"] = json!("01a03652-dead-beef-0000-000000000000");
         });
 
-        // P3 — every field the SEEDING path consults is type-checked before a fact is
+        // Every field the SEEDING path consults is type-checked before a fact is
         // minted, because the key that fact would take is first-wins: a payload
         // defaulted from a wrong-typed field would occupy it ahead of the real live
         // fact and never be corrected.

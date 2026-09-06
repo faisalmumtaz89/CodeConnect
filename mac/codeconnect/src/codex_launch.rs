@@ -139,7 +139,7 @@ pub enum CleanupState {
 /// A recorded child (app-server / TUI / custodian): its identity, pgid, the
 /// per-spawn nonce, and the hash of the argv it was released to exec — all as
 /// the D6 exec gate fsynced them **before** the child was allowed to `execve`
-/// (findings 4/5: the spawn is durably attributable to a specific nonce+argv).
+/// (so the spawn is durably attributable to a specific nonce+argv).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildEntry {
     pub role: String,
@@ -177,14 +177,14 @@ pub struct ChildEntry {
     /// only thing missing was the one fact the record claimed.
     ///
     /// **`spawn()` returning `Ok` is NOT that proof, and the counterexample is
-    /// measured** (round-2 finding 2). The parent does block on the CLOEXEC error
-    /// pipe std uses to report exec failure — a `pre_exec` that sleeps 500 ms delays
-    /// `spawn()` by 500 ms, a nonexistent binary comes back as `Err(ENOENT)`, a
-    /// `pre_exec` returning `Err` comes back as that errno — but the pipe is closed
-    /// by the child's DEATH just as it is by a successful `execve`. A child SIGKILLed
-    /// after the fence's GO and before `execve` therefore returns `Ok` from `spawn()`
-    /// without ever having become the program: measured directly, `spawn()` `Ok` and
-    /// the recording `Ok` for a process that never ran the target.
+    /// measured.** The parent does block on the CLOEXEC error pipe std uses to report
+    /// exec failure — a `pre_exec` that sleeps 500 ms delays `spawn()` by 500 ms, a
+    /// nonexistent binary comes back as `Err(ENOENT)`, a `pre_exec` returning `Err`
+    /// comes back as that errno — but the pipe is closed by the child's DEATH just as
+    /// it is by a successful `execve`. A child SIGKILLed after the fence's GO and
+    /// before `execve` therefore returns `Ok` from `spawn()` without ever having become
+    /// the program: measured directly, `spawn()` `Ok` and the recording `Ok` for a
+    /// process that never ran the target.
     ///
     /// So the bit is written from a proof the host takes itself, against the child:
     /// [`crate::codex_host`]'s `prove_past_execve` requires the child to be ALIVE by
@@ -196,7 +196,7 @@ pub struct ChildEntry {
 }
 
 /// A spawn the owner has fsynced its **intent** to make, before the child
-/// exists (finding 4). Cleared when the child's identity is recorded.
+/// exists. Cleared when the child's identity is recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpawn {
     pub role: String,
@@ -206,14 +206,13 @@ pub struct PendingSpawn {
 
 /// **Server A** — the identity of the exact tmux session + server the launch
 /// created, captured at launch and persisted so the *separate* custodian and
-/// supervisor processes can bind their absent/killed/gone/live conclusions to it
-/// (round-5 findings 1–4). Without this, cleanup re-establishes "A" from whatever
-/// server currently owns the socket, so a different server B rebinding the path
-/// could fake a proven absence.
+/// supervisor processes can bind their absent/killed/gone/live conclusions to it.
+/// Without this, cleanup re-establishes "A" from whatever server currently owns the
+/// socket, so a different server B rebinding the path could fake a proven absence.
 ///
 /// `server_birth` is **required** (not optional): A is not proven without the
 /// server process's kernel birth, and no cleanup/liveness conclusion may run
-/// unbound (finding 3).
+/// unbound.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerA {
     pub session_id: String,
@@ -239,7 +238,7 @@ impl ServerA {
     }
 
     /// Capture A from a freshly-resolved [`OwnedSession`]. Fails closed if the
-    /// server birth was not proven (finding 3).
+    /// server birth was not proven.
     pub fn from_owned(s: &protocol::tmux::OwnedSession) -> Result<ServerA> {
         let Some(birth) = s.server_birth else {
             bail!("refusing to record server A without a proven server birth");
@@ -254,10 +253,10 @@ impl ServerA {
     }
 }
 
-/// A late `codex-host`'s exclusive lease (finding 9). Carries the identity, its
-/// process group, the nonce it presented, and its role — not just pid/birth — so
-/// a second correct-nonce host is refused while this one is live and so the lease
-/// is attributable in a post-mortem.
+/// A late `codex-host`'s exclusive lease. Carries the identity, its process group, the
+/// nonce it presented, and its role — not just pid/birth — so a second correct-nonce
+/// host is refused while this one is live and so the lease is attributable in a
+/// post-mortem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostLease {
     pub identity: ProcessIdentity,
@@ -300,13 +299,13 @@ pub struct LaunchRecord {
     /// cannot both win.
     pub host_lease: Option<HostLease>,
     /// The exec-gate spawn currently in flight, fsynced before the child exists
-    /// (D6/finding 4). `None` when no spawn is between intent and identity.
+    /// (D6). `None` when no spawn is between intent and identity.
     #[serde(default)]
     pub pending_spawn: Option<PendingSpawn>,
-    /// **Server A**: the persisted identity of the session+server the launch
-    /// created (round-5). `Some` once `tmux new-session` returned a resolved,
-    /// birth-proven session; the custodian and supervisor read it to bind their
-    /// cleanup/liveness to A instead of re-establishing it from the socket.
+    /// **Server A**: the persisted identity of the session+server the launch created.
+    /// `Some` once `tmux new-session` returned a resolved, birth-proven session; the
+    /// custodian and supervisor read it to bind their cleanup/liveness to A instead of
+    /// re-establishing it from the socket.
     #[serde(default)]
     pub server_a: Option<ServerA>,
     /// The **disposable run dir** the coordinator chose for this launch's
@@ -379,7 +378,7 @@ pub struct LaunchRecord {
     /// the option away, at both scopes that decide it, the instant there is a session
     /// to assert it on, and records here that the assertion was proven to land.
     ///
-    /// **Read it as history, and only as history** (round-3 finding 5). This says
+    /// **Read it as history, and only as history.** This says
     /// that at one moment, on that session's window and its then-current pane, the
     /// option was off. It is emphatically NOT a standing guarantee about the session's
     /// remaining lifetime: a config hook can create another pane or another window
@@ -437,6 +436,48 @@ pub struct LaunchRecord {
     /// operator is never sent to a file that was not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_unbound_exit: Option<String>,
+    /// **A vnode freeze this launch is holding right now** on the pinned codex
+    /// executable — the exec hash-pin's `UF_IMMUTABLE`, written while the flag is
+    /// being taken and withdrawn before it is given back.
+    ///
+    /// The guard that sets the flag also clears it, on every ending the process can
+    /// run code for. `SIGKILL` is not one of those, and it is not a hypothetical:
+    /// under load, a killed host left the real `codex` binary immutable twice, and
+    /// a frozen `codex` cannot be updated until somebody works out why and runs
+    /// `chflags nouchg` by hand. The guard cannot survive its own process, so the
+    /// fact it holds is written somewhere that does — here — and the custodian,
+    /// which already outlives the host to clean up after exactly this kind of
+    /// death, undoes it.
+    ///
+    /// It carries the vnode and not just the name (see
+    /// [`protocol::hash::HeldFreeze`]): the clear happens in another process, at
+    /// another time, and a pathname by then may reach a different file — very
+    /// plausibly the codex update the operator ran once they found the binary
+    /// unwritable. Changing *that* file's flags would be a worse bug than the leak.
+    ///
+    /// `Some` is a claim about the present, not history, which is what makes it
+    /// safe to act on — and both ends of that claim are ordered so it cannot be
+    /// wrong in the dangerous direction. It is written from inside the freeze,
+    /// before the hash is taken rather than after it: the digest is a whole-file
+    /// read of a 210 MB executable, and recording afterwards left most of a second
+    /// (about eight, unoptimised) in which the bytes were immutable and nothing said
+    /// so. It is withdrawn before the guard is dropped, so a claim can never outlive
+    /// the flag it describes and point a janitor at a vnode the next launch has
+    /// since frozen for itself.
+    ///
+    /// The residual is what is left of the first window: the instant between
+    /// `fchflags` returning and this write. A host killed there leaks with no
+    /// record. Nothing durable can close it — the record cannot be written before
+    /// the flag is set without inviting the janitor to clear a freeze that was never
+    /// taken — and the clear is holder-checked, vnode-checked and flag-checked, so
+    /// the surviving failure mode is a leak that must be cleared by hand, never a
+    /// stray `chflags`.
+    ///
+    /// **It carries the HOLDER**, and that is what makes the clear safe rather than
+    /// merely careful: see [`protocol::hash::FreezeHolder`]. A record with no holder
+    /// is not read as "nobody is holding it".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_freeze: Option<protocol::hash::HeldFreeze>,
     pub children: Vec<ChildEntry>,
     pub created_ms: i64,
 }
@@ -498,7 +539,7 @@ pub enum Admission {
 }
 
 // ----------------------------------------------------------------------------
-// Fail-closed liveness predicates (Principle D / finding 6).
+// Fail-closed liveness predicates (Principle D).
 //
 // The two decisions the whole launch machine makes about a recorded guardian —
 // "may I admit/commit on it?" and "may I tear it down / rearm past it?" — are
@@ -541,14 +582,14 @@ fn fsync_dir(dir: &std::path::Path) -> Result<()> {
         .with_context(|| format!("fsync of {}", dir.display()))
 }
 
-/// Create the session dir for `uid` and **establish the durability barrier**
-/// (findings 8/12 + finding 6). This is the one place the uid dir is first
-/// created — at lock acquisition, before any record is written.
+/// Create the session dir for `uid` and **establish the durability barrier**. This
+/// is the one place the uid dir is first created — at lock acquisition, before any
+/// record is written.
 ///
-/// The barrier is established on **every** call, not only first creation
-/// (finding 6): the previous "return early if the dir exists" skipped the fsync
-/// whenever the dir was already there — which is exactly the case of a *retry*
-/// after a prior parent-fsync error, or a concurrent creator that raced ahead but
+/// The barrier is established on **every** call, not only first creation: the
+/// previous "return early if the dir exists" skipped the fsync whenever the dir was
+/// already there — which is exactly the case of a *retry* after a prior
+/// parent-fsync error, or a concurrent creator that raced ahead but
 /// whose fsync we cannot observe. An unconditional parent fsync is idempotent and
 /// cheap (lock acquisition is not a tight loop), and it guarantees the uid dir's
 /// entry is durable before we proceed no matter which path created it.
@@ -577,9 +618,9 @@ fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
         .with_context(|| format!("resolving {} to an absolute path", dir.display()))?;
     let dir = dir.as_path();
     // The ancestors that do NOT yet exist — the ones THIS call will create, whose
-    // parents must be fsynced so the new entries are durable (finding 9: based on
-    // ACTUAL creation, not a pre-existence check that a concurrent creator or a
-    // retry could skip). Captured innermost-first before we create anything.
+    // parents must be fsynced so the new entries are durable — based on ACTUAL
+    // creation, not a pre-existence check that a concurrent creator or a retry could
+    // skip. Captured innermost-first before we create anything.
     let mut newly: Vec<std::path::PathBuf> = Vec::new();
     let mut cur: Option<&std::path::Path> = Some(dir);
     while let Some(p) = cur {
@@ -590,14 +631,13 @@ fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
         cur = p.parent();
     }
     // Create the whole session tree **private (0700)** through `fsperm` — a launch
-    // record's dirs must never be 0755 under a normal umask (finding 9, a privacy
-    // leak of session metadata). `private_dir` is recursive and hardens existing
-    // dirs too.
+    // record's dirs must never be 0755 under a normal umask (a privacy leak of
+    // session metadata). `private_dir` is recursive and hardens existing dirs too.
     protocol::fsperm::private_dir(dir)
         .with_context(|| format!("creating {} as a private (0700) dir", dir.display()))?;
     // fsync the parent of each dir we actually created — including the root when
     // `sessions/` is first made, and `.codeconnect`'s parent if it was recursively
-    // created (finding 9).
+    // created.
     for p in &newly {
         if let Some(parent) = p.parent() {
             fsync_dir(parent)?;
@@ -606,7 +646,7 @@ fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
     // And ALWAYS re-fsync the parent of the uid dir **and its ancestors**, even on
     // the already-exists path, so a retry after a prior fsync error re-establishes
     // the barrier for EVERY ancestor whose earlier fsync may have failed — not just
-    // the immediate parent (round-5 finding 7).
+    // the immediate parent.
     for p in durability_ancestors(dir) {
         fsync_dir(&p)?;
     }
@@ -617,7 +657,7 @@ fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
 /// re-flushed on every lock acquisition, innermost-first — **every** one of them,
 /// up to and including the filesystem root.
 ///
-/// A9.6(c), and the bound is the finding. The walk used to stop at a point derived
+/// A9.6(c), and the bound is what matters. The walk used to stop at a point derived
 /// from `sessions_root`: first `.codeconnect`, then one level past it. Both are
 /// short of what the creation above can actually make. `private_dir` is
 /// `DirBuilder::recursive`, so it creates every missing ancestor without limit —
@@ -674,9 +714,9 @@ impl LaunchLock {
         Ok(LaunchLock { _file: file })
     }
 
-    /// Acquire the lock within a **bounded deadline**, never blocking indefinitely
-    /// (round-5 finding 6): a `SIGSTOP`ed holder must never wedge the sole cleanup
-    /// owner, the sweep, or host admission. Retries the non-blocking `try_acquire`
+    /// Acquire the lock within a **bounded deadline**, never blocking indefinitely: a
+    /// `SIGSTOP`ed holder must never wedge the sole cleanup owner, the sweep, or host
+    /// admission. Retries the non-blocking `try_acquire`
     /// until `budget` elapses; a lock still held at the deadline is a hard error.
     pub fn acquire_bounded(uid: &str, budget: std::time::Duration) -> Result<LaunchLock> {
         let deadline = std::time::Instant::now() + budget;
@@ -916,18 +956,18 @@ fn store_atomic(uid: &str, record: &LaunchRecord) -> Result<()> {
     // The session dir's own directory entry is made durable at lock acquisition
     // (`create_session_dir_durably`), which is the only place it is first
     // created; every `store_atomic` runs under that lock, so the parent `sessions/`
-    // dir is already fsynced by the time we get here (finding 8). We still ensure
+    // dir is already fsynced by the time we get here. We still ensure
     // the dir exists (belt and suspenders) and fsync *this* dir after the rename
     // below so the record's own entry is durable.
     // Ensure the dir exists as a PRIVATE (0700) dir even on this belt-and-suspenders
-    // path (finding 9).
+    // path.
     protocol::fsperm::private_dir(&dir)
         .with_context(|| format!("ensuring {} is a private dir", dir.display()))?;
     let target = dir.join(RECORD_FILE);
     let temp = dir.join(format!(".{RECORD_FILE}.tmp"));
     let json = serde_json::to_vec_pretty(record).context("serializing the launch record")?;
     {
-        // 0600 from the instant it exists (finding 9): a launch record carries
+        // 0600 from the instant it exists: a launch record carries
         // session metadata and must never be world-readable under a normal umask.
         let mut f = protocol::fsperm::create_private(&temp)
             .with_context(|| format!("creating {} (0600)", temp.display()))?;
@@ -991,7 +1031,7 @@ pub struct NewLaunch {
 }
 
 /// Write the first `pending` record — a single-owner **ABSENT → Pending** CAS
-/// (Principle A / finding 10). If any record already exists for this uid, refuse:
+/// (Principle A). If any record already exists for this uid, refuse:
 /// a duplicate or restarted coordinator must **never** erase a `Ready` or
 /// `Failed` outcome by blindly rewriting `pending`.
 pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord> {
@@ -1034,6 +1074,7 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         remain_on_exit_asserted: false,
         codex_thread_bound: false,
         codex_unbound_exit: None,
+        exec_freeze: None,
         children: Vec::new(),
         created_ms: new.created_ms,
     };
@@ -1052,21 +1093,19 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
 /// bind teardown to. Fusing them makes "a session exists" and "we know which one"
 /// the same durable fact, which is what A9.3's disposition rule then reads.
 ///
-/// Server A (round-5 finding 1) is the identity of the session+server the launch
-/// created, so the separate custodian/supervisor can bind cleanup and liveness to
-/// it. Recorded on a still-`pending` record right after `tmux new-session` returns
-/// a resolved, birth-proven session; carried forward through the terminal
-/// transitions.
+/// Server A is the identity of the session+server the launch created, so the separate
+/// custodian/supervisor can bind cleanup and liveness to it. Recorded on a
+/// still-`pending` record right after `tmux new-session` returns a resolved,
+/// birth-proven session; carried forward through the terminal transitions.
 ///
-/// The flag is cleared **regardless of the current state** (finding 6). The bug
-/// that closes: if the custodian raced the coordinator to `pending → failed`
-/// (deadline/loss) *before* the coordinator got here, a "only while pending" clear
-/// was a no-op, leaving `new_session_indeterminate` stuck true on a `failed`
-/// record whose new-session was actually determinate — and the custodian would
-/// then treat one `Absent` observation as insufficient and stay armed forever.
-/// Clearing it here is safe because this is only ever called for a session tmux
-/// *did* create (the confirmed-indeterminate path is
-/// [`fail_new_session_indeterminate`], which sets the flag instead). The
+/// The flag is cleared **regardless of the current state**. The bug that closes: if the
+/// custodian raced the coordinator to `pending → failed` (deadline/loss) *before* the
+/// coordinator got here, a "only while pending" clear was a no-op, leaving
+/// `new_session_indeterminate` stuck true on a `failed` record whose new-session was
+/// actually determinate — and the custodian would then treat one `Absent` observation
+/// as insufficient and stay armed forever. Clearing it here is safe because this is
+/// only ever called for a session tmux *did* create (the confirmed-indeterminate path
+/// is [`fail_new_session_indeterminate`], which sets the flag instead). The
 /// `cleanup → pending` restore stays scoped to a still-`pending` record.
 ///
 /// **`remain_asserted` folds [`note_remain_on_exit_asserted`]'s fact into this same
@@ -1332,6 +1371,302 @@ pub fn note_session_observed(_lock: &LaunchLock, uid: &str) -> Result<()> {
     store_atomic(uid, &record)
 }
 
+/// Record that this launch is **holding** a vnode freeze on the pinned executable.
+///
+/// State, not history, unlike its neighbours here — it is written while the flag is
+/// going on and taken back before it comes off, because a janitor acting on it must
+/// be reading a claim about right now. See [`LaunchRecord::exec_freeze`] for both
+/// orderings and what each of them buys.
+///
+/// Called from inside the freeze, so it is the caller's business to hold a lock it
+/// already has and to treat a failure the way it treats any other recording failure
+/// on that path.
+pub fn note_exec_freeze_taken(
+    _lock: &LaunchLock,
+    uid: &str,
+    held: protocol::hash::HeldFreeze,
+) -> Result<()> {
+    let mut record = load(uid)?;
+    record.exec_freeze = Some(held);
+    store_atomic(uid, &record)
+}
+
+/// Record that the freeze is being released — called with the guard still held, an
+/// instant before it is dropped and the flag goes back as it was found.
+///
+/// Idempotent, and deliberately unconditional about *which* freeze it clears: at
+/// most one is ever held at a time (the app-server's is released before the TUI's
+/// is taken), so there is no second holder whose claim this could erase.
+pub fn note_exec_freeze_released(_lock: &LaunchLock, uid: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.exec_freeze.is_none() {
+        return Ok(());
+    }
+    record.exec_freeze = None;
+    store_atomic(uid, &record)
+}
+
+/// Whether some launch OTHER than this one still stands behind a freeze on the
+/// same vnode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtherFreezeClaim {
+    /// No other launch record claims this vnode with a holder that could still be
+    /// running. The recorded holder's death is the whole warrant.
+    None,
+    /// One does — or a record could not be read to rule it out. Carries the reason,
+    /// because a deferred clear has to be able to say what it was waiting for.
+    Standing(String),
+}
+
+/// Only the field a freeze scan needs, read **without** the schema gate [`load`]
+/// applies.
+///
+/// The scan asks one question of somebody else's record — "are you holding a freeze
+/// on this vnode?" — and a record from another schema is still a record whose
+/// answer matters. Parsing the whole `LaunchRecord` would turn every schema bump
+/// into a reason to stop being able to see other launches' claims, which is the
+/// direction that fails open.
+#[derive(serde::Deserialize)]
+struct FreezeClaimProbe {
+    #[serde(default)]
+    exec_freeze: Option<protocol::hash::HeldFreeze>,
+}
+
+/// Whether any launch **other than** `except_uid` still stands behind a freeze on
+/// `(dev, ino)`.
+///
+/// # Why the holder's death is not enough on its own
+///
+/// A freeze record is a warrant for one vnode, and a vnode is not one freeze: the
+/// same executable is frozen again by the next launch, and the next, each time on
+/// the same `(dev, ino)`. So a record whose own holder is dead, matched against a
+/// file whose immutable bit is set, does not establish that the bit it is looking at
+/// is the bit that record is about — the bit may belong to a launch that started
+/// afterwards and is using it right now. Inode equality cannot tell successive
+/// freezes apart, and nothing in the record can either.
+///
+/// What can tell them apart is the set of records: the live launch that took the
+/// current freeze wrote one too. So before a clear, every other record is asked
+/// whether it names this vnode with a holder that is not proven dead — and one that
+/// does defers the clear, whatever this record's own holder did.
+///
+/// **Fail-closed on doubt.** A record that cannot be read or parsed reads as
+/// standing rather than absent: the dangerous direction here is clearing, and an
+/// unreadable record is the strongest hint that something is changing underneath.
+/// The caller bounds how long it will wait on that, so an unreadable record delays a
+/// clear rather than cancelling it forever.
+///
+/// **The caller holds the executable's own [`protocol::hash::FreezeLock`] across this
+/// scan AND the clear that follows it**, and that is what makes the scan's answer
+/// still true when the `chflags` lands. Without it the two are separate moments: a
+/// launch could publish its claim after this scan had passed its directory and before
+/// the clear, and the clear would then revoke a guard that by then existed. The lock
+/// is on the file, so a freezer cannot be between its `fchflags` and its record write
+/// while this runs.
+///
+/// No launch LOCK is taken — a different lock, and a different question. Blocking on
+/// the record lock a live host holds, in order to decide whether that host is live,
+/// is a question answering itself the slow way. `store_atomic` publishes by rename,
+/// so a reader sees a whole record or none.
+///
+/// **Fail-closed all the way down.** A directory that cannot be enumerated to the
+/// end, a record that cannot be stat'ed for any reason other than not being there,
+/// and a record that cannot be read or parsed all answer `Standing`.
+pub fn other_freeze_claim_on(except_uid: &str, dev: u64, ino: u64) -> OtherFreezeClaim {
+    let dir = sessions_root();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        // **Not "nobody else has a record".** The caller's own record lives in this
+        // directory and was read a moment ago, so a listing that fails now is a
+        // question that could not be asked — a descriptor shortfall, an I/O error —
+        // and not an answer. Reading it as absence is the one direction that lets a
+        // live launch's guard be revoked.
+        return OtherFreezeClaim::Standing(format!(
+            "{} could not be listed, so no other launch can be ruled out as the holder of \
+             the freeze on device {dev}/inode {ino}",
+            dir.display()
+        ));
+    };
+    for entry in entries {
+        // **An entry that could not be produced is not an entry that is not there.**
+        // `flatten()` dropped these, which made a directory this process could half
+        // read look like a directory with fewer launches in it — and fewer launches
+        // is the direction that licenses a clear.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                return OtherFreezeClaim::Standing(format!(
+                    "{} could not be enumerated to the end ({err}), so no other launch can be \
+                     ruled out as the holder of the freeze on device {dev}/inode {ino}",
+                    dir.display()
+                ))
+            }
+        };
+        // Lossy rather than skipped: a name this process cannot spell is still a
+        // directory whose record may claim this vnode, and the name is only ever used
+        // to say which record deferred the clear.
+        let uid = entry.file_name().to_string_lossy().into_owned();
+        if uid == except_uid {
+            continue;
+        }
+        let path = entry.path().join(RECORD_FILE);
+        // **`exists()` reads every failure as absence**, including the ones that mean
+        // "this process was not allowed to look". Asked properly: only the two errnos
+        // that genuinely say "there is nothing at this name" are an absence, and
+        // every other one defers.
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) => {
+                continue
+            }
+            Err(err) => {
+                return OtherFreezeClaim::Standing(format!(
+                    "{uid}'s launch record could not be stat'ed ({err}), so it cannot be ruled \
+                     out as the holder of the freeze on device {dev}/inode {ino}"
+                ))
+            }
+        }
+        let probe = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FreezeClaimProbe>(&bytes).ok());
+        let Some(probe) = probe else {
+            return OtherFreezeClaim::Standing(format!(
+                "{uid}'s launch record could not be read, so it cannot be ruled out as the \
+                 holder of the freeze on device {dev}/inode {ino}"
+            ));
+        };
+        let Some(held) = probe.exec_freeze else {
+            continue;
+        };
+        if held.dev != dev || held.ino != ino {
+            continue;
+        }
+        match held.holder {
+            Some(holder) if holder.is_provably_gone() => continue,
+            Some(holder) => {
+                return OtherFreezeClaim::Standing(format!(
+                    "{uid} claims a freeze on device {dev}/inode {ino} and its holder (pid {}) \
+                     is not proven dead",
+                    holder.identity.pid
+                ))
+            }
+            None => {
+                return OtherFreezeClaim::Standing(format!(
+                    "{uid} claims a freeze on device {dev}/inode {ino} and names no holder, so \
+                     nothing about it can be proven"
+                ))
+            }
+        }
+    }
+    OtherFreezeClaim::None
+}
+
+/// **What one attempt at a standing freeze claim came to** — the warrants and the
+/// `chflags`, with no policy about what to do next.
+///
+/// Two actors act on these claims and they must agree about every warrant: the
+/// custodian, which is armed for one launch and has a waiting budget, and the
+/// daemon's recovery sweep, which has neither and is the backstop for a custodian
+/// that died or gave up. A second copy of four warrants is a second copy that drifts,
+/// and the direction it drifts in is a flag taken off a live launch's binary.
+#[derive(Debug)]
+pub enum StandingFreeze {
+    /// **Not yet, and here is what it is waiting for.** The holder is not proven
+    /// dead, the lock could not be taken, or another launch still stands behind the
+    /// vnode. Every actor's answer to this is the same: come back.
+    Waiting(String),
+    /// **The claim is an ADOPTED one, so the flag was never this launch's.** Its
+    /// holder is gone, so the claim no longer stands behind the vnode for anybody and
+    /// may be withdrawn — but the bit belongs to whoever put it there, which includes
+    /// an operator's own `chflags uchg`, and no evidence that could ever arrive would
+    /// make it this record's to remove.
+    NotOursToClear,
+    /// Past every warrant. This is what the `chflags` itself came to.
+    Attempted(protocol::hash::FreezeClear),
+}
+
+/// Ask, for one standing claim, whether the flag it names may be taken off — and if
+/// so, take it off.
+///
+/// # The warrants, in order, and why each one is not the others
+///
+///   * **The holder is provably dead.** Not "its session was destroyed" and not "its
+///     children stopped" — the recorded `(pid, birth)` under the recorded boot, asked
+///     of the kernel the same way every other identity in this codebase is. A holder
+///     that is alive, stopped, or simply unreadable is a holder whose guard nobody may
+///     revoke: clearing the flag while its holder lives is precisely the failure the
+///     freeze was put there to prevent.
+///   * **The record says the bit is OURS.** An adopter found the bit already on and
+///     stood behind the vnode so that nobody would clear it out from under a running
+///     launch; it undertook nothing about the bit itself. A janitor inherits exactly
+///     the authority the guard that wrote the record had, and no more. See
+///     [`protocol::hash::FreezeOwnership`].
+///   * **The lock, taken BEFORE the scan and held through the clear.** This is what
+///     makes the scan's answer still true when the `chflags` lands: without it the two
+///     are separate moments, and a launch could publish its claim after the scan passed
+///     its directory and before the clear removed the bit it was relying on. Every
+///     freezer holds this same lock across its own freeze + record — and the launcher's
+///     probe, which writes no record at all, holds it across its whole run. See
+///     [`protocol::hash::FreezeLock`] and [`protocol::hash::LockHold`].
+///   * **Nobody else stands behind this vnode.** A dead holder proves this record is
+///     finished with the file; it does not prove the bit now set on the file is the bit
+///     this record is about. The same executable is frozen again by the next launch on
+///     the same `(dev, ino)`, and the only thing that can tell two successive freezes
+///     apart is the other launches' own records. See [`other_freeze_claim_on`].
+///
+/// # The lock this does NOT take
+///
+/// No launch lock. The caller's relationship to it differs — the custodian holds none
+/// here and takes one afterwards to withdraw; the sweep is already holding one for
+/// this record — and taking it inside would make the sweep's order file-then-launch
+/// while a freezer's is launch-then-file. Left out, both callers keep the freezer's
+/// order and there is no cycle to have.
+pub fn resolve_standing_freeze(
+    except_uid: &str,
+    held: &protocol::hash::HeldFreeze,
+) -> StandingFreeze {
+    match held.holder.as_ref() {
+        Some(holder) if holder.is_provably_gone() => {}
+        Some(holder) => {
+            return StandingFreeze::Waiting(format!(
+                "the holder of the freeze on {} (pid {}) is not proven dead",
+                held.path, holder.identity.pid
+            ))
+        }
+        None => {
+            return StandingFreeze::Waiting(format!(
+                "the record of the freeze on {} names no holder, so nothing about it can be \
+                 proven",
+                held.path
+            ))
+        }
+    }
+    if held.ownership == protocol::hash::FreezeOwnership::Adopted {
+        return StandingFreeze::NotOursToClear;
+    }
+    let file_lock = match protocol::hash::FreezeLock::acquire(std::path::Path::new(&held.path)) {
+        Ok(lock) => lock,
+        // The name reaches nothing: the vnode this record describes is not there, so
+        // nothing is owed — the same ending a `NotOurs` from the clear itself has.
+        Err(protocol::hash::FreezeLockFailure::Missing(why)) => {
+            return StandingFreeze::Attempted(protocol::hash::FreezeClear::NotOurs(why))
+        }
+        // A question that could not be asked — a permission denied, a descriptor
+        // shortfall, or another participant (a live probe) holding the lock. Waiting,
+        // so whoever asked comes back; reading it as an answer is what licenses a
+        // clear on no evidence at all.
+        Err(protocol::hash::FreezeLockFailure::Unavailable(why)) => {
+            return StandingFreeze::Waiting(format!(
+                "the freeze on {} could not be locked: {why}",
+                held.path
+            ))
+        }
+    };
+    if let OtherFreezeClaim::Standing(why) = other_freeze_claim_on(except_uid, held.dev, held.ino) {
+        return StandingFreeze::Waiting(why);
+    }
+    StandingFreeze::Attempted(protocol::hash::clear_held_freeze(held, &file_lock))
+}
+
 /// The two roles a host spawns, which cleanup must be able to address.
 pub const HOST_CHILD_ROLES: [&str; 2] = ["app-server", "tui"];
 
@@ -1341,16 +1676,15 @@ pub const HOST_CHILD_ROLES: [&str; 2] = ["app-server", "tui"];
 /// The coordinator asks this before committing `ready`: a session declared ready
 /// must be one whose processes cleanup can name and which are actually running.
 ///
-/// **One entry must satisfy all three, and that is the whole point of fusing them**
-/// (round-3 finding 1). These used to be two predicates over the same list — one
-/// asking "is some entry for this role recorded-by-the-lease and exec-confirmed?",
-/// the other, separately, "is some entry for this role alive?" — and two existential
-/// quantifiers over one list do not compose into one. Entries recorded by a
-/// **displaced** host are deliberately retained (see [`ChildEntry::recorded_by`]),
-/// so a predecessor's TUI that is still breathing could answer the liveness question
-/// while the CURRENT host's confirmed TUI was already dead, and readiness committed
-/// on two facts about two different processes. Asked as one conjunction over one
-/// entry, that shape cannot arise.
+/// **One entry must satisfy all three, and that is the whole point of fusing them.**
+/// These used to be two predicates over the same list — one asking "is some entry for
+/// this role recorded-by-the-lease and exec-confirmed?", the other, separately, "is
+/// some entry for this role alive?" — and two existential quantifiers over one list do
+/// not compose into one. Entries recorded by a **displaced** host are deliberately
+/// retained (see [`ChildEntry::recorded_by`]), so a predecessor's TUI that is still
+/// breathing could answer the liveness question while the CURRENT host's confirmed TUI
+/// was already dead, and readiness committed on two facts about two different
+/// processes. Asked as one conjunction over one entry, that shape cannot arise.
 ///
 /// The three conjuncts, and why none is redundant:
 ///
@@ -1702,7 +2036,7 @@ pub(crate) fn remove_tree_beneath(
     let mut enumeration: std::io::Result<()> = Ok(());
     loop {
         // **A null `readdir` is two different answers, and only one of them is
-        // "done"** (round-2 finding 6). `readdir` reports both end-of-directory and
+        // "done".** `readdir` reports both end-of-directory and
         // a read error by returning NULL; the two are told apart ONLY by `errno`,
         // which it leaves untouched on EOF. Read as EOF unconditionally, an I/O
         // error part-way through enumeration became a *complete* enumeration of a
@@ -1840,7 +2174,7 @@ pub(crate) enum RunDirSweep {
 ///     directory, and the data was already unlinked through the verified fd.
 ///
 /// **`rmdir` is fallible AFTER the warrant is gone, and that is the one ordering
-/// this list cannot fix** (round-2 finding 5): the marker lives inside the directory
+/// this list cannot fix**: the marker lives inside the directory
 /// `rmdir` empties, so it cannot be removed later than `rmdir` succeeds. A straggler
 /// entry created after the enumeration makes `rmdir` return `ENOTEMPTY` with the
 /// marker already unlinked — and a missing marker reads as `Foreign`, which settles.
@@ -1887,8 +2221,8 @@ pub(crate) fn sweep_owned_run_dir(
         // never touch a stranger's contents.
         MarkerVerdict::Foreign => {
             drop(dir_fd);
-            // **The `remove_dir`'s failure is READ, not discarded** (round-3
-            // finding 3). It used to be `let _ = …`, which meant this arm reported
+            // **The `remove_dir`'s failure is READ, not discarded.** It used to be
+            // `let _ = …`, which meant this arm reported
             // `Settled` — "nothing is owed here" — no matter what happened, including
             // on a directory it had just failed to collect for a reason it never
             // looked at.
@@ -1970,7 +2304,7 @@ pub(crate) fn sweep_owned_run_dir(
     match std::fs::remove_dir(run_dir) {
         Ok(()) => RunDirSweep::Settled(None),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => RunDirSweep::Settled(None),
-        // **The marker is gone and the directory is not** (round-2 finding 5).
+        // **The marker is gone and the directory is not.**
         //
         // `rmdir` is the last fallible step and it cannot be moved before the marker
         // removal, because the marker is IN the directory `rmdir` empties — so the
@@ -2012,7 +2346,7 @@ pub(crate) fn sweep_owned_run_dir(
 /// prefix and not a name.
 pub(crate) const MARKER_RESTORE_TEMP: &str = ".owner.restore";
 
-/// A staging name **no other restorer can be using** (round-4 finding 3).
+/// A staging name **no other restorer can be using**.
 ///
 /// One shared staging name is not safe here, and the reason is not hypothetical: the
 /// custodian sweeping a launch and that launch's own host both call
@@ -2050,8 +2384,7 @@ fn marker_restore_staging_name() -> String {
     )
 }
 
-/// Put the deletion warrant back after a failed `rmdir` (round-2 finding 5),
-/// **atomically and durably** (round-3 finding 3).
+/// Put the deletion warrant back after a failed `rmdir`, **atomically and durably**.
 ///
 /// The whole value of this function is that the next pass reads `Ours` instead of
 /// `Foreign`, so what it must never do is leave something that reads as neither.
@@ -2082,10 +2415,10 @@ fn marker_restore_staging_name() -> String {
 /// Every failure unlinks the staging file, so a pass that could not restore leaves
 /// no litter for the next one to trip over.
 ///
-/// **The staging name is unique per attempt** (round-4 finding 3) — see
+/// **The staging name is unique per attempt** — see
 /// [`marker_restore_staging_name`] for the interleave a shared name admits.
 ///
-/// **And its mode is SET, not requested** (round-4 finding 4). `openat`'s mode
+/// **And its mode is SET, not requested.** `openat`'s mode
 /// argument is a creation mode the umask can only take bits away from, and the
 /// restorer is not always the process that chose the umask: a replacement custodian
 /// spawned under a hostile or merely careless umask (`0777` is enough) creates the
@@ -2123,12 +2456,12 @@ fn restore_marker_at(dir: &DirFd, uid: &str, launch_nonce: &str) -> std::io::Res
         // SAFETY: `fd` was just opened by this call and is owned by nothing else.
         // Wrapped FIRST so every arm below closes it by dropping `file`.
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        // Round-4 finding 4: 0600 as a FACT about the file, not as a request the
+        // 0600 as a FACT about the file, not as a request the
         // umask may have narrowed. SAFETY: `file` owns a live descriptor.
         if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // **The write-failure seam fires HERE** (round-4 finding 8), not at the top
+        // **The write-failure seam fires HERE**, not at the top
         // of the function. It used to return before the staging file was created,
         // which made the injected failure a different failure from the one it stands
         // for: nothing had been staged, so the unlink below had nothing to remove,
@@ -2236,15 +2569,15 @@ pub fn record_run_dir(_lock: &LaunchLock, uid: &str, run_dir: &str) -> Result<()
     store_atomic(uid, &record)
 }
 
-/// Fsync the **intent** to spawn a gated child, before the child exists (D6 /
-/// finding 4). Recorded on any non-terminal state where a spawn can be in
-/// flight (`pending`, or `failed{cleanup:pending}` for a sweep rearm).
+/// Fsync the **intent** to spawn a gated child, before the child exists (D6). Recorded
+/// on any non-terminal state where a spawn can be in flight (`pending`, or
+/// `failed{cleanup:pending}` for a sweep rearm).
 pub fn set_pending_spawn(_lock: &LaunchLock, uid: &str, intent: PendingSpawn) -> Result<()> {
     let mut record = load(uid)?;
     match &record.state {
         LaunchState::Pending => {}
         LaunchState::Failed { .. } if record.cleanup == CleanupState::Pending => {}
-        // A Ready session whose custodian died needs a replacement (finding 4);
+        // A Ready session whose custodian died needs a replacement;
         // the CAS that consumes this intent enforces the Gone-slot requirement.
         LaunchState::Ready => {}
         other => bail!("cannot record a spawn intent while the launch is {other:?}"),
@@ -2254,9 +2587,8 @@ pub fn set_pending_spawn(_lock: &LaunchLock, uid: &str, intent: PendingSpawn) ->
 }
 
 /// The exec gate's `on_ready`: the **single-owner CAS of the custodian slot**
-/// (Principle A / finding 8) — atomically set the slot to `identity`, append the
-/// child's [`ChildEntry`], and clear the pending spawn intent, all in one durable
-/// write (findings 4/5/8).
+/// (Principle A) — atomically set the slot to `identity`, append the child's
+/// [`ChildEntry`], and clear the pending spawn intent, all in one durable write.
 ///
 /// The CAS succeeds only when the slot is **empty** (the coordinator's initial
 /// arm) or its current occupant is **proven `Gone`** (a sweep replacing a dead
@@ -2282,7 +2614,7 @@ pub fn cas_custodian_with_child(
         LaunchState::Pending => {}
         LaunchState::Failed { .. } if record.cleanup == CleanupState::Pending => {}
         // A committed `Ready` session whose custodian has died still needs an
-        // independent teardown owner for coordinator/supervisor loss (finding 4):
+        // independent teardown owner for coordinator/supervisor loss:
         // the sweep rearms one here. The slot check below still requires the dead
         // occupant be *proven* Gone, so this cannot displace a live custodian.
         LaunchState::Ready => {}
@@ -2313,8 +2645,8 @@ pub fn cas_custodian_with_child(
     store_atomic(uid, &record)
 }
 
-/// CAS `pending → ready` (Principle A / finding 7). Refuses unless, **re-checked
-/// under the lock at commit time**, all of:
+/// CAS `pending → ready` (Principle A). Refuses unless, **re-checked under the lock at
+/// commit time**, all of:
 ///   * the record is still `pending` (so a resumed, deadline-lost coordinator
 ///     cannot overwrite `failed`);
 ///   * the committing coordinator is the recorded one;
@@ -2328,10 +2660,9 @@ pub fn cas_custodian_with_child(
 ///     which always persists A in the same durable write (a session whose server
 ///     birth was not proven already fails closed in `ServerA::from_owned`), so
 ///     this refuses nothing the forward path can legitimately produce;
-///   * and the **host lease is live and its children are ready RIGHT NOW**
-///     (round-3 finding 2) — re-asked here rather than inherited from the
-///     bring-up census, because a bounded lock wait separates the two and a child
-///     can die inside it.
+///   * and the **host lease is live and its children are ready RIGHT NOW** —
+///     re-asked here rather than inherited from the bring-up census, because a
+///     bounded lock wait separates the two and a child can die inside it.
 pub fn to_ready(_lock: &LaunchLock, uid: &str, coordinator: &ProcessIdentity) -> Result<()> {
     let mut record = load(uid)?;
     // **The A-check comes before BOTH arms**, not just the forward CAS below.
@@ -2350,7 +2681,7 @@ pub fn to_ready(_lock: &LaunchLock, uid: &str, coordinator: &ProcessIdentity) ->
     }
     // A retry after a PARTIAL first commit (rename landed, dir-fsync failed ⇒ the
     // first `to_ready` returned Err leaving a visible-but-not-proven-durable
-    // Ready): re-prove durability instead of refusing (finding 8). Only for OUR
+    // Ready): re-prove durability instead of refusing. Only for OUR
     // own Ready — a foreign/failed record still falls through to the guards below.
     if record.state == LaunchState::Ready && &record.coordinator == coordinator {
         store_atomic(uid, &record)?;
@@ -2374,7 +2705,7 @@ pub fn to_ready(_lock: &LaunchLock, uid: &str, coordinator: &ProcessIdentity) ->
         None => bail!("refusing pending→ready: no custodian is armed"),
     }
     // **The host and its children are re-asked HERE, under the lock, at the instant
-    // of the commit** (round-3 finding 2).
+    // of the commit.**
     //
     // The bring-up loop samples "the legs serve, the host lives, both children are
     // confirmed and alive" and then calls this — but not directly. In between sits a
@@ -2420,9 +2751,9 @@ pub fn to_failed(
         LaunchState::Failed { .. } => {
             // Already terminal. Re-run the durable write so a RETRY after a
             // partial first write (rename landed, dir-fsync failed ⇒ the first
-            // call returned Err) actually **proves durability** this time
-            // (finding 3): the fix for "reads Failed and returns Ok without
-            // re-fsyncing". The reason is unchanged (first reason wins).
+            // call returned Err) actually **proves durability** this time — never
+            // "reads Failed and returns Ok without re-fsyncing". The reason is
+            // unchanged (first reason wins).
             store_atomic(uid, &record)?;
             Ok(record.state.clone())
         }
@@ -2444,11 +2775,29 @@ pub fn to_failed(
 /// Update just the cleanup disposition (e.g. a custodian marking `complete`).
 pub fn set_cleanup(_lock: &LaunchLock, uid: &str, cleanup: CleanupState) -> Result<()> {
     let mut record = load(uid)?;
+    // **`Complete` is the durable statement that nothing is owed, and a standing
+    // freeze claim is something owed.** Nothing re-arms a completed record — that is
+    // what the marker is FOR — so a `Complete` written over a claim that is still on a
+    // real binary is not merely wrong, it is permanent: no custodian is rearmed, no
+    // recovery pass looks again, and the flag comes off when a human eventually works
+    // out why codex will not update. The custodian's own arms hold the marker back
+    // already; this is the same rule where a caller that has not read those arms still
+    // cannot get it wrong.
+    if cleanup == CleanupState::Complete {
+        if let Some(held) = &record.exec_freeze {
+            bail!(
+                "{uid} still claims the vnode freeze on {}, so its cleanup cannot be marked \
+                 complete: the marker is what stops anybody looking again, and the flag is \
+                 still on the file",
+                held.path
+            );
+        }
+    }
     record.cleanup = cleanup;
     store_atomic(uid, &record)
 }
 
-/// **Durable-before-mutation** (Principle B / finding 1, CRITICAL): mark the
+/// **Durable-before-mutation** (Principle B, CRITICAL): mark the
 /// launch as having an *in-flight* `tmux new-session` and fsync it **before** the
 /// mutation is issued. While set, a coordinator death with tmux in flight leaves
 /// a record that already says "indeterminate", so the custodian stays armed
@@ -2493,20 +2842,19 @@ pub fn fail_new_session_indeterminate(_lock: &LaunchLock, uid: &str, reason: &st
     store_atomic(uid, &record)
 }
 
-/// Fail the launch on a **determinate** `tmux new-session` failure — the opposite
-/// of [`fail_new_session_indeterminate`] (finding 6). Terminalizes to
-/// `failed{cleanup:pending}` if still `pending`, and **atomically clears**
-/// `new_session_indeterminate` in the same write whether or not the custodian has
-/// already raced the record to `failed`. This closes the residual where a
-/// coordinator that learned a definite new-session failure could die before a
-/// separate clear ran, leaving the flag stuck true and the custodian armed
-/// forever on `Absent`: the determinate outcome is now recorded as one durable,
+/// Fail the launch on a **determinate** `tmux new-session` failure — the opposite of
+/// [`fail_new_session_indeterminate`]. Terminalizes to `failed{cleanup:pending}` if
+/// still `pending`, and **atomically clears** `new_session_indeterminate` in the same
+/// write whether or not the custodian has already raced the record to `failed`. This
+/// closes the residual where a coordinator that learned a definite new-session failure
+/// could die before a separate clear ran, leaving the flag stuck true and the custodian
+/// armed forever on `Absent`: the determinate outcome is now recorded as one durable,
 /// interruption-free fact. Idempotent like [`to_failed`] (the first reason wins).
 ///
 /// `cleanup` lets the caller record whether a disposable session actually needs
 /// reaping: `NotRequired` for a failure that happened **before** `tmux
 /// new-session` created anything (nothing to clean — so the custodian completes
-/// via `Done` rather than probing a non-existent server forever, round-4), and
+/// via `Done` rather than probing a non-existent server forever), and
 /// `Pending` for a failure **after** a session was created. It is only applied on
 /// the `pending → failed` transition; a record already `failed` keeps its first
 /// disposition (first-writer wins).
@@ -2523,9 +2871,9 @@ pub fn fail_new_session_determinate(
         LaunchState::Failed { .. } => {
             // The first *reason* wins (idempotent), but a determinate
             // `NotRequired` (the coordinator KNOWS no session was created) must
-            // SUPERSEDE a custodian-set speculative `Pending` for the same launch
-            // (round-5 finding 5) — otherwise the custodian probes a nonexistent
-            // server forever. Only downgrade Pending→NotRequired; never touch a
+            // SUPERSEDE a custodian-set speculative `Pending` for the same launch —
+            // otherwise the custodian probes a nonexistent server forever. Only
+            // downgrade Pending→NotRequired; never touch a
             // Complete.
             if cleanup == CleanupState::NotRequired && record.cleanup == CleanupState::Pending {
                 record.cleanup = CleanupState::NotRequired;
@@ -2546,15 +2894,15 @@ pub fn fail_new_session_determinate(
     Ok(record.state)
 }
 
-/// A late `codex-host` admission attempt (Principle A/D / finding 9), linearized
-/// under the lock with `pending → failed`. Admitted only when, at commit time,
-/// **all** of: the record parses and is this-boot; the nonce matches; the state
-/// is `pending`; the deadline is `Live`; the recorded coordinator is **proven
-/// `Live`** (not `Gone` and not `Unknown`); a custodian is recorded and **proven
-/// `Live`**; and no **live** `host_lease` already exists (the lease is
-/// **exclusive** — two correct-nonce hosts must not both be admitted). On
-/// success it records an exclusive [`HostLease`] carrying nonce/role/pgid; on any
-/// doubt it refuses and the host runs cleanup-only. D6/D7.
+/// A late `codex-host` admission attempt (Principle A/D), linearized under the lock
+/// with `pending → failed`. Admitted only when, at commit time, **all** of: the record
+/// parses and is this-boot; the nonce matches; the state is `pending`; the deadline is
+/// `Live`; the recorded coordinator is **proven `Live`** (not `Gone` and not
+/// `Unknown`); a custodian is recorded and **proven `Live`**; and no **live**
+/// `host_lease` already exists (the lease is **exclusive** — two correct-nonce hosts
+/// must not both be admitted). On success it records an exclusive [`HostLease`]
+/// carrying nonce/role/pgid; on any doubt it refuses and the host runs cleanup-only.
+/// D6/D7.
 pub fn admit_host(
     _lock: &LaunchLock,
     uid: &str,
@@ -2614,7 +2962,7 @@ pub fn admit_host(
         None => return Ok(Admission::Refused("no custodian is armed".into())),
     }
     // The lease is EXCLUSIVE and taking it over requires the incumbent be
-    // **proven GONE** (finding 5, fail-closed like every other admission gate):
+    // **proven GONE** (fail-closed like every other admission gate):
     // an incumbent that is Alive OR whose liveness is Unknown both refuse — an
     // unreadable lease holder is never overwritten on uncertainty.
     if let Some(existing) = &record.host_lease {
@@ -2658,6 +3006,14 @@ pub enum SweepAction {
     /// `failed{cleanup:pending}` whose custodian is gone: the caller should
     /// spawn a replacement custodian to finish cleanup.
     NeedsReplacementCustodian { uid: String },
+    /// A standing freeze claim was **dealt with**: the flag was cleared, or found to
+    /// be nobody's business of this record's, and the claim withdrawn. Carries what
+    /// happened, because a flag coming off a binary is worth reading.
+    FreezeClaimSettled { uid: String, what: String },
+    /// A standing freeze claim was left **standing**: its warrants are not complete
+    /// yet — most often a live launch behind the same vnode, which is the ordinary
+    /// healthy case and not a failure. Carries what it is waiting for.
+    FreezeClaimStanding { uid: String, why: String },
     /// The record could not be **examined** this pass — its lock was held, or it
     /// could not be read. Nothing was done to it and nothing is known about it.
     ///
@@ -2746,7 +3102,7 @@ pub fn recovery_sweep() -> Vec<SweepAction> {
                     actions.push(SweepAction::FailedStalePending { uid: uid.clone() });
                     // It now needs cleanup; if no custodian can do it, flag.
                     if guardian_gone(record.custodian.as_ref()) {
-                        actions.push(SweepAction::NeedsReplacementCustodian { uid });
+                        actions.push(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
                     }
                 }
             }
@@ -2754,31 +3110,150 @@ pub fn recovery_sweep() -> Vec<SweepAction> {
                 if record.cleanup == CleanupState::Pending
                     && guardian_gone(record.custodian.as_ref())
                 {
-                    actions.push(SweepAction::NeedsReplacementCustodian { uid });
+                    actions.push(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
                 }
             }
             LaunchState::Ready => {
                 // A committed session whose custodian has died has lost its
-                // independent teardown authority (finding 3): rearm one. Only a
+                // independent teardown authority: rearm one. Only a
                 // *proven* dead custodian triggers this (Principle D). But NOT if
                 // the session was already torn down: a Ready teardown records a
-                // durable marker (cleanup = Complete, round-4 finding 8), so we
+                // durable marker (cleanup = Complete), so we
                 // must NOT rearm a fresh custodian on every later sweep for a
                 // session that is already gone.
                 if record.cleanup != CleanupState::Complete
                     && guardian_gone(record.custodian.as_ref())
                 {
-                    actions.push(SweepAction::NeedsReplacementCustodian { uid });
+                    actions.push(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
                 }
             }
+        }
+        // **A standing freeze claim is owed whatever state its launch is in**, so it
+        // is asked about for every record — but OUTSIDE the launch lock, and that is
+        // not a tidiness preference. See `settle_standing_freeze` for the ordering
+        // and what holding both the wrong way round costs a live launch.
+        drop(lock);
+        if let Some(action) = settle_standing_freeze(&uid, &record) {
+            actions.push(action);
         }
     }
     actions
 }
 
-/// A stable hash of a spawn's argv, recorded with the child (findings 4/5) so a
-/// spawn is durably attributable to the exact command it was released to exec.
-/// NUL-joined so no argv boundary can be forged by embedding a separator.
+/// How long the sweep waits for a launch lock to withdraw a claim it has just dealt
+/// with. Short: it holds no other lock at that point, the write is one rename, and a
+/// pass that cannot have it simply says so and asks again.
+const FREEZE_WITHDRAWAL_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Retry, from the recovery pass, the clear a launch's own custodian could not or did
+/// not finish — and withdraw the claim when there is nothing left owed on it.
+///
+/// **Why the sweep and not only the custodian.** The custodian is armed for one launch
+/// and has a budget: past it, it stops waiting, says so, and leaves the claim standing
+/// rather than writing off a flag that is still on a file. Something has to come back
+/// for that claim, and it cannot be the custodian that already gave up or the one that
+/// was killed. This pass is the backstop that already exists for exactly that shape of
+/// loss, and it runs with no budget at all — it simply asks again, every pass, until
+/// the warrants are met.
+///
+/// The warrants themselves are [`resolve_standing_freeze`]'s, shared with the custodian
+/// so the two actors cannot come to different conclusions about the same file.
+///
+/// **The lock order, which is the whole reason this runs outside the sweep's own
+/// launch lock.** Every other participant takes the executable's lock FIRST: a host's
+/// freeze takes it inside [`protocol::hash::freeze_and_hash_recording`] and then takes
+/// the launch lock from inside the recording callback; its withdrawal does the same;
+/// the custodian takes the file lock, drops it, and only then takes the launch lock.
+/// A sweep holding a launch lock while waiting up to `FREEZE_LOCK_BUDGET` for a file
+/// lock is that order inverted, in front of a host that waits one second for that
+/// launch lock — and a host whose freeze cannot be recorded does not continue, it
+/// REFUSES THE LAUNCH. So this holds nothing on the way in and takes a launch lock
+/// only to withdraw, which is the custodian's shape and never holds both.
+///
+/// The record it acts on is the snapshot the sweep read under the lock. That is a
+/// decision input rather than a licence: everything destructive below re-proves
+/// itself against the file and the other records at the moment it acts, under the
+/// executable's own lock, so a record that changed in between changes the answer
+/// rather than the act. A withdrawal that lands on a record which has since taken a
+/// NEW freeze is the one thing that would be wrong, and it cannot happen: the
+/// withdrawal is refused unless the claim on the record right now is still the one
+/// this pass dealt with.
+///
+/// `None` when the record claims no freeze, which is almost every record.
+fn settle_standing_freeze(uid: &str, record: &LaunchRecord) -> Option<SweepAction> {
+    let held = record.exec_freeze.as_ref()?;
+    let what = match resolve_standing_freeze(uid, held) {
+        // Not a failure, and usually not even a problem: the ordinary reading is a
+        // healthy launch running on those bytes right now. Reported so a sweep that
+        // did nothing can still say what it was waiting for.
+        StandingFreeze::Waiting(why) => {
+            return Some(SweepAction::FreezeClaimStanding {
+                uid: uid.to_string(),
+                why,
+            })
+        }
+        StandingFreeze::NotOursToClear => format!(
+            "{uid} adopted the freeze on {} rather than setting it, so the flag is left \
+             exactly as it was found and only the claim is withdrawn",
+            held.path
+        ),
+        StandingFreeze::Attempted(protocol::hash::FreezeClear::Failed(why)) => {
+            return Some(SweepAction::FreezeClaimStanding {
+                uid: uid.to_string(),
+                why: format!(
+                    "the clear of the freeze on {} was attempted and did not take: {why}. \
+                     Until it is cleared codex cannot be updated; `chflags nouchg {}` undoes \
+                     the flag",
+                    held.path, held.path
+                ),
+            })
+        }
+        StandingFreeze::Attempted(protocol::hash::FreezeClear::Cleared) => format!(
+            "cleared the vnode freeze {uid} left on {} (a launch that did not survive to \
+             clear its own, and a custodian that did not finish)",
+            held.path
+        ),
+        StandingFreeze::Attempted(protocol::hash::FreezeClear::NotOurs(why)) => {
+            format!("left the flags on {} alone: {why}", held.path)
+        }
+    };
+    // The claim goes only once the flag has been dealt with, and never before: a claim
+    // that outlived its flag would send every later reader back to a file this pass has
+    // already finished with, and a flag that outlived its claim would have nobody left
+    // to come back for it.
+    let withdrawn =
+        LaunchLock::acquire_bounded(uid, FREEZE_WITHDRAWAL_LOCK_BUDGET).and_then(|lock| {
+            // **Only this claim.** Between the snapshot and here the launch may have
+            // taken a fresh freeze, and blanking the field would then erase a live
+            // holder's own record — the one thing that stops another custodian
+            // clearing the bit out from under it.
+            let current = load(uid)?;
+            if current.exec_freeze.as_ref() != Some(held) {
+                bail!(
+                    "{uid}'s freeze claim changed while this pass was dealing with the one it \
+                     read, so nothing is withdrawn"
+                );
+            }
+            note_exec_freeze_released(&lock, uid)
+        });
+    if let Err(err) = withdrawn {
+        return Some(SweepAction::FreezeClaimStanding {
+            uid: uid.to_string(),
+            why: format!(
+                "{what}, but the record still says the freeze is held and could not be \
+                 updated ({err:#}), so the claim is asked about again next pass"
+            ),
+        });
+    }
+    Some(SweepAction::FreezeClaimSettled {
+        uid: uid.to_string(),
+        what,
+    })
+}
+
+/// A stable hash of a spawn's argv, recorded with the child, so a spawn is durably
+/// attributable to the exact command it was released to exec. NUL-joined so no argv
+/// boundary can be forged by embedding a separator.
 pub fn argv_hash(argv: &[String]) -> String {
     protocol::hash::sha256_hex(argv.join("\u{0}").as_bytes())
 }
@@ -2829,7 +3304,7 @@ mod tests {
     }
 
     /// **A restorer never touches, and never publishes, another restorer's staging
-    /// inode** (round-4 finding 3).
+    /// inode**.
     ///
     /// The custodian sweeping a launch and that launch's own host both reach
     /// [`restore_marker_at`] on the same directory, both having verified it `Ours`,
@@ -2894,8 +3369,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A restore under a hostile umask still produces a READABLE warrant**
-    /// (round-4 finding 4).
+    /// **A restore under a hostile umask still produces a READABLE warrant.**
     ///
     /// `openat`'s mode argument is a creation-mode REQUEST that the umask can only
     /// take bits away from, and the restorer is not always the process that chose the
@@ -2974,7 +3448,7 @@ mod tests {
     }
 
     /// The statement the detector above cannot make: a staging name is fresh on
-    /// every attempt, so no restorer can address another's (round-4 finding 3).
+    /// every attempt, so no restorer can address another's.
     #[test]
     fn staging_names_are_unique_per_attempt() {
         let names: std::collections::HashSet<String> =
@@ -3060,7 +3534,7 @@ mod tests {
     }
 
     /// Bring a still-`pending` record to the shape [`to_ready`] requires of the
-    /// host side (round-3 finding 2): a LIVE admitted host holding the lease, and
+    /// host side: a LIVE admitted host holding the lease, and
     /// both roles recorded, exec-confirmed and alive.
     ///
     /// Returns the process guards so the caller keeps them breathing for as long as
@@ -3216,7 +3690,7 @@ mod tests {
         ));
     }
 
-    /// **Round-2 finding 4b: the remain-on-exit note is HISTORY, not state.**
+    /// **The remain-on-exit note is HISTORY, not state.**
     ///
     /// The coordinator asserts the option and then writes it down, and the custodian
     /// can win the deadline CAS in between. A `pending`-only note lost the fact
@@ -3250,7 +3724,7 @@ mod tests {
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
         let lock = LaunchLock::acquire("u7").unwrap();
         create_pending(&lock, a_pending("u7", far)).unwrap();
-        // Admission requires a recorded, proven-live custodian (finding 9): arm
+        // Admission requires a recorded, proven-live custodian: arm
         // one (us — provably alive) before any admit can succeed.
         arm(&lock, "u7", live_custodian());
         let host = fake_identity(5555);
@@ -3320,7 +3794,7 @@ mod tests {
 
     #[test]
     fn a_second_custodian_arm_over_a_live_one_is_refused_but_a_gone_one_is_replaced() {
-        // The concurrent/duplicate-sweep CAS (Principle A / finding 8): once a
+        // The concurrent/duplicate-sweep CAS (Principle A): once a
         // live custodian holds the slot, a second arm is refused (so two sweeps
         // never leave two untracked custodians); a slot whose occupant is proven
         // Gone is replaceable (the sweep's rearm).
@@ -3374,7 +3848,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_coordinator_cannot_erase_a_terminal_record() {
-        // Principle A / finding 10: create_pending is ABSENT→Pending only. A
+        // Principle A: create_pending is ABSENT→Pending only. A
         // restarted or duplicate coordinator must never blind-overwrite a
         // committed Failed (or Ready) outcome with a fresh pending.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -3402,7 +3876,7 @@ mod tests {
         // durable write the coordinator's `Created` arm makes.
         record_new_session_created(&lock, "dupready", fake_server_a(), false).unwrap();
         // …and a live host with both children up, which is the other thing Ready
-        // requires at commit time (round-3 finding 2).
+        // requires at commit time.
         let _up = make_host_ready(&lock, "dupready");
         to_ready(&lock, "dupready", &coord).unwrap();
         let err = create_pending(&lock, a_pending("dupready", far)).unwrap_err();
@@ -3483,7 +3957,7 @@ mod tests {
 
     #[test]
     fn a_ready_record_with_a_dead_custodian_can_be_rearmed_by_the_sweep() {
-        // Finding 4: a committed Ready session whose custodian has died still
+        // A committed Ready session whose custodian has died still
         // needs an independent teardown owner. The sweep flags it, and the CAS
         // now accepts a rearm on a Ready record (over a proven-Gone slot),
         // keeping the state Ready.
@@ -3518,9 +3992,9 @@ mod tests {
             "a Ready record with a dead custodian must be flagged for a replacement"
         );
 
-        // The core of finding 4 (deterministic): the CAS now accepts a rearm on a
-        // Ready record over the proven-Gone slot, installing a live custodian and
-        // keeping the state Ready.
+        // The deterministic core: the CAS accepts a rearm on a Ready record over
+        // the proven-Gone slot, installing a live custodian and keeping the state
+        // Ready.
         let lock = LaunchLock::acquire("rdyrearm").unwrap();
         let live = live_custodian();
         cas_custodian_with_child(&lock, "rdyrearm", live, live.pid, "rn", "rh").unwrap();
@@ -3531,7 +4005,7 @@ mod tests {
 
     #[test]
     fn a_host_lease_is_taken_over_only_from_a_proven_gone_incumbent() {
-        // Finding 5: replacing an existing lease requires the incumbent be proven
+        // Replacing an existing lease requires the incumbent be proven
         // GONE. A live incumbent (and, by the same `!liveness_is_gone` gate, an
         // Unknown one) refuses.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -3644,7 +4118,7 @@ mod tests {
             after_b.children
         );
 
-        // **THE MUTATION round-3 finding 1 names, staged exactly** — the reason the
+        // **THE MUTATION, staged exactly** — the reason the
         // three conjuncts have to hold of ONE entry rather than of the list.
         //
         // B is the current lease. Kill B's TUI and leave A's retired TUI breathing.
@@ -3903,7 +4377,7 @@ mod tests {
 
     #[test]
     fn a_determinate_clear_disarms_the_flag_even_after_the_custodian_failed_first() {
-        // Finding 6: the coordinator's determinate clear must win even when the
+        // The coordinator's determinate clear must win even when the
         // custodian raced it to `failed` first — otherwise the speculative
         // in-flight flag sticks true and the custodian stays armed forever.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -4070,8 +4544,7 @@ mod tests {
         assert_eq!(rec.cleanup, CleanupState::NotRequired);
     }
 
-    /// **A child that dies before the commit lands does not get to certify `Ready`**
-    /// (round-3 finding 2).
+    /// **A child that dies before the commit lands does not get to certify `Ready`.**
     ///
     /// The bring-up loop samples the host census and then calls `commit_ready`, which
     /// may spend up to five seconds waiting for the launch lock. Nothing re-read the
@@ -4327,7 +4800,7 @@ mod tests {
 
     #[test]
     fn a_determinate_new_session_failure_terminalizes_and_disarms_atomically() {
-        // Finding 6: the atomic determinate-failure write disarms the flag AND
+        // The atomic determinate-failure write disarms the flag AND
         // terminalizes in one fsync, even after the custodian raced to Failed.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
         let lock = LaunchLock::acquire("det2").unwrap();
@@ -4357,7 +4830,7 @@ mod tests {
 
     #[test]
     fn a_torn_down_ready_record_is_not_rearmed_by_the_sweep() {
-        // Finding 8: once a Ready session is torn down (cleanup marked Complete),
+        // Once a Ready session is torn down (cleanup marked Complete),
         // a later sweep must NOT keep rearming a fresh custodian even though the
         // old one is gone.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -4383,7 +4856,7 @@ mod tests {
 
     #[test]
     fn a_determinate_notrequired_supersedes_a_custodian_set_pending() {
-        // Round-5 finding 5: the coordinator's determinate NotRequired (it KNOWS
+        // The coordinator's determinate NotRequired (it KNOWS
         // no session was created) must supersede a custodian-set speculative
         // Pending, so the custodian does not probe a nonexistent server forever.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -4409,7 +4882,7 @@ mod tests {
 
     #[test]
     fn acquire_bounded_fails_fast_when_the_lock_is_held() {
-        // Round-5 finding 6: a bounded acquire never blocks forever on a held
+        // A bounded acquire never blocks forever on a held
         // (e.g. SIGSTOPed) lock — it returns Err within the budget, then succeeds
         // once released.
         let held = LaunchLock::acquire("boundedlock").unwrap();
@@ -4433,7 +4906,7 @@ mod tests {
 
     #[test]
     fn the_launch_record_and_its_dir_are_private() {
-        // Finding 9: a launch record leaks session metadata if world-readable. The
+        // A launch record leaks session metadata if world-readable. The
         // record file must be 0600 and its dir 0700.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
         let lock = LaunchLock::acquire("privacy").unwrap();
@@ -4449,5 +4922,173 @@ mod tests {
             0o700,
             "the session dir must be owner-only"
         );
+    }
+
+    /// **A question the scan could not ask is not an answer that nobody is holding
+    /// the freeze.**
+    ///
+    /// This scan decides whether a custodian may `chflags` a file a live launch may be
+    /// relying on, so every reading that goes "there is no other claim" has to be a
+    /// reading it actually made. Two did not: `entries.flatten()` silently dropped an
+    /// entry the kernel refused to produce, and `path.exists()` reads a permission
+    /// denial or an I/O error on the stat as *the record is not there*. Both make a
+    /// directory this process can only half read look like a directory with fewer
+    /// launches in it — and fewer launches is precisely the direction that licenses a
+    /// clear.
+    ///
+    /// Staged with a real refusal: another launch's session directory is made
+    /// unreadable, so the record inside it cannot be stat'ed and its claim cannot be
+    /// ruled in or out.
+    /// **The sweep must not hold a launch lock while it waits for an executable's.**
+    ///
+    /// Every other participant takes the two in one order: a host's freeze takes the
+    /// file lock inside the freeze primitive and the launch lock from inside the
+    /// recording callback; its withdrawal does the same; the custodian takes the file
+    /// lock, drops it, and only then takes the launch lock. Inverted, a sweep holding a
+    /// launch lock and waiting out `FREEZE_LOCK_BUDGET` for a file lock stands in front
+    /// of a host that waits one second for that launch lock — and a host whose freeze
+    /// cannot be recorded does not carry on, it refuses the launch. The cost of getting
+    /// this wrong is therefore a launch refused by the janitor.
+    ///
+    /// A source read, because the property is an ORDERING inside one function: nothing
+    /// observable from a single-threaded test differs between the two orders, and a
+    /// two-thread test of it would be a race with a timeout in it. The signature is
+    /// half the proof (this function cannot be handed a `LaunchLock`) and the release
+    /// point is the other half.
+    #[test]
+    fn the_sweep_lets_go_of_the_launch_lock_before_it_touches_a_freeze_claim() {
+        let source = include_str!("codex_launch.rs");
+        let at = source
+            .find("pub fn recovery_sweep() -> Vec<SweepAction> {")
+            .expect("recovery_sweep must exist");
+        let rest = &source[at..];
+        let body = &rest[..rest.find("\n}\n").expect("a closed function body")];
+
+        let released = body
+            .find("drop(lock);")
+            .expect("the sweep must release the record's launch lock explicitly");
+        let settles = body
+            .find("settle_standing_freeze(")
+            .expect("the sweep must settle standing freeze claims");
+        assert!(
+            released < settles,
+            "the launch lock has to be gone BEFORE the executable's lock is asked for, \
+             or a sweep is in front of a live launch's own record write"
+        );
+        // And the function it calls cannot be given one, which is what keeps a later
+        // caller from re-introducing the inversion by hand.
+        assert!(
+            source.contains("fn settle_standing_freeze(uid: &str, record: &LaunchRecord)"),
+            "settle_standing_freeze must not take a lock it would then hold across the \
+             executable's"
+        );
+    }
+
+    /// **`Complete` is a durable statement that nothing is owed, and a standing freeze
+    /// claim is something owed.**
+    ///
+    /// Nothing re-arms a completed record — that is the whole point of the marker, and
+    /// it is what makes a `Complete` written over a claim that is still on a real
+    /// binary permanent rather than merely wrong. The custodian's own arms already
+    /// hold the marker back; this is the same rule at the record layer, where a future
+    /// caller that has not read those arms still cannot get it wrong.
+    #[test]
+    fn a_record_still_claiming_a_freeze_can_never_be_marked_complete() {
+        let uid = "cleanup-vs-freeze";
+        let far = protocol::proc_identity::monotonic_now_nanos().unwrap() + 60_000_000_000;
+        let lock = LaunchLock::acquire(uid).unwrap();
+        create_pending(
+            &lock,
+            NewLaunch {
+                launch_nonce: "n".into(),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: current_identity().unwrap(),
+                boot: boot_identity().unwrap(),
+                deadline_monotonic_nanos: far,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        note_exec_freeze_taken(
+            &lock,
+            uid,
+            protocol::hash::HeldFreeze {
+                path: "/nowhere/codex".into(),
+                dev: 1,
+                ino: 2,
+                original_flags: 0,
+                ownership: protocol::hash::FreezeOwnership::Set,
+                holder: None,
+            },
+        )
+        .unwrap();
+
+        let err = set_cleanup(&lock, uid, CleanupState::Complete)
+            .expect_err("a claim that still stands must refuse the marker");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("freeze"),
+            "the refusal must say what is still owed: {text}"
+        );
+        assert_ne!(load(uid).unwrap().cleanup, CleanupState::Complete);
+
+        // Every other transition is untouched: this is a rule about one marker.
+        set_cleanup(&lock, uid, CleanupState::Pending).unwrap();
+        assert_eq!(load(uid).unwrap().cleanup, CleanupState::Pending);
+
+        // And once the claim is withdrawn the marker goes on exactly as before.
+        note_exec_freeze_released(&lock, uid).unwrap();
+        set_cleanup(&lock, uid, CleanupState::Complete).unwrap();
+        assert_eq!(load(uid).unwrap().cleanup, CleanupState::Complete);
+    }
+
+    #[test]
+    fn a_record_the_scan_cannot_read_defers_rather_than_reading_as_no_claim() {
+        let lock = LaunchLock::acquire("scanhole-mine").unwrap();
+        create_pending(
+            &lock,
+            NewLaunch {
+                launch_nonce: "scanhole-nonce".into(),
+                uid: "scanhole-mine".into(),
+                session_name: "cc-1".into(),
+                coordinator: fake_identity(1),
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: protocol::proc_identity::monotonic_now_nanos().unwrap()
+                    + 60_000_000_000,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        drop(lock);
+
+        // A peer launch with a record of its own, whose contents this process is
+        // about to be unable to reach.
+        let peer = sessions_root().join("scanhole-peer");
+        std::fs::create_dir_all(&peer).unwrap();
+        std::fs::write(peer.join(RECORD_FILE), b"{}").unwrap();
+
+        assert_eq!(
+            other_freeze_claim_on("scanhole-mine", 7, 7),
+            OtherFreezeClaim::None,
+            "with every record readable and none of them claiming this vnode, there \
+             really is no other claim"
+        );
+
+        std::fs::set_permissions(&peer, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+        let verdict = other_freeze_claim_on("scanhole-mine", 7, 7);
+        std::fs::set_permissions(&peer, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        match verdict {
+            OtherFreezeClaim::Standing(why) => assert!(
+                why.contains("scanhole-peer"),
+                "a deferral must name the record it could not read: {why}"
+            ),
+            OtherFreezeClaim::None => panic!(
+                "a record this process was refused must defer the clear, not read as \
+                 an absent claim"
+            ),
+        }
     }
 }

@@ -237,7 +237,7 @@ pub fn parse_no_dup_value(s: &str) -> Option<Value> {
 const DUP_MARKER: &str = "codex-broker/duplicate-key";
 
 // ---------------------------------------------------------------------------
-// Cheap top-level header scan (round-3 P1)
+// Cheap top-level header scan
 // ---------------------------------------------------------------------------
 
 /// The top-level JSON-RPC header of an observed **server→client** frame — everything the
@@ -250,13 +250,13 @@ pub(crate) struct FrameHeader {
     /// Whether a top-level `method` member is present. A method-bearing frame is a
     /// notification or a server→client request — never the answer to a forwarded request.
     pub has_method: bool,
-    /// What the top-level `result`/`error` members PROVE about the frame (round-4 P1).
+    /// What the top-level `result`/`error` members PROVE about the frame.
     /// An id may only be released from the outstanding ledger when this is a response.
     pub response: ResponseKind,
 }
 
 /// What a frame's top-level `result`/`error` members prove about it — decided by the header
-/// scan, without the body ever becoming a [`Value`] (round-4 P1).
+/// scan, without the body ever becoming a [`Value`].
 ///
 /// ## One definition of "a valid response", shared by two rules
 ///
@@ -264,7 +264,8 @@ pub(crate) struct FrameHeader {
 /// deliberately: the ledger's DRAIN rule ("may this frame release an outstanding id?") and
 /// the creation-response CLASSIFICATION rule ("did this frame prove success or failure?")
 /// must never disagree about what a response is, or an id could be released by a frame the
-/// creation state machine would not accept — which is exactly the hole round-4 P1 closed.
+/// creation state machine would not accept — which is exactly the hole one shared
+/// definition closes.
 ///
 /// * [`Self::Result`] ⇔ `classify_creation_response`'s INSTALL precondition (`error` absent,
 ///   `result` present).
@@ -298,22 +299,23 @@ impl ResponseKind {
 
 /// Read a frame's top-level JSON-RPC header **without materializing its body**.
 ///
-/// Round-3 P1 makes the session observer look at every s2c frame (a response has to release
-/// its outstanding id), which would otherwise mean deserializing a multi-MB `plugin/list`
+/// The session observer looks at every s2c frame (a response has to release its
+/// outstanding id), which would otherwise mean deserializing a multi-MB `plugin/list`
 /// answer into a `Value` tree on the hot path. This scan instead skips every member that is
 /// not `id`, `method` or `error` with `serde::de::IgnoredAny`: it walks the bytes once and
 /// allocates nothing for the body.
 ///
-/// ## `result` is never deserialized; only `error` is descended into (round-4 P1)
+/// ## `result` is never deserialized; only `error` is descended into
 ///
-/// P1 also has to prove a frame IS a response before its id may be released, which needs
-/// presence/exclusivity of `result` vs `error` plus the error's two field TYPES — and
-/// nothing more. So `result` keeps being skipped with `IgnoredAny` (its presence is a bool;
-/// its 5.76 MB `plugin/list` body is never touched), and only `error` — a handful of small
-/// members on the real wire — is descended into, by [`ErrorProbe`], which itself reduces
-/// `code`/`message` to a TYPE TAG rather than a value and `IgnoredAny`s every other member
-/// including the spec's optional `data`. "Multi-MB frames are not reparsed" is therefore
-/// unchanged; see `tests::the_header_scan_skips_a_multi_megabyte_body` and
+/// The ledger also has to prove a frame IS a response before its id may be released,
+/// which needs presence/exclusivity of `result` vs `error` plus the error's two field
+/// TYPES — and nothing more. So `result` keeps being skipped with `IgnoredAny` (its
+/// presence is a bool; its 5.76 MB `plugin/list` body is never touched), and only
+/// `error` — a handful of small members on the real wire — is descended into, by
+/// [`ErrorProbe`], which itself reduces `code`/`message` to a TYPE TAG rather than a
+/// value and `IgnoredAny`s every other member including the spec's optional `data`.
+/// "Multi-MB frames are not reparsed" is therefore unchanged; see
+/// `tests::the_header_scan_skips_a_multi_megabyte_body` and
 /// `tests::the_header_scan_distrusts_non_objects_dups_and_garbage` (whose nested-duplicate
 /// case is the direct witness that the body never becomes a `Value`).
 ///
@@ -787,9 +789,9 @@ mod tests {
 
     #[test]
     fn response_with_duplicate_top_level_members_is_malformed() {
-        // Finding 5: a method-less response with a duplicate id/result/error member is
-        // rejected by the NoDup parser (no Shape::Response, so refusal.rs never authorizes
-        // it). Confirms the c2s Response path already fails closed on duplicate members.
+        // A method-less response with a duplicate id/result/error member is rejected by
+        // the NoDup parser (no Shape::Response, so refusal.rs never authorizes it).
+        // Confirms the c2s Response path already fails closed on duplicate members.
         for s in [
             r#"{"id":0,"id":1,"result":{"x":1}}"#,
             r#"{"id":0,"result":{"a":1},"result":{"a":2}}"#,
@@ -818,7 +820,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The cheap top-level header scan (round-3 P1).
+    // The cheap top-level header scan.
     // -----------------------------------------------------------------
 
     #[test]
@@ -875,8 +877,8 @@ mod tests {
     #[test]
     fn the_header_scan_skips_a_multi_megabyte_body() {
         // The property the scan exists for: a 6 MB `plugin/list`-class answer yields its
-        // header without the body ever becoming a `Value`. Round-4 P1 added result/error
-        // VALIDATION to the same scan, and this test is what pins that the validation stayed
+        // header without the body ever becoming a `Value`. The result/error VALIDATION
+        // lives in the same scan, and this test is what pins that the validation stayed
         // a header scan: `result` is still only tested for PRESENCE, with `IgnoredAny`.
         let big = "A".repeat(6 * 1024 * 1024);
         let frame = format!(r#"{{"id":42,"result":{{"pad":"{big}"}}}}"#);
@@ -907,8 +909,8 @@ mod tests {
         );
     }
 
-    // ROUND-4 P1 — DRAIN VALIDATION. The scan proves EXCLUSIVE result-or-well-formed-error
-    // before an id may be released; `id`-only, partial, both, or neither is `NotAResponse`.
+    // DRAIN VALIDATION. The scan proves EXCLUSIVE result-or-well-formed-error before an id
+    // may be released; `id`-only, partial, both, or neither is `NotAResponse`.
     #[test]
     fn the_header_scan_proves_exclusive_result_or_well_formed_error() {
         use ResponseKind::{Error, NotAResponse, Result as Ok_};

@@ -663,7 +663,7 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
                 let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
                 set_once(&mut hooks_enabled, flag, parsed)?;
             }
-            // The workspace anchor (round-2 P4): the CANONICAL cwd this session was
+            // The workspace anchor: the CANONICAL cwd this session was
             // launched in. The coordinator resolved it once; the host passes it through
             // verbatim and never re-resolves, so the broker compares exact strings.
             "--launch-cwd" => set_once(&mut launch_cwd, flag, value_of(&mut it, flag)?)?,
@@ -877,7 +877,7 @@ fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> R
     // And make the published name itself durable, so a crash cannot lose the dirent
     // the record already points at.
     //
-    // A11.7 / round-2 finding 3: this is the one step that runs AFTER the publish, so
+    // A11.7: this is the one step that runs AFTER the publish, so
     // a failure here is a failure by a host that has ALREADY claimed the directory.
     // Returning straight out would strand that claimed directory and leave the caller
     // exiting before it can either record the claim or sweep — a host that got past
@@ -1046,9 +1046,9 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
 ///
 /// A bool, not the claimed `(dev, ino)`. `host_claimed_run_dir == false` on a
 /// loser directly refutes "the host got past the claim", which is the whole of
-/// finding 11; carrying the inode too would let a gate ALSO prove an adopter
-/// walked past onto the *winner's* directory, but that is a strengthening this
-/// gate does not need and it is left unbuilt.
+/// what this bit is for; carrying the inode too would let a gate ALSO prove an
+/// adopter walked past onto the *winner's* directory, but that is a strengthening
+/// this gate does not need and it is left unbuilt.
 fn note_run_dir_claimed(args: &HostArgs) -> Result<()> {
     let me = crate::codex_launch::require_current_identity()?;
     let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, CLAIM_RECORD_BUDGET)?;
@@ -1389,12 +1389,35 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // running with `CS_HARD | CS_KILL`, so a substituted page is refused and the
     // process KILLED rather than steered. Denial-of-service, not code execution, for
     // a signed build. (A18/A20 number this gate "A7.1 executable hash-pin".)
+    //
+    // **The record lands inside the verify, not after it.** The hash is a whole-file
+    // read of a 210 MB executable — most of a second in a release build, about eight
+    // unoptimised — and the flag is on for all of it. Recording from the return
+    // value left that entire interval with the bytes frozen and nothing durable
+    // saying so, which is precisely the load-kill shape that produced the two real
+    // leaks. See `codex::verify_codex_identity`.
+    //
+    // **The claim's scope opens here and closes by `Drop`.** Every exit below this
+    // line that leaves the freeze behind — the verify refusing, the spawn failing,
+    // the ordinary success — withdraws the claim, and the ones that are not written
+    // out are covered because the scope ends. See `FreezeClaim`.
+    let mut claim = FreezeClaim::opened(&args.uid, &args.codex);
     let frozen = match crate::codex::verify_codex_identity(
         &args.codex,
         &args.codex_sha256,
         "immediately before the app-server spawn",
+        // A record is written, so a custodian's scan can see this holder without the
+        // lock and the long hash below runs unlocked. See `protocol::hash::LockHold`.
+        protocol::hash::LockHold::UntilRecorded,
+        |frozen| note_freeze_held(&args.uid, &args.codex, frozen),
     ) {
         Ok(frozen) => frozen,
+        // The freeze is already gone here — it was dropped inside the verify that
+        // refused — and `claim` withdraws on the way out of this return, which keeps
+        // "a claim never outlives its flag" true on the refusal paths as well as the
+        // ordinary one. A refusal produced by the RECORD failing is one of these:
+        // there is then nothing to withdraw and the withdrawal is a no-op, but the
+        // launch stops, which is the point.
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
 
@@ -1447,7 +1470,9 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
         // it, so returning here drops it through `kill_on_drop`. A session whose
         // processes cleanup cannot name is the leak this chunk exists to remove.
-        // `frozen` also drops on this path, clearing the freeze — nothing ran.
+        // `frozen` also drops on this path, clearing the freeze — nothing ran — so
+        // the claim is withdrawn first, exactly as on the success path. An early
+        // return is where a claim most easily outlives its flag.
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
     // `spawn_fenced` returns only after the app-server is proven past `execve`
@@ -1455,6 +1480,10 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // frozen, hashed bytes. The freeze has done its whole job; clear it. The tail
     // after this — demand-paged text from a signed, hardened-runtime binary — is
     // defended by the kernel's per-page code-signature check, not by this flag.
+    // Withdrawn BEFORE the guard is dropped: see `note_freeze_released` for why a
+    // claim must never outlive its flag. Explicit here, and only here, because this
+    // is the one path whose ORDER matters; every other exit is covered by the drop.
+    claim.withdraw();
     drop(frozen);
 
     let mut session = Session::new(appserver, sink);
@@ -2000,7 +2029,7 @@ fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child>
                         // write releases it.
                         bail!("releasing the fenced {role} child failed");
                     }
-                    // The window round-2 finding 2 measured, staged from inside it.
+                    // The measured confirmation window, staged from inside it.
                     // A released child that dies before `spawn()` gets back out is
                     // indistinguishable, to `spawn()`, from one that exec'd — and no
                     // test can schedule that death from outside this thread.
@@ -2053,7 +2082,7 @@ fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child>
     // exec either succeeds or reports its errno, so `Ok` was read as "the exec
     // succeeded". What actually reaches the parent is the pipe CLOSING, and a pipe
     // closes for two reasons — the exec that set `O_CLOEXEC` on it, or the child
-    // dying with every descriptor it held. **Measured** (round-2 finding 2): a child
+    // dying with every descriptor it held. **Measured**: a child
     // SIGKILLed after the GO byte and before `execve` gives `spawn()` → `Ok(pid)`,
     // `recorded` → `Ok`, and a process that never became codex. The interval is real
     // — the fence releases the child and then the parent has to get back out of
@@ -2112,8 +2141,7 @@ fn child_image(pid: i32) -> Option<std::path::PathBuf> {
     )))
 }
 
-/// Whether two image paths name the **same file**, not merely the same spelling
-/// (round-3 finding 9).
+/// Whether two image paths name the **same file**, not merely the same spelling.
 ///
 /// The discriminator below asks "is the child still running MY image?", and it used
 /// to ask it by comparing [`std::env::current_exe`]'s bytes against `proc_pidpath`'s.
@@ -2205,6 +2233,134 @@ fn prove_past_execve(
 ///
 /// A11.1: called by [`spawn_fenced`] while the child is still parked before
 /// `execve`, so "recorded" now strictly precedes "running the target program".
+/// Write down a freeze this host is holding, so the custodian can undo it if this
+/// host does not live to undo it itself.
+///
+/// **A shortfall here is LAUNCH-FATAL**, and the asymmetry with the rest of this
+/// host's bookkeeping is the point. An earlier version logged and continued, on the
+/// reasoning that a leak is recoverable with one `chflags`. That reasoning weighs the
+/// wrong two things. The record is not an aid to the leak — it *is* the safety: it is
+/// what tells this host's own custodian the flag is ours and may be cleared, what
+/// tells a peer's custodian to defer instead of clearing a guard out from under this
+/// launch, and what an operator reads a week later when codex refuses to update. A
+/// launch that holds the flag with none of that written down is precisely the
+/// invisible, unattributable freeze this whole chunk exists to abolish. So: no
+/// record, no launch, and a refusal somebody can read.
+///
+/// Called from inside the freeze, with the executable's own [`protocol::hash::
+/// FreezeLock`] held by the primitive — so a custodian's scan cannot pass this record
+/// before it exists and then clear the bit it describes.
+///
+/// Nothing is written when the guard owns no flag: the freeze could not be taken at
+/// all, so there is no claim to make and nothing for a janitor to undo.
+fn note_freeze_held(
+    uid: &str,
+    codex: &Path,
+    frozen: &protocol::hash::FrozenExecutable,
+) -> std::result::Result<(), String> {
+    let Some(held) = frozen.held(codex) else {
+        return Ok(());
+    };
+    crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET)
+        .and_then(|lock| crate::codex_launch::note_exec_freeze_taken(&lock, uid, held))
+        .map_err(|err| {
+            format!(
+                "the launch record could not be told that this host is holding a vnode freeze \
+                 on {} ({err:#})",
+                codex.display()
+            )
+        })
+}
+
+/// Withdraw the claim, **before** the guard is dropped.
+///
+/// Best-effort, unlike taking the claim: by the time this runs the flag either is
+/// about to come off or already has, and there is no launch left to refuse. The
+/// ORDER is not best-effort. A claim must never outlive the flag it describes: the
+/// record is what the custodian acts on, and a record still saying "held" after the
+/// flag has come off is a warrant pointed at a vnode this launch has finished with —
+/// and the very next launch freezes the same `(dev, ino)`, so what that warrant now
+/// names is somebody else's live guard.
+///
+/// Withdrawing first inverts which side of the write can be interrupted, and the
+/// inversion is strictly in the safe direction. While the record is being written it
+/// still says "held" and the flag is still set, which is true. What is left is the
+/// interval between the write landing and the `fchflags` a few instructions later:
+/// a `SIGKILL` there leaves a flag with no claim — a window measured in instructions.
+/// The next launch adopts that flag and writes the claim back, so it is accounted for
+/// again from then on; what takes it off is a custodian pass once no live holder names
+/// the vnode, because an adopter's release deliberately clears nothing.
+///
+/// **Taken under the executable's own freeze lock**, in the same order every other
+/// participant takes its two locks (the file's, then the record's). That is what
+/// makes a withdrawal racing a freeze on another thread land *after* that freeze's
+/// record rather than before it — the case the TUI's cancellation arm has, where a
+/// signal wins the race against a verify running on the blocking pool.
+fn note_freeze_released(uid: &str, codex: &Path) {
+    // The file lock first, so this cannot interleave with a freeze + record in
+    // flight. A lock that cannot be had is not a reason to skip the withdrawal —
+    // the claim coming off is what matters — so it is taken if it can be and the
+    // withdrawal proceeds either way.
+    let _file_lock = protocol::hash::FreezeLock::acquire(codex);
+    let cleared = crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET)
+        .and_then(|lock| crate::codex_launch::note_exec_freeze_released(&lock, uid));
+    if let Err(err) = cleared {
+        eprintln!(
+            "codex-host: the freeze on {} is about to be released but the launch record could \
+             not be told ({err:#}); the custodian will open the file, find it not immutable, \
+             and say so rather than writing anything",
+            codex.display()
+        );
+    }
+}
+
+/// **The withdrawal, made unconditional by making it a `Drop`.**
+///
+/// The claim used to be withdrawn by a call written at each exit, and there were six
+/// exits: two spawns, a verify refusal, a cancellation, a passthrough refusal reached
+/// by `?`, and the ordinary path. Three of them were missing it or had it in the
+/// wrong order — which is what a hand-maintained list of exits does over time,
+/// especially the ones added later by a `?` that nobody thought of as an exit at all.
+///
+/// This makes "the claim is withdrawn on every path that drops the guard" a property
+/// of the scope rather than of anybody's diligence: the ordinary path calls
+/// [`Self::withdraw`] explicitly, because the ORDER matters there (the claim must come
+/// off before the flag does); every other path just ends, and the drop does it.
+/// Withdrawing twice is a no-op, so the explicit call and the drop cannot disagree.
+struct FreezeClaim<'a> {
+    uid: &'a str,
+    codex: &'a Path,
+    standing: bool,
+}
+
+impl<'a> FreezeClaim<'a> {
+    /// Open the scope in which a claim may exist. Created BEFORE the freeze is taken,
+    /// so a callback that writes the record inside the verify is already covered.
+    fn opened(uid: &'a str, codex: &'a Path) -> Self {
+        FreezeClaim {
+            uid,
+            codex,
+            standing: true,
+        }
+    }
+
+    /// Withdraw now, at a point the caller has chosen because the order matters
+    /// there. Idempotent.
+    fn withdraw(&mut self) {
+        if !self.standing {
+            return;
+        }
+        self.standing = false;
+        note_freeze_released(self.uid, self.codex);
+    }
+}
+
+impl Drop for FreezeClaim<'_> {
+    fn drop(&mut self) {
+        self.withdraw();
+    }
+}
+
 fn record_child_pid(
     args: &HostArgs,
     role: &str,
@@ -2375,22 +2531,57 @@ async fn drive(
     // update race, completely), what it does not (a hostile same-uid peer, which is
     // out of scope and which macOS gives no way to exclude), and the post-clear
     // demand-paging residual.
-    let (codex, codex_sha256) = (args.codex.clone(), args.codex_sha256.clone());
+    let (codex, codex_sha256, uid) = (
+        args.codex.clone(),
+        args.codex_sha256.clone(),
+        args.uid.clone(),
+    );
+    // The claim's scope, as at the app-server spawn: opened before the freeze can be
+    // taken, closed by `Drop` on every exit below — including the `?` a few lines
+    // down, which is an exit nobody wrote out and which used to leave the claim
+    // standing over a flag that had come off.
+    let mut claim = FreezeClaim::opened(&args.uid, &args.codex);
     let verify = tokio::task::spawn_blocking(move || {
+        // Recorded from inside the verify, on the blocking thread, for the reason
+        // the app-server's spawn gives: the flag is on for the whole hash and a
+        // record written afterwards leaves that interval unclaimed.
         crate::codex::verify_codex_identity(
             &codex,
             &codex_sha256,
             "immediately before the TUI spawn",
+            protocol::hash::LockHold::UntilRecorded,
+            |frozen| note_freeze_held(&uid, &codex, frozen),
         )
     });
-    let frozen = tokio::select! {
+    let verified = tokio::select! {
         biased;
+        // **A signal loses the race, and the freeze is still somebody's.** The verify
+        // runs on the blocking pool, which has no cancellation: dropping the handle
+        // does not stop the work, so that task will finish, may write the record, and
+        // will clear the flag when its result is dropped. What this arm can do — and
+        // does, through the claim's drop — is withdraw the claim, so the record does
+        // not go on naming a freeze that is about to come off.
+        //
+        // The withdrawal takes the executable's own freeze lock first, in the same
+        // order the freeze itself takes it, so a withdrawal racing a freeze+record
+        // still in flight lands AFTER that record rather than before it. What it
+        // cannot order is a verify that has not reached its freeze at all when the
+        // signal arrives: that task goes on to write a record this host is no longer
+        // here to withdraw. What is left there is a claim whose holder is provably
+        // dead — which is exactly the state the custodian exists for, and it clears
+        // it — rather than a flag with nothing naming it.
         name = signals.recv() => return Ok(Outcome::Signalled(name)),
         // A join error here is a panic inside the verify. Failing closed on it is
         // the only honest reading: a check that crashed did not pass. The `Ok` is the
         // held freeze (see `verify_codex_identity`), kept across the spawn below.
         verified = verify => verified
-            .context("the codex identity check panicked before the TUI spawn")??,
+            .context("the codex identity check panicked before the TUI spawn"),
+    };
+    let frozen = match verified.and_then(|inner| inner) {
+        Ok(frozen) => frozen,
+        // Refused, or the record could not be written, or it panicked: the guard is
+        // already gone, and the claim comes back through this scope's drop.
+        Err(err) => return Err(err),
     };
     // **The `--` fence, applied at the exec that actually runs.** Not in the coordinator
     // and not at parse time: the process whose spawn this is, is the one that has to be
@@ -2484,7 +2675,8 @@ async fn drive(
     // in which a SIGKILLed host left a live, unrecorded TUI on the user's pane.
     let tui = match spawn_fenced(&mut tui_cmd, args, "tui") {
         Ok(child) => child,
-        // `frozen` drops here too, clearing the freeze — nothing became codex.
+        // `frozen` drops here too, clearing the freeze — nothing became codex — and
+        // the claim comes back with the scope, as on every other path out of it.
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))
@@ -2492,7 +2684,9 @@ async fn drive(
     };
     // The TUI is past `execve` (spawn_fenced proved it); the frozen bytes are the
     // bytes that ran. Clear the freeze — the post-clear tail is the signed-binary
-    // demand-paging residual documented at the app-server spawn.
+    // demand-paging residual documented at the app-server spawn. Explicit, because
+    // the order matters here: the claim comes off before the flag.
+    claim.withdraw();
     drop(frozen);
     session.tui = Some(tui);
 
@@ -3182,7 +3376,7 @@ mod tests {
             "read-only",
             "--hooks-enabled",
             "true",
-            // The fifth fingerprint dimension (round-2 P4): the CANONICAL launch cwd the
+            // The fifth fingerprint dimension: the CANONICAL launch cwd the
             // coordinator resolved. The host passes it through and never re-resolves it.
             "--launch-cwd",
             "/work/proj",
@@ -4189,8 +4383,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **Finding 3 (round 2): recording the run-dir claim is LAUNCH-FATAL, so
-    /// `host_claimed_run_dir == false` is a sound negative proof.**
+    /// **Recording the run-dir claim is LAUNCH-FATAL, so `host_claimed_run_dir ==
+    /// false` is a sound negative proof.**
     ///
     /// The A11.7 loser-refusal gate reads that bit negatively: a losing host with the
     /// bit false is taken as proof it was refused at the fence and never adopted the
@@ -4207,8 +4401,8 @@ mod tests {
     /// created — so it never runs on with the bit false.
     ///
     /// **Mutation:** make `note_run_dir_claimed` best-effort again (swallow the error
-    /// and return) and this fails at the `expect_err` — the exact masking finding 3
-    /// names, back in place.
+    /// and return) and this fails at the `expect_err` — the exact masking described
+    /// above, back in place.
     #[test]
     fn a_host_that_cannot_record_its_claim_refuses_and_tears_down_the_dir_it_made() {
         // A uid with no launch record, so the claim has nothing to be written into —
@@ -4417,7 +4611,7 @@ mod tests {
     ///
     /// `spawn()` returning `Ok` is not it. What the parent observes is the CLOEXEC
     /// error pipe closing, and that happens both when `execve` closes it and when
-    /// the child dies holding it — measured (round-2 finding 2): a child SIGKILLed
+    /// the child dies holding it — measured: a child SIGKILLed
     /// after the fence's GO byte and before `execve` yields `spawn()` → `Ok(pid)`
     /// with a recorded child that never became codex.
     ///
@@ -4470,7 +4664,7 @@ mod tests {
         );
     }
 
-    /// **The image discriminator compares files, not spellings** (round-3 finding 9).
+    /// **The image discriminator compares files, not spellings.**
     ///
     /// Darwin reaches one inode by two paths — `/x` and `/System/Volumes/Data/x` —
     /// and a byte compare calls that "a different image", which is the answer that
@@ -4519,7 +4713,7 @@ mod tests {
     }
 
     /// **A11.1, the window itself: a child that dies in the confirmation interval
-    /// is not confirmed** (round-2 finding 2).
+    /// is not confirmed.**
     ///
     /// `spawn_fenced`'s own wiring, not just the predicate. The fence releases the
     /// child and the parent then has to get back out of `spawn()`; a child killed in
@@ -4609,6 +4803,60 @@ mod tests {
             !staged.exists(),
             "and the staging dir must be cleaned up: {}",
             staged.display()
+        );
+    }
+
+    /// **The claim is withdrawn on every exit that drops the guard, and that has to be
+    /// a property of the SCOPE rather than of a list somebody maintains.**
+    ///
+    /// It was a list, and the list rotted exactly the way lists do. Six exits leave the
+    /// freeze behind — two spawn failures, a verify refusal, a cancellation, a
+    /// passthrough refusal reached by `?`, and the ordinary path — and three of them
+    /// were missing the withdrawal or had it in the wrong order. The `?` is the
+    /// instructive one: nobody writes `?` thinking "this is an exit from the freeze
+    /// scope", which is precisely why a rule that depends on noticing cannot hold.
+    ///
+    /// A source read, because there is no other way to see it: the exits are inside a
+    /// function that spawns real children and awaits a real broker, so no unit test
+    /// reaches them, and a test that only checked the paths somebody remembered to test
+    /// would have the same blind spot the list had. What is checked is structural and
+    /// mechanical — every freeze site opens a `FreezeClaim` before it takes the freeze,
+    /// and the withdrawal is never called by hand outside the guard's own `Drop` and the
+    /// one ordered call the guard exposes.
+    #[test]
+    fn every_freeze_site_withdraws_its_claim_by_scope_rather_than_by_a_list_of_exits() {
+        let source = include_str!("codex_host.rs");
+        // Strip the test module, so this test's own prose is not the thing it reads.
+        let code = &source[..source
+            .find("\n#[cfg(test)]\nmod tests {")
+            .unwrap_or(source.len())];
+
+        // Every freeze taken in this file is preceded by a claim scope. `verify_codex_identity`
+        // is the only way to take one, and there are exactly two sites.
+        let verifies: Vec<_> = code.match_indices("verify_codex_identity(").collect();
+        assert_eq!(
+            verifies.len(),
+            2,
+            "the app-server and the TUI, and a third freeze site would need its own claim"
+        );
+        let opens: Vec<_> = code.match_indices("FreezeClaim::opened(").collect();
+        assert_eq!(opens.len(), 2, "one claim scope per freeze site");
+        for ((verify, _), (open, _)) in verifies.iter().zip(opens.iter()) {
+            assert!(
+                open < verify,
+                "the claim's scope must open BEFORE the freeze is taken, or the record \
+                 the verify's own callback writes is outside it"
+            );
+        }
+
+        // And nothing calls the withdrawal by hand. Exactly two mentions survive: the
+        // `Drop`, and the one ordered call `withdraw` makes on behalf of both.
+        let by_hand = code.matches("note_freeze_released(").count();
+        assert_eq!(
+            by_hand, 2,
+            "the withdrawal is the scope guard's to make — one call inside \
+             `FreezeClaim::withdraw` and the definition itself. A hand-written call at \
+             an exit is the pattern that left three of six exits wrong"
         );
     }
 }

@@ -116,6 +116,20 @@ pub struct GateSpec {
     pub target_argv: Vec<String>,
     /// Environment entries to set on the target (added to the inherited env).
     pub target_envs: Vec<(String, String)>,
+    /// Where the child's **stderr** goes, or `None` for `/dev/null`.
+    ///
+    /// A gated child is spawned detached, with no terminal and no parent left
+    /// reading it, so the default has always been to discard it — and for the two
+    /// host children that is right: their diagnostics have their own logs. It is not
+    /// right for a child whose whole output is diagnostics. The custodian's account
+    /// of what it did to a leaked vnode freeze, including the `chflags nouchg` line
+    /// an operator needs to repair one by hand, went to `/dev/null` in every
+    /// shipping launch — written, formatted, and thrown away.
+    ///
+    /// Named by the OWNER rather than opened by the child, so the file exists and is
+    /// owner-only before the child runs and a child that dies in its first
+    /// microsecond still has somewhere its failure could have gone.
+    pub stderr: Option<PathBuf>,
 }
 
 /// Bring a child up through the gate (D6, completed per Principle E).
@@ -169,7 +183,7 @@ where
         .args(&spec.target_argv)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(gate_stderr(spec.stderr.as_deref()));
     for (k, v) in &spec.target_envs {
         command.env(k, v);
     }
@@ -514,11 +528,77 @@ pub fn ack_started_if_gated() {
 /// never a human command.
 pub fn run_ack_probe(args: &[String]) -> ! {
     ack_started_if_gated();
+    // One line on stderr, always. A gated child's stderr is whatever the owner named
+    // in its `GateSpec`, and until that field existed it was `/dev/null` for every
+    // child the gate has ever launched — so the test that a named sink actually
+    // receives what a gated child says needs a gated child that says something.
+    eprintln!("{ACK_PROBE_STDERR}");
     if let Some(marker) = args.first() {
         // Best-effort: the test polls for this file to confirm the exec landed.
         let _ = std::fs::File::create(marker);
     }
     std::process::exit(0)
+}
+
+/// The line [`run_ack_probe`] writes to stderr, so a test can look for it rather
+/// than for a string spelled twice.
+pub const ACK_PROBE_STDERR: &str = "gate-ack-probe: this line is the test's evidence";
+
+/// The child's stderr sink: the named file, owner-only, or `/dev/null`.
+///
+/// A file that cannot be opened falls back to `/dev/null` rather than failing the
+/// spawn. The log is an aid, and refusing to bring a custodian up because its
+/// diagnostics have nowhere to go would trade the cleanup this launch depends on for
+/// the account of it.
+///
+/// **But the fallback is said out loud, on THIS process's stderr**, which is the
+/// launcher's and which somebody is looking at. It used to be silent, and a silent
+/// fall back to `/dev/null` is the same state this whole fix was about: a janitor
+/// whose entire product is an explanation, explaining into nothing, with nobody able
+/// to tell that from a janitor with nothing to say. One line here means the operator
+/// who later finds an unexplained frozen binary can at least see why there is no log
+/// to read.
+fn gate_stderr(path: Option<&std::path::Path>) -> Stdio {
+    let Some(path) = path else {
+        return Stdio::null();
+    };
+    match open_owner_only_append(path) {
+        Some(file) => Stdio::from(file),
+        None => {
+            eprintln!(
+                "codeconnect: {} could not be opened for the gated child's diagnostics, so \
+                 everything it says goes to /dev/null. It still runs; if it later has \
+                 something to explain, there will be no log to read it in",
+                path.display()
+            );
+            Stdio::null()
+        }
+    }
+}
+
+/// Open (creating) `path` for append with mode 0600, under a directory this process
+/// has proven private.
+///
+/// Owner-only because a custodian's diagnostics name the session, its uid and the
+/// pathname of the operator's codex install. The mode is applied at creation rather
+/// than after it, so there is no instant in which the file exists and is readable.
+pub(crate) fn open_owner_only_append(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path.parent()?;
+    protocol::fsperm::private_dir(parent).ok()?;
+    // `mode` applies only when the file is created, so an existing loose file
+    // would keep whatever mode it had and be silently appended to. Hardening
+    // afterwards is what makes the sentence above true of a file that was already
+    // there — the same discipline `protocol::fsperm::create_private` applies, and
+    // for the same reason.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(protocol::fsperm::FILE_MODE)
+        .open(path)
+        .ok()?;
+    protocol::fsperm::harden_file(path).ok()?;
+    Some(file)
 }
 
 /// `execvp` the target. Only returns (as an error) if exec fails.
@@ -711,5 +791,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Where the codeconnect binary this test's crate built lives. Unit tests get no
+    /// `CARGO_BIN_EXE_*`, so it is derived from the test binary's own location —
+    /// `target/<profile>/deps/<test>` — which is where cargo also puts the bin.
+    fn codeconnect_bin() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let candidate = exe.parent()?.parent()?.join("codeconnect");
+        candidate.is_file().then_some(candidate)
+    }
+
+    /// **A gated child's diagnostics reach the file the owner named, owner-only.**
+    ///
+    /// Every gated child's stderr went to `/dev/null`, which is right for the two
+    /// host children — their output has its own logs — and wrong for the custodian,
+    /// whose entire product is an explanation. Its account of a leaked vnode freeze,
+    /// including the `chflags nouchg` repair line, was written and discarded on every
+    /// shipping launch. Driven through the real `launch_gated` with the real gate
+    /// binary, because the routing is the thing under test.
+    #[test]
+    fn a_gated_child_s_stderr_reaches_the_owner_named_file_and_nobody_else_can_read_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(bin) = codeconnect_bin() else {
+            // The bin is built alongside these tests by `cargo test -p codeconnect`.
+            // Saying so beats a silent pass if that ever stops being true.
+            panic!("the codeconnect binary must be built beside this test binary");
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cc-gate-stderr-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("child.log");
+        let marker = dir.join("marker");
+
+        let ready = launch_gated(
+            GateSpec {
+                role: "stderr-probe".into(),
+                nonce: "nonce-for-the-stderr-probe".into(),
+                gate_program: bin.clone(),
+                target_argv: vec![
+                    bin.to_string_lossy().into_owned(),
+                    "internal-gate-ack-probe".into(),
+                    marker.to_string_lossy().into_owned(),
+                ],
+                target_envs: vec![],
+                stderr: Some(log.clone()),
+            },
+            |_| Ok(()),
+            |_, _| Ok(()),
+        );
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("the gated probe must come up: {err:#}");
+            }
+        };
+        assert!(ready.pid > 0);
+
+        // The probe writes its line, touches the marker and exits; poll for the line
+        // rather than for the exit, since the owner does not wait on the child.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut body = String::new();
+        while Instant::now() < deadline {
+            body = std::fs::read_to_string(&log).unwrap_or_default();
+            if body.contains(ACK_PROBE_STDERR) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let mode = std::fs::metadata(&log).map(|m| m.permissions().mode() & 0o777);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            body.contains(ACK_PROBE_STDERR),
+            "what the gated child said must reach the file the spec named, got {body:?}"
+        );
+        assert_eq!(
+            mode.ok(),
+            Some(protocol::fsperm::FILE_MODE),
+            "a child log naming a session and an install path is owner-only"
+        );
     }
 }

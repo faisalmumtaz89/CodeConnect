@@ -37,13 +37,13 @@
 //!   bind the thread a `turn/start` is allowed to name (see [`crate::session`], and clause 4
 //!   of the lineage in [`crate::fingerprint`]). The claim is provisional until the bytes
 //!   actually go out: if the relay's upstream write fails it calls
-//!   `threads.rollback_creation` and the slot re-opens (round-2 P3).
+//!   `threads.rollback_creation` and the slot re-opens.
 //!
-//!   Round-3 P1 is what widens the ledger from creation-only to every FORWARDED request: a
-//!   request whose id is already outstanding on its connection is protocol-hostile (the
-//!   client has made its own responses uncorrelatable), so it is dropped with zero upstream
-//!   bytes, the leg is kept open, and the event is counted — see
-//!   [`crate::session::IdLedgerCounts`] for the failure-containment seam those counters feed.
+//!   The ledger is not creation-only: it covers every FORWARDED request. A request whose
+//!   id is already outstanding on its connection is protocol-hostile (the client has made
+//!   its own responses uncorrelatable), so it is dropped with zero upstream bytes, the leg
+//!   is kept open, and the event is counted — see [`crate::session::IdLedgerCounts`] for
+//!   the failure-containment seam those counters feed.
 //!
 //!   "Forwarded" is the exact scope, and [`crate::session`]'s module header states the two
 //!   side paths it excludes: a REFUSED request never registers an id at all (the ledger runs
@@ -51,7 +51,7 @@
 //!   `thread/start` is caught by the creation SLOT before the reuse rule is ever consulted.
 //!   Neither forwards a byte, so neither compromises binding.
 //!
-//! ## Refusal details are audit-log-safe (round-3 P3 / P4)
+//! ## Refusal details are audit-log-safe
 //!
 //! Every `note` on a [`RelayAction`] is written to a durable `broker.log` that operators and
 //! live gates read. The classifier's inputs are attacker-chosen bytes, so a note may carry
@@ -63,8 +63,8 @@
 //! ## The turn/start gate, end to end
 //!
 //! A `turn/start` forwards only when ALL of these hold, in this order:
-//! 1. the captured params boundary (P4), the captured sandbox shape (P6) and the
-//!    exhaustive top-level param allowlist (round-2 P5) — [`crate::fingerprint`];
+//! 1. the captured params boundary, the captured sandbox shape and the exhaustive
+//!    top-level param allowlist — [`crate::fingerprint`];
 //! 2. the launch fingerprint over the remaining ownership dimensions;
 //! 3. it names the session's ONE verified thread ([`check_turn_head`]);
 //! 4. it carries exactly the `cwd`/`runtimeWorkspaceRoots` bound at that thread's creation.
@@ -79,15 +79,15 @@
 //!
 //! Only then is the measured `sandboxPolicy: null` deferral discharged.
 //!
-//! The creation side has its own workspace rules — [`check_workspace_cwd`] (round-2 P4) for
-//! `cwd` and [`check_workspace_roots`] (2e-7c) for `runtimeWorkspaceRoots`: a
+//! The creation side has its own workspace rules — [`check_workspace_cwd`] for `cwd` and
+//! [`check_workspace_roots`] (2e-7c) for `runtimeWorkspaceRoots`: a
 //! `thread/start` whose request names a workspace OTHER than the launch workspace, through
 //! EITHER channel, is refused before it can claim the creation slot. Each of these refusals —
 //! head, turn workspace, start workspace — carries its OWN cause; none reuses another's text.
 //!
-//! Round-5 finding 6 runs BOTH of those guards on `thread/resume` as well, because the real
-//! 0.147 schema gives resume the same two params and documents its `runtimeWorkspaceRoots` as
-//! REPLACING the thread's — so a creation-only anchor secured a thread's birth and nothing
+//! BOTH of those guards run on `thread/resume` as well, because the real 0.147 schema
+//! gives resume the same two params and documents its `runtimeWorkspaceRoots` as REPLACING
+//! the thread's — so a creation-only anchor would secure a thread's birth and nothing
 //! after it. `thread/resume`'s remaining bypasses (`path`, `history`, and every param outside
 //! the captured set) are pinned in [`crate::fingerprint`], beside the turn's captured
 //! boundary and for the same refuse-by-default-on-params reason.
@@ -114,8 +114,8 @@ pub struct Env<'a> {
     pub fingerprint: &'a LaunchFingerprint,
     pub capabilities: &'a dyn ResponseCapabilityRegistry,
     pub threads: &'a dyn ThreadBinding,
-    /// The relay-minted instance id of the connection this message arrived on (round-2
-    /// P1). Every thread-creation claim is keyed by it, so two connections of the SAME
+    /// The relay-minted instance id of the connection this message arrived on. Every
+    /// thread-creation claim is keyed by it, so two connections of the SAME
     /// role — the TUI `/resume` picker opens a second one — cannot satisfy each other's
     /// pending creation, and a request id cannot be reused or replayed on one connection.
     /// It flows exactly like the per-leg [`crate::response_capability::LegCapabilities`]
@@ -190,7 +190,7 @@ fn classify_notification(role: Role, method: &str) -> RelayAction {
         // A refused notification has no reply channel; zero bytes, keep open. An unknown
         // notification lands here too (bypass prevented). Repeated ones would trip the
         // spam-close counter (seam: failure-containment sub-chunk). The method is
-        // client-chosen, so it is rendered through the audit-log grammar (round-3 P3).
+        // client-chosen, so it is rendered through the audit-log grammar.
         other => RelayAction::DropLogKeepOpen {
             note: format!(
                 "notification {} refused ({other:?})",
@@ -221,7 +221,7 @@ fn classify_request(
     // `classify_request_disposition`, so a `Forward` always carries one. This is a
     // construction fact, not an assumption.
     let id = id.expect("a forwarded request always carries a usable id");
-    // **`turn/start` and the held switch prefix admit themselves** (round-1 P1/P4). The
+    // **`turn/start` and the held switch prefix admit themselves.** The
     // turn's admission is atomic with its head-check inside `try_admit_turn`; the hold
     // registers its id at hold time. Passing either through the generic ledger here would
     // register the same id twice and be refused as `ReusedInFlight`.
@@ -310,7 +310,7 @@ pub(crate) fn creation_slot_closed_refusal() -> (i64, &'static str) {
 }
 
 /// Render one id-ledger verdict as a relay action. Shared by the generic request path and
-/// by `turn/start`'s atomic admission (round-1 P1), so the two can never disagree about
+/// by `turn/start`'s atomic admission, so the two can never disagree about
 /// what a full ledger or a reused id looks like to a client.
 fn ledger_refusal(
     env: &Env,
@@ -388,15 +388,16 @@ fn classify_request_disposition(
             note: "request allowlisted",
         },
         Disposition::FingerprintAssert => {
-            // P2 — `thread/fork` is refused OUTRIGHT pre-2e-4c. A fork's lineage rule is
+            // `thread/fork` is refused OUTRIGHT pre-2e-4c. A fork's lineage rule is
             // that its SOURCE thread must itself be session-bound, and the wire capture
             // contains NO fork frame: there is no measured source-thread field to read, so
             // the rule is unenforceable and the method is unprovable. Refused here in the
             // executor, not in the table, so the golden matrix does not move.
             //
-            // Belt-and-braces: P3 makes this unconditional anyway — a fork needs an
-            // existing thread, and P3 closes the creation slot the moment one is bound —
-            // so the fork of a bound thread would already be refused as a second creation.
+            // Belt-and-braces: the single-thread rule makes this unconditional anyway — a
+            // fork needs an existing thread, and the creation slot closes the moment one is
+            // bound — so the fork of a bound thread would already be refused as a second
+            // creation.
             if method == "thread/fork" {
                 return refuse_request(
                     id,
@@ -419,16 +420,16 @@ fn classify_request_disposition(
                         detail,
                     );
                 }
-                // **This connection is RE-SUBSCRIBING** (round-2 P4). If its unsubscribe
+                // **This connection is RE-SUBSCRIBING.** If its unsubscribe
                 // prefix outlived a failed switch, its turn authorization was wedged; a
                 // real resume of that thread is what lifts it — but only once the SERVER
-                // has ACCEPTED it (round-3 P6), and only for a resume that was actually
+                // has ACCEPTED it, and only for a resume that was actually
                 // ADMITTED: the attempt is recorded in `classify_request`, after the
                 // fingerprint and the id ledger have both passed (closing S4).
             }
             match assert_fingerprint(env.fingerprint, method, params) {
                 Ok(FpVerdict::Proven) => {
-                    // **THE WORKSPACE CHANNELS ARE NOT CREATION-ONLY** (round-5 finding 6).
+                    // **THE WORKSPACE CHANNELS ARE NOT CREATION-ONLY.**
                     //
                     // Both guards were `thread/start`-only, and that was the narrower half of
                     // a rule the wire does not scope that way: the real 0.147
@@ -444,8 +445,8 @@ fn classify_request_disposition(
                     // neither key, and the captured TUI `/resume` sends `cwd: null` beside
                     // `runtimeWorkspaceRoots: [its own cwd]` — the anchored form in production.
                     if matches!(method, "thread/start" | "thread/resume") {
-                        // P4 (round 2) — a creation may not name a workspace OTHER than the
-                        // one the coordinator launched this session in. Checked BEFORE the
+                        // A creation may not name a workspace OTHER than the one the
+                        // coordinator launched this session in. Checked BEFORE the
                         // slot is claimed, so a refused creation never consumes it, and with
                         // its own message: this is not the head-check's failure.
                         if let Err(detail) = check_workspace_cwd(env, method, params) {
@@ -473,12 +474,12 @@ fn classify_request_disposition(
                                 detail,
                             );
                         }
-                        // P3 — on the `thread/start` half, the creation slot itself is
-                        // claimed by the id ledger in `classify_request`, atomically with
-                        // recording `(connection, request id)` as the pending creation
-                        // (round-3 P1 folded the round-2 `try_open_creation` into
-                        // `try_admit_request`, so one atomic step covers both the slot and
-                        // the outstanding entry). A refused request never reaches that step,
+                        // On the `thread/start` half, the creation slot itself is claimed
+                        // by the id ledger in `classify_request`, atomically with recording
+                        // `(connection, request id)` as the pending creation
+                        // (`try_admit_request` claims the slot itself, so one atomic step
+                        // covers both the slot and the outstanding entry). A refused request
+                        // never reaches that step,
                         // so it can never bind — which is why both guards above run here,
                         // ahead of it, rather than anywhere later.
                     }
@@ -568,7 +569,7 @@ fn classify_request_disposition(
                     );
                 }
             };
-            // **ONE ATOMIC DECISION** (round-1 P1): head-check, workspace-check, id ledger
+            // **ONE ATOMIC DECISION**: head-check, workspace-check, id ledger
             // and the busy-mark that keeps a switch from being admitted between this
             // decision and the relay's upstream write — all under a single lock inside
             // `try_admit_turn`. They used to be three separate lock acquisitions from here,
@@ -623,7 +624,7 @@ fn classify_request_disposition(
                         detail,
                     )
                 }
-                // Round-2 P3 — a reserved switch's prefix has already had a wire effect.
+                // A reserved switch's prefix has already had a wire effect.
                 TurnAdmission::SwitchReserved => {
                     return refuse_request(
                         Some(turn_id),
@@ -637,7 +638,7 @@ fn classify_request_disposition(
                         ),
                     )
                 }
-                // Round-2 P2 — the cardinality bound, refused legibly rather than dropped.
+                // The cardinality bound, refused legibly rather than dropped.
                 TurnAdmission::TooManyActiveTurns => {
                     return refuse_request(
                         Some(turn_id),
@@ -650,7 +651,7 @@ fn classify_request_disposition(
                         ),
                     )
                 }
-                // Round-2 P4 — this connection unsubscribed itself and never came back.
+                // This connection unsubscribed itself and never came back.
                 TurnAdmission::ConnectionUnsubscribed { thread } => {
                     return refuse_request(
                         Some(turn_id),
@@ -674,7 +675,7 @@ fn classify_request_disposition(
             match verdict {
                 // O14 — **a future proven turn shape.** This arm is UNREACHABLE BY
                 // CONSTRUCTION for the only method with this disposition today: on
-                // `turn/start` the sandbox boundary (P6) accepts exactly one shape —
+                // `turn/start` the sandbox boundary accepts exactly one shape —
                 // `params.sandboxPolicy: null` — and the absence rule refuses when it is
                 // missing, so every turn that gets this far DEFERRED. No test reaches it.
                 // It is kept, and labeled honestly rather than deleted, because it is the
@@ -693,7 +694,7 @@ fn classify_request_disposition(
         Disposition::Refuse(reason) => {
             let (code, msg) = refuse_message(reason);
             // `NotAllowlisted` reaches here for an UNKNOWN, client-chosen method, so the
-            // name is rendered through the audit-log grammar (round-3 P3).
+            // name is rendered through the audit-log grammar.
             refuse_request(
                 id,
                 code,
@@ -727,7 +728,7 @@ fn classify_request_disposition(
             }
         }
         Disposition::UnsubscribeSessionThread => {
-            // P10 — the params shape is PINNED to the capture: exactly `{threadId}`, a
+            // The params shape is PINNED to the capture: exactly `{threadId}`, a
             // string, and nothing else. Every measured `thread/unsubscribe` (four of them,
             // from the TUI and from an observer) carries that one key. An extra key is an
             // uncaptured channel on a method that is now forwarded rather than refused, so
@@ -748,8 +749,8 @@ fn classify_request_disposition(
                     format!("{}: {detail}", redact::method(method)),
                 );
             }
-            // **THE SWITCH BEHIND IT MUST BE ADMISSIBLE** (round-1 P4, as re-grounded) —
-            // but that is no longer decided HERE (A16.1).
+            // **THE SWITCH BEHIND IT MUST BE ADMISSIBLE** — but that is no longer decided
+            // HERE (A16.1).
             //
             // `/new` is `unsubscribe, unsubscribe, thread/start`. If the prefix forwards
             // and the start is then refused, the TUI is left on the old thread and
@@ -820,7 +821,7 @@ fn classify_request_disposition(
 /// repeating it, exactly as [`INTERRUPT_PARAMS`] is.
 const UNSUBSCRIBE_PARAMS: [&str; 1] = ["threadId"];
 
-/// **`thread/unsubscribe`'s params are pinned to the capture** (round-1 P10): exactly
+/// **`thread/unsubscribe`'s params are pinned to the capture**: exactly
 /// `{"threadId": "<string>"}`.
 ///
 /// Refuse-by-default applies to params, not just to methods — the same rule
@@ -868,10 +869,10 @@ fn check_unsubscribe_shape(params: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-/// A `thread/resume` may only target a thread bound to this session (finding 5).
+/// A `thread/resume` may only target a thread bound to this session.
 ///
 /// The requested id is client-chosen, so it is rendered through the measured thread-id
-/// grammar before it reaches the audit log (round-3 P4).
+/// grammar before it reaches the audit log.
 fn check_resume_binding(env: &Env, params: &serde_json::Value) -> Result<(), String> {
     match params.get("threadId").and_then(|t| t.as_str()) {
         None => Err("resume without a string threadId".to_string()),
@@ -1254,9 +1255,9 @@ fn check_cursor_thread(env: &Env, cursor: &str) -> Result<(), String> {
     }
 }
 
-/// P4 (round 2) — a `thread/start` REQUEST may not name a workspace other than the one the
-/// COORDINATOR launched this session in. Round-5 finding 6 widens it to `thread/resume`,
-/// which the real 0.147 schema gives the very same `cwd` param.
+/// A `thread/start` REQUEST may not name a workspace other than the one the COORDINATOR
+/// launched this session in — and neither may a `thread/resume`, which the real 0.147
+/// schema gives the very same `cwd` param.
 ///
 /// The measured real TUI sends `"cwd": null` on BOTH methods (it lets the server resolve
 /// the app-server's own cwd), the ccd's resume omits the key entirely, and an absent key is
@@ -1284,11 +1285,11 @@ fn check_workspace_cwd(env: &Env, method: &str, params: &serde_json::Value) -> R
     }
 }
 
-/// P4 follow-on (2e-7c, gate A10) — a `thread/start` REQUEST may not name workspace ROOTS
-/// other than the single workspace the COORDINATOR launched this session in. Round-5
-/// finding 6 widens it to `thread/resume`.
+/// The workspace-roots anchor (2e-7c, gate A10) — a `thread/start` REQUEST may not name
+/// workspace ROOTS other than the single workspace the COORDINATOR launched this session
+/// in, and neither may a `thread/resume`.
 ///
-/// ## Why `thread/resume` was the bigger hole (round-5 finding 6)
+/// ## Why `thread/resume` is the bigger hole
 ///
 /// The real 0.147 `ThreadResumeParams.runtimeWorkspaceRoots` is documented **"Replace the
 /// thread's runtime workspace roots"** — a creation-only guard therefore secured the moment a
@@ -1359,7 +1360,7 @@ fn classify_response(
     } else {
         // No live authorized capability: losing-fanout / unsolicited / stale — a normal
         // race. Zero bytes, no error (no schema-legal error form), keep the leg open. The
-        // id is client-supplied, so it goes through the audit-log renderer (round-3 P3).
+        // id is client-supplied, so it goes through the audit-log renderer.
         RelayAction::DropLogKeepOpen {
             note: format!(
                 "method-less response id={} has no live capability",
@@ -1549,7 +1550,7 @@ mod tests {
 
     /// Two distinct client connections. `CONN_A` is the one every single-connection test
     /// uses; `CONN_B` is the SAME-ROLE sibling (the TUI `/resume` picker's second
-    /// connection) the round-2 P1 tests drive.
+    /// connection) the connection-scoped tests drive.
     const CONN_A: ConnId = ConnId(1);
     const CONN_B: ConnId = ConnId(2);
 
@@ -1591,7 +1592,7 @@ mod tests {
     /// id and nothing else.
     const OK_START_SWITCH: &str = r#"{"method":"thread/start","id":"s2","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#;
 
-    /// The captured `turn/start` shape class (P4/P6) naming `thread`, in the workspace
+    /// The captured `turn/start` shape class naming `thread`, in the workspace
     /// `cwd` / `roots`. Every turn/start test starts from this and perturbs ONE thing, so a
     /// test aimed at one rule is never silently answered by another.
     fn turn_frame(thread: &str, cwd: serde_json::Value, roots: serde_json::Value) -> String {
@@ -1725,7 +1726,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Thread creation: the admitted-creation root of the lineage (P1/P2/P3).
+    // Thread creation: the admitted-creation root of the lineage.
     // -----------------------------------------------------------------
 
     fn refused_code(a: &RelayAction) -> i64 {
@@ -1745,7 +1746,7 @@ mod tests {
         }
     }
 
-    // P2 — no fork frame exists in the wire capture, so a fork's source-thread lineage is
+    // No fork frame exists in the wire capture, so a fork's source-thread lineage is
     // unprovable and the method is refused outright pre-2e-4c.
     #[test]
     fn thread_fork_is_refused_outright() {
@@ -1773,7 +1774,7 @@ mod tests {
         ));
     }
 
-    // P3 — one thread per session: a second creation is refused while the first is PENDING
+    // One thread per session: a second creation is refused while the first is PENDING
     // (the pipeline race) and after it is BOUND.
     #[test]
     fn a_second_thread_start_is_refused_while_pending_and_while_bound() {
@@ -1846,7 +1847,7 @@ mod tests {
             .to_string(),
         );
         // The marker: `/new` sends it TWICE, both naming the active head. Each is HELD —
-        // zero upstream bytes — until the switch behind it is admitted (round-1 P4).
+        // zero upstream bytes — until the switch behind it is admitted.
         for id in [7, 8] {
             let a = go_env(
                 Role::Tui,
@@ -2457,7 +2458,7 @@ mod tests {
         }
     }
 
-    // P1 ROOT FIX — receipt is not lineage. A `thread/started` for an UNCORRELATED thread
+    // Receipt is not lineage. A `thread/started` for an UNCORRELATED thread
     // binds nothing, so a turn naming it is refused.
     #[test]
     fn a_thread_started_for_an_uncorrelated_thread_binds_nothing() {
@@ -2477,7 +2478,7 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
     }
 
-    // P1 — `thread/resumed` cannot seed a binding either (and so cannot authorize a resume).
+    // `thread/resumed` cannot seed a binding either (and so cannot authorize a resume).
     #[test]
     fn a_thread_resumed_cannot_seed_a_binding() {
         let threads = SessionThreads::new(BOUND_CWD);
@@ -2497,7 +2498,7 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
     }
 
-    // P1 — a creation response missing any of the three proofs binds NOTHING, so the turn
+    // A creation response missing any of the three proofs binds NOTHING, so the turn
     // it would have authorized is refused.
     #[test]
     fn an_unverifiable_creation_response_binds_nothing() {
@@ -2513,7 +2514,7 @@ mod tests {
             ));
             threads.observe_server_frame(CONN_A, &json!({"id": "s", "result": body}).to_string());
             // Asserted on the BINDING itself, not only on the refusal: a lax verifier that
-            // bound a PARTIAL thread would still be refused by P5's workspace equality,
+            // bound a PARTIAL thread would still be refused by the turn's workspace equality,
             // which would mask the missing verification entirely. Nothing may be bound.
             assert_eq!(threads.bound_thread(), None, "{body}");
             let a = go_env(Role::Tui, &threads, &turn("01a0-head"));
@@ -2521,7 +2522,7 @@ mod tests {
         }
     }
 
-    // P1 — an ERROR response to a pending creation clears the pending and RE-OPENS
+    // An ERROR response to a pending creation clears the pending and RE-OPENS
     // creation, so a legitimately failed thread/start stays retryable.
     #[test]
     fn an_error_response_reopens_creation() {
@@ -2542,8 +2543,8 @@ mod tests {
             ),
             "a failed creation must be retryable"
         );
-        // …but not by REPLAYING the spent request id: `s` is tombstoned on this connection
-        // (round-2 P1), so a retry must mint a fresh id, which is what a real client does.
+        // …but not by REPLAYING the spent request id: `s` is tombstoned on this
+        // connection, so a retry must mint a fresh id, which is what a real client does.
         let threads2 = SessionThreads::new(BOUND_CWD);
         assert!(matches!(
             go_env(Role::Tui, &threads2, OK_START),
@@ -2558,11 +2559,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ROUND-2 P1 / P3 / P4 / P7 — connection-scoped correlation, transport lifecycle,
-    // the coordinator-owned workspace anchor, and log hygiene, through the CLASSIFIER.
+    // Connection-scoped correlation, transport lifecycle, the coordinator-owned workspace
+    // anchor, and log hygiene, through the CLASSIFIER.
     // -----------------------------------------------------------------
 
-    // P1 — the real vulnerability. Two TUI connections (the `/resume` picker opens the
+    // The real vulnerability. Two TUI connections (the `/resume` picker opens the
     // second). A's creation is admitted; B answers with A's request id and a thread of its
     // own choosing. NOTHING binds, so the turn B wanted is refused.
     #[test]
@@ -2587,7 +2588,7 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
     }
 
-    // P3 — the owning connection disconnects with a creation in flight. The pending goes
+    // The owning connection disconnects with a creation in flight. The pending goes
     // to the indeterminate CLOSED state: no binding, and a later creation is REFUSED rather
     // than reopened (even on a different connection).
     #[test]
@@ -2608,7 +2609,7 @@ mod tests {
         assert_eq!(threads.bound_thread(), None);
     }
 
-    // P3 — a proven send failure rolls the claim back, so creation re-opens.
+    // A proven send failure rolls the claim back, so creation re-opens.
     #[test]
     fn a_rolled_back_creation_claim_reopens_the_slot() {
         let threads = SessionThreads::new(BOUND_CWD);
@@ -2627,7 +2628,7 @@ mod tests {
         );
     }
 
-    // P4 — a `thread/start` REQUEST may not name a workspace other than the launch cwd.
+    // A `thread/start` REQUEST may not name a workspace other than the launch cwd.
     #[test]
     fn thread_start_naming_a_different_cwd_is_refused() {
         for cwd in [json!("/somewhere/else"), json!(""), json!(42), json!([])] {
@@ -2649,7 +2650,7 @@ mod tests {
         }
     }
 
-    // P4 — the MEASURED real TUI sends `cwd: null` on thread/start. That must keep passing,
+    // The MEASURED real TUI sends `cwd: null` on thread/start. That must keep passing,
     // as must an absent key and the launch cwd named explicitly.
     #[test]
     fn thread_start_with_a_null_or_matching_cwd_still_forwards() {
@@ -2746,7 +2747,7 @@ mod tests {
         }
     }
 
-    // ROUND-5 FINDING 6 — the workspace guards are no longer creation-only.
+    // The workspace guards are not creation-only.
     //
     // A `thread/resume` naming a thread this session OWNS still gets to re-point that
     // thread's runtime workspace, because the real 0.147 `ThreadResumeParams` documents
@@ -2777,7 +2778,7 @@ mod tests {
         }
     }
 
-    // FINDING 6, the half that is NOT optional: a guard that breaks the real resume is a
+    // The half that is NOT optional: a guard that breaks the real resume is a
     // worse bug than the one it fixes.
     //
     // Both MEASURED resume clients must still forward against a bound head: the ccd's own
@@ -2814,7 +2815,7 @@ mod tests {
         }
     }
 
-    // FINDING 6 — `path` and `history` each defeat the binding check on their own, so each
+    // `path` and `history` each defeat the binding check on their own, so each
     // is refused on its own, with its own cause. MEASURED live: with `path` set the server
     // resolves the PATH's rollout and never consults the requested id; with `history` set the
     // same request that otherwise errors instead answers with a BRAND NEW thread id.
@@ -2869,7 +2870,7 @@ mod tests {
         );
     }
 
-    // P7 — a workspace refusal names the FIELD and the shape, never the path. The audit log
+    // A workspace refusal names the FIELD and the shape, never the path. The audit log
     // is durable and the requested path is attacker-supplied.
     #[test]
     fn workspace_refusals_never_log_the_path_values() {
@@ -2913,7 +2914,7 @@ mod tests {
         assert!(!note.contains(BOUND_CWD), "launch cwd value leaked: {note}");
     }
 
-    // ROUND-2 P5 — the exhaustive top-level allowlist, through the classifier.
+    // The exhaustive top-level allowlist, through the classifier.
     #[test]
     fn turn_start_with_an_unknown_top_level_param_is_refused() {
         let threads = bound_session("01a0-head");
@@ -2921,7 +2922,7 @@ mod tests {
         frame["params"]["steering"] = json!({"do": "whatever"});
         let a = go_env(Role::Tui, &threads, &frame.to_string());
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
-        // ROUND-3 P3 — INVERTED: the note counts the unknown param, it never names it.
+        // The note counts the unknown param, it never names it.
         assert!(
             refused_note(&a).contains("unknown top-level parameter (1 of 14)"),
             "{}",
@@ -2934,7 +2935,7 @@ mod tests {
         );
     }
 
-    // ROUND-2 P5 — the named consequence: `config` is not in the captured turn/start set.
+    // The named consequence: `config` is not in the captured turn/start set.
     #[test]
     fn a_config_param_on_turn_start_is_refused() {
         let threads = bound_session("01a0-head");
@@ -2949,7 +2950,7 @@ mod tests {
         );
     }
 
-    // ROUND-2 P5 — `collaborationMode` is null OR exactly the captured value.
+    // `collaborationMode` is null OR exactly the captured value.
     #[test]
     fn turn_start_collaboration_mode_is_null_or_the_captured_value() {
         let threads = bound_session("01a0-head");
@@ -2989,7 +2990,7 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
     }
 
-    // P5 — the turn must run in the workspace bound at the thread's creation.
+    // The turn must run in the workspace bound at the thread's creation.
     #[test]
     fn turn_start_with_a_diverging_cwd_is_refused() {
         let threads = bound_session("01a0-head");
@@ -3051,7 +3052,7 @@ mod tests {
         }
     }
 
-    // P4 — the captured turn/start boundary, one case per gated field, through the whole
+    // The captured turn/start boundary, one case per gated field, through the whole
     // classifier (not just the fingerprint module).
     #[test]
     fn turn_start_with_a_populated_captured_null_param_is_refused() {
@@ -3085,11 +3086,11 @@ mod tests {
         assert!(refused_note(&a).contains("collaborationMode"), "{a:?}");
     }
 
-    // P6 — the turn/start sandbox boundary.
+    // The turn/start sandbox boundary.
     #[test]
     fn turn_start_with_a_sandbox_string_or_top_level_key_is_refused() {
         let threads = bound_session("01a0-head");
-        // A MATCHING string — the shape the rejected first cut accepted — is refused.
+        // A MATCHING string — a shape the measured turn never sent — is refused.
         let mut matching: serde_json::Value = serde_json::from_str(&turn("01a0-head")).unwrap();
         matching["params"]["sandboxPolicy"] = json!("read-only");
         let a = go_env(Role::Tui, &threads, &matching.to_string());
@@ -3132,7 +3133,7 @@ mod tests {
                 .to_string(),
             sandbox: "read-only".into(),
             hooks_enabled: true,
-            // The workspace the captured session was launched in (P4 / A10 follow-on): the
+            // The workspace the captured session was launched in (A10 follow-on): the
             // frame's own `cwd`, which the coordinator would have canonicalized before launch.
             launch_cwd: launch_cwd.clone(),
         };
@@ -3392,8 +3393,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ROUND-3 P1 / P3 / P4 / P6 — the total id ledger and audit-log hygiene, through the
-    // CLASSIFIER.
+    // The total id ledger and audit-log hygiene, through the CLASSIFIER.
     // -----------------------------------------------------------------
 
     fn dropped_note(a: &RelayAction) -> String {
@@ -3407,7 +3407,7 @@ mod tests {
         format!(r#"{{"method":"app/list","id":"{id}","params":{{}}}}"#)
     }
 
-    // P1 — a forwarded request whose id is ALREADY outstanding on the connection is dropped
+    // A forwarded request whose id is ALREADY outstanding on the connection is dropped
     // (zero upstream bytes), the leg is kept open, and the event is counted.
     #[test]
     fn a_request_reusing_an_in_flight_id_is_dropped_and_counted() {
@@ -3440,7 +3440,7 @@ mod tests {
         ));
     }
 
-    // P1 — the cross-method collision. A non-creation request takes the id first, so the
+    // The cross-method collision. A non-creation request takes the id first, so the
     // `thread/start` that wanted it never claims the slot, and the response to that request
     // — shaped exactly like a creation answer — installs NOTHING. A turn on the smuggled
     // thread is therefore refused.
@@ -3483,7 +3483,7 @@ mod tests {
         ));
     }
 
-    // P1 — an unrelated ERROR must not reopen creation. The id is the discriminator, and the
+    // An unrelated ERROR must not reopen creation. The id is the discriminator, and the
     // ledger is what guarantees an unrelated request can never hold the pending creation's.
     #[test]
     fn an_unrelated_error_does_not_reopen_the_pending_creation() {
@@ -3524,7 +3524,7 @@ mod tests {
         assert_eq!(threads.sole_session_thread(), Some("01a0-head".into()));
     }
 
-    // P6 — an over-long request id is refused (zero bytes) and never stored, so it cannot
+    // An over-long request id is refused (zero bytes) and never stored, so it cannot
     // burn the creation slot or grow the ledger.
     #[test]
     fn an_over_long_request_id_is_dropped_and_never_stored() {
@@ -3553,7 +3553,7 @@ mod tests {
         ));
     }
 
-    // P4 — a client-chosen thread id is never echoed into the audit log unless it matches the
+    // A client-chosen thread id is never echoed into the audit log unless it matches the
     // MEASURED wire grammar (a lowercase 36-byte UUID).
     #[test]
     fn a_non_conforming_thread_id_is_never_echoed_in_a_refusal() {
@@ -3591,7 +3591,7 @@ mod tests {
         assert!(note.contains(REAL), "{note}");
     }
 
-    // P3 — a client-chosen METHOD is never echoed unless it matches the census grammar, and
+    // A client-chosen METHOD is never echoed unless it matches the census grammar, and
     // a client-chosen RESPONSE id is never echoed unless it is a plain identifier.
     #[test]
     fn a_non_conforming_method_or_response_id_is_never_echoed() {
@@ -3654,7 +3654,7 @@ mod tests {
             ),
             RelayAction::Forward { .. }
         ));
-        // P10 — the params shape is PINNED: exactly `{threadId}`, a string. An EXTRA key
+        // The params shape is PINNED: exactly `{threadId}`, a string. An EXTRA key
         // is an uncaptured channel on a method that is now forwarded rather than refused.
         for params in [
             json!({"threadId": "01a0-stranger"}),
@@ -3772,7 +3772,7 @@ mod tests {
     /// **A16.1, stated rather than raced — and stated THROUGH THE CLASSIFIER.**
     ///
     /// The session-level test races two threads two thousand times and asserts that
-    /// both never win. That is a detector, and it has two holes the reviewer named:
+    /// both never win. That is a detector, and it has two holes:
     /// a split check→claim form only loses on an interleaving the scheduler is free
     /// never to produce, and a classifier that stopped routing the prefix into
     /// `try_admit_prefix` at all would bypass the tested method entirely and leave
@@ -3808,7 +3808,7 @@ mod tests {
 
             let creation = scope.spawn(move || go_conn(Role::Tui, CONN_B, t, CREATION));
 
-            // THE GATE, and it is three claims, not one (round-3 finding 7).
+            // THE GATE, and it is three claims, not one.
             //
             // First: the competitor really did REACH this binding's critical section.
             // Without this, everything below is equally green when the thread was
@@ -3848,7 +3848,7 @@ mod tests {
         );
     }
 
-    /// **The latch belongs to ONE binding** (round-3 finding 8).
+    /// **The latch belongs to ONE binding.**
     ///
     /// It is a process-global object keyed, until now, by `ConnId` alone — and
     /// `ConnId(1)` is the first connection of every test in a suite that runs in

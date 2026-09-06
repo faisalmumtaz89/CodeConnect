@@ -195,6 +195,22 @@ impl Db {
             .await
     }
 
+    /// Write down the thread the control link at `generation` has adopted. `false`
+    /// when nothing changed — already recorded, or a generation this link does not
+    /// speak for.
+    ///
+    /// Hand-written rather than declared in `db_ops!`, which passes every argument
+    /// to the store by reference: this one takes a `u64` by value.
+    pub async fn bind_codex_thread(
+        &self,
+        session_uid: String,
+        generation: u64,
+        thread_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.bind_codex_thread(&session_uid, generation, &thread_id))
+            .await
+    }
+
     pub async fn set_lifecycle(&self, session_uid: String, lifecycle: Lifecycle) -> Result<()> {
         self.run(move |store| store.set_lifecycle(&session_uid, lifecycle))
             .await

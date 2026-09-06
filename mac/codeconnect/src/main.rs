@@ -16,6 +16,10 @@ mod codex_host;
 mod codex_launch;
 mod daemon;
 mod exec_gate;
+/// Test-only: the fence that proves the suite does not write into the operator's
+/// own `~/.codeconnect`. See the module's own docs for what it watches.
+#[cfg(test)]
+mod home_guard;
 mod launchd;
 mod pair;
 mod sessions;
@@ -70,6 +74,14 @@ fn main() -> Result<()> {
         // touches a marker, so the exec-gate tests can fence `execve` on a real
         // target-side effect. Machinery, never typed by a human.
         "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
+        // Hidden: a test-only stand-in for the launcher's probe freeze. It takes a
+        // vnode freeze the way `codex::probe_codex` does and then blocks, so a test
+        // can interrupt it and read the flag. Machinery, never typed by a human.
+        "internal-freeze-probe" => codex::run_freeze_probe(rest),
+        // Hidden: a test-only stand-in for a freezer holding the executable's freeze
+        // lock, so a test can prove a second PROCESS is excluded from it. Carries its
+        // own deadline. Machinery, never typed by a human.
+        "internal-freeze-lock-hold" => codex::run_freeze_lock_hold(rest),
         // Hidden: the D7 launch coordinator (the supervisor in launch mode).
         // Spawned by the `codex` launcher before tmux exists; it owns the launch
         // record and every forward mutation, and stays on as the session's

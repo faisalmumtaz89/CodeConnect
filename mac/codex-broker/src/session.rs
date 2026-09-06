@@ -1,5 +1,4 @@
-//! Session-scoped thread binding: **lineage, not receipt** (A4 / finding 5; P1 and P3 of
-//! the codex review of 2e-4a, hardened by round 2's P1/P2/P3/P4).
+//! Session-scoped thread binding: **lineage, not receipt** (A4).
 //!
 //! An ownership-free `thread/resume`, and every `turn/start`, must name a thread whose
 //! policy this broker actually proved. The store this replaces bound a thread id from **bare
@@ -33,7 +32,7 @@
 //! never seed one, so the observer ignores every method-bearing frame outright; "confirm"
 //! is a no-op by construction, not a code path.
 //!
-//! ## Correlation is CONNECTION-scoped, not role-scoped (round-2 P1)
+//! ## Correlation is CONNECTION-scoped, not role-scoped
 //!
 //! The pending key used to be `(Role, RequestId)`. Two connections of the SAME role
 //! collide under that key — and the TUI's `/resume` picker really does open a second TUI
@@ -62,15 +61,15 @@
 //! are dropped when it disconnects — its ids can only ever be replayed on its own (now
 //! dead) s2c stream, so retaining them past the connection buys nothing.
 //!
-//! ## Correlation needs EVERY forwarded id, not just the creation's (round-3 P1)
+//! ## Correlation needs EVERY forwarded id, not just the creation's
 //!
-//! Round 2 registered only `thread/start` ids. That left a cross-method collision open: a
-//! *different* forwarded request on the same connection could carry the SAME id as the
+//! Registering only `thread/start` ids leaves a cross-method collision open: a
+//! *different* forwarded request on the same connection can carry the SAME id as the
 //! pending creation, and then
 //!
 //! * a method-less response to THAT request — a perfectly ordinary answer the client
-//!   solicited — matched the pending entry and could install a binding, or
-//! * an ordinary `error` answering that unrelated request re-opened the creation slot
+//!   solicited — matches the pending entry and can install a binding, or
+//! * an ordinary `error` answering that unrelated request re-opens the creation slot
 //!   mid-flight.
 //!
 //! Both are closed by widening the ledger from creation-only to
@@ -94,7 +93,7 @@
 //!    outstanding request still holds that id. The first two make the collision unusable;
 //!    the third is belt-and-braces (rule 1 already makes a second holder unrepresentable,
 //!    and `outstanding` is a map keyed BY the id, so it can hold at most one entry per id).
-//! 4. **The RELEASE is validated, not assumed** (round-4 P1): only a frame the header scan
+//! 4. **The RELEASE is validated, not assumed**: only a frame the header scan
 //!    proves is a response — exclusive `result`, or an exclusive well-formed JSON-RPC error
 //!    object — may remove an entry. See [`SessionThreads::observe_server_frame`].
 //!
@@ -112,11 +111,11 @@
 //!   [`ThreadBinding::try_admit_request`] the `creation != Creation::Open` test runs BEFORE
 //!   the outstanding-reuse test, so a second `thread/start` — same id or a fresh one — is
 //!   refused as [`IdAdmission::CreationSlotClosed`] and never reaches the reuse path. The
-//!   reuse path is therefore not what enforces single-creation; the slot is (P3). Binding is
+//!   reuse path is therefore not what enforces single-creation; the slot is. Binding is
 //!   unaffected, and the client gets a synthetic policy error it can act on rather than a
 //!   silent drop.
 //!
-//! ## A client-chosen id is length-capped before it is stored (round-3 P6)
+//! ## A client-chosen id is length-capped before it is stored
 //!
 //! Tombstones, reservations and the outstanding ledger all store client-chosen id bytes. In
 //! addition to the per-set entry caps, a single id is capped at
@@ -124,7 +123,7 @@
 //! `"startup-thread-start-9747f04e-f467-466f-96dd-b6872bd77820"` (a fixed prefix plus a
 //! UUID). An over-long id is refused and counted, and is NEVER stored.
 //!
-//! ## The creation state machine (round-2 P2)
+//! ## The creation state machine
 //!
 //! The old code dropped the pending on ANY correlated response and re-opened creation on
 //! any `error`. That is too loose: a partial result is not evidence that the server failed.
@@ -148,18 +147,18 @@
 //! server's own thread list — is what owns the richer "find out what actually happened"
 //! path; this module deliberately does not guess.
 //!
-//! ## Pending is claimed around a PROVEN send (round-2 P3)
+//! ## Pending is claimed around a PROVEN send
 //!
 //! `try_admit_request` claims the slot inside `classify`, before any byte moves. If the
 //! relay's upstream write then FAILS the request never reached the server, so the claim is
 //! rolled back with [`ThreadBinding::rollback_creation`] and creation re-opens (no
 //! tombstone: zero bytes went out, so nothing is ambiguous). If instead the owning
 //! connection **disconnects** while a creation is still pending,
-//! [`ThreadBinding::close_connection`] transitions it to the same `Closed` state as P2 —
-//! the request DID go out, so its fate is unknown. A pending is therefore never stranded
-//! "in flight" forever, and never reopened without evidence.
+//! [`ThreadBinding::close_connection`] transitions it to the same indeterminate `Closed`
+//! state — the request DID go out, so its fate is unknown. A pending is therefore never
+//! stranded "in flight" forever, and never reopened without evidence.
 //!
-//! ## Single-ACTIVE-thread session invariant (P3, as evolved by 2e-4c)
+//! ## Single-ACTIVE-thread session invariant (as evolved by 2e-4c)
 //!
 //! The rule used to be "one thread per session": `try_admit_request` refused a
 //! `thread/start` unless the creation state was [`Creation::Open`]. That made a real user
@@ -190,7 +189,7 @@
 //! NOT match that shape — a differing ownership field, a `cwd` naming another workspace, a
 //! second creation while one is pending — still refuses, unchanged.
 //!
-//! ### The linearization that IS here, and the fence that is not (round-1 P1/P2)
+//! ### The linearization that IS here, and the fence that is not
 //!
 //! D2 is one design covering two different actuations, and 2e-4c splits it along the line
 //! of what can actually be produced today.
@@ -223,7 +222,7 @@
 //! capability exists to scope. Today the registry has no producer, so there is nothing to
 //! revoke and nothing to test.
 //!
-//! ## The workspace anchor is COORDINATOR-owned (round-2 P4)
+//! ## The workspace anchor is COORDINATOR-owned
 //!
 //! `cwd`/`roots` are still read from the creation **RESPONSE** (the measured reason is
 //! below), but a response is only the server echoing back what the client asked for — so on
@@ -318,7 +317,7 @@ pub const MAX_TRACKED_CONNECTIONS: usize = 1024;
 /// this bounds *concurrently unanswered* requests, not lifetime requests.
 pub const MAX_OUTSTANDING_REQUESTS: usize = 256;
 
-/// The strict per-id byte cap for any client-chosen request id this broker STORES (P6).
+/// The strict per-id byte cap for any client-chosen request id this broker STORES.
 ///
 /// MEASURED on the real wire: request ids run 1–59 bytes, the longest being
 /// `"startup-thread-start-9747f04e-f467-466f-96dd-b6872bd77820"` (a fixed prefix plus a
@@ -351,7 +350,7 @@ pub enum IdAdmission {
     /// id, which makes its own responses uncorrelatable. Protocol-hostile — the frame is
     /// dropped (zero upstream bytes), the leg stays open, and the event is counted.
     ReusedInFlight,
-    /// The id is longer than [`MAX_REQUEST_ID_BYTES`] and is therefore never stored (P6).
+    /// The id is longer than [`MAX_REQUEST_ID_BYTES`] and is therefore never stored.
     /// Dropped and counted, exactly like [`Self::ReusedInFlight`].
     Oversized,
     /// This connection's outstanding ledger or the tracked-connection table is full.
@@ -378,7 +377,8 @@ pub enum IdAdmission {
     /// * `CreationSlotClosed` — a POLICY state of the one thing a session may do once. It is
     ///   **answered** with a synthetic policy error carrying
     ///   [`ThreadBinding::creation_closed_reason`], and is **not** counted as a hostile event:
-    ///   refusing a second creation is the normal, expected outcome of P3, not an attack.
+    ///   refusing a second creation is the normal, expected outcome of the
+    ///   one-creation-at-a-time rule, not an attack.
     ///
     /// `MAX_CONN_REQUEST_IDS` is the case where a capacity condition is reported as
     /// `CreationSlotClosed` rather than `AtCapacity`, and that is on purpose: it can only be
@@ -402,8 +402,7 @@ pub enum IdAdmission {
 /// thread holding NOTHING, and the second sails through; that is a deterministic
 /// failure, not an unlucky one.
 ///
-/// **What this does and does not catch, measured** (round-3 finding 7, corrected in
-/// round 4 finding 7).
+/// **What this does and does not catch, measured.**
 ///
 /// [`park`] takes a borrow of the guarded [`Binding`], so it cannot be called without
 /// the guard — that much is enforced by the compiler and stands. **The stronger claim
@@ -436,7 +435,7 @@ pub enum IdAdmission {
 /// in-process (a thread stopped inside the section blocks the competitor), and the race
 /// detector covers the window the latch structurally cannot see.
 ///
-/// **Keyed by the BINDING under test as well as by [`ConnId`]** (round-3 finding 8).
+/// **Keyed by the BINDING under test as well as by [`ConnId`].**
 /// The latch is one process-global object and the broker's tests run in parallel, so
 /// a key of `ConnId` alone is not a key at all: `ConnId(1)` is the first connection
 /// of *every* test, `TURN` serializes only arming, and an unrelated binding's
@@ -559,13 +558,13 @@ pub(crate) mod prefix_latch {
     /// Called from inside the critical section, **while the session guard is held**.
     ///
     /// The `_held` parameter is that sentence, enforced by the compiler rather than
-    /// asserted in a comment (round-3 finding 7): it borrows the guarded [`Binding`],
+    /// asserted in a comment: it borrows the guarded [`Binding`],
     /// so this cannot be called from anywhere the guard is not held. A form that
     /// parked with no guard at all parks holding NOTHING — a deterministic failure,
     /// not an unlucky one — or does not compile.
     ///
-    /// **It does NOT prevent the section being split around this call** (round-4
-    /// finding 7). Non-lexical lifetimes end the borrow when `park` returns, so
+    /// **It does NOT prevent the section being split around this call.**
+    /// Non-lexical lifetimes end the borrow when `park` returns, so
     /// `park(…, g); drop(guard); re-lock;` compiles — measured. See the module doc on
     /// [`prefix_latch`] for which instrument covers that mutant and which cannot.
     pub(super) fn park(key: u64, conn: ConnId, _held: &Binding) {
@@ -588,7 +587,7 @@ pub(crate) mod prefix_latch {
 
     /// Record that the armed binding's critical section was reached. Any binding but
     /// the armed one is ignored — which is what stops a parallel test's traffic from
-    /// being counted as this one's evidence (round-3 finding 8).
+    /// being counted as this one's evidence.
     pub(super) fn note_section_entry(key: u64) {
         let mut s = state();
         if s.armed.map(|(k, _)| k) != Some(key) {
@@ -612,7 +611,7 @@ pub enum PrefixAdmission {
     /// ledger, and the creation slot is now CLAIMED for this connection. Forward.
     Reserved,
     /// It names a thread this session RETIRED. Its id is on the ledger and it forwards like
-    /// any other request, but it begins no switch and reserves nothing (round-3 P5).
+    /// any other request, but it begins no switch and reserves nothing.
     NoSwitch,
     /// The switch behind it could not be admitted, and the reason is rendered into the
     /// refusal's audit note. **Zero upstream bytes** — which is the whole point: the
@@ -668,7 +667,7 @@ pub trait ThreadBinding: Send + Sync {
     /// Atomically admit ONE request the classifier has decided to forward: record its id as
     /// **outstanding** on `conn` together with the request's ACTUAL `method`, and — when
     /// that method is [`CREATION_METHOD`] — claim the session's single creation slot in the
-    /// same step (round-3 P1; round-2 P3).
+    /// same step.
     ///
     /// [`IdAdmission::Admitted`] ⇒ forward. Every other verdict means **zero upstream
     /// bytes**: `CreationSlotClosed` is answered with a synthetic policy error (it is a
@@ -694,8 +693,7 @@ pub trait ThreadBinding: Send + Sync {
     /// here would break the fanout.
     fn try_admit_request(&self, conn: ConnId, id: &RequestId, method: &str) -> IdAdmission;
 
-    /// **Head-check, workspace-check, id-ledger and busy-mark, as ONE atomic decision**
-    /// (round-1 P1).
+    /// **Head-check, workspace-check, id-ledger and busy-mark, as ONE atomic decision.**
     ///
     /// Before this existed the three were separate lock acquisitions from
     /// `crate::refusal`: read the head, read the workspace, then record the id. A switch
@@ -724,21 +722,21 @@ pub trait ThreadBinding: Send + Sync {
     fn release_turn(&self, _conn: ConnId, _id: &RequestId) {}
 
     /// **Admit ONE `thread/unsubscribe` — check and claim in a SINGLE critical section**
-    /// (A16.1; round-1 P4, round-2 P3 and round-3 P4/P5, now inseparable).
+    /// (A16.1).
     ///
     /// It answers all three questions a prefix raises and takes the claim, under one held
     /// `MutexGuard`, in this order:
     ///
-    /// 1. **Is it a switch prefix?** Only an unsubscribe naming the ACTIVE head is
-    ///    (round-3 P5). Anything else is a retired thread's cleanup: ledger-admitted,
-    ///    forwarded, reserving nothing.
+    /// 1. **Is it a switch prefix?** Only an unsubscribe naming the ACTIVE head is.
+    ///    Anything else is a retired thread's cleanup: ledger-admitted, forwarded,
+    ///    reserving nothing.
     /// 2. **Would the `thread/start` behind it be admitted?** Every precondition, from the
     ///    single [`creation_preconditions`] definition — session state, the retirement cap,
     ///    active turns, and the per-connection creation-id arithmetic.
     /// 3. **May this connection claim the slot?** A live reservation held by ANOTHER
     ///    connection refuses: that connection's unsubscribe already went upstream, and a
     ///    claim it paid for on the wire may not be taken from it.
-    /// 4. **The id ledger**, then the claim — in that order (round-3 P4): a prefix the
+    /// 4. **The id ledger**, then the claim — in that order: a prefix the
     ///    ledger refuses sends zero bytes and must leave no reservation behind.
     ///
     /// # Why ONE section (A16.1)
@@ -749,7 +747,7 @@ pub trait ThreadBinding: Send + Sync {
     /// subscription, and then found the creation slot taken. And the check never consulted
     /// the reservation at all while the claim overwrote it unconditionally, so a second
     /// connection's prefix CLOBBERED a live claim with no thread interleaving whatsoever,
-    /// only frame ordering. Both end in round-2 P4's "unsubscribed, then refused" — the
+    /// only frame ordering. Both end in "unsubscribed, then refused" — the
     /// sequence the pre-check exists to make impossible.
     ///
     /// # Why a pre-check rather than a hold
@@ -779,8 +777,8 @@ pub trait ThreadBinding: Send + Sync {
     ///
     /// # The reservation
     ///
-    /// The claim this takes makes the prefix and the switch behind it ONE causal unit
-    /// (round-2 P3): while it is live, turns refuse ([`TurnAdmission::SwitchReserved`]) and
+    /// The claim this takes makes the prefix and the switch behind it ONE causal unit:
+    /// while it is live, turns refuse ([`TurnAdmission::SwitchReserved`]) and
     /// another connection's creation refuses. It is idempotent for the SAME connection — the
     /// measured `/new` sends the prefix twice, and the second frame must refresh rather than
     /// collide. It is consumed by that connection's next `thread/start`, released by its
@@ -795,7 +793,7 @@ pub trait ThreadBinding: Send + Sync {
 
     /// A `thread/resume` naming `thread` is being FORWARDED on `conn` under request `id`.
     ///
-    /// It does not clear the wedge (round-3 P6) — an attempt is not a subscription. The id
+    /// It does not clear the wedge — an attempt is not a subscription. The id
     /// is remembered, and the wedge clears only when that exact request is answered with a
     /// SUCCESS. A refused or errored resume subscribes nothing and must leave the
     /// connection wedged, or a client could lift it by asking and being told no.
@@ -829,8 +827,8 @@ pub trait ThreadBinding: Send + Sync {
         false
     }
 
-    /// The running counts of protocol-hostile id events (round-3 P1/P6). See
-    /// [`IdLedgerCounts`] for the failure-containment seam these feed.
+    /// The running counts of protocol-hostile id events. See [`IdLedgerCounts`] for the
+    /// failure-containment seam these feed.
     fn id_ledger_counts(&self) -> IdLedgerCounts {
         IdLedgerCounts::default()
     }
@@ -872,7 +870,7 @@ pub trait ThreadBinding: Send + Sync {
     }
 }
 
-/// How long a switch reservation stays valid without its `thread/start` (round-2 P3).
+/// How long a switch reservation stays valid without its `thread/start`.
 ///
 /// The measured `/new` sends `unsubscribe, unsubscribe, thread/start` back to back and
 /// awaits each response, so the whole prefix-to-start window is a few round trips on a unix
@@ -895,15 +893,14 @@ fn wedge(g: &mut Binding, conn: ConnId, thread: String) {
     g.unsubscribed.insert(conn, Wedge { thread, seq });
 }
 
-/// Expire a reservation whose TTL has passed — and WEDGE the connection that made it
-/// (round-3 P5).
+/// Expire a reservation whose TTL has passed — and WEDGE the connection that made it.
 ///
 /// Expiry is not "nothing happened". A reservation only exists because a
 /// `thread/unsubscribe` naming the ACTIVE head really went upstream, so that connection is
 /// provably no longer receiving the head's stream. If the `thread/start` it was holding the
 /// slot for never arrives, silently restoring its turn authorization would authorize turns
-/// nobody on that connection can observe — the same lie P4 closes on the errored-start
-/// path, reached by a different route.
+/// nobody on that connection can observe — the same lie the errored-start path closes,
+/// reached by a different route.
 ///
 /// So expiry hands the connection to the same wedge, cleared the same way: by a correlated,
 /// accepted `thread/resume`.
@@ -936,11 +933,11 @@ struct Wedge {
     seq: u64,
 }
 
-/// One connection's claim on the next thread creation (round-2 P3).
+/// One connection's claim on the next thread creation.
 #[derive(Debug, Clone)]
 struct SwitchReservation {
     conn: ConnId,
-    /// The ACTIVE head this connection unsubscribed from (round-3 P5). Only an unsubscribe
+    /// The ACTIVE head this connection unsubscribed from. Only an unsubscribe
     /// naming the head reserves — a retired-thread cleanup unsubscribes something the
     /// session is not on and fences nothing — and this is the thread the connection is
     /// wedged against if the reservation expires without a `thread/start` consuming it.
@@ -963,14 +960,14 @@ impl SwitchReservation {
 /// not recorded — which leaves the wedge in place, the fail-closed direction.
 pub const MAX_RESUBSCRIBE_ATTEMPTS: usize = 256;
 
-/// How many settled terminal ids are remembered for duplicate suppression (round-3 P2).
+/// How many settled terminal ids are remembered for duplicate suppression.
 ///
 /// One per turn, and only the recent ones matter: duplicates arrive inside one delivery
 /// fan-out, never tens of turns later. 64 is far past that while keeping the set finite in
 /// a session of any length.
 pub const MAX_CLEARED_TURNS: usize = 64;
 
-/// **Cap on concurrently admitted-but-unterminated `turn/start` requests** (round-2 P2).
+/// **Cap on concurrently admitted-but-unterminated `turn/start` requests.**
 ///
 /// The set is bounded by the same reasoning as every other ledger here: an entry is created
 /// by a client request, and an unanswered entry is cleared only by its own error response
@@ -984,7 +981,7 @@ pub const MAX_CLEARED_TURNS: usize = 64;
 /// flight" is something an operator can act on.
 pub const MAX_ACTIVE_TURNS: usize = 8;
 
-/// The strict byte cap on a thread id this broker STORES (round-1 P9).
+/// The strict byte cap on a thread id this broker STORES.
 ///
 /// MEASURED: every thread id on the wire is a lowercase UUID — `8-4-4-4-12` hex, exactly
 /// 36 bytes — and `crate::redact::thread_id` already relies on that grammar. 64 bytes is
@@ -1010,8 +1007,8 @@ pub const MAX_THREAD_ID_BYTES: usize = 64;
 /// operator can see and act on.
 pub const MAX_RETIRED_THREADS: usize = 64;
 
-/// The session's thread-creation slot, as an explicit state machine (round-2 P2), extended
-/// by 2e-4c so that a creation admitted while one thread is already bound is a **switch**.
+/// The session's thread-creation slot, as an explicit state machine, extended by 2e-4c so
+/// that a creation admitted while one thread is already bound is a **switch**.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Creation {
     /// No creation is admitted; the next fingerprint-clean `thread/start` may claim it.
@@ -1026,11 +1023,11 @@ enum Creation {
         conn: ConnId,
         id: RequestId,
         superseding: Option<VerifiedThread>,
-        /// **This creation consumed a switch reservation** (round-2 P3/P4) — i.e. its
+        /// **This creation consumed a switch reservation** — i.e. its
         /// `thread/unsubscribe` prefix really did go upstream, so the connection is no
         /// longer subscribed to the thread it is switching away from. If the creation then
         /// FAILS, that connection is left unsubscribed and must be wedged rather than
-        /// quietly handed its old head back (P4).
+        /// quietly handed its old head back.
         prefix_forwarded: bool,
     },
     /// A creation response was correlated and fully verified: the session's ACTIVE thread.
@@ -1044,7 +1041,7 @@ enum Creation {
     Closed(&'static str),
 }
 
-/// **The turn/switch linearization state** (round-1 P1).
+/// **The turn/switch linearization state.**
 ///
 /// # What it is for
 ///
@@ -1087,10 +1084,9 @@ struct TurnActivity {
     /// `(connection, request id)` — never by turn id, because at admission time the turn
     /// does not exist yet.
     ///
-    /// **A key may hold at most one LIVE entry** (round-3 P1). See
-    /// [`TurnActivity::holds`].
+    /// **A key may hold at most one LIVE entry.** See [`TurnActivity::holds`].
     admitted: HashMap<(ConnId, RequestId), TurnEntry>,
-    /// Turn ids whose terminal this broker has already acted on (round-3 P2).
+    /// Turn ids whose terminal this broker has already acted on.
     ///
     /// A terminal is delivered to every subscribed connection, and this broker observes
     /// every leg — so it sees the SAME terminal more than once as a matter of course. Only
@@ -1100,7 +1096,7 @@ struct TurnActivity {
     cleared: TerminalEpochs,
 }
 
-/// The bounded memory of terminals already acted on (round-3 P2).
+/// The bounded memory of terminals already acted on.
 ///
 /// Bounded for the same reason as every other ledger here: the ids are server-supplied and
 /// a long session produces one per turn. Eviction is oldest-first, and the consequence of
@@ -1138,12 +1134,12 @@ impl TerminalEpochs {
     }
 }
 
-/// Where one admitted `turn/start` stands (round-2 P1).
+/// Where one admitted `turn/start` stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TurnEntry {
     /// Admitted, and its response has NOT been seen. The server has not told us whether
     /// this request became a turn, joined one, or did nothing — so no turn terminal can
-    /// speak for it. **This is the state round-2 P1 exists to protect.**
+    /// speak for it. **This is the state the terminal rule exists to protect.**
     Unanswered,
     /// Its `turn/start` was answered. `turn` is `result.turn.id` when the response carried
     /// a readable one (D12: for an implicit steer this may be a PHANTOM id that never
@@ -1160,7 +1156,7 @@ impl TurnActivity {
         self.admitted.len()
     }
 
-    /// **Does this `(conn, id)` already hold a live entry?** (round-3 P1.)
+    /// **Does this `(conn, id)` already hold a live entry?**
     ///
     /// The defect this closes: a `turn/start` response DRAINS its outstanding-ledger entry,
     /// so the id becomes reusable — and a second `turn/start` under that same id would
@@ -1197,7 +1193,7 @@ impl TurnActivity {
     }
 
     /// **A turn TERMINAL was observed for `thread`: clear the ANSWERED entries, and only
-    /// those, and only ONCE per terminal** (round-2 P1, round-3 P2).
+    /// those, and only ONCE per terminal.**
     ///
     /// # Why "answered" is the dividing line
     ///
@@ -1213,7 +1209,7 @@ impl TurnActivity {
     /// this terminal cannot be about it, and it survives. It is cleared only by its OWN
     /// error response.
     ///
-    /// # Why it must be idempotent per terminal (round-3 P2)
+    /// # Why it must be idempotent per terminal
     ///
     /// A terminal reaches every subscribed connection and this broker watches every leg, so
     /// it sees the same terminal repeatedly by design. Without the epoch gate, the second
@@ -1238,7 +1234,7 @@ impl TurnActivity {
         self.forget_thread_if_idle();
     }
 
-    /// **The owning connection went away — which is NOT a turn terminal** (round-3 P3).
+    /// **The owning connection went away — which is NOT a turn terminal.**
     ///
     /// Only UNANSWERED entries release. An answered `turn/start` reached the server and the
     /// turn it belongs to keeps running whether or not this leg is there to watch it (A15:
@@ -1263,7 +1259,7 @@ impl TurnActivity {
     }
 }
 
-/// The verdict of the ATOMIC turn admission (round-1 P1).
+/// The verdict of the ATOMIC turn admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnAdmission {
     /// Head-checked, workspace-checked, id-ledgered and marked busy — all under one lock.
@@ -1275,14 +1271,14 @@ pub enum TurnAdmission {
     /// The id ledger refused it; carries the ledger's own verdict so the caller can keep
     /// the existing drop/refuse/count distinctions.
     Ledger(IdAdmission),
-    /// A switch has been RESERVED on some connection (round-2 P3): its `thread/unsubscribe`
+    /// A switch has been RESERVED on some connection: its `thread/unsubscribe`
     /// prefix has already gone upstream and its `thread/start` is expected next. A turn
     /// admitted now would be authorized against a head that is about to move.
     SwitchReserved,
-    /// Too many turns are admitted and unterminated on this session (round-2 P2).
+    /// Too many turns are admitted and unterminated on this session.
     TooManyActiveTurns,
-    /// **This CONNECTION unsubscribed itself from the thread and never re-subscribed**
-    /// (round-2 P4). Its `thread/unsubscribe` prefix forwarded and the switch behind it
+    /// **This CONNECTION unsubscribed itself from the thread and never re-subscribed.**
+    /// Its `thread/unsubscribe` prefix forwarded and the switch behind it
     /// then failed at the server, so the head was restored but this connection is no longer
     /// receiving the thread's stream. Authorizing its turns would produce turns nobody on
     /// that connection can observe.
@@ -1294,7 +1290,7 @@ pub enum TurnAdmission {
 #[derive(Debug, Default)]
 struct ConnIds {
     /// **Every** id forwarded upstream on this connection and not yet answered, mapped to
-    /// the ACTUAL method of the request that carries it (round-3 P1). An id already in this
+    /// the ACTUAL method of the request that carries it. An id already in this
     /// map cannot be reused; a response removes its entry.
     ///
     /// Storing the real method — rather than a bare "is this the creation?" flag — is what
@@ -1333,7 +1329,7 @@ impl ConnIds {
 #[derive(Debug)]
 struct Binding {
     creation: Creation,
-    /// **Turn/switch linearization state** (round-1 P1): the `turn/start` requests this
+    /// **Turn/switch linearization state**: the `turn/start` requests this
     /// broker admitted for the active head whose turn has not been observed to terminate.
     ///
     /// While this is non-empty a switch is REFUSED, so a `thread/start` can never be
@@ -1350,20 +1346,20 @@ struct Binding {
     /// session created with `dynamicTools: null` — one where the model was handed no tools
     /// at all — would still answer a tool call the app-server sent.
     tool_bundle_admitted: bool,
-    /// **A switch reserved by one connection** (round-2 P3). Held from the moment its
+    /// **A switch reserved by one connection.** Held from the moment its
     /// `thread/unsubscribe` prefix is admitted until its `thread/start` is decided, the
     /// connection closes, or [`SWITCH_RESERVATION_TTL`] elapses. While it is held, a turn
     /// or a competing creation is refused: the prefix has already had a wire effect, so the
     /// switch behind it must not lose a race it already started.
     switch_reservation: Option<SwitchReservation>,
-    /// **Connections that unsubscribed themselves from a thread and have not re-subscribed**
-    /// (round-2 P4). See [`TurnAdmission::ConnectionUnsubscribed`].
+    /// **Connections that unsubscribed themselves from a thread and have not
+    /// re-subscribed.** See [`TurnAdmission::ConnectionUnsubscribed`].
     unsubscribed: HashMap<ConnId, Wedge>,
     /// Monotonic stamp for wedge slots (closing S5). Never reused, so "newer" is a total
     /// order rather than a guess about arrival.
     wedge_seq: u64,
-    /// `thread/resume` requests forwarded by a WEDGED connection, by `(conn, request id)`
-    /// (round-3 P6). The wedge lifts when one of these is answered with a success; an
+    /// `thread/resume` requests forwarded by a WEDGED connection, by `(conn, request id)`.
+    /// The wedge lifts when one of these is answered with a success; an
     /// error leaves it in place.
     resubscribing: HashMap<(ConnId, RequestId), u64>,
     /// Threads this session bound and later switched AWAY from, oldest first (2e-4c).
@@ -1375,9 +1371,8 @@ struct Binding {
     /// resume of a switched-away thread with its own full populated history, while the TUI
     /// runs every subsequent turn on the new one.
     ///
-    /// Bounded by [`MAX_RETIRED_THREADS`] entries and [`MAX_THREAD_ID_BYTES`] per entry
-    /// (round-1 P9); the count cap refuses a further switch rather than evicting (see that
-    /// constant).
+    /// Bounded by [`MAX_RETIRED_THREADS`] entries and [`MAX_THREAD_ID_BYTES`] per entry;
+    /// the count cap refuses a further switch rather than evicting (see that constant).
     ///
     /// **Ids only, deliberately.** A retired thread is consulted by exactly one predicate —
     /// [`ThreadBinding::is_session_thread`], which scopes `thread/resume` and
@@ -1400,7 +1395,7 @@ pub struct SessionThreads {
     /// header). Compared by **exact string equality** against a creation response's `cwd`;
     /// this crate performs no path normalization of its own.
     launch_cwd: Arc<str>,
-    /// Identifies THIS store to the A16.1 test latch (round-3 finding 8). The latch
+    /// Identifies THIS store to the A16.1 test latch. The latch
     /// is process-global and the tests run in parallel, so it has to be able to tell
     /// one binding's admissions from another's; `ConnId` cannot, because every test
     /// starts at `ConnId(1)`.
@@ -1410,8 +1405,8 @@ pub struct SessionThreads {
 
 /// The next distinct [`SessionThreads::latch_key`].
 ///
-/// **The previous note here was wrong, and is corrected rather than quietly deleted**
-/// (round-4 finding 9). It said this had to be a free function because a `static`
+/// **The previous note here was wrong, and is corrected rather than quietly deleted.**
+/// It said this had to be a free function because a `static`
 /// inside the generic `SessionThreads::new` would be "monomorphized once per argument
 /// type", giving `new(&str)` and `new(String)` separate counters that both start at 1
 /// and hand two unrelated stores the same key. That is not how Rust behaves. A `static`
@@ -1431,7 +1426,7 @@ pub struct SessionThreads {
 /// ```
 ///
 /// So the "4 where 0 was asserted" cross-talk that note credits to the placement was
-/// really the defect round-3 finding 8 named: a latch keyed by [`ConnId`] alone, where
+/// really a different defect: a latch keyed by [`ConnId`] alone, where
 /// every test's first connection is `ConnId(1)`. That is fixed by the `latch_key`
 /// field, and the fix does not depend on where this counter lives — the isolation test
 /// next door constructs both bindings through the same `&str` instantiation, so it
@@ -1439,8 +1434,8 @@ pub struct SessionThreads {
 ///
 /// The module-scope counter STAYS. It is correct, and one counter at module scope is
 /// the clearer statement of "one namespace" than a hidden static inside a constructor.
-/// But it is a legibility choice, not the load-bearing part of finding 8's fix, and it
-/// is recorded as one so a later reader does not defend it on a false premise.
+/// But it is a legibility choice, not the load-bearing part of the `latch_key` fix, and
+/// it is recorded as one so a later reader does not defend it on a false premise.
 #[cfg(test)]
 fn next_latch_key() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1482,7 +1477,7 @@ impl SessionThreads {
     /// Every acquisition of `inner` goes through here, and that is the point: the
     /// A16.1 latch has to be able to say that a competing request REACHED this
     /// binding's section and was held there, as opposed to never having been
-    /// scheduled or having been refused somewhere upstream (round-3 finding 7).
+    /// scheduled or having been refused somewhere upstream.
     /// Instrumenting one entry point — `try_admit_request` — was not enough and was
     /// measured not to be: a competing `thread/start` blocks on whichever of these
     /// sites its path touches first, which is not always that one, so the counter sat
@@ -1497,16 +1492,17 @@ impl SessionThreads {
 
     /// Does the store hold a per-connection id ledger for `conn`?
     ///
-    /// The direct witness M10's capacity test needs: it distinguishes "the connection was
-    /// tracked" from "the connection was refused before a ledger was allocated", which is
-    /// what proves an over-capacity or over-long-id refusal stores nothing.
+    /// The direct witness the tracked-connection capacity test needs: it distinguishes
+    /// "the connection was tracked" from "the connection was refused before a ledger was
+    /// allocated", which is what proves an over-capacity or over-long-id refusal stores
+    /// nothing.
     #[cfg(test)]
     pub(crate) fn has_tracked_connection(&self, conn: ConnId) -> bool {
         self.enter().conns.contains_key(&conn)
     }
 
     /// Observe one server→client frame **on the connection with `conn`** and, if it is the
-    /// correlated response to the pending creation, run the P2 state machine over it.
+    /// correlated response to the pending creation, run the creation state machine over it.
     ///
     /// ## Only a correlated RESPONSE can bind
     ///
@@ -1517,8 +1513,8 @@ impl SessionThreads {
     ///
     /// ## Why cwd/roots come from the RESPONSE (measured correction)
     ///
-    /// The 2e-4a review asked for "the `thread/start`'s cwd + roots". Measured against a
-    /// real codex 0.147 `--remote` TUI, the `thread/start` REQUEST sends `"cwd": null`
+    /// The obvious source would be the `thread/start`'s own cwd + roots. Measured against
+    /// a real codex 0.147 `--remote` TUI, the `thread/start` REQUEST sends `"cwd": null`
     /// while the following `turn/start` sends a concrete path, so binding from the request
     /// would refuse **every** real turn. The creation RESPONSE carries the SERVER-RESOLVED
     /// values, and those compare equal to the turn's:
@@ -1530,8 +1526,8 @@ impl SessionThreads {
     /// So the response is the only sound source, and it is also the one this broker can
     /// correlate to an admission. What the response canNOT supply is *authority* — the
     /// server is echoing the client's own ask — so BOTH workspace fields are additionally
-    /// required to match the coordinator-owned launch cwd: `cwd` equal to it (round-2 P4,
-    /// module header) and `runtimeWorkspaceRoots` equal to `[it]` (A10 follow-on, 2e-7c).
+    /// required to match the coordinator-owned launch cwd: `cwd` equal to it (module
+    /// header) and `runtimeWorkspaceRoots` equal to `[it]` (A10 follow-on, 2e-7c).
     ///
     /// The echo argument applies to `runtimeWorkspaceRoots` even more directly than to
     /// `cwd`, which is why leaving it shape-checked was the hole 2e-7c closes: MEASURED, the
@@ -1542,8 +1538,8 @@ impl SessionThreads {
     ///
     /// ## Cheap guard
     ///
-    /// Round-3 P1 makes every response interesting (it has to release its outstanding id),
-    /// so the round-2 "is a creation pending?" guard is no longer sufficient on its own.
+    /// Every response is interesting, because each has to release its outstanding id, so a
+    /// bare "is a creation pending?" guard is not sufficient on its own.
     /// The cheap step is instead a **top-level header scan**
     /// ([`crate::message::scan_frame_header`]): it walks the frame once and skips every
     /// member that is not `id`/`method` with `IgnoredAny`, so a multi-MB `app/list/updated`
@@ -1556,7 +1552,7 @@ impl SessionThreads {
     /// binds nothing (fail closed). The header scan applies the same discipline to the
     /// top-level members it reads, so an ambiguous header releases nothing either.
     ///
-    /// ## The DRAIN is validated, not assumed (round-4 P1)
+    /// ## The DRAIN is validated, not assumed
     ///
     /// Releasing an outstanding id is not free: a released id is claimable again, and the
     /// claimant may be a `thread/start`. So an id is released ONLY by a frame the header scan
@@ -1578,7 +1574,7 @@ impl SessionThreads {
         // Method-bearing ⇒ a notification or a server→client request, never the answer to a
         // forwarded request. `thread/started`/`thread/resumed` land here and may never seed
         // a binding — but ONE method-bearing frame now has an effect: a turn TERMINAL
-        // releases the linearization's busy mark (round-1 P1). It is read out of the raw
+        // releases the linearization's busy mark. It is read out of the raw
         // bytes and only ever CLEARS state, so it can neither bind a thread nor authorize
         // anything.
         if header.has_method {
@@ -1606,7 +1602,7 @@ impl SessionThreads {
             // nothing, so it is safe on any well-formed response — including an `error`,
             // which is exactly how a real client's failed `thread/resume` is answered.
             //
-            // ROUND-4 P1 — DRAIN VALIDATION. The release is gated on the frame having been
+            // DRAIN VALIDATION. The release is gated on the frame having been
             // PROVEN a response by the header scan (exactly one of `result`/`error`, and for
             // `error` a structurally valid JSON-RPC error object). Without this gate a bare
             // method-less `{"id":X}` — which proves nothing — drained X, and that is a
@@ -1617,7 +1613,7 @@ impl SessionThreads {
             // `thread/start` is still in flight upstream and may already have created a
             // thread. An unprovable frame therefore releases NOTHING.
             if header.response.is_response() {
-                // **An ERRORED `turn/start` releases its busy mark** (round-1 P1). The turn
+                // **An ERRORED `turn/start` releases its busy mark.** The turn
                 // provably never started, so no terminal will ever arrive for it, and a
                 // mark nothing can clear would wedge the session against switching for
                 // ever. Scoped to the entry this response actually releases, so an error
@@ -1631,12 +1627,12 @@ impl SessionThreads {
                 if let Some(slots) = g.conns.get_mut(&conn) {
                     slots.outstanding.remove(&id);
                 }
-                // **A correlated ACCEPTED resume lifts the wedge** (round-3 P6). Only a
+                // **A correlated ACCEPTED resume lifts the wedge.** Only a
                 // success: an errored or policy-refused resume subscribes nothing, and a
                 // client must not be able to lift its own wedge by asking and being told no.
                 if let Some(stamp) = g.resubscribing.remove(&(conn, id.clone())) {
                     // Only an ACCEPTED answer to the attempt that named THIS wedge lifts it
-                    // (round-3 P6, closing S5): a stale answer stamped against an older
+                    // (closing S5): a stale answer stamped against an older
                     // wedge cannot clear the newer one that replaced it.
                     if matches!(header.response, crate::message::ResponseKind::Result)
                         && g.unsubscribed.get(&conn).is_some_and(|w| w.seq == stamp)
@@ -1649,7 +1645,7 @@ impl SessionThreads {
                         // Provably never started: no terminal will ever speak for it.
                         g.active_turns.release(conn, &id);
                     } else {
-                        // **ANSWERED** (round-2 P1). From here the entry belongs to the
+                        // **ANSWERED.** From here the entry belongs to the
                         // server's turn epoch and the next terminal on its thread clears
                         // it. The turn id is recorded when the response carries a readable
                         // one — for the audit trail and the logs, NOT as the terminal's
@@ -1672,7 +1668,7 @@ impl SessionThreads {
             return;
         }
 
-        // A CREATION response must satisfy all three conditions (round-3 P1).
+        // A CREATION response must satisfy all three conditions.
         let slots = g.conns.entry(conn).or_default();
         // (a) the id matches the pending creation — established above;
         // (b) the outstanding entry it releases is the CREATION request, not some other
@@ -1737,7 +1733,7 @@ impl SessionThreads {
             // refusing every subsequent turn on a thread that is still perfectly valid.
             //
             // **But if this switch's `thread/unsubscribe` prefix forwarded, this
-            // CONNECTION is no longer subscribed to that head** (round-2 P4), and handing
+            // CONNECTION is no longer subscribed to that head**, and handing
             // it back its authorization would be a quiet lie: its turns would run and it
             // would observe none of them. So the head restores for the SESSION while THIS
             // CONNECTION's turn authorization WEDGES, with a legible cause, until a real
@@ -1773,7 +1769,7 @@ impl SessionThreads {
     }
 }
 
-/// **Every precondition a `thread/start` must satisfy, in one place** (round-2 P3).
+/// **Every precondition a `thread/start` must satisfy, in one place.**
 ///
 /// The first form of `switch_admissibility` restated a SUBSET of `try_admit_request`'s
 /// rules, and the subset was wrong in a way that reintroduced the very defect the
@@ -1781,7 +1777,8 @@ impl SessionThreads {
 /// a connection that had already spent its [`MAX_CONN_REQUEST_IDS`] budget (63 switches and
 /// their tombstones) the check answered `Ok`, the `thread/unsubscribe` prefix forwarded and
 /// dropped the subscription, and the `thread/start` behind it was then refused
-/// `CreationSlotClosed`. Exactly the "unsubscribed, then refused" sequence P4 is about.
+/// `CreationSlotClosed`. Exactly the "unsubscribed, then refused" sequence the pre-check
+/// exists to make impossible.
 ///
 /// One function, two callers, no subset: `try_admit_request` consults it before claiming,
 /// and `switch_admissibility` consults it before letting a prefix forward. `id` is the
@@ -1820,7 +1817,7 @@ fn creation_preconditions(g: &Binding, conn: ConnId, for_prefix: bool) -> Result
         return Err("this broker is tracking as many connections as it may hold");
     }
     if let Some(slots) = g.conns.get(&conn) {
-        // **The 63-switch arithmetic** (round-2 P3): every settled creation leaves a
+        // **The 63-switch arithmetic**: every settled creation leaves a
         // permanent tombstone, so a connection's creation-id budget is finite. The first
         // form of this check omitted it, and that omission was the defect: on a connection
         // that had spent the budget the prefix forwarded and dropped the subscription, and
@@ -1844,7 +1841,7 @@ fn creation_preconditions(g: &Binding, conn: ConnId, for_prefix: bool) -> Result
 /// While a switch is `Pending` there is no `Bound` head at all, so
 /// [`ThreadBinding::sole_session_thread`] answers `None` — and an unsubscribe naming the
 /// thread being superseded would look indistinguishable from a retired thread's cleanup,
-/// quietly forwarding a second prefix into a switch already in flight (round-3 P5). This
+/// quietly forwarding a second prefix into a switch already in flight. This
 /// closes that window: during a switch the superseded thread still counts as the head for the
 /// purpose of "is this a switch prefix?", and the prefix is then refused by the
 /// one-creation-in-flight rule with zero bytes.
@@ -1873,7 +1870,7 @@ fn head_or_superseded_of(g: &Binding) -> Option<&str> {
 /// the slot. Two copies of this rule would be two chances for the check and the claim to
 /// disagree about what a prefix is.
 fn prefix_preconditions(g: &Binding, conn: ConnId, thread: &str) -> Result<(), &'static str> {
-    // **Only an unsubscribe naming the ACTIVE HEAD is a switch prefix** (round-3 P5).
+    // **Only an unsubscribe naming the ACTIVE HEAD is a switch prefix.**
     // A retired thread's cleanup unsubscribes something this session is not on: it begins no
     // switch, so reserving for it would fence turns and block other connections' creations
     // for a frame that changes nothing.
@@ -1885,8 +1882,8 @@ fn prefix_preconditions(g: &Binding, conn: ConnId, thread: &str) -> Result<(), &
                         it begins no switch",
             )
         }
-        // A switch is already in flight. The thread it is superseding still reads as the head
-        // (round-3 P5), so a SECOND prefix lands here and is refused with zero bytes rather
+        // A switch is already in flight. The thread it is superseding still reads as the
+        // head, so a SECOND prefix lands here and is refused with zero bytes rather
         // than quietly forwarding into an in-flight switch.
         Creation::Pending { .. } => return Err("a thread creation is already in flight"),
         // No head bound yet: the next `thread/start` is a FIRST creation, not a switch, and
@@ -1896,7 +1893,7 @@ fn prefix_preconditions(g: &Binding, conn: ConnId, thread: &str) -> Result<(), &
     creation_preconditions(g, conn, true)
 }
 
-/// Move a thread onto the retired list — id only, and never past the cap (round-1 P9).
+/// Move a thread onto the retired list — id only, and never past the cap.
 ///
 /// The cap cannot be exceeded here in practice: `try_admit_request` refuses a switch unless
 /// there is room for exactly this entry, and only one switch is ever in flight. The guard
@@ -1913,14 +1910,14 @@ fn retire(g: &mut Binding, thread: VerifiedThread) {
 }
 
 /// The per-connection id ledger's admission rules, shared by [`ThreadBinding::try_admit_request`]
-/// and [`ThreadBinding::try_admit_turn`] (round-1 P1).
+/// and [`ThreadBinding::try_admit_turn`].
 ///
 /// Factored out precisely because the turn path now needs them INSIDE the same critical
 /// section as the head-check. Two copies of these rules would be two chances for the two
 /// paths to disagree about what an id ledger admits.
 fn admit_id(g: &mut Binding, conn: ConnId, id: &RequestId, method: &str) -> IdAdmission {
     let is_creation = method == CREATION_METHOD;
-    // **P6's byte cap lives HERE, not at one call site** (round-2 P2). It used to sit in
+    // **The id byte cap lives HERE, not at one call site.** It used to sit in
     // `try_admit_request` above this call, so `try_admit_turn` — which calls this directly
     // — stored a client-chosen id of any length. Every path that can put an id into the
     // ledger now goes through the same cap.
@@ -1934,7 +1931,7 @@ fn admit_id(g: &mut Binding, conn: ConnId, id: &RequestId, method: &str) -> IdAd
         return IdAdmission::AtCapacity;
     }
     let slots = g.conns.entry(conn).or_default();
-    // Round-3 P1: the id must not ALREADY be outstanding on this connection.
+    // The id must not ALREADY be outstanding on this connection.
     if slots.outstanding.contains_key(id) {
         g.counts.reused_in_flight += 1;
         return IdAdmission::ReusedInFlight;
@@ -1956,7 +1953,7 @@ fn admit_id(g: &mut Binding, conn: ConnId, id: &RequestId, method: &str) -> IdAd
 }
 
 impl SessionThreads {
-    /// **Observe a turn TERMINAL and clear the linearization's busy mark** (round-1 P1).
+    /// **Observe a turn TERMINAL and clear the linearization's busy mark.**
     ///
     /// The terminal is `turn/completed`, whatever its `status` — A3 measured exactly one
     /// terminal per turn (7/7) and named the vocabulary `completed | interrupted | failed`.
@@ -1985,13 +1982,13 @@ impl SessionThreads {
         else {
             return;
         };
-        // The terminal's own turn id names the EPOCH it ends (round-3 P2). A terminal
+        // The terminal's own turn id names the EPOCH it ends. A terminal
         // without a readable one clears nothing: it cannot be told apart from its duplicate.
         let turn = v
             .pointer("/params/turn/id")
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty() && t.len() <= MAX_THREAD_ID_BYTES);
-        // Through `enter()` like every other acquisition (round-4 finding 7): this
+        // Through `enter()` like every other acquisition: this
         // was the last raw `inner.lock()` in the file, which made "all 17 sites are
         // counted" false and left one path a competitor could block on invisibly.
         self.enter().active_turns.terminal(thread, turn);
@@ -2008,10 +2005,10 @@ pub const TURN_METHOD: &str = "turn/start";
 /// outstanding request's method — and the two must not be able to drift apart.
 pub const UNSUBSCRIBE_METHOD: &str = "thread/unsubscribe";
 
-/// The P2 state machine over a correlated creation response. Pure, so the three arms are
+/// The state machine over a correlated creation response. Pure, so the three arms are
 /// unit-testable without a store.
 ///
-/// **Shared definition of "a valid response" (round-4 P1).** Arms 1 and 2 below are the same
+/// **Shared definition of "a valid response".** Arms 1 and 2 below are the same
 /// rule the header scan applies when it decides whether a frame may DRAIN an outstanding id
 /// — [`crate::message::ResponseKind::Error`] is arm 1's precondition and
 /// [`crate::message::ResponseKind::Result`] is arm 2's. The two must never drift apart, or an
@@ -2026,7 +2023,7 @@ fn classify_creation_response(v: &Value, launch_cwd: &str) -> Creation {
     //    one shape that proves the creation FAILED, so it — and only it — reopens creation,
     //    keeping a legitimately failed `thread/start` retryable.
     //
-    //    Round 3 P2 tightens "an object" to "a JSON-RPC error object". `{}`, `{"code":-1}`,
+    //    "An object" is tightened to "a JSON-RPC error object". `{}`, `{"code":-1}`,
     //    `{"message":"x"}`, a float code or a non-string message do not prove a failure —
     //    they are a frame this broker cannot read — and reopening creation on one would
     //    risk a SECOND thread. They fall through to the indeterminate arm below.
@@ -2054,7 +2051,7 @@ fn classify_creation_response(v: &Value, launch_cwd: &str) -> Creation {
     )
 }
 
-/// Is `error` structurally a JSON-RPC error object (round-3 P2)?
+/// Is `error` structurally a JSON-RPC error object?
 ///
 /// The JSON-RPC 2.0 error object is `{code: integer, message: string, data?: any}`. Both
 /// required members must be present AND well-typed: an INTEGER code (`-32601`, not `-1.5`
@@ -2066,7 +2063,7 @@ fn classify_creation_response(v: &Value, launch_cwd: &str) -> Creation {
 /// error proves nothing about whether the server created a thread, and the single-thread
 /// invariant makes "prove nothing" mean "do not reopen".
 ///
-/// It is ALSO — since round-4 P1 — the definition the ledger's DRAIN rule uses, reached from
+/// It is ALSO the definition the ledger's DRAIN rule uses, reached from
 /// the other side by the header scan's error probe (`crate::message::ResponseKind::Error`),
 /// which decides the same predicate on the raw bytes without building a `Value`. One
 /// definition, two call sites: `tests::response_kind_agrees_with_the_creation_state_machine`
@@ -2082,7 +2079,7 @@ fn is_jsonrpc_error_object(error: &Value) -> bool {
 
 /// The three proofs, fully type-checked, with the workspace anchored to the launch cwd.
 fn verify_creation_result(result: &Value, launch_cwd: &str) -> Option<VerifiedThread> {
-    // Round-1 P9: the id is server-supplied and is about to be STORED for the life of the
+    // The id is server-supplied and is about to be STORED for the life of the
     // session (as the head, and later on the retired list). Capped BEFORE it is copied, so
     // an over-long string never enters this process's long-lived state — it binds nothing,
     // which leaves the session headless and is the fail-closed direction.
@@ -2142,7 +2139,7 @@ impl ThreadBinding for SessionThreads {
         let mut guard = self.enter();
         let g = &mut *guard;
 
-        // SWITCH ADMISSION (2e-4c). Round-2 P3's rule was "one thread per session, and one
+        // SWITCH ADMISSION (2e-4c). The older rule was "one thread per session, and one
         // creation in flight at a time"; 2e-4c keeps the second half exactly and replaces
         // the first with "one ACTIVE thread at a time".
         //
@@ -2159,13 +2156,13 @@ impl ThreadBinding for SessionThreads {
         //                    restore it. `active` becomes retired only when the new
         //                    creation is CORRELATED AND VERIFIED, never at claim time.
         //   Pending{..}    — a switch is already in flight. ONE AT A TIME: refuse. This is
-        //                    round-2 P3's pipeline race, unchanged and still load-bearing —
+        //                    the pipeline race, unchanged and still load-bearing —
         //                    two creations in flight would let the second response silently
         //                    re-point the head.
         //   Closed(_)      — wedged-safe; refuse.
         if is_creation {
             expire_reservation(g);
-            // **A reservation held by ANOTHER connection wins** (round-2 P3). That
+            // **A reservation held by ANOTHER connection wins.** That
             // connection's `thread/unsubscribe` prefix has already had a wire effect, so
             // the switch behind it must not lose the slot to a creation that started later.
             if let Some(res) = &g.switch_reservation {
@@ -2178,7 +2175,7 @@ impl ThreadBinding for SessionThreads {
                 return IdAdmission::CreationSlotClosed;
             }
         }
-        // **THE LEDGER RUNS BEFORE THE RESERVATION IS CONSUMED** (round-3 P4). An oversized
+        // **THE LEDGER RUNS BEFORE THE RESERVATION IS CONSUMED.** An oversized
         // or reused creation id sends ZERO bytes, so it is not the switch the prefix was
         // holding the slot for and must not consume it. Ordering this the other way round
         // let a malformed creation quietly eat a reservation that a real unsubscribe had
@@ -2189,7 +2186,7 @@ impl ThreadBinding for SessionThreads {
                 if is_creation {
                     // The prefix DID land, and this creation will never consume it. The
                     // connection is provably unsubscribed from the head with no switch
-                    // behind it — exactly P4's errored-start situation, reached earlier.
+                    // behind it — exactly the errored-start situation, reached earlier.
                     if let Some(res) = g.switch_reservation.take() {
                         if res.conn == conn {
                             wedge(g, conn, res.thread);
@@ -2211,7 +2208,7 @@ impl ThreadBinding for SessionThreads {
                 }
                 None => false,
             };
-            // The clone happens only after every cheap refusal (P9).
+            // The clone happens only after every cheap refusal.
             let superseding = match &g.creation {
                 Creation::Bound(active) => Some(active.clone()),
                 _ => None,
@@ -2313,7 +2310,7 @@ impl ThreadBinding for SessionThreads {
                 ),
             };
         }
-        // 2b. **This connection unsubscribed itself and never came back** (round-2 P4).
+        // 2b. **This connection unsubscribed itself and never came back.**
         //     Its prefix forwarded and the switch behind it failed, so it is no longer
         //     receiving this thread's stream. Authorizing its turns would run turns nobody
         //     on that connection can see. Cleared by a real `thread/resume` (see
@@ -2326,14 +2323,14 @@ impl ThreadBinding for SessionThreads {
                 };
             }
         }
-        // 2c. **A switch is reserved** (round-2 P3): its prefix has already had a wire
+        // 2c. **A switch is reserved**: its prefix has already had a wire
         //     effect and its `thread/start` is expected next, so a turn admitted now would
         //     be authorized against a head that is about to move.
         expire_reservation(g);
         if g.switch_reservation.is_some() {
             return TurnAdmission::SwitchReserved;
         }
-        // 2d. **This id still holds a live turn entry** (round-3 P1). A `turn/start`
+        // 2d. **This id still holds a live turn entry.** A `turn/start`
         //     response drains the OUTSTANDING ledger, so the id becomes reusable there —
         //     but the turn it started may still be running, and admitting a second turn
         //     under the same id would overwrite that turn's only mark. Its error response
@@ -2348,7 +2345,7 @@ impl ThreadBinding for SessionThreads {
             g.counts.reused_in_flight += 1;
             return TurnAdmission::Ledger(IdAdmission::ReusedInFlight);
         }
-        // 2e. Cardinality (round-2 P2).
+        // 2e. Cardinality.
         if g.active_turns.len() >= MAX_ACTIVE_TURNS {
             return TurnAdmission::TooManyActiveTurns;
         }
@@ -2376,11 +2373,11 @@ impl ThreadBinding for SessionThreads {
 
         // 1. **Expire FIRST.** A reservation past `SWITCH_RESERVATION_TTL` is no longer a
         //    claim and must not hold the slot against a legitimate prefix. Expiry is not
-        //    "nothing happened", though — it WEDGES the connection that made it (round-3 P5),
+        //    "nothing happened", though — it WEDGES the connection that made it,
         //    because that connection's unsubscribe really did go upstream.
         expire_reservation(g);
 
-        // 2. **Is this a switch prefix at all?** (round-3 P5.) Anything but the active head
+        // 2. **Is this a switch prefix at all?** Anything but the active head
         //    is a retired thread's cleanup: it forwards, it takes a ledger slot like any
         //    other request, and it reserves NOTHING. Reserving for it would fence turns and
         //    block other connections' creations for a frame that changes nothing.
@@ -2432,7 +2429,7 @@ impl ThreadBinding for SessionThreads {
         #[cfg(test)]
         prefix_latch::park(self.latch_key, conn, g);
 
-        // 5. **The ledger runs BEFORE the claim** (round-3 P4). A prefix the ledger refuses
+        // 5. **The ledger runs BEFORE the claim.** A prefix the ledger refuses
         //    sends zero bytes, so it must leave no reservation behind — a reservation with no
         //    wire effect fences turns and blocks other connections for nothing.
         match admit_id(g, conn, id, UNSUBSCRIBE_METHOD) {
@@ -2489,7 +2486,7 @@ impl ThreadBinding for SessionThreads {
         g.switch_reservation = None;
         // A rolled-back SWITCH restores the head it was superseding: nothing reached the
         // server, so the old thread is still the one the session is on and turns must keep
-        // working. (2e-4c; the non-switch case is round-2 P3's original reopen.)
+        // working. (2e-4c; the non-switch case is the original reopen.)
         g.creation = match superseding {
             Some(old_active) => Creation::Bound(old_active),
             None => Creation::Open,
@@ -2505,8 +2502,8 @@ impl ThreadBinding for SessionThreads {
         } = &g.creation
         {
             if *c == conn {
-                // **A disconnected SWITCH still retires the head it superseded**
-                // (round-1 P3). The head is not RESTORED — unlike the rollback above, the
+                // **A disconnected SWITCH still retires the head it superseded.**
+                // The head is not RESTORED — unlike the rollback above, the
                 // request DID reach the server, so a thread may exist this broker cannot
                 // name and authorizing turns on the old head could authorize a turn
                 // against a thread nobody is on. But it must not be FORGOTTEN either: it
@@ -2631,7 +2628,7 @@ impl SessionThreads {
         prefix_preconditions(&self.enter(), conn, thread)
     }
 
-    /// Backdate the live switch reservation so its TTL has provably elapsed (round-2 P3).
+    /// Backdate the live switch reservation so its TTL has provably elapsed.
     ///
     /// Test-only, and the alternative was worse: the only other way to exercise the TTL is
     /// to sleep for [`SWITCH_RESERVATION_TTL`], which would put a ten-second sleep in the
@@ -2705,8 +2702,8 @@ mod tests {
         RequestId::Str(id.to_string())
     }
 
-    /// Admit a `thread/start` — round 2's `try_open_creation`, which round-3 P1 folded into
-    /// [`ThreadBinding::try_admit_request`] under [`CREATION_METHOD`].
+    /// Admit a `thread/start` through [`ThreadBinding::try_admit_request`] under
+    /// [`CREATION_METHOD`].
     fn open(s: &SessionThreads, conn: ConnId, id: &RequestId) -> bool {
         s.try_admit_request(conn, id, CREATION_METHOD) == IdAdmission::Admitted
     }
@@ -2731,7 +2728,7 @@ mod tests {
     }
 
     /// The `cwd` and `roots` a [`creation_response`] binds — what a turn must name to pass
-    /// the workspace half of the atomic admission (round-1 P1).
+    /// the workspace half of the atomic admission.
     fn cwd() -> Value {
         json!(LAUNCH_CWD)
     }
@@ -2740,25 +2737,25 @@ mod tests {
     }
 
     /// The `turn/start` RESPONSE, in the measured shape (`result.turn.id`). This is what
-    /// moves an admitted entry from `Unanswered` to `Answered` (round-2 P1).
+    /// moves an admitted entry from `Unanswered` to `Answered`.
     fn turn_started_response(id: &str, turn: &str) -> String {
         json!({"id": id, "result": {"turn": {"id": turn, "status": "inProgress"}}}).to_string()
     }
 
-    /// A `turn/completed` naming the epoch it ends (round-3 P2).
+    /// A `turn/completed` naming the epoch it ends.
     fn terminal(thread: &str, turn: &str, status: &str) -> String {
         json!({"method": "turn/completed",
                "params": {"threadId": thread, "turn": {"id": turn, "status": status}}})
         .to_string()
     }
 
-    /// A successful `thread/resume` answer — the shape that lifts a P4 wedge (round-3 P6).
+    /// A successful `thread/resume` answer — the shape that lifts an unsubscribe wedge.
     fn resume_ok(id: &str) -> String {
         json!({"id": id, "result": {"thread": {"id": "01a0"}}}).to_string()
     }
 
-    /// A structurally valid JSON-RPC error answer (round-3 P2: an INTEGER `code` AND a
-    /// STRING `message`).
+    /// A structurally valid JSON-RPC error answer (an INTEGER `code` AND a STRING
+    /// `message`).
     fn error_response(id: &str) -> String {
         json!({"id": id, "error": {"code": -1, "message": "boom"}}).to_string()
     }
@@ -2780,7 +2777,7 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".to_string()));
     }
 
-    // P1 ROOT FIX — receipt is not lineage.
+    // THE ROOT RULE — receipt is not lineage.
     #[test]
     fn a_bare_thread_started_binds_nothing() {
         let s = store();
@@ -2823,7 +2820,7 @@ mod tests {
         assert!(s.is_session_thread("01a0"));
     }
 
-    // ROUND-2 P1 — the real vulnerability: two connections of the SAME role. Connection B
+    // The real vulnerability: two connections of the SAME role. Connection B
     // answering with connection A's request id must install NOTHING.
     #[test]
     fn a_same_role_sibling_connection_cannot_satisfy_our_pending() {
@@ -2843,7 +2840,7 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".into()));
     }
 
-    // ROUND-3 P1 — a sibling connection's ERROR carrying our pending creation's id must not
+    // A sibling connection's ERROR carrying our pending creation's id must not
     // REOPEN creation either (the reopen path is the one that could produce a second thread).
     #[test]
     fn a_sibling_connections_error_for_our_pending_id_does_not_reopen_creation() {
@@ -2859,7 +2856,7 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".into()));
     }
 
-    // ROUND-2 P1 — tombstone: a replayed/duplicate response for a consumed id installs
+    // Tombstone: a replayed/duplicate response for a consumed id installs
     // nothing, even when creation has legitimately reopened in between.
     #[test]
     fn a_replayed_response_for_a_consumed_id_installs_nothing() {
@@ -2886,7 +2883,7 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".into()));
     }
 
-    // ROUND-2 P1 — tombstone, claim side: a consumed id may not be claimed again.
+    // Tombstone, claim side: a consumed id may not be claimed again.
     #[test]
     fn a_tombstoned_id_cannot_be_claimed_again() {
         let s = store();
@@ -2900,7 +2897,7 @@ mod tests {
         assert!(open(&s, A, &req("startup-2")));
     }
 
-    // O11 — RELABELLED. The `reserved` set is **defense-in-depth, not an independently
+    // The `reserved` set is **defense-in-depth, not an independently
     // provable rule**: with one session-wide creation slot, a second claim while one is
     // pending is ALREADY refused by `creation != Creation::Open`, and a non-creation request
     // reusing the id is ALREADY refused by the outstanding ledger. Deleting the
@@ -2921,7 +2918,7 @@ mod tests {
         assert!(open(&s, A, &req("dup")));
     }
 
-    // ROUND-2 P3 — a proven send failure rolls the claim back and re-opens creation.
+    // A proven send failure rolls the claim back and re-opens creation.
     #[test]
     fn a_rolled_back_claim_reopens_creation() {
         let s = store();
@@ -2938,7 +2935,7 @@ mod tests {
         assert!(!open(&s, A, &req("startup-3")), "still pending");
     }
 
-    // ROUND-3 P1 — a rollback releases the OUTSTANDING entry too, so the retried creation
+    // A rollback releases the OUTSTANDING entry too, so the retried creation
     // may legitimately reuse the very id whose bytes never left the broker.
     #[test]
     fn a_rolled_back_claim_releases_its_outstanding_id() {
@@ -2952,7 +2949,7 @@ mod tests {
         );
     }
 
-    // ROUND-2 P3 — the owning connection disconnects with a creation pending ⇒ CLOSED, and
+    // The owning connection disconnects with a creation pending ⇒ CLOSED, and
     // a later creation is REFUSED, not reopened.
     #[test]
     fn a_disconnect_with_a_pending_creation_closes_it_terminally() {
@@ -2983,10 +2980,9 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".into()));
     }
 
-    // ROUND-2 P2 — INVERTED from round 1's `a_creation_response_missing_a_proof_binds_
-    // nothing`, which asserted that a partial/invalid response RE-OPENS creation. That
-    // codified an unsafe behaviour: the server may have created a thread anyway, so
-    // reopening risks a second one. The state is now CLOSED — binds nothing AND does not
+    // A partial or invalid response must NOT re-open creation. Asserting that it does
+    // would codify an unsafe behaviour: the server may have created a thread anyway, so
+    // reopening risks a second one. The state is CLOSED — binds nothing AND does not
     // reopen.
     #[test]
     fn a_creation_response_missing_a_proof_closes_creation_rather_than_reopening_it() {
@@ -3013,7 +3009,7 @@ mod tests {
         }
     }
 
-    // ROUND-2 P2 — the "neither / both / null" arms of the state machine are all closed.
+    // The "neither / both / null" arms of the state machine are all closed.
     #[test]
     fn only_an_exclusive_error_object_reopens_creation() {
         for frame in [
@@ -3034,7 +3030,7 @@ mod tests {
         }
     }
 
-    // ROUND-3 P2 — an exclusive `error` reopens creation ONLY if it is STRUCTURALLY a
+    // An exclusive `error` reopens creation ONLY if it is STRUCTURALLY a
     // JSON-RPC error: an object with an INTEGER `code` AND a STRING `message`. A partial or
     // ill-typed error proves nothing about whether the server created a thread, so it lands
     // in the indeterminate CLOSED state instead.
@@ -3083,7 +3079,7 @@ mod tests {
         }
     }
 
-    // ROUND-2 P4 — the workspace anchor. A response naming a cwd other than the
+    // The workspace anchor. A response naming a cwd other than the
     // COORDINATOR-owned launch cwd binds nothing (and closes creation).
     #[test]
     fn a_creation_response_outside_the_launch_cwd_binds_nothing() {
@@ -3143,7 +3139,8 @@ mod tests {
             );
             assert_eq!(s.bound_thread(), None, "roots {roots}");
             // Indeterminate, not failed: the server may hold a thread we cannot name, so
-            // creation is CLOSED rather than reopened (the P2 state machine's third arm).
+            // creation is CLOSED rather than reopened — the creation state machine's
+            // third arm.
             assert!(
                 s.creation_closed_reason().is_some(),
                 "an unanchored workspace must close creation, not reopen it: {roots}"
@@ -3176,7 +3173,7 @@ mod tests {
         );
     }
 
-    // ROUND-2 P4 — `runtimeWorkspaceRoots` must be a well-typed, non-empty array of
+    // `runtimeWorkspaceRoots` must be a well-typed, non-empty array of
     // non-empty strings. Since 2e-7c this is SUBSUMED by the launch-workspace anchor above
     // (`[launch cwd]` is by construction a one-element array of a non-empty string), but the
     // cases are kept as their own test: they pin that the anchor did not *narrow* what the
@@ -3228,7 +3225,7 @@ mod tests {
         );
     }
 
-    // P3 (as evolved by 2e-4c) — ONE CREATION IN FLIGHT is still absolute; ONE THREAD PER
+    // As evolved by 2e-4c: ONE CREATION IN FLIGHT is still absolute, while ONE THREAD PER
     // SESSION is now ONE ACTIVE thread per session.
     #[test]
     fn creation_is_closed_while_pending_but_a_bound_head_admits_a_switch() {
@@ -3362,7 +3359,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Round-1 P1 — the turn/switch linearization.
+    // The turn/switch linearization.
     // ---------------------------------------------------------------------------
 
     /// A turn admitted for the head makes that head BUSY, and a switch is refused for as
@@ -3396,7 +3393,7 @@ mod tests {
         );
     }
 
-    /// **ROUND-2 P1, THE CAUSAL DEFECT.** A terminal must not release a `turn/start` the
+    /// **THE CAUSAL DEFECT.** A terminal must not release a `turn/start` the
     /// server has not answered yet.
     ///
     /// The sequence, all of it reachable: turn T0 is running; a second `turn/start` S is
@@ -3570,7 +3567,7 @@ mod tests {
         );
     }
 
-    /// **ROUND-3 P1 — an id with a LIVE turn entry is not reusable for a turn.**
+    /// **An id with a LIVE turn entry is not reusable for a turn.**
     ///
     /// The defect: a `turn/start` response DRAINS its outstanding-ledger entry, so the id
     /// becomes reusable there while the turn it started is still running. A second
@@ -3619,7 +3616,7 @@ mod tests {
         );
     }
 
-    /// **ROUND-3 P2 — a terminal that names no EPOCH clears nothing.**
+    /// **A terminal that names no EPOCH clears nothing.**
     ///
     /// Without a readable turn id a terminal cannot be told apart from its own duplicate,
     /// so acting on it would reintroduce exactly the defect the epoch gate closes. Asserted
@@ -3652,7 +3649,7 @@ mod tests {
         assert!(open(&s, A, &req("switch")));
     }
 
-    /// **ROUND-3 P2 — a DUPLICATE terminal clears nothing.**
+    /// **A DUPLICATE terminal clears nothing.**
     ///
     /// A terminal reaches every subscribed connection and this broker watches every leg, so
     /// it sees the same terminal repeatedly by design. Without an epoch gate the second
@@ -3795,7 +3792,7 @@ mod tests {
         );
     }
 
-    /// **ROUND-3 P3 — a disconnect is NOT a terminal.**
+    /// **A disconnect is NOT a terminal.**
     ///
     /// An ANSWERED `turn/start` reached the server, and the turn it belongs to keeps
     /// running whether or not this leg is there to watch it (A15: turns are independent of
@@ -3834,7 +3831,7 @@ mod tests {
         );
     }
 
-    /// Round-2 P2 — the concurrent-turn cardinality bound, refused legibly.
+    /// The concurrent-turn cardinality bound, refused legibly.
     #[test]
     fn the_active_turn_set_is_bounded() {
         let s = store();
@@ -3865,7 +3862,7 @@ mod tests {
         );
     }
 
-    /// Round-2 P2 — the id byte cap applies to the TURN path too, which called `admit_id`
+    /// The id byte cap applies to the TURN path too, which called `admit_id`
     /// directly and so used to bypass it entirely.
     #[test]
     fn the_turn_path_applies_the_request_id_byte_cap() {
@@ -3902,7 +3899,7 @@ mod tests {
             r#"{"method":"turn/completed","params":{}}"#,
             r#"{"method":"turn/completed"}"#,
             r#"{"method":"turn/completed","params":{"threadId":123}}"#,
-            // Round-3 P2: no readable turn id names no EPOCH, so it cannot be told apart
+            // No readable turn id names no EPOCH, so it cannot be told apart
             // from its own duplicate and must clear nothing.
             r#"{"method":"turn/completed","params":{"threadId":"01a0","turn":{"status":"completed"}}}"#,
             "not json at all but mentions \"turn/completed\"",
@@ -4050,7 +4047,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Round-1 P3 — a disconnected switch still retires the head it superseded.
+    // A disconnected switch still retires the head it superseded.
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -4073,7 +4070,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Round-2 P3 / round-3 P4+P5 — the switch RESERVATION.
+    // The switch RESERVATION.
     // ---------------------------------------------------------------------------
 
     /// Admit a `thread/unsubscribe` of `thread` the way the classifier does: ONE atomic
@@ -4129,7 +4126,7 @@ mod tests {
         assert!(w.switch_prefix_admissible(A, "01a0").is_err(), "wedged");
     }
 
-    /// **ROUND-3 P5 — only an unsubscribe naming the ACTIVE HEAD is a switch prefix.**
+    /// **Only an unsubscribe naming the ACTIVE HEAD is a switch prefix.**
     ///
     /// A retired thread's cleanup unsubscribes something this session is not on. It begins
     /// no switch, so reserving for it would fence turns and block other connections'
@@ -4182,7 +4179,7 @@ mod tests {
         );
     }
 
-    /// **ROUND-3 P4, BOTH DIRECTIONS.**
+    /// **The reservation lives inside the transaction, BOTH DIRECTIONS.**
     ///
     /// (a) A prefix the ID LEDGER refuses sends zero bytes, so it leaves NO reservation —
     ///     otherwise turns are fenced and other connections blocked for a frame that never
@@ -4229,7 +4226,7 @@ mod tests {
     }
 
     /// A reservation dies with its connection; and expiry WEDGES rather than silently
-    /// restoring authorization (round-3 P5).
+    /// restoring authorization.
     #[test]
     fn a_reservation_expires_with_the_connection_and_with_time() {
         let s = store();
@@ -4243,7 +4240,7 @@ mod tests {
             "a reservation must not outlive the connection that made it"
         );
 
-        // **Expiry is not 'nothing happened'** (round-3 P5). The unsubscribe really went
+        // **Expiry is not 'nothing happened'.** The unsubscribe really went
         // upstream, so the connection is provably not receiving the head's stream; letting
         // the TTL silently restore its turn authorization would authorize turns nobody on
         // that connection can observe.
@@ -4284,11 +4281,11 @@ mod tests {
     /// admissibility check never consulted `switch_reservation` and the claim overwrote it
     /// unconditionally, so B's prefix was admitted while A held a live reservation and took
     /// it — and A's `thread/start`, already unsubscribed on the wire, was then refused
-    /// `CreationSlotClosed`. Exactly the "unsubscribed, then refused" sequence round-2 P4
-    /// exists to prevent, reached by a route P4 did not cover.
+    /// `CreationSlotClosed`. Exactly the "unsubscribed, then refused" sequence the
+    /// errored-start wedge exists to prevent, reached by a route it did not cover.
     ///
     /// B necessarily names the SAME thread: only an unsubscribe of the ACTIVE HEAD is a
-    /// switch prefix at all (round-3 P5), so a prefix for any other thread reserves nothing
+    /// switch prefix at all, so a prefix for any other thread reserves nothing
     /// and could never have clobbered anything.
     #[test]
     fn a_second_connections_prefix_cannot_clobber_a_live_reservation() {
@@ -4375,7 +4372,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Round-2 P4 — a failed PREFIXED switch wedges that connection, not the session.
+    // A failed PREFIXED switch wedges that connection, not the session.
     // ---------------------------------------------------------------------------
 
     /// The exact sequence: prefix forwards, the server ERRORS the `thread/start`, the head
@@ -4405,7 +4402,7 @@ mod tests {
             s.try_admit_turn(B, &req("t"), "01a0", Some(&cwd()), Some(&roots())),
             TurnAdmission::Admitted
         );
-        // **ROUND-3 P6 — only a CORRELATED, ACCEPTED resume lifts the wedge.**
+        // **Only a CORRELATED, ACCEPTED resume lifts the wedge.**
         //
         // A resume of some other thread is not a re-subscription to this one.
         s.note_resubscribe_attempt(A, "01a0-other", &req("r0"));
@@ -4457,7 +4454,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Round-1 P9 — bounded, id-only retired storage.
+    // Bounded, id-only retired storage.
     // ---------------------------------------------------------------------------
 
     /// An over-long thread id binds NOTHING, so it is never copied into long-lived state.
@@ -4580,7 +4577,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ROUND-3 P1 — the TOTAL outstanding-request-id ledger.
+    // The TOTAL outstanding-request-id ledger.
     // -----------------------------------------------------------------
 
     // The headline rule: an id already in flight on a connection cannot be reused, whatever
@@ -4666,7 +4663,7 @@ mod tests {
         );
     }
 
-    // ROUND-3 P1, the cross-method collision this round closes. A NON-creation request
+    // The cross-method collision the total ledger closes. A NON-creation request
     // occupies the id first; the `thread/start` that wanted it is refused, so NO creation is
     // pending — and the response to that non-creation request, even shaped exactly like a
     // creation answer, installs NOTHING.
@@ -4716,7 +4713,7 @@ mod tests {
         assert_eq!(s.sole_session_thread(), Some("01a0".into()));
     }
 
-    // ROUND-3 P6 — a client-chosen id longer than the cap is refused and NEVER stored.
+    // A client-chosen id longer than the cap is refused and NEVER stored.
     #[test]
     fn an_over_long_request_id_is_refused_and_never_stored() {
         let s = store();
@@ -4756,7 +4753,7 @@ mod tests {
         );
     }
 
-    // ROUND-3 P1 — the outstanding ledger is bounded per connection.
+    // The outstanding ledger is bounded per connection.
     #[test]
     fn the_outstanding_ledger_is_bounded_per_connection() {
         let s = store();
@@ -4785,9 +4782,9 @@ mod tests {
         );
     }
 
-    // M10 — a DIRECT capacity test for MAX_TRACKED_CONNECTIONS: fill it with live
+    // A DIRECT capacity test for MAX_TRACKED_CONNECTIONS: fill it with live
     // connections, prove the next one is refused, close one, prove the capacity is released.
-    // (Round 2 argued this bound in a comment; round 3 proves it.)
+    // (The bound is proven here rather than merely argued in a comment.)
     #[test]
     fn the_tracked_connection_table_is_bounded_and_released_on_close() {
         let s = store();
@@ -4835,7 +4832,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ROUND-4 P1 — DRAIN VALIDATION. An outstanding id is released only by a frame PROVEN
+    // DRAIN VALIDATION. An outstanding id is released only by a frame PROVEN
     // to be a response.
     // -----------------------------------------------------------------
 
@@ -4860,7 +4857,7 @@ mod tests {
         assert!(s.creation_closed_reason().is_none());
     }
 
-    // CODEX'S EXACT EXPLOIT TRACE, end to end. Before the drain validation this produced a
+    // THE EXPLOIT TRACE, end to end. Before the drain validation this produced a
     // SECOND admitted creation while the first `thread/start` was still in flight upstream
     // and may already have created a thread — i.e. it broke the single-thread invariant.
     //
@@ -4973,7 +4970,7 @@ mod tests {
     }
 
     // ONE definition of "a valid response", used by two rules: the ledger's DRAIN gate
-    // (decided on raw bytes by the header scan) and the P2 creation-response state machine
+    // (decided on raw bytes by the header scan) and the creation-response state machine
     // (decided on a parsed `Value`). If either side is changed alone, this fails.
     #[test]
     fn response_kind_agrees_with_the_creation_state_machine() {

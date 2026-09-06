@@ -1901,10 +1901,40 @@ fn log_line(args: &SupervisorArgs, message: &str) {
     log_for(&args.session_id, args.session_uid.as_deref(), message);
 }
 
+/// Where a supervisor log is written. `protocol::logs_dir()` in a real run, and a
+/// throwaway directory under a test binary.
+///
+/// **A test run observes; it does not supervise.** Left on the real root, every
+/// `cargo test -p codeconnect` appended to — and created files in — the operator's
+/// own `~/.codeconnect/logs`, because the tests that drive registration and exit
+/// handling drive the production logger with them. Measured: one suite run created
+/// four files and appended to two, and the accumulated litter was 292 of the 380
+/// files in that directory, from 71 test processes that had long since exited. A
+/// directory whose contents are mostly the artefacts of running the test suite is a
+/// directory nobody can read to find out why a session lost its link.
+///
+/// Split at compile time rather than on an environment variable, so nothing has to
+/// remember to set anything and no production path can reach the test branch — the
+/// same shape [`crate::tmux`] uses for the server conf and [`crate::codex_launch`]
+/// for the session root, for the same reason.
+#[cfg(not(test))]
+fn log_root() -> std::path::PathBuf {
+    protocol::logs_dir()
+}
+
+#[cfg(test)]
+fn log_root() -> std::path::PathBuf {
+    // Per process, not per test: several tests write here and the file is named by
+    // the session they claim to be, so they do not collide.
+    let dir = std::env::temp_dir().join(format!("cc-supervisor-log-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// The same, addressed by identity rather than by the whole argument struct, so
 /// a worker thread that only carries the session's name can still write to it.
 fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
-    let dir = protocol::logs_dir();
+    let dir = log_root();
     // Owner-only: a supervisor log carries the session's name, its working
     // directory and whatever a refusal reason quoted off the pane.
     if protocol::fsperm::private_dir(&dir).is_err() {
@@ -1928,6 +1958,48 @@ fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The suite must not write into the operator's own `~/.codeconnect`.**
+    ///
+    /// The supervisor has no terminal, so everything it wants to say goes to a
+    /// per-run file under the real logs directory — and the tests that drive
+    /// registration, refusal and exit handling drive that logger with them. Measured
+    /// before this was split: one `cargo test -p codeconnect` created four files
+    /// there and appended to two, and the accumulated litter was 292 of the 380
+    /// files in the directory, from 71 test processes long since exited.
+    ///
+    /// Driven through the production logger rather than argued from the path, and
+    /// fenced by a recursive snapshot of the whole home, so a future writer that
+    /// reaches the real root by another route fails here too.
+    #[test]
+    fn logging_never_touches_the_operator_s_own_home() {
+        let before = crate::home_guard::snapshot_real_home();
+
+        // Both spellings the production logger produces: the per-run name, and the
+        // flat one an older build with no uid leaves behind.
+        let session = format!("cc-home-guard-{}", std::process::id());
+        log_for(
+            &session,
+            Some("01M0000000000000000000000"),
+            "a line a test wrote",
+        );
+        log_for(&session, None, "and the flat one an older build writes");
+
+        crate::home_guard::assert_real_home_unchanged(&before, "writing a supervisor log");
+
+        // And it really wrote something, somewhere: a logger that silently did
+        // nothing would pass the fence above for the wrong reason.
+        let scoped = log_root().join(format!("supervisor-{session}.log"));
+        let body = std::fs::read_to_string(&scoped).expect("the scoped log must exist");
+        assert!(
+            body.contains("the flat one an older build writes"),
+            "the scoped path must receive what a real run would have written: {body:?}"
+        );
+        let _ = std::fs::remove_file(&scoped);
+        let _ = std::fs::remove_file(log_root().join(format!(
+            "supervisor-{session}-01M0000000000000000000000.log"
+        )));
+    }
     use crate::tmux::{Keyboard, TmuxMode};
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;

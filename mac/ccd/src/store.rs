@@ -1768,15 +1768,47 @@ impl Store {
                     -- it actually carries, absence included, and only a write at
                     -- or below the standing generation `COALESCE`s. That makes
                     -- true of the row the one thing the guard already assumes:
-                    -- **a non-NULL `codex_thread_id` was named by a
-                    -- registration at exactly this row's `codex_generation`.**
-                    -- No second column is needed to record when the thread was
-                    -- bound, because the generation beside it IS when — and a
-                    -- second column would have to be added to both tables, kept
-                    -- in the `INSERT … SELECT *` carry, kept out of
-                    -- `move_codex_sessions`' freshest-wins family and proven
-                    -- rollback-invisible, all to store a number this one already
-                    -- holds.
+                    -- **the pair reads: the registration recorded at this
+                    -- `codex_generation` is currently on this
+                    -- `codex_thread_id`.** Note what that does and does not
+                    -- say. It does NOT say a registration at this generation
+                    -- named this thread — on a healthy run none ever does, and
+                    -- after a `/new` the thread here is the session's second or
+                    -- third while the generation is still the registration's
+                    -- first. What it says is that the two are one live fact
+                    -- about one registration, which is exactly what the
+                    -- adoption guard needs and all it reads them for. No second
+                    -- column is needed to record when the thread was bound,
+                    -- because the generation beside it names the registration
+                    -- that owns it — and a second column would have to be added
+                    -- to both tables, kept in the `INSERT … SELECT *` carry,
+                    -- kept out of `move_codex_sessions`' freshest-wins family
+                    -- and proven rollback-invisible, all to store a number this
+                    -- one already holds.
+                    --
+                    -- **The thread has a second writer, and it is the reason
+                    -- the sentence above is phrased about the REGISTRATION
+                    -- rather than about a registration having named a thread.**
+                    -- A registration is written
+                    -- before the app-server has announced a thread, so on a
+                    -- healthy run it names none and the column stayed empty for
+                    -- the whole life of the session. The control link is what
+                    -- learns the thread, and it writes it through
+                    -- [`Store::bind_codex_thread`] — scoped to the generation
+                    -- its own REGISTRATION was accepted at, which is this one
+                    -- and stays this one for as long as the link lives. The
+                    -- link's live visit generation moves with every thread it
+                    -- adopts and is deliberately not what the write is keyed
+                    -- by: a `/new` is a new visit, the row is still the same
+                    -- registration's, and a write scoped to the visit would
+                    -- match nothing at exactly the moment the row most needs
+                    -- updating. The ELSE arm here
+                    -- is what preserves that write across every later
+                    -- registration at the same generation: a restart
+                    -- re-registers with no thread, `COALESCE` keeps the one the
+                    -- link recorded, and a relaunch — a strictly later
+                    -- generation — blanks it, which is right, because its
+                    -- thread is a new one nobody has adopted yet.
                     --
                     -- Every other writer is untouched, and structurally rather
                     -- than by convention: a hook, a heartbeat or a tailer reaches
@@ -2338,6 +2370,62 @@ impl Store {
             )?;
         }
         Ok(())
+    }
+
+    /// **Write down the thread a control link has actually adopted**, against the
+    /// generation that link belongs to.
+    ///
+    /// The column has one other writer — a registration, through
+    /// [`Store::upsert_session_at_generation`] — and a registration happens before
+    /// the app-server has said which thread this session is on. So on a healthy run
+    /// nothing ever named one, and the row said a Codex session was on no thread
+    /// while the live link knew exactly which. Everything that reads the row rather
+    /// than the link saw the emptier answer, and a restarted daemon saw only that.
+    ///
+    /// **Scoped to the generation, and that is the fence rather than a filter.** The
+    /// row's thread and its generation are one fact: a generation is one visit, one
+    /// codex process, one thread, which is what lets the adoption guard read the
+    /// pair as a binding. A link whose registration has been superseded is still
+    /// running for as long as it takes to notice, and an unscoped write would let it
+    /// stamp its thread onto the visit that replaced it — the exact confusion the
+    /// guard exists to refuse, arriving from underneath instead.
+    ///
+    /// **`updated_at` is deliberately left alone.** That stamp arbitrates the
+    /// rollback merge in [`move_codex_sessions`], which decides the location family
+    /// by comparing the two copies; `codex_thread_id` is not in that family at all,
+    /// and it is written here without touching a location column. Bumping the stamp
+    /// would be this write casting a vote in an argument it is not part of.
+    ///
+    /// Both tables, for the reason [`Store::set_lifecycle`] gives: the uid is a
+    /// primary key in each and lives in exactly one, so the statement that does not
+    /// match writes nothing, and no wrong guess about the agent can silently drop
+    /// the write.
+    ///
+    /// Returns whether a row actually changed — `false` for a row already carrying
+    /// this thread, and for a generation this link does not speak for.
+    pub fn bind_codex_thread(
+        &self,
+        session_uid: &str,
+        generation: u64,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let generation = i64::try_from(generation).unwrap_or(i64::MAX);
+        let mut changed = 0usize;
+        for table in SESSION_TABLES {
+            changed += conn.execute(
+                // A compile-time list in this file; nothing a caller supplies
+                // reaches the statement text.
+                &format!(
+                    "UPDATE {table} SET codex_thread_id = ?3
+                       WHERE session_uid = ?1
+                         AND codex_generation = ?2
+                         AND (codex_thread_id IS NULL OR codex_thread_id <> ?3)"
+                ),
+                params![session_uid, generation, thread_id],
+            )?;
+        }
+        Ok(changed > 0)
     }
 
     /// Insert-once ledger write. Returns the original outcome if one exists.
@@ -6641,6 +6729,98 @@ mod tests {
             codex_thread_id: None,
             codex_socket: None,
         }
+    }
+
+    /// **The link's thread survives a daemon restart, and a relaunch clears it.**
+    ///
+    /// The row is the only answer that outlives the process, so a re-registration
+    /// after a restart — which carries no thread, because a registration happens
+    /// before the app-server announces one — must not blank what the link recorded.
+    /// A relaunch must, because its generation is a different visit and its thread is
+    /// one nobody has adopted yet.
+    #[test]
+    fn a_link_recorded_thread_survives_a_restart_and_not_a_relaunch() {
+        let (store, _path) = temp_store();
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let mut row = session_row(&session);
+        row.agent = AgentKind::Codex;
+        store
+            .upsert_session_at_generation(&row, Some(7))
+            .unwrap()
+            .assert_present();
+        let thread = "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86";
+
+        assert!(
+            store.bind_codex_thread(&session.uid, 7, thread).unwrap(),
+            "the link's first write is a change"
+        );
+        assert!(
+            !store.bind_codex_thread(&session.uid, 7, thread).unwrap(),
+            "the same thread again owes nothing"
+        );
+        assert!(
+            !store
+                .bind_codex_thread(&session.uid, 6, "somebody-elses")
+                .unwrap(),
+            "a superseded link speaks for no generation but its own"
+        );
+        assert_eq!(
+            store
+                .get_session(&session.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id,
+            Some(thread.to_string())
+        );
+
+        // **The restart, with the store actually closed and reopened.** The claim is
+        // that the link's write survives the daemon dying, and a test that kept one
+        // open handle proved only that the row survived a second statement. Dropping
+        // the `Store` closes its connections; reopening reads the same file back off
+        // the disk the durable answer is supposed to be on.
+        drop(store);
+        let store = Store::open(&_path).unwrap();
+        assert_eq!(
+            store
+                .get_session(&session.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id,
+            Some(thread.to_string()),
+            "the thread the link recorded must still be there after the file is \
+             reopened, or it was never durable"
+        );
+
+        // Then the supervisor re-registers at the same generation, naming no thread,
+        // exactly as the producer does.
+        store
+            .upsert_session_at_generation(&row, Some(7))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store
+                .get_session(&session.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id,
+            Some(thread.to_string()),
+            "a restart re-registers with no thread and must keep the one the link adopted"
+        );
+
+        // The relaunch: a later generation is a different visit.
+        store
+            .upsert_session_at_generation(&row, Some(8))
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            store
+                .get_session(&session.uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id,
+            None,
+            "a new visit starts on no adopted thread"
+        );
     }
 
     // ----------------------------------------------------------- pruning

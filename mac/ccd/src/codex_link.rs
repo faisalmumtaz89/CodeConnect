@@ -193,8 +193,19 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(15);
 const ATTACH_BACKOFF_MIN: Duration = Duration::from_millis(500);
 const ATTACH_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// **How long a followed switch waits for the broker to ADOPT the new thread**
-/// (round-1 P5), and at what interval.
+/// How long a **failed** write of the adopted thread onto the session row waits
+/// before it is tried again.
+///
+/// The write happens at the idle moment, which is every frame, so an unthrottled
+/// retry against a briefly-locked store is a hot loop. The interval is short because
+/// the thing being waited out is short — a `database is locked` is milliseconds —
+/// and because the value is only worth having if it lands while the session is still
+/// running. There is no ceiling and no give-up: the row is the only answer that
+/// survives the process, and a connection that stops trying leaves it empty.
+const THREAD_RECORD_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// **How long a followed switch waits for the broker to ADOPT the new thread**, and
+/// at what interval.
 ///
 /// The window being waited on is one `thread/start` round trip: the link re-targets off the
 /// `thread/started` BROADCAST, and the broker makes that thread resumable when it correlates
@@ -521,7 +532,7 @@ fn frame_kind(frame: &Value) -> FrameKind {
 }
 
 /// What [`Connection::note_switch_candidate`] made of one frame — **two separate
-/// facts, which a boolean conflated** (round-10 F2).
+/// facts, which a boolean conflated**.
 ///
 /// The caller asks two questions of a `thread/started`, and they have different
 /// answers. *Must I ingest this frame myself?* is about the fact: the ordinary
@@ -634,8 +645,8 @@ pub fn is_measured_not_ready(frame: &Value, requested_thread: &str) -> bool {
 }
 
 /// The `status` a live `turn/started` reports its turn under — `"inProgress"` on
-/// all 11 captured frames (round-4 F7; see [`Connection::note_turn_start`], which
-/// carries the full measurement).
+/// all 11 captured frames (see [`Connection::note_turn_start`], which carries the
+/// full measurement).
 ///
 /// Spelled here rather than reached for in [`crate::codex_adapter`], which holds
 /// the same string for a `thread/resume` answer's turn. They are two independent
@@ -996,20 +1007,20 @@ enum Attach {
     /// like [`Attach::Unbound`], and for the same reason: there is nothing left to ask
     /// for.
     Attached,
-    /// **A recovery-only resume is outstanding** (round-3 P7): an on-demand ask about a
-    /// thread this link has already switched AWAY from, purely to record the items that
-    /// finished before it subscribed.
+    /// **A recovery-only resume is outstanding**: an on-demand ask about a thread this
+    /// link has already switched AWAY from, purely to record the items that finished
+    /// before it subscribed.
     ///
     /// Deliberately its own state rather than a reuse of `Awaiting`: its answer must NOT
     /// bind the visit, must NOT move the attach target, and must NOT adopt anything. The
     /// link is on the new thread and stays there; this only pays a debt.
     ///
-    /// **It is nonetheless a resume OUTSTANDING, and A2 applies to it** (round-8 F1).
-    /// Being its own variant cost it the `Awaiting` tests every other site makes, and the
-    /// candidate block was one: a `/new` landing here re-targeted the attach and sent the
-    /// next resume beside this unanswered one. Every site that asks "may I send now?"
-    /// must name both variants. There are exactly two ways out — an answer, and an
-    /// expired deadline — and both go through [`leaving_recovery`].
+    /// **It is nonetheless a resume OUTSTANDING, and A2 applies to it.** Being its own
+    /// variant cost it the `Awaiting` tests every other site makes, and the candidate
+    /// block was one: a `/new` landing here re-targeted the attach and sent the next
+    /// resume beside this unanswered one. Every site that asks "may I send now?" must
+    /// name both variants. There are exactly two ways out — an answer, and an expired
+    /// deadline — and both go through [`leaving_recovery`].
     Recovering {
         id: i64,
         deadline: Instant,
@@ -1033,7 +1044,7 @@ impl Attach {
 }
 
 /// **Leaving [`Attach::Recovering`] — and not parking with a follow-up already
-/// owed** (round-7 F2).
+/// owed.**
 ///
 /// Both exits from `Recovering` land on a state that carries no deadline, and the
 /// only thing that re-examines the owed set sits at the BOTTOM of the loop, past the
@@ -1050,7 +1061,7 @@ impl Attach {
 /// scheduler's own answer, and the `Backoff` block issues it on the next pass with
 /// the fallback handling and the debt bookkeeping the send site already owns.
 ///
-/// # A HELD SWITCH CANDIDATE IS APPLIED HERE TOO (round-8 F1)
+/// # A HELD SWITCH CANDIDATE IS APPLIED HERE TOO
 ///
 /// The same argument, about the other thing the loop only reconsiders past the read.
 /// `Recovering` used to count as settled at the candidate block, so a `/new` arriving
@@ -1078,8 +1089,7 @@ fn leaving_recovery(
     attach
 }
 
-/// **Discharge one carried recovery debt — the one place a debt is cleared**
-/// (round-8 F2).
+/// **Discharge one carried recovery debt — the one place a debt is cleared.**
 ///
 /// Named rather than owed, and that has always been the property that makes this safe:
 /// an ask about A discharges A's obligation and nothing else's. Clearing blind at the end
@@ -1103,7 +1113,7 @@ fn discharge_recovery(carried: &Arc<Mutex<Carried>>, thread: &str) {
 }
 
 /// **Follow a switch this connection has been holding** — the one place a candidate
-/// becomes the visit (round-8 F1).
+/// becomes the visit.
 ///
 /// Extracted from the loop's candidate block so that the block and [`leaving_recovery`]
 /// cannot drift apart. They are the same act at two moments: the block applies a
@@ -1140,12 +1150,12 @@ fn apply_held_candidate(
             Attach::Refused => "Refused",
         }
     );
-    // **The fallback** (round-1 P5). The announcement said which thread the TUI
-    // moved to; it did NOT say the broker has adopted it. If the new thread
-    // never verifies, every resume of it is policy-refused — and the previous
-    // thread, which this link CAN still read, is remembered so the retry loop
-    // can fall back to it rather than stranding the session on a thread that
-    // was never a session thread.
+    // **The fallback.** The announcement said which thread the TUI moved to; it
+    // did NOT say the broker has adopted it. If the new thread never verifies,
+    // every resume of it is policy-refused — and the previous thread, which this
+    // link CAN still read, is remembered so the retry loop can fall back to it
+    // rather than stranding the session on a thread that was never a session
+    // thread.
     //
     // Both halves already live OUTSIDE this connection — persisted when the
     // candidate was NOTED. This only sharpens the fallback to the thread
@@ -1154,10 +1164,11 @@ fn apply_held_candidate(
         let mut c = carried.lock().expect("the carried link state");
         c.fallback = Some(retired.clone());
         c.pending_candidate = Some(target.clone());
-        // **ROUND-3 P7.** If the thread being left still owes a
-        // pre-subscription recovery — this link attached to it MID-TURN and its
-        // follow-up never landed — that obligation must outlive the switch and
-        // the connection. Nothing else will ever ask about that thread again.
+        // **A thread left with an unpaid pre-subscription debt.** If the thread
+        // being left still owes a pre-subscription recovery — this link attached
+        // to it MID-TURN and its follow-up never landed — that obligation must
+        // outlive the switch and the connection. Nothing else will ever ask
+        // about that thread again.
         //
         // **The one site that records one** (A16.3c) — the same shape
         // [`Connection::note_switch_candidate`] is for the candidate slot's
@@ -1875,8 +1886,8 @@ pub(crate) type OpenAnswers = Arc<Mutex<std::collections::BTreeMap<i64, PendingA
 
 /// **How long an answer waits to be told what became of it.**
 ///
-/// **A missing disposition CAN be a slow peer, and since R5 that is the ordinary case
-/// rather than the impossible one.** The broker still writes the disposition in the arm
+/// **A missing disposition CAN be a slow peer, and that is the ordinary case rather
+/// than the impossible one.** The broker still writes the disposition in the arm
 /// that forwarded the response — but it now waits inside that arm for the pump's proof
 /// that `ws.send` completed, so an app-server that has stopped draining its socket holds
 /// the broker, which holds this. That is why the ending here is `Unknown` and never "not
@@ -2496,10 +2507,9 @@ pub async fn run(
     mut interrupts: tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
 ) {
     let mut adapter = CodexAdapter::new(session.clone());
-    // **The chase survives a reconnect** (round-2 P6b) — see [`Carried`] — and, in
-    // this cell, a *registration* too: the daemon owns it, seeded it from whatever
-    // the previous link knew, and reads it back when this one is retired. See
-    // [`LinkCarry`].
+    // **The chase survives a reconnect** — see [`Carried`] — and, in this cell, a
+    // *registration* too: the daemon owns it, seeded it from whatever the previous
+    // link knew, and reads it back when this one is retired. See [`LinkCarry`].
     let carried = carry.shared();
     // **The registration's claim goes in here, and only here.** Whatever the daemon
     // seeded the cell with is what a *previous* link learned; the hint is what this
@@ -2659,7 +2669,7 @@ pub async fn run(
     }
 }
 
-/// **The link state that survives a reconnect** (round-2 P6b, round-3 P7/P9).
+/// **The link state that survives a reconnect.**
 ///
 /// A connection is disposable; these are not. The app-server broadcasts `thread/started`
 /// exactly once per thread, to the connections it has at that instant, so a switch this
@@ -2675,8 +2685,8 @@ pub async fn run(
 /// fallback, and the unpaid pre-subscription debt. Those are facts about this link's own
 /// history, and no announcement can restate them.
 ///
-/// **The three thread slots are DISTINCT, and the distinction is load-bearing** (round-3
-/// P9). An earlier form collapsed them into one "carried target", which then had to answer
+/// **The three thread slots are DISTINCT, and the distinction is load-bearing.** An
+/// earlier form collapsed them into one "carried target", which then had to answer
 /// two different questions at once — "what should I resume?" and "what have I adopted?" —
 /// and got the second wrong: a merely-PENDING thread was handed to the next connection
 /// labelled as adopted, so it was treated as retired-and-readable when it had never been
@@ -2703,12 +2713,12 @@ pub struct Carried {
     /// the fallback, which are the two ways a chase ends.
     ///
     /// **"Not adopted" describes what it is FOR, not an invariant it enforces.** On the
-    /// reconnect path (P6c) the wire re-announces the thread this link is already
-    /// carrying, the bind writes it here, and it briefly equals `adopted`. Nothing reads
-    /// the two together: [`Carried::first_target`] returns the same thread either way,
-    /// the fallback reads only `fallback`, and the adoption site clears this
-    /// unconditionally. Worth naming rather than tightening — the write is what makes a
-    /// wire-named thread survive a registration, and that is the property that matters.
+    /// reconnect path the wire re-announces the thread this link is already carrying, the
+    /// bind writes it here, and it briefly equals `adopted`. Nothing reads the two
+    /// together: [`Carried::first_target`] returns the same thread either way, the
+    /// fallback reads only `fallback`, and the adoption site clears this unconditionally.
+    /// Worth naming rather than tightening — the write is what makes a wire-named thread
+    /// survive a registration, and that is the property that matters.
     pending_candidate: Option<String>,
     /// **Fallback**: the last ADOPTED thread, kept while a chase is in flight so a
     /// never-adopted candidate cannot strand the link.
@@ -2722,7 +2732,7 @@ pub struct Carried {
     /// too, so retaining it would carry nothing across. Wire evidence used to be mirrored
     /// in here as well, which quietly made the exclusion drop a fact only this link had.
     hint: Option<String>,
-    /// **The unrecovered pre-subscription debts** (round-3 P7, A16.3c): threads this link
+    /// **The unrecovered pre-subscription debts** (A16.3c): threads this link
     /// attached to MID-TURN and then switched away from before their follow-up resume
     /// could land. The items that finished before the subscription existed are reachable
     /// from nowhere else — no live frame carries them, and the link will never be asked
@@ -2855,12 +2865,12 @@ async fn serve_connection(
     // D4 filter rejects every NAMED frame until one arrives.
     // A pending candidate carried in from a previous connection outranks the published
     // target: it is the thread the user moved to, and `thread/started` will not be
-    // broadcast again for it (round-2 P6b).
-    // The round-3 P7 debts this connection must pay once a new thread is adopted, in the
-    // order they were incurred. This connection's own WORK QUEUE and not the obligation
-    // itself: the obligation lives in [`Carried::owed_recovery`], which survives the
-    // connection, and this is re-armed from it at every adoption. Popping from here is
-    // what stops one connection asking the same question twice (A16.3c).
+    // broadcast again for it.
+    // The pre-subscription debts this connection must pay once a new thread is adopted,
+    // in the order they were incurred. This connection's own WORK QUEUE and not the
+    // obligation itself: the obligation lives in [`Carried::owed_recovery`], which
+    // survives the connection, and this is re-armed from it at every adoption. Popping
+    // from here is what stops one connection asking the same question twice (A16.3c).
     let mut owed_recovery: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let (mut resume_target, carried_adopted, carried_candidate) = {
         let c = carried.lock().expect("the carried link state");
@@ -2899,8 +2909,8 @@ async fn serve_connection(
         // connection publishes `Unbound { adopted: A }` until the first settle applies
         // the candidate, and `Bound { B }` after it.
         switch_candidate: carried_candidate,
-        // **Adopted-only** (round-3 P9): a merely-PENDING thread is not something this link
-        // has verified, so it must not be handed to the candidate rule as though it were.
+        // **Adopted-only**: a merely-PENDING thread is not something this link has
+        // verified, so it must not be handed to the candidate rule as though it were.
         carried_target: carried_adopted,
         carried: Arc::clone(carried),
         adopted_thread: None,
@@ -2914,6 +2924,9 @@ async fn serve_connection(
         open_interrupts: Arc::clone(open_interrupts),
         running_turn: None,
         swept_generation: None,
+        registered_generation: link.generation,
+        recorded_thread: None,
+        thread_record_retry_at: None,
     };
 
     // The handshake can bind (a `thread/started` may arrive before the `initialize`
@@ -2958,10 +2971,10 @@ async fn serve_connection(
     loop {
         // The one place a request is issued. Reached only when no request is
         // outstanding, which is what keeps the resume unpipelined (A2).
-        // **PAY THE ROUND-3 P7 DEBTS, ONE PER PASS.** The link has adopted the new thread
-        // and owes pre-subscription recoveries on threads it left. Fired from `Attached`
-        // only — any other state has an attach in flight or scheduled, and this must never
-        // pipeline against it (A2: a resume is never pipelined).
+        // **PAY THE PRE-SUBSCRIPTION DEBTS, ONE PER PASS.** The link has adopted the new
+        // thread and owes pre-subscription recoveries on threads it left. Fired from
+        // `Attached` only — any other state has an attach in flight or scheduled, and this
+        // must never pipeline against it (A2: a resume is never pipelined).
         //
         // **Oldest first, and one at a time** (A16.3c). One per pass is not a rationing:
         // the ask puts this connection into `Recovering`, and the only ways out of that
@@ -2971,12 +2984,13 @@ async fn serve_connection(
         if matches!(attach, Attach::Attached) {
             if let Some(thread) = owed_recovery.pop_front() {
                 let id = conn.send_resume(&mut ws, &thread).await?;
-                // **THE CARRIED DEBT IS NOT CLEARED HERE** (round-8 F2), and the reason
-                // is the one the local `pop_front()` above already answers for.
+                // **THE CARRIED DEBT IS NOT CLEARED HERE**, and the reason is the one
+                // the local `pop_front()` above already answers for.
                 //
-                // Round 7 moved the clear from where the debt was noticed to just after
-                // the write, because a debt discharged against a state that could not
-                // issue a request is a debt lost. That was half the rule. The other half
+                // An earlier design moved the clear from where the debt was noticed
+                // to just after the write, because a debt discharged against a state
+                // that could not issue a request is a debt lost. That was half the
+                // rule, and the clear is no longer here either. The other half
                 // is that a request on the wire is not a recovery: the answer still has to
                 // arrive, be readable, and be WRITTEN, and every one of those can fail
                 // while the request cannot be un-sent. What is in the queue is the only
@@ -3009,16 +3023,16 @@ async fn serve_connection(
         if let Attach::Backoff { until, next_delay } = &attach {
             if Instant::now() >= *until {
                 let next_delay = *next_delay;
-                // **THE FALLBACK FIRES HERE** (round-1 P5). A followed switch re-targets
-                // off a broadcast; only the broker's verification makes the new thread
+                // **THE FALLBACK FIRES HERE.** A followed switch re-targets off a
+                // broadcast; only the broker's verification makes the new thread
                 // resumable. `settle_resume` retries a not-yet-adopted refusal with
                 // backoff, and the backoff is capped — so when it reaches the ceiling
                 // without ever being accepted, the link stops asking about a thread that
                 // may never become a session thread and goes back to the one it could
-                // demonstrably read. The switch is not "undone": the visit stays on the new
-                // thread, so nothing of the new thread would be mis-filed; only the ATTACH
-                // target reverts, which is what keeps the session observable instead of
-                // silent.
+                // demonstrably read. The switch is not "undone": the visit stays on the
+                // new thread, so nothing of the new thread would be mis-filed; only the
+                // ATTACH target reverts, which is what keeps the session observable
+                // instead of silent.
                 if conn.fallback_due {
                     conn.fallback_due = false;
                     let previous = carried
@@ -3042,7 +3056,7 @@ async fn serve_connection(
                         resume_target = Some(previous.clone());
                         // The chase is over — the candidate is not carried to the next
                         // connection, because it was tried and never adopted. The published
-                        // id is untouched: it is still the last ADOPTED thread (P6a).
+                        // id is untouched: it is still the last ADOPTED thread.
                         {
                             let mut c = carried.lock().expect("the carried link state");
                             c.pending_candidate = None;
@@ -3131,10 +3145,10 @@ async fn serve_connection(
                      session is on",
                     session.name
                 );
-                // **Given up is a discharge** (round-8 F2). The debt is asked once; an
-                // app-server that answered nothing within the budget is not going to
-                // answer a repeat of the same question, and leaving the slot set would
-                // buy every future connection a resume nobody will reply to.
+                // **Given up is a discharge.** The debt is asked once; an app-server that
+                // answered nothing within the budget is not going to answer a repeat of
+                // the same question, and leaving the slot set would buy every future
+                // connection a resume nobody will reply to.
                 discharge_recovery(carried, &thread);
                 attach = leaving_recovery(&mut conn, carried, &mut resume_target);
             }
@@ -3158,6 +3172,10 @@ async fn serve_connection(
         // the link has left is retired. Guarded on the generation, so it reads
         // the store only when the visit actually moved.
         conn.retire_superseded_cards().await;
+        // And the same moment for the session row: the thread this link is on is
+        // settled here and nowhere else in the loop, so this is where the fleet's
+        // durable answer to "which thread is this session on" is brought up to it.
+        conn.record_adopted_thread().await;
 
         // **An answer that is never told its fate holds a card nobody can answer.**
         // The disposition is written by the broker in the same arm that forwards
@@ -3326,8 +3344,7 @@ async fn serve_connection(
                     );
                 }
                 resume_target = Some(bound.to_string());
-                // **Published outward, unless that would DISCARD an adopted thread**
-                // (round-2 P6a).
+                // **Published outward, unless that would DISCARD an adopted thread.**
                 //
                 // Two cases, and only one of them defers:
                 //
@@ -3340,20 +3357,18 @@ async fn serve_connection(
                 //   now would hand the next connection a target the broker may never adopt
                 //   while discarding A, which this link demonstrably could read. Deferred
                 //   until B's resume is ACCEPTED; the chase itself survives the reconnect
-                //   through `pending_candidate`/`fallback_target` (P6b).
+                //   through `pending_candidate`/`fallback_target`.
                 //
-                // **`Carried::adopted` is NOT written here** (round-2 d2, resolved as
-                // polish in round 3): it has exactly ONE write site — `attach_from_seed`,
-                // where a resume is accepted — so "what is published is a thread we
-                // adopted" is a property of the type's single writer rather than a
-                // condition this site must remember to apply.
+                // **`Carried::adopted` is NOT written here**: it has exactly ONE write
+                // site — `attach_from_seed`, where a resume is accepted — so "what is
+                // published is a thread we adopted" is a property of the type's single
+                // writer rather than a condition this site must remember to apply.
                 //
-                // **Nothing is written to the CARRY here either**, and that is the
-                // round-6 correction. This site used to mirror the binding into
-                // [`Carried::hint`] — wire evidence in the slot reserved for the
-                // registration's claim, which retention ignores and which [`run`]
-                // overwrites. The binding writes its own slot now, at the instant it
-                // happens: see [`Connection::bind_or_follow`].
+                // **Nothing is written to the CARRY here either.** This site used to
+                // mirror the binding into [`Carried::hint`] — wire evidence in the slot
+                // reserved for the registration's claim, which retention ignores and
+                // which [`run`] overwrites. The binding writes its own slot now, at the
+                // instant it happens: see [`Connection::bind_or_follow`].
             }
             // A binding with nothing scheduled means this connection learned its thread
             // from the broadcast and has not asked yet. Ask now.
@@ -3384,10 +3399,10 @@ async fn serve_connection(
             // drops it, which is the D4 filter doing precisely the job it exists for.
             // **An outstanding resume for a DIFFERENT thread is superseded.** It cannot
             // be recalled, so it is marked here and its answer is discarded when it
-            // arrives. Skipped during a fallback (round-2 P5): there the outstanding
-            // request names the old thread ON PURPOSE. The announcement is the wire telling us which thread is this
-            // session's; a request issued before that correction must not be allowed to
-            // win by answering later.
+            // arrives. Skipped during a fallback: there the outstanding request names the
+            // old thread ON PURPOSE. The announcement is the wire telling us which thread
+            // is this session's; a request issued before that correction must not be
+            // allowed to win by answering later.
             if let Attach::Awaiting {
                 id,
                 target,
@@ -3406,7 +3421,7 @@ async fn serve_connection(
             }
         }
 
-        // **A RECOVERY ANSWER RECORDS AND NOTHING ELSE** (round-3 P7). It is about a thread
+        // **A RECOVERY ANSWER RECORDS AND NOTHING ELSE.** It is about a thread
         // this link has already left, so it may not bind the visit, move the target or
         // adopt anything — the link is on the new thread and stays there. Whatever the
         // answer is, the attach leaves `Recovering`: this debt is paid once, and a second
@@ -3418,7 +3433,7 @@ async fn serve_connection(
         if is_our_response {
             if let Attach::Recovering { thread, .. } = &attach {
                 let thread = thread.clone();
-                // **THE DEBT IS DISCHARGED BY DURABILITY, NEVER BY THE ASK** (round-8 F2).
+                // **THE DEBT IS DISCHARGED BY DURABILITY, NEVER BY THE ASK.**
                 //
                 // `recover_from` says whether this answer was CONSUMED TO COMPLETION —
                 // every fact it described filed, or the answer proved to be one no repeat
@@ -3472,26 +3487,26 @@ async fn serve_connection(
                         .settle_resume(&frame, &target, next_delay, has_fallback)
                         .await?;
                     // An answer that did not ATTACH recovered nothing, so any debt this
-                    // request was paying is owed again (round-3 P7).
+                    // request was paying is owed again.
                     if !matches!(settled, Attach::Attached) {
                         conn.unsettle_debts(&target);
                     }
                     settled
                 };
-                // **ADOPTION ENDS THE CHASE** (round-2 P5/P6), checked AFTER the settle —
+                // **ADOPTION ENDS THE CHASE**, checked AFTER the settle —
                 // `attach_from_seed` is what records the adoption, so reading it before
                 // would only ever see the previous one.
                 //
                 // The connection accepted a resume for `target`, so that thread is the one
                 // to publish outward and to inherit, and neither the candidate nor the
                 // fallback is owed anything further. This is the ONLY place the published
-                // id moves to a switched-to thread (P6a).
+                // id moves to a switched-to thread.
                 if conn.adopted_thread.as_deref() == Some(target.as_str()) {
                     // `attach_from_seed` already wrote `Carried::adopted` and cleared the
-                    // chase (round-3 P8/P9). What is left for the loop is the LOCAL target,
-                    // and the round-3 P7 debts: if this link owes pre-subscription
-                    // recoveries on threads it switched away from, adopting a new one is
-                    // the moment they become payable.
+                    // chase. What is left for the loop is the LOCAL target, and the unpaid
+                    // debts: if this link owes pre-subscription recoveries on threads it
+                    // switched away from, adopting a new one is the moment they become
+                    // payable.
                     //
                     // **Re-armed from the carry WHOLE, not merged** (A16.3c). The carry is
                     // the obligation and this queue is only the work list, so taking it
@@ -3508,20 +3523,20 @@ async fn serve_connection(
                 }
             }
         }
-        // **P7 — AN UNREADABLE ANSWER ENDS THE LEG BEFORE ANY CANDIDATE IS APPLIED.**
+        // **AN UNREADABLE ANSWER ENDS THE LEG BEFORE ANY CANDIDATE IS APPLIED.**
         //
         // This bail used to sit at the very bottom, after the candidate block, so a switch
         // announcement arriving on the same pass could apply a candidate, re-arm the attach
         // and leave `Refused` behind — SUPPRESSING the loud stop that an answer this build
         // cannot read is supposed to produce. The candidate is not lost by moving the bail:
-        // it is carried to the next connection by `pending_candidate`/`fallback_target`
-        // (round-2 P6b), which live outside this function precisely so a reconnect resumes
-        // the chase rather than forgetting it.
+        // it is carried to the next connection by `pending_candidate`/`fallback_target`,
+        // which live outside this function precisely so a reconnect resumes the chase
+        // rather than forgetting it.
         if matches!(attach, Attach::Refused) {
             bail!("thread/resume answered with a shape this build cannot read; reconnecting");
         }
 
-        // **APPLY A HELD SWITCH CANDIDATE — after settling, never before** (round-1 P5/P6).
+        // **APPLY A HELD SWITCH CANDIDATE — after settling, never before.**
         //
         // Position is the whole point. By here, an outstanding `thread/resume` of the
         // thread the link is leaving has had its answer settled and RECORDED on this very
@@ -3530,15 +3545,15 @@ async fn serve_connection(
         // announcement applied where it arrived would have marked that request superseded
         // and thrown its answer away.
         //
-        // Nothing is applied while a resume is still outstanding — of EITHER kind
-        // (round-8 F1). `Awaiting` alone was the test, and `Recovering` is a resume
-        // outstanding too: a `/new` for C landing during the on-demand ask about A applied
-        // the candidate here, replaced `Recovering` with `due_now()`, and let `resume(C)`
-        // go out beside A's unanswered request. A's answer then matched no active id and
-        // was dropped as unroutable — while its debt had already been discharged — so the
-        // one copy of A's pre-subscription items was lost by the pipelining A2 forbids.
-        // The candidate is not stranded by waiting: [`leaving_recovery`] applies it at the
-        // instant the recovery ends, which is the only other way out of that state.
+        // Nothing is applied while a resume is still outstanding — of EITHER kind.
+        // `Awaiting` alone was the test, and `Recovering` is a resume outstanding too: a
+        // `/new` for C landing during the on-demand ask about A applied the candidate
+        // here, replaced `Recovering` with `due_now()`, and let `resume(C)` go out beside
+        // A's unanswered request. A's answer then matched no active id and was dropped as
+        // unroutable — while its debt had already been discharged — so the one copy of
+        // A's pre-subscription items was lost by the pipelining A2 forbids. The candidate
+        // is not stranded by waiting: [`leaving_recovery`] applies it at the instant the
+        // recovery ends, which is the only other way out of that state.
         if !matches!(attach, Attach::Awaiting { .. } | Attach::Recovering { .. }) {
             apply_held_candidate(&mut conn, carried, &mut resume_target, &mut attach);
         }
@@ -3596,38 +3611,38 @@ struct Connection<'a> {
     /// resume nobody owed. A single map makes a turn's state one value, so "in two
     /// states at once" is not something the code can express.
     ///
-    /// **Keyed by (THREAD, turn)** (round-1 P7). Turn ids are unique per thread, not per
-    /// session, and 2e-4c made one connection carry more than one thread's worth of them:
-    /// the link follows a `/new` switch on the socket it already has, so debts recorded
-    /// under thread A now share a map with turns of thread B. A bare turn-id key would let
-    /// a terminal on B settle a debt owed on A — and, worse, let a resume of B be counted
+    /// **Keyed by (THREAD, turn).** Turn ids are unique per thread, not per session, and
+    /// 2e-4c made one connection carry more than one thread's worth of them: the link
+    /// follows a `/new` switch on the socket it already has, so debts recorded under
+    /// thread A now share a map with turns of thread B. A bare turn-id key would let a
+    /// terminal on B settle a debt owed on A — and, worse, let a resume of B be counted
     /// as paying it, so A's unrecoverable items would be marked recovered and never asked
     /// for again.
     debts: std::collections::BTreeMap<(String, String), TurnDebt>,
-    /// How many times a resume of a followed-to thread has been refused as not-yet-adopted
-    /// (round-1 P5). Reset when an attach is accepted or a fresh candidate is applied.
+    /// How many times a resume of a followed-to thread has been refused as
+    /// not-yet-adopted. Reset when an attach is accepted or a fresh candidate is applied.
     unadopted_retries: u32,
     /// Set when the adoption budget is spent and a fallback target exists; read by the loop
     /// at its one send site.
     fallback_due: bool,
-    /// **A `thread/started` for a different thread, not yet applied** (round-1 P5/P6).
+    /// **A `thread/started` for a different thread, not yet applied.**
     ///
     /// Set by [`Connection::note_switch_candidate`] and consumed by
     /// [`apply_held_candidate`] once no resume of the CURRENT thread is outstanding — of
-    /// either kind (round-8 F1: `Recovering` is an outstanding resume too, and applying a
-    /// candidate against it pipelines the next ask over an unanswered one). Holding it as
+    /// either kind (`Recovering` is an outstanding resume too, and applying a candidate
+    /// against it pipelines the next ask over an unanswered one). Holding it as
     /// a candidate — rather than re-pointing the visit where the frame arrives — is what
     /// keeps an in-flight recovery of the old thread from being thrown away, and what
     /// keeps the link from committing to a thread the broker has not adopted.
     /// The thread the SUBSCRIPTION should chase, once any outstanding recovery for the
-    /// current one is settled. Latest announcement wins (round-2 P8); the announcement's
+    /// current one is settled. Latest announcement wins; the announcement's
     /// own fact is recorded when it arrives, so a replaced candidate costs nothing.
     switch_candidate: Option<String>,
     /// The target this connection inherited from a previous one **that the link had
-    /// actually ADOPTED** (round-2 P6c). A carried adopted target means "not unbound,
-    /// merely unannounced": an announcement naming a DIFFERENT thread gets candidate
-    /// treatment rather than binding instantly, exactly as it would on a connection that
-    /// had been announced.
+    /// actually ADOPTED.** A carried adopted target means "not unbound, merely
+    /// unannounced": an announcement naming a DIFFERENT thread gets candidate treatment
+    /// rather than binding instantly, exactly as it would on a connection that had been
+    /// announced.
     ///
     /// **A registration HINT is deliberately not carried here**, and the distinction is
     /// the module's existing one rather than a new rule: a hint is a CLAIM, an announcement
@@ -3637,7 +3652,7 @@ struct Connection<'a> {
     /// so its answer would be read and this session's timeline filed under a thread the
     /// wire had already corrected.
     carried_target: Option<String>,
-    /// **The reconnect-surviving state, shared with [`run`]** (round-3 P8).
+    /// **The reconnect-surviving state, shared with [`run`].**
     ///
     /// Held by handle rather than mirrored by the loop, because the mirror had a window:
     /// a candidate noted during the HANDSHAKE — before the main loop runs at all — was not
@@ -3646,7 +3661,7 @@ struct Connection<'a> {
     /// where it is noted removes the window rather than narrowing it.
     carried: Arc<Mutex<Carried>>,
     /// The thread whose resume this connection ACCEPTED. Only an adopted thread is
-    /// published outward for the next connection to inherit (round-2 P6a).
+    /// published outward for the next connection to inherit.
     adopted_thread: Option<String>,
     /// **Approvals this connection raised a card for and has not seen retired,
     /// keyed by the id the app-server called the request on THIS socket.**
@@ -3699,6 +3714,29 @@ struct Connection<'a> {
     /// generation later than the one a surviving card was raised under clears it
     /// rather than leaving a decision on the phone that no screen still holds.
     swept_generation: Option<u64>,
+    /// **The generation this link's REGISTRATION was accepted at** — the number the
+    /// session row is keyed by, and not [`Visit::generation`], which starts equal to
+    /// it and then moves with every thread this connection adopts.
+    ///
+    /// The row records a registration's visit, so a write scoped to the live visit
+    /// number would stop matching the moment the session took its second thread —
+    /// which is exactly when the row most needs updating.
+    registered_generation: u64,
+    /// The thread this connection has already written onto the row.
+    ///
+    /// The write happens at the idle moment, which is every frame; without a memory
+    /// of what was last recorded it would be a store round trip per frame for a
+    /// value that changes a handful of times in a session's life. The store refuses
+    /// a redundant write too, so this is the cost and not the correctness — **as
+    /// long as only a successful write sets it.** Setting it on a failure was the
+    /// correctness: one `database is locked` retired the retry for the life of the
+    /// connection.
+    recorded_thread: Option<String>,
+    /// The earliest moment a failed thread write may be attempted again.
+    ///
+    /// `None` when nothing is owed or the last attempt succeeded. See
+    /// [`THREAD_RECORD_RETRY_INTERVAL`].
+    thread_record_retry_at: Option<std::time::Instant>,
 }
 
 /// An answer written on this socket, waiting to be told what became of it.
@@ -4129,11 +4167,11 @@ impl Connection<'_> {
                 next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
             });
         }
-        // **The broker has not adopted this thread YET — retryable, not fatal**
-        // (round-1 P5). A followed switch re-targets off a `thread/started` BROADCAST,
-        // which announces that the TUI created a thread; only the broker's own correlated
-        // verification of that creation makes it a session thread, and until then a
-        // `thread/resume` naming it is policy-refused on the ccd leg.
+        // **The broker has not adopted this thread YET — retryable, not fatal.** A
+        // followed switch re-targets off a `thread/started` BROADCAST, which announces
+        // that the TUI created a thread; only the broker's own correlated verification of
+        // that creation makes it a session thread, and until then a `thread/resume`
+        // naming it is policy-refused on the ccd leg.
         //
         // That window is ordinary and short — it is the round trip of the very
         // `thread/start` whose broadcast we just saw — so treating the refusal as a
@@ -4205,7 +4243,7 @@ impl Connection<'_> {
         Ok(Attach::Refused)
     }
 
-    /// **Record what a recovery answer describes, and change nothing else** (round-3 P7).
+    /// **Record what a recovery answer describes, and change nothing else.**
     ///
     /// The full attach path binds the visit, seeds the adapter and marks the connection
     /// adopted. None of that may happen here: this answer is about a thread the link has
@@ -4216,7 +4254,7 @@ impl Connection<'_> {
     /// refused, not guessed at — and a refusal costs only the recovery, never the
     /// connection: the link is attached to a different thread and healthy.
     ///
-    /// # What the answer decides: whether the carried debt is discharged (round-8 F2)
+    /// # What the answer decides: whether the carried debt is discharged
     ///
     /// `true` means **this ask is over**, which is two different situations the caller
     /// treats alike because nothing distinguishes them from outside:
@@ -4233,7 +4271,7 @@ impl Connection<'_> {
     ///   had them in its hands, and the log does not hold them — so the debt is
     ///   still owed and the next connection asks again. The log's dedup key makes
     ///   that retry cost only the rows that did not land;
-    /// * the answer reports the thread's turn **still running** (round-9 F1). Read
+    /// * the answer reports the thread's turn **still running**. Read
     ///   what that answer contains: an `inProgress` turn contributes no item fact
     ///   whatsoever, because its `items[]` carry placeholder ids rather than the
     ///   ones the live wire emitted — the measurement written down at
@@ -4261,7 +4299,7 @@ impl Connection<'_> {
     /// later adoption spends one `thread/resume` on it. That is one request per
     /// adoption, on a link that is otherwise idle, against the alternative of
     /// silently dropping the only claim on facts that exist nowhere else — and it is
-    /// the same cost the round-8 unanswered case already accepted.
+    /// the same cost the unanswered case already accepted.
     async fn recover_from(&mut self, frame: &Value, thread: &str) -> bool {
         let Some(result) = frame.get("result").filter(|_| frame.get("error").is_none()) else {
             crate::log_info!(
@@ -4313,10 +4351,9 @@ impl Connection<'_> {
             );
             return false;
         }
-        // **A RUNNING TURN OWES FACTS THIS ANSWER COULD NOT CARRY** (round-9 F1).
-        // Checked after the writes, not instead of them: an answer may describe
-        // several turns, and the finished ones' facts are worth filing whatever the
-        // running one is doing.
+        // **A RUNNING TURN OWES FACTS THIS ANSWER COULD NOT CARRY.** Checked after the
+        // writes, not instead of them: an answer may describe several turns, and the
+        // finished ones' facts are worth filing whatever the running one is doing.
         if still_running > 0 {
             crate::log_info!(
                 "codex link for {}: the recovery answer for {thread} filed {described} \
@@ -4351,10 +4388,10 @@ impl Connection<'_> {
     /// Turn an accepted answer into an attach: **subscribe, weigh the movement,
     /// record, rebuild, then remember what is owed.**
     ///
-    /// The order is the whole safety property, and each step is a constraint a review
-    /// round paid for:
+    /// The order is the whole safety property, and each step is a constraint something
+    /// got wrong before:
     ///
-    ///   * **The movement is weighed BEFORE anything is persisted** (round-4 F6).
+    ///   * **The movement is weighed BEFORE anything is persisted.**
     ///     Deciding "this answer says the agent went back to work" is a pure read of
     ///     the answer plus one question to the log; cancelling a doomed doorbell on
     ///     the strength of it costs nothing and cannot fail. Doing it *after* the
@@ -4413,25 +4450,25 @@ impl Connection<'_> {
         // before the writes, and deliberately not undone if they fail — the visit is
         // per-connection, and a failed attach ends the connection anyway.
         self.visit.thread_id = Some(thread.to_string());
-        // **THE RUN IS MID-TURN, AND THIS IS THE ONLY WITNESS THERE IS** (round-3
-        // P4). A completion admitted moments ago is waiting out its dispatch grace;
+        // **THE RUN IS MID-TURN, AND THIS IS THE ONLY WITNESS THERE IS.** A
+        // completion admitted moments ago is waiting out its dispatch grace;
         // if the link dropped and the next turn began while it was down, no
         // `turn/started` frame exists to see — the app-server broadcasts it once and
         // never replays it — and this answer is what says the agent went back to
         // work. Ringing anyway announces a completion the reader can no longer act
         // on.
         //
-        // **Gated on a turn that is NEWS, and news is a question for the LOG**
-        // (round-4 F5). It used to be a question for `self.debts`, and that map
-        // cannot answer it: it gains an entry in exactly two places — the seeding
-        // below, and `note_terminal`, which only *transitions* one that is already
-        // there — and it is built empty per `Connection`. So a turn watched
-        // completing NORMALLY, live and admitted, is not in it at all, and a
-        // vacancy test read that turn as brand new. An app-server snapshot taken
-        // before that completion then describes the same turn `inProgress`, and the
-        // gate opened for it: a stale answer cancelled a doorbell about a
-        // completion that had really happened, on one connection with no reconnect
-        // at all (a mid-connection `launch_follow_up`), and doubly so across one.
+        // **Gated on a turn that is NEWS, and news is a question for the LOG.** It used
+        // to be a question for `self.debts`, and that map cannot answer it: it gains an
+        // entry in exactly two places — the seeding below, and `note_terminal`, which
+        // only *transitions* one that is already there — and it is built empty per
+        // `Connection`. So a turn watched completing NORMALLY, live and admitted, is not
+        // in it at all, and a vacancy test read that turn as brand new. An app-server
+        // snapshot taken before that completion then describes the same turn
+        // `inProgress`, and the gate opened for it: a stale answer cancelled a doorbell
+        // about a completion that had really happened, on one connection with no
+        // reconnect at all (a mid-connection `launch_follow_up`), and doubly so across
+        // one.
         //
         // The log is the right scope twice over: it is what actually watched the
         // turn finish, and it is the only memory of a turn that outlives a
@@ -4451,25 +4488,23 @@ impl Connection<'_> {
         // Recovery may silence and may not ring — see
         // [`Daemon::note_codex_turn_running`] for why those are the same rule.
         //
-        // **The read is on the cancel's critical path, and its cost was measured
-        // rather than assumed** (round-5 F4). It is a point query on the dedup
-        // index over WAL — p50 24 µs, p99 36 µs, worst sample 0.39 ms against a
-        // 2,000-event log, and p99 46 µs with the executor under concurrent write
-        // load — against the 400 ms this is racing. The cancel is nonetheless
-        // issued before the ingest loop below (round-4 F6), which is the part that
-        // does scale with the answer; see [`Daemon::dispatch_push`], where the
+        // **The read is on the cancel's critical path, and its cost was measured rather
+        // than assumed.** It is a point query on the dedup index over WAL — p50 24 µs,
+        // p99 36 µs, worst sample 0.39 ms against a 2,000-event log, and p99 46 µs with
+        // the executor under concurrent write load — against the 400 ms this is racing.
+        // The cancel is nonetheless issued before the ingest loop below, which is the
+        // part that does scale with the answer; see [`Daemon::dispatch_push`], where the
         // window is documented as best-effort and both measurements are recorded.
         //
-        // **The FIRST novel turn is the whole answer** (round-6 F8). The gate is a
-        // single per-session flag — one turn moving and five turns moving are the same
-        // cancel — so a loop that went on querying after the first `Ok(false)` was
-        // buying nothing and spending the one budget that matters. Nothing bounds how
-        // many turns an answer may report `inProgress` (`plan_resume_seed` pushes one
-        // per turn and caps nothing), and each further read can block on a busy
-        // connection from the store's four-reader pool, so the tail it was holding the
-        // cancel behind is unbounded in exactly the direction the grace cannot afford.
-        // The cancel is issued the moment the evidence is decisive, and the loop stops
-        // there.
+        // **The FIRST novel turn is the whole answer.** The gate is a single per-session
+        // flag — one turn moving and five turns moving are the same cancel — so a loop
+        // that went on querying after the first `Ok(false)` was buying nothing and
+        // spending the one budget that matters. Nothing bounds how many turns an answer
+        // may report `inProgress` (`plan_resume_seed` pushes one per turn and caps
+        // nothing), and each further read can block on a busy connection from the store's
+        // four-reader pool, so the tail it was holding the cancel behind is unbounded in
+        // exactly the direction the grace cannot afford. The cancel is issued the moment
+        // the evidence is decisive, and the loop stops there.
         for turn in seed.running_turn_ids() {
             if self.debts.contains_key(&(thread.to_string(), turn.clone())) {
                 // Already awaiting, owed or settled here: this connection has known
@@ -4529,13 +4564,13 @@ impl Connection<'_> {
         }
         self.adapter.apply_resume_seed(&seed);
         // The attach was ACCEPTED, so whatever adoption budget an earlier switch spent is
-        // returned: the next switch gets a full one (round-1 P5).
+        // returned: the next switch gets a full one.
         self.unadopted_retries = 0;
         self.fallback_due = false;
-        // ADOPTED (round-2 P6a). Only now may this thread be published outward as the
-        // target a future connection should inherit — the single write site for
-        // [`Carried::adopted`], which is what makes "published implies adopted" structural
-        // rather than a condition to be maintained (round-2 d2, now polish).
+        // ADOPTED. Only now may this thread be published outward as the target a future
+        // connection should inherit — the single write site for [`Carried::adopted`],
+        // which is what makes "published implies adopted" structural rather than a
+        // condition to be maintained.
         self.adopted_thread = Some(thread.to_string());
         {
             let mut carried = self.carried.lock().expect("the carried link state");
@@ -4547,15 +4582,14 @@ impl Connection<'_> {
         // never be sent: they finished before it subscribed. Remember it until its
         // terminal is observed, then ask once more.
         //
-        // **The vacancy still governs the DEBT, and only the debt** (round-4 F5). A
-        // turn whose terminal this link has already seen — or already asked about —
-        // keeps the state it is in: an answer that is merely stale about a turn
-        // cannot rewind that turn's settlement, and re-seeding it `AwaitingTerminal`
-        // would buy a second follow-up for a turn already settled. That is a sound
-        // rule about *this connection's* obligations, which is exactly why it is the
-        // wrong rule for the cancellation above — the connection's obligations and
-        // what the run has actually done are different questions, and one map was
-        // being asked both.
+        // **The vacancy still governs the DEBT, and only the debt.** A turn whose
+        // terminal this link has already seen — or already asked about — keeps the state
+        // it is in: an answer that is merely stale about a turn cannot rewind that turn's
+        // settlement, and re-seeding it `AwaitingTerminal` would buy a second follow-up
+        // for a turn already settled. That is a sound rule about *this connection's*
+        // obligations, which is exactly why it is the wrong rule for the cancellation
+        // above — the connection's obligations and what the run has actually done are
+        // different questions, and one map was being asked both.
         for turn in seed.running_turn_ids() {
             self.debts
                 .entry((thread.to_string(), turn.clone()))
@@ -4672,18 +4706,17 @@ impl Connection<'_> {
         // unbound the filter rejects every named frame, so a `thread/started`
         // checked first would be dropped by the very rule it exists to satisfy.
         //
-        // A SWITCH announcement is NOT applied here, though (round-1 P5/P6). It is
-        // recorded as a CANDIDATE and applied by the loop, after the loop has had a
-        // chance to settle an outstanding resume of the thread being left. See
+        // A SWITCH announcement is NOT applied here, though. It is recorded as a
+        // CANDIDATE and applied by the loop, after the loop has had a chance to settle an
+        // outstanding resume of the thread being left. See
         // [`Connection::note_switch_candidate`] and the loop's candidate block.
         //
-        // **Its FACT, however, is recorded immediately** (round-2 P8) — see that method.
+        // **Its FACT, however, is recorded immediately** — see that method.
         //
-        // **And a followed switch is MOVEMENT** (round-9 F4). A `thread/started`
-        // naming a thread other than the one this connection is on is the operator
-        // pressing `/new` — a person acting on this session, which ends the quiet
-        // state any completion doorbell still sitting out its dispatch grace is
-        // describing.
+        // **And a followed switch is MOVEMENT.** A `thread/started` naming a thread other
+        // than the one this connection is on is the operator pressing `/new` — a person
+        // acting on this session, which ends the quiet state any completion doorbell
+        // still sitting out its dispatch grace is describing.
         //
         // It has to be said HERE rather than inferred from the new thread's first
         // turn, and that is measured: the old subscription receives the announcement
@@ -4693,9 +4726,8 @@ impl Connection<'_> {
         // frame waits for one it is never sent, and the stale ring goes out. See
         // [`Daemon::note_codex_switch`].
         //
-        // **But only a NOVEL announcement this build could READ is that person**
-        // (round-10 F2). Two shapes reach the cancel that are not somebody moving,
-        // and both used to fire it:
+        // **But only a NOVEL announcement this build could READ is that person.** Two
+        // shapes reach the cancel that are not somebody moving, and both used to fire it:
         //
         //   * [`Switch::Held`] — the candidate slot already held this thread. The
         //     slot is applied by the loop, so a repeat announcement moves neither
@@ -4708,19 +4740,18 @@ impl Connection<'_> {
         //     else is one this build declines to record. A doorbell must not die on
         //     evidence the fact store rejected.
         //
-        // So the READING happens first and the cancel reads its answer — but the
-        // cancel does not wait for the FILING (round-11 F1). Those are two halves of
-        // an ingest and only the first one is on this question's critical path:
-        // [`CodexAdapter::ingest`] is a synchronous read of the frame, so whether it
-        // minted anything is known the instant it returns, while writing what it
-        // minted is an await on the DB executor whose worst case is the store's
-        // five-second `busy_timeout` — a second process holding the write lock —
-        // against the 400 ms dispatch grace this is racing
-        // ([`Daemon::dispatch_push`]). An ingest awaited to completion before the
-        // cancel therefore put a five-second hostage in front of a 400 ms window,
-        // and the stale ring went out while the operator was already on the new
-        // thread. The same reordering, for the same reason, is why the resume
-        // cancel above is issued before its own recovery writes (round-4 F6).
+        // So the READING happens first and the cancel reads its answer — but the cancel
+        // does not wait for the FILING. Those are two halves of an ingest and only the
+        // first one is on this question's critical path: [`CodexAdapter::ingest`] is a
+        // synchronous read of the frame, so whether it minted anything is known the
+        // instant it returns, while writing what it minted is an await on the DB executor
+        // whose worst case is the store's five-second `busy_timeout` — a second process
+        // holding the write lock — against the 400 ms dispatch grace this is racing
+        // ([`Daemon::dispatch_push`]). An ingest awaited to completion before the cancel
+        // therefore put a five-second hostage in front of a 400 ms window, and the stale
+        // ring went out while the operator was already on the new thread. The same
+        // reordering, for the same reason, is why the resume cancel above is issued
+        // before its own recovery writes.
         //
         // The two halves are split, and the order is safe both ways round. The
         // cancel is [`crate::push_gate::PushGate::note_progress`] — in memory, no
@@ -6101,6 +6132,65 @@ impl Connection<'_> {
     /// the handler for a generation that moved between visits, which is real,
     /// and not for a pending approval overtaken by a switch, which is not
     /// reachable. See [`protocol::ws::ClearCause::Superseded`].
+    /// Bring the session row up to the thread this link is on.
+    ///
+    /// **The row is the only answer that survives this process.** `sessions list`
+    /// prefers the live link's adopted thread, so while the daemon is up nobody
+    /// notices the column is empty; a restart loses the link and its memory both,
+    /// and then the row is all there is. Writing it here — at the idle moment, from
+    /// the connection that learned the thread — is what makes the durable answer and
+    /// the live one the same answer.
+    ///
+    /// Only a thread this connection is actually BOUND to, never a carried or
+    /// pending one: [`Connection::bound`] is the fact that this link watched the
+    /// thread start or had its resume accepted, and a candidate it is merely chasing
+    /// is not yet a place the session is.
+    ///
+    /// **"Adopted" here is the loose word and not this module's strict one.** Strictly
+    /// (see `Connection::adopted_thread`) adoption is an ACCEPTED `thread/resume`, and
+    /// a followed announcement is `Bound` before any resume is accepted. What the row
+    /// records is the binding — the same set of facts the fleet's own addressee
+    /// reports, and what the existing fleet tests already accept under that name.
+    async fn record_adopted_thread(&mut self) {
+        let Some(thread) = self.bound() else {
+            // Nothing to say. Deliberately not a clear: a link that drops its
+            // binding on a reconnect has not moved the session off the thread, and
+            // blanking the row for the length of a handshake would make the durable
+            // answer flicker in a way the live one never does.
+            return;
+        };
+        if self.recorded_thread.as_deref() == Some(thread) {
+            return;
+        }
+        // A failed write is retried, but not on every frame. The idle moment is
+        // every frame, and a store that is briefly locked would otherwise be asked
+        // again thousands of times a second for as long as the lock lasts. One
+        // attempt per interval is enough to land the moment the lock clears and
+        // cheap enough to keep for the life of the connection.
+        if self
+            .thread_record_retry_at
+            .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        let thread = thread.to_string();
+        if self
+            .daemon
+            .note_codex_thread(self.session, self.registered_generation, &thread)
+            .await
+        {
+            // Remembered only once the row is actually up to date. A write the store
+            // DECLINED — already recorded, or a generation this link does not speak
+            // for — is a finished state and counts; a write the store FAILED does
+            // not, and memoizing it made one transient lock permanent.
+            self.recorded_thread = Some(thread);
+            self.thread_record_retry_at = None;
+        } else {
+            self.thread_record_retry_at =
+                Some(std::time::Instant::now() + THREAD_RECORD_RETRY_INTERVAL);
+        }
+    }
+
     async fn retire_superseded_cards(&mut self) {
         if self.swept_generation == Some(self.visit.generation) {
             return;
@@ -6229,7 +6319,7 @@ impl Connection<'_> {
     /// frame must name a thread, and it must be the thread this connection is bound
     /// to. Anything else is somebody else's movement, or nobody's.
     ///
-    /// # And it must carry the MEASURED `turn/started` BODY (round-4 F7)
+    /// # And it must carry the MEASURED `turn/started` BODY
     ///
     /// Naming the bound thread was not enough, because the resolver that read the
     /// name — [`frame_thread_id`] — is deliberately *generous*: it accepts both the
@@ -6413,7 +6503,7 @@ impl Connection<'_> {
         // The thread this terminal belongs to. A fact only reaches here after the D4
         // filter admitted it, so it is this visit's thread by construction — but the key is
         // built from the CURRENT binding rather than assumed, so a debt can never be
-        // recorded under a thread the link is not on (round-1 P7).
+        // recorded under a thread the link is not on.
         let Some(thread) = self.bound().map(str::to_string) else {
             return;
         };
@@ -6437,7 +6527,7 @@ impl Connection<'_> {
     /// Is a follow-up owed? **Peeked, never consumed** — see [`Connection::owed`]. The
     /// debt is cleared by [`Connection::launch_follow_up`], and only once the request
     /// that pays it is actually on the wire.
-    /// **Does this link owe `thread` a pre-subscription recovery?** (round-3 P7.)
+    /// **Does this link owe `thread` a pre-subscription recovery?**
     ///
     /// True when a turn on that thread was seeded while RUNNING and its follow-up resume
     /// has not been launched. Those items — the ones that finished before this link
@@ -6452,10 +6542,10 @@ impl Connection<'_> {
 
     /// Is a follow-up owed **for the thread this link is currently on**?
     ///
-    /// Thread-scoped (round-1 P7): a resume can only ever ask about ONE thread, so a debt
-    /// owed on a thread the link has switched away from cannot be paid by the request this
-    /// would schedule. Counting it would fire a resume of the CURRENT thread and then mark
-    /// the OTHER thread's debt settled — retiring a recovery that never happened.
+    /// Thread-scoped: a resume can only ever ask about ONE thread, so a debt owed on a
+    /// thread the link has switched away from cannot be paid by the request this would
+    /// schedule. Counting it would fire a resume of the CURRENT thread and then mark the
+    /// OTHER thread's debt settled — retiring a recovery that never happened.
     fn follow_up_owed(&self) -> bool {
         let Some(thread) = self.bound() else {
             return false;
@@ -6472,7 +6562,7 @@ impl Connection<'_> {
     /// A debt recorded *after* this point stays owed and fires when the connection is
     /// attached again — which is what keeps at most one follow-up in flight without
     /// letting the next one fall on the floor.
-    /// **A follow-up went out but did not RECOVER anything** (round-3 P7).
+    /// **A follow-up went out but did not RECOVER anything.**
     ///
     /// `launch_follow_up` marks a debt `Settled` at the send site, which is right for the
     /// purpose it was written for — one ask per turn, never a loop. But "asked" is not
@@ -6491,9 +6581,9 @@ impl Connection<'_> {
     }
 
     fn launch_follow_up(&mut self, target: &str) {
-        // Settles only the debts of the thread the request ACTUALLY names (round-1 P7).
-        // One answer describes one whole thread, so it pays every debt of that thread at
-        // once — and none of any other's.
+        // Settles only the debts of the thread the request ACTUALLY names. One answer
+        // describes one whole thread, so it pays every debt of that thread at once — and
+        // none of any other's.
         for ((thread, _), debt) in self.debts.iter_mut() {
             if thread == target && *debt == TurnDebt::Owed {
                 *debt = TurnDebt::Settled;
@@ -6508,10 +6598,10 @@ impl Connection<'_> {
     /// is there, which is the ordinary case and costs nothing) and a write that
     /// failed. Neither is something to announce: one is not new, and the other did
     /// not happen.
-    /// **The failure is reported as well as logged** (round-8 F2). The live path has
-    /// nothing to do with a fact it could not write — the frame is gone and no state
-    /// depends on it — but the recovery path does: whether its answer was written is
-    /// exactly what decides whether the debt it was paying is discharged or owed again.
+    /// **The failure is reported as well as logged.** The live path has nothing to do
+    /// with a fact it could not write — the frame is gone and no state depends on it —
+    /// but the recovery path does: whether its answer was written is exactly what decides
+    /// whether the debt it was paying is discharged or owed again.
     async fn record(
         &self,
         pending: protocol::event::PendingEvent,
@@ -6639,8 +6729,8 @@ impl Connection<'_> {
     /// the candidate is already the bound thread).
     ///
     /// The state change is exactly what [`Connection::bind_or_follow`] used to do inline;
-    /// only WHEN it happens moved (round-1 P5/P6).
-    /// **Give up on the chased thread and go back** (round-2 P5).
+    /// only WHEN it happens moved.
+    /// **Give up on the chased thread and go back.**
     ///
     /// A fallback that moved only the ATTACH target was not a fallback at all: the visit
     /// stayed on the un-adopted thread, so the bound-target redirect — whose whole job is
@@ -6705,30 +6795,29 @@ impl Connection<'_> {
     }
 
     /// Record a `thread/started` that names a DIFFERENT thread as a switch CANDIDATE,
-    /// without touching the visit (round-1 P5/P6).
+    /// without touching the visit.
     ///
     /// # Why the announcement is not applied where it arrives
     ///
     /// Two reasons, both about what would be lost if it were:
     ///
-    /// * **P6 — an in-flight recovery is the only copy of some facts.** When the switch
+    /// * **An in-flight recovery is the only copy of some facts.** When the switch
     ///   lands, this link may have a `thread/resume` of the OLD thread outstanding. That
     ///   answer can be the only thing that will ever name the items which finished before
     ///   this link subscribed: no live frame carries them, and once the link has moved on
     ///   it will never ask about that thread again. Re-pointing the visit here marks the
     ///   request superseded, so its answer is received and thrown away. The loop settles it
     ///   FIRST and follows afterwards.
-    /// * **P5 — the announcement is not an adoption.** `thread/started` is a broadcast; the
+    /// * **The announcement is not an adoption.** `thread/started` is a broadcast; the
     ///   broker has not necessarily verified the new thread's creation yet, and it may
     ///   never (a creation response can prove failure, or prove nothing at all). Until it
     ///   does, the new thread is not a session thread and a `thread/resume` naming it is
     ///   policy-refused. Committing the visit to it irrevocably would strand the link on a
     ///   thread that was never adopted, with the thread it *could* still read forgotten.
     ///
-    /// Returns what the frame turned out to be, in the caller's terms: whether its
-    /// ingest is now the caller's obligation (round-2 P8), and — separately — whether
-    /// this announcement is a person moving. See [`Switch`] for why those two are not
-    /// one answer.
+    /// Returns what the frame turned out to be, in the caller's terms: whether its ingest
+    /// is now the caller's obligation, and — separately — whether this announcement is a
+    /// person moving. See [`Switch`] for why those two are not one answer.
     ///
     /// # Why a switch announcement's FACT is recorded at once
     ///
@@ -6772,7 +6861,7 @@ impl Connection<'_> {
         if current.as_deref() == Some(id) {
             // A re-announcement of the thread we are already on (or carrying). If we are
             // BOUND to it the ordinary filter admits the frame; if we are merely carrying
-            // it as a target, bind now — this is the reconnect case (P6c) where the
+            // it as a target, bind now — this is the reconnect case where the
             // announcement finally names the thread we were already asking about.
             if self.visit.thread_id.is_none() {
                 let _ = self.bind_or_follow(frame);
@@ -6794,13 +6883,13 @@ impl Connection<'_> {
         // Latest wins. A candidate this replaces cost nothing but its announcement, which
         // was recorded when it arrived.
         self.switch_candidate = Some(id.to_string());
-        // **Persisted HERE, at note time, in every path** (round-3 P8) — including the
+        // **Persisted HERE, at note time, in every path** — including the
         // handshake, where the main loop has not begun and a mirror would never run.
         {
             let mut carried = self.carried.lock().expect("the carried link state");
             carried.pending_candidate = Some(id.to_string());
             // The thread to fall back to is the last ADOPTED one — the only slot that is
-            // provably readable (round-3 P9). Never overwritten by a second switch.
+            // provably readable. Never overwritten by a second switch.
             //
             // **Honest status: REDUNDANT, and deliberately kept** (closing S10).
             //
@@ -6853,10 +6942,10 @@ impl Connection<'_> {
     /// thread's resume is accepted.
     ///
     /// **Deliberately not read off [`Attach`].** A subscribed connection re-enters
-    /// `Backoff`/`Awaiting` to fire the follow-up resume it owes (the round-3
-    /// mid-turn debt) while frames keep flowing to it, so an `Attach`-derived answer
-    /// would drop that connection to `Bound` for the length of a round trip and
-    /// report a live addressee as unreachable.
+    /// `Backoff`/`Awaiting` to fire the follow-up resume it owes (the mid-turn debt)
+    /// while frames keep flowing to it, so an `Attach`-derived answer would drop that
+    /// connection to `Bound` for the length of a round trip and report a live addressee
+    /// as unreachable.
     ///
     /// # A held switch candidate is deliberately invisible here
     ///
@@ -6868,13 +6957,13 @@ impl Connection<'_> {
     /// to A, A's frames are still arriving, and a decision raised on A is answered
     /// on A.
     ///
-    /// What it does not say is that a newer thread has been announced — and it must
-    /// not, because an announcement is not an adoption. B has not been resumed and
-    /// may never be: a thread with no rollout is policy-refused on every attempt,
-    /// and the link falls back to A. Publishing B would name a thread nothing has
-    /// verified as readable, which is the mistake `Carried`'s three distinct slots
-    /// were separated to prevent (round-3 P9). So the *announced* head is carried
-    /// where a chase can act on it, and the *adopted* head is what is published.
+    /// What it does not say is that a newer thread has been announced — and it must not,
+    /// because an announcement is not an adoption. B has not been resumed and may never
+    /// be: a thread with no rollout is policy-refused on every attempt, and the link
+    /// falls back to A. Publishing B would name a thread nothing has verified as
+    /// readable, which is the mistake `Carried`'s three distinct slots were separated to
+    /// prevent. So the *announced* head is carried where a chase can act on it, and the
+    /// *adopted* head is what is published.
     ///
     /// # How long the gap really lasts
     ///
@@ -6921,12 +7010,12 @@ impl Connection<'_> {
         addressee_of(
             self.visit.thread_id.as_deref(),
             self.adopted_thread.as_deref(),
-            // **What the LINK knows, for the one state the connection does not.**
-            // A fresh connection has bound nothing and adopted nothing, but the link
-            // it belongs to is resuming a thread it adopted on an earlier one — see
+            // **What the LINK knows, for the one state the connection does not.** A fresh
+            // connection has bound nothing and adopted nothing, but the link it belongs
+            // to is resuming a thread it adopted on an earlier one — see
             // [`CodexAddressee::Unbound`]. Read from `carried_target`, which is the
-            // adopted-only slot (round-2 P6c): a merely-pending candidate is not
-            // something this link has verified, and must not be named.
+            // adopted-only slot: a merely-pending candidate is not something this link
+            // has verified, and must not be named.
             self.carried_target.as_deref(),
         )
     }
@@ -7090,7 +7179,7 @@ mod tests {
     }
 
     /// **A generation the ledger cannot hold is refused, and the boundary is
-    /// exact** (round-C F3).
+    /// exact.**
     ///
     /// The wire carries this as a JSON number into an `Option<u64>`; SQLite holds
     /// `i64`. The store used to saturate the difference, which is worse than it
@@ -7148,7 +7237,7 @@ mod tests {
     }
 
     /// **A thread id made of whitespace names no thread, and there is one
-    /// spelling of that** (round-C F4).
+    /// spelling of that.**
     ///
     /// The link has always read a blank socket as an absent socket; it read a
     /// blank thread the same way and the row beside it did not, which is how a
@@ -7522,9 +7611,9 @@ mod tests {
                 "/work/proj",
                 "/work/.codex/sessions",
                 "gpt-5.6-luna",
-                // And the KEY names, which round 1 printed. A key name is peer text
-                // from no fixed vocabulary; a future or hostile server can put
-                // anything in one, so none of them may reach the log either.
+                // And the KEY names, which the frame dump printed too. A key name
+                // is peer text from no fixed vocabulary; a future or hostile server
+                // can put anything in one, so none of them may reach the log either.
                 "itemsBackwardsCursor",
                 "instructionSources",
                 "activePermissionProfile",
@@ -7741,7 +7830,7 @@ mod tests {
                 .find(|line| line.contains("STOP-AND-AMEND"))
                 .unwrap_or_else(|| panic!("the sink captured nothing ({mode}): {captured:?}"));
             assert!(line.starts_with("20") && line.contains(" ERROR "), "{line}");
-            // The `Frame: {frame}` dump round 1 removed, asserted where it would
+            // The removed `Frame: {frame}` dump, asserted where it would
             // actually have appeared.
             assert!(!line.contains("Frame:"), "{mode}: {line}");
             assert!(
@@ -7867,7 +7956,7 @@ mod tests {
     const LIFECYCLE: &str = include_str!("../../../fixtures/codex/lifecycle.jsonl");
     /// The real 0.147 stream for the first turn of a fresh thread. Read here for one
     /// thing only: it is the nearest committed capture of a `turn/started` frame, and
-    /// round-4 F7's guard is a claim about that frame's shape. `lifecycle.jsonl`
+    /// the measured-body guard is a claim about that frame's shape. `lifecycle.jsonl`
     /// begins after the turn has started and carries none.
     const FIRST_TURN: &str = include_str!("../../../fixtures/codex/first-turn.jsonl");
 
@@ -7965,7 +8054,7 @@ mod tests {
         /// a thread. Neither is a notification, so neither may bind this connection
         /// or reach the adapter; and the handshake must still complete.
         NoisyHandshake,
-        /// **A RECOVERY ANSWER CROSSING THE SWITCH BOUNDARY** (round-1 P6).
+        /// **A RECOVERY ANSWER CROSSING THE SWITCH BOUNDARY.**
         ///
         /// The first resume is answered with the turn still RUNNING, so the link owes
         /// itself a follow-up; the leg replays only the TAIL, standing for items that
@@ -7977,7 +8066,7 @@ mod tests {
         /// carries them, and once the link moves to the new thread it will never ask about
         /// the old one again. It must be CONSUMED before the switch is followed.
         RecoveryCrossingASwitch,
-        /// **THE FOLLOWED-TO THREAD IS NOT ADOPTED YET** (round-1 P5).
+        /// **THE FOLLOWED-TO THREAD IS NOT ADOPTED YET.**
         ///
         /// The link is announced a new thread and re-targets to it — but the broker has not
         /// finished verifying that thread's creation, so the first resumes of it come back
@@ -7999,7 +8088,7 @@ mod tests {
         /// The leg refuses the stale hint outright, so a reconnect that still asks for it
         /// gets nowhere: the observable is which thread the second connection names.
         AnnouncedThenDroppedBeforeAdopting,
-        /// **A CROSSING RECOVERY THAT NEVER LANDS BEFORE THE SWITCH** (round-3 P7).
+        /// **A CROSSING RECOVERY THAT NEVER LANDS BEFORE THE SWITCH.**
         ///
         /// The link attaches to A MID-TURN, so it owes a follow-up: A's earlier items
         /// finished before the subscription existed and are reachable from nowhere else.
@@ -8009,9 +8098,9 @@ mod tests {
         ///
         /// A's withheld item must still be recovered: the obligation outlives the switch,
         /// and is paid once, on demand, after B is adopted. That is the on-demand recovery
-        /// the P8 doctrine promises, made real rather than asserted.
+        /// the doctrine promises, made real rather than asserted.
         SwitchWithACrossingRecoveryOwed,
-        /// **THE APP-SERVER GOES AWAY AS THE ON-DEMAND RECOVERY IS WRITTEN** (round-3 P7).
+        /// **THE APP-SERVER GOES AWAY AS THE ON-DEMAND RECOVERY IS WRITTEN.**
         ///
         /// The same arc as [`ResumeAnswer::SwitchWithACrossingRecoveryOwed`] up to the point
         /// where B is adopted — and then B's answer is the leg's **last act**: it sends it
@@ -8030,7 +8119,7 @@ mod tests {
         /// the moment the recovery is issued is the same failure by the route the wire
         /// actually produces it.
         SwitchThenTheLegVanishesAsTheRecoveryIsWritten,
-        /// **THE ON-DEMAND RECOVERY IS NEVER ANSWERED** (round-3 P7).
+        /// **THE ON-DEMAND RECOVERY IS NEVER ANSWERED.**
         ///
         /// The same arc again — A attached mid-turn, the follow-up refused, B announced and
         /// adopted — and then the leg simply **says nothing** to the recovery resume for A.
@@ -8055,7 +8144,7 @@ mod tests {
         /// `Recovering` ([`leaving_recovery`]) asks for B's follow-up, and only that answer
         /// can name B's withheld item.
         SwitchThenTheRecoveryIsNeverAnswered,
-        /// **THE RECOVERY IS ANSWERED AND THE LEG THEN SAYS NOTHING** (round-8 F5).
+        /// **THE RECOVERY IS ANSWERED AND THE LEG THEN SAYS NOTHING.**
         ///
         /// The sibling of [`ResumeAnswer::SwitchThenTheRecoveryIsNeverAnswered`], and the
         /// reason it needs one: that script leaves `Recovering` through the TIMEOUT arm,
@@ -8073,8 +8162,7 @@ mod tests {
         /// no later pass at all, so B's withheld userMessage can be named only if the
         /// answered exit itself re-checks what is owed.
         SwitchThenTheRecoveryIsAnsweredAndTheLegGoesQuiet,
-        /// **A THIRD THREAD IS ANNOUNCED WHILE THE ON-DEMAND RECOVERY IS OUTSTANDING**
-        /// (round-8 F1).
+        /// **A THIRD THREAD IS ANNOUNCED WHILE THE ON-DEMAND RECOVERY IS OUTSTANDING.**
         ///
         /// The same arc again — A joined mid-turn, its follow-up refused, B announced and
         /// adopted, the on-demand ask about A on the wire — and then the operator presses
@@ -8091,10 +8179,11 @@ mod tests {
         SwitchThenAThirdIsAnnouncedDuringTheRecovery,
         /// **TWO THREADS LEFT MID-TURN, AND BOTH DEBTS ARE OWED AT ONCE** (A16.3c).
         ///
-        /// The owed-B case, which one slot cannot hold. The arc opens as the round-3 P7
-        /// scripts do — A joined mid-turn, its follow-up refused, B announced — and then
-        /// diverges at the one moment that matters: **C is announced BEFORE B's resume is
-        /// answered**, so the candidate is already held when that answer arrives.
+        /// The owed-B case, which one slot cannot hold. The arc opens as the other
+        /// on-demand recovery scripts do — A joined mid-turn, its follow-up refused, B
+        /// announced — and then diverges at the one moment that matters: **C is announced
+        /// BEFORE B's resume is answered**, so the candidate is already held when that
+        /// answer arrives.
         ///
         /// The loop settles B's answer (adopting B, and seeding a turn that is still
         /// RUNNING, so B owes a recovery of its own) and reaches the candidate block on
@@ -8109,8 +8198,7 @@ mod tests {
         /// distinguishable. A single slot keeps the newer write, so it is A's key —
         /// `{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}` — that goes missing.
         TwoSwitchesEachLeavingARecoveryOwed,
-        /// **THE LEG VANISHES AFTER THE RECOVERY IS ASKED, BEFORE IT IS ANSWERED**
-        /// (round-8 F2).
+        /// **THE LEG VANISHES AFTER THE RECOVERY IS ASKED, BEFORE IT IS ANSWERED.**
         ///
         /// The near-twin of [`ResumeAnswer::SwitchThenTheLegVanishesAsTheRecoveryIsWritten`],
         /// and the difference is the whole finding: there the WRITE fails, so the ask never
@@ -8126,7 +8214,7 @@ mod tests {
         /// is the observable. Connection 2 adopts B and must then ask about A.
         SwitchThenTheLegVanishesAfterTheRecoveryIsAsked,
         /// **THE ON-DEMAND RECOVERY IS ANSWERED, AND THE ANSWER SAYS THE TURN IS STILL
-        /// RUNNING** (round-9 F1).
+        /// RUNNING.**
         ///
         /// The near-twin of the two above, and the difference is the whole finding: the
         /// request is sent, the answer arrives, it is perfectly readable, and every fact
@@ -8145,8 +8233,7 @@ mod tests {
         /// "the debt survived and was later settled" one observable rather than two
         /// hopes.
         SwitchThenTheRecoveryAnswersARunningTurn,
-        /// **THE CANDIDATE MUST SURVIVE A CONNECTION THAT DIES BEFORE APPLYING IT**
-        /// (round-2 P6b).
+        /// **THE CANDIDATE MUST SURVIVE A CONNECTION THAT DIES BEFORE APPLYING IT.**
         ///
         /// Connection 1: the resume of A is answered and A's stream replays, so A is
         /// ADOPTED. The leg then announces B **and immediately drops the connection**,
@@ -8157,8 +8244,7 @@ mod tests {
         /// would sit on A for the rest of the session while the user works in B. The
         /// reconnect must therefore ask about B — with A still the thing to fall back to.
         CandidateAnnouncedThenTheLegDrops,
-        /// **A RECONNECT CARRYING AN ADOPTED TARGET IS ANNOUNCED A DIFFERENT THREAD**
-        /// (round-2 P6c).
+        /// **A RECONNECT CARRYING AN ADOPTED TARGET IS ANNOUNCED A DIFFERENT THREAD.**
         ///
         /// Connection 1 adopts A and drops. Connection 2 carries A and is announced B as
         /// its FIRST announcement. That must get candidate treatment — announcement is not
@@ -8169,7 +8255,7 @@ mod tests {
         ///
         /// The leg refuses B for ever, so the fallback to A is what the test observes.
         ReconnectCarryingAdoptedThenAnnouncedAnother,
-        /// **TWO SWITCHES WHILE A RECOVERY IS OUTSTANDING** (round-2 P8).
+        /// **TWO SWITCHES WHILE A RECOVERY IS OUTSTANDING.**
         ///
         /// The link attaches mid-turn (so it owes a follow-up), and while that request is
         /// in flight the leg announces B and then C. The single candidate slot holds one
@@ -8177,7 +8263,7 @@ mod tests {
         /// announcement, which is recorded the moment it arrives. The SUBSCRIPTION chases
         /// C, because C is where the user is.
         TwoSwitchesDuringRecovery,
-        /// **AN UNREADABLE ANSWER ARRIVES WITH A SWITCH ANNOUNCEMENT** (round-2 P7).
+        /// **AN UNREADABLE ANSWER ARRIVES WITH A SWITCH ANNOUNCEMENT.**
         ///
         /// The leg announces a switch and answers the outstanding resume with a shape this
         /// build cannot read, on the same pass. The unreadable answer must still END the
@@ -8185,8 +8271,7 @@ mod tests {
         /// survive to the next connection, since `thread/started` is broadcast once and
         /// never replayed.
         UnreadableAnswerBesideASwitch,
-        /// **THE SWITCH TARGET IS NEVER ADOPTED, AND THE FALLBACK MUST COMPLETE**
-        /// (round-2 P5).
+        /// **THE SWITCH TARGET IS NEVER ADOPTED, AND THE FALLBACK MUST COMPLETE.**
         ///
         /// The first resume (A) is answered and A's stream replays; the leg announces B and
         /// then refuses EVERY resume of B, for ever. Once the adoption budget is spent the
@@ -8553,7 +8638,7 @@ mod tests {
     /// finished. Read from `fixtures/codex/lifecycle.jsonl`'s own `item/completed`.
     const LIFECYCLE_USER_ITEM: &str = "01a0127a-dbdd-7d11-b925-5bb0c2dac319";
 
-    /// A THIRD thread, for the two-switches-in-a-row case (round-2 P8).
+    /// A THIRD thread, for the two-switches-in-a-row case.
     const THIRD_THREAD: &str = "01a039a6-d67c-7bb1-9050-071265c77067";
 
     /// The thread the `/new` switch moves TO. A second real-shaped thread id.
@@ -8750,7 +8835,7 @@ mod tests {
     /// [`lifecycle_answer_in_progress`] cannot express that on its own: it reuses the
     /// capture's one turn id, so an answer built from it after that turn has been
     /// recorded finished is a *stale snapshot* of a settled turn, not news. The two
-    /// helpers are the two halves of the round-4 F5 distinction, and a test needs
+    /// helpers are the two halves of the news-versus-stale distinction, and a test needs
     /// both to show the gate telling them apart.
     fn lifecycle_answer_novel_turn(id: i64, thread: &str, turn_id: &str) -> Value {
         let mut answer = lifecycle_answer_in_progress(id, thread);
@@ -8760,7 +8845,7 @@ mod tests {
 
     /// Make every `events` insert fail, and leave every read working.
     ///
-    /// The asymmetry is the whole point of the probe: round-4 F6 is about a
+    /// The asymmetry is the whole point of the probe: the rule under test is about a
     /// cancellation that used to be hostage to the recovery WRITES, and separating it
     /// from them can only be shown by a log that refuses to be written to while still
     /// answering [`crate::store::Store::turn_terminal_filed`]. Closing the database,
@@ -8822,7 +8907,7 @@ mod tests {
         // reply the shared tail sends — refusals included — so it cannot be used to say
         // "this is the second time the link asked about the fallback thread".
         let mut fallback_asks = 0usize;
-        // Asks about the ORIGINAL thread, for the round-3 P7 script.
+        // Asks about the ORIGINAL thread, for the on-demand recovery scripts.
         let mut a_asks = 0usize;
         // Asks about the SWITCHED-TO thread. Separate from `a_asks` for the same reason
         // that one is separate from `resumes_answered`: the never-answered-recovery
@@ -8932,7 +9017,7 @@ mod tests {
                     // frames go only to a connection whose `thread/resume` succeeded
                     // (2e-4a, and `codex_link_live`'s claim 5 counts it). A leg that
                     // handed them out for free let an announced-but-unsubscribed link
-                    // look like it was observing, which is exactly the defect P1 fixes.
+                    // look like it was observing, which is exactly the defect this fixes.
                     //
                     // **Act one only.** A reconnect to a thread that is already running
                     // gets no `thread/started` — the announcement happened once, on a
@@ -8942,7 +9027,7 @@ mod tests {
                     if announce_thread && nth == 0 && !announces_late {
                         ws.send(Message::Text(announce(LIFECYCLE_THREAD))).await?;
                     }
-                    // P6c: the RECONNECT — which is carrying an ADOPTED target — is
+                    // The RECONNECT — which is carrying an ADOPTED target — is
                     // announced a DIFFERENT thread as its first announcement.
                     if matches!(
                         answer,
@@ -9477,12 +9562,12 @@ mod tests {
                                 resumes_answered += 1;
                                 if b_asks == 1 {
                                     // **C IS ANNOUNCED FIRST, AND THAT ORDERING IS THE
-                                    // WHOLE CASE.** The broadcast lands while B's resume is
-                                    // still outstanding, so the loop HOLDS it as a
-                                    // candidate rather than applying it (round-8 F1). The
-                                    // answer below then adopts B and seeds a turn that is
-                                    // still RUNNING — B's own pre-subscription debt — and
-                                    // the candidate block, one statement further down the
+                                    // WHOLE CASE.** The broadcast lands while B's resume
+                                    // is still outstanding, so the loop HOLDS it as a
+                                    // candidate rather than applying it. The answer below
+                                    // then adopts B and seeds a turn that is still
+                                    // RUNNING — B's own pre-subscription debt — and the
+                                    // candidate block, one statement further down the
                                     // same pass, retires B with that debt unsettled.
                                     //
                                     // A's debt is still unpaid at that instant and could
@@ -9733,7 +9818,7 @@ mod tests {
                                 // Connection 0 adopts A and drops. Connection 1 is
                                 // announced B, chases it, falls back to A — and then drops
                                 // too, so connection 2's FIRST ask reveals what was
-                                // PUBLISHED across all of it (round-2 P6a).
+                                // PUBLISHED across all of it.
                                 if nth <= 1 {
                                     tokio::time::sleep(Duration::from_millis(120)).await;
                                     ws.close(None).await?;
@@ -10235,6 +10320,160 @@ mod tests {
         (events, connections, resumes, frames, presence, push.last())
     }
 
+    /// **The same drive, reading the session ROW the link left behind.**
+    ///
+    /// Split out for the reason [`drive_holding_the_carry`] is: what a link *writes
+    /// down about the session* is one property, and the dozen tests about what it
+    /// records and what it publishes have no business restating it.
+    ///
+    /// The row is seeded at a generation, unlike the shared seed, because that is
+    /// what a real registration writes (`Daemon::register_supervisor` upserts the
+    /// generation the frame carried) and the thread binding is a fact about a
+    /// generation rather than about a uid.
+    ///
+    /// Returns `(the row's recorded thread, the states the link published)`.
+    async fn drive_reading_the_row(
+        answer: ResumeAnswer,
+        hint: Option<&str>,
+        announce_thread: bool,
+        generation: u64,
+        settle: Duration,
+    ) -> (Option<String>, Vec<CodexAddressee>) {
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(answer, announce_thread);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db, _push) = linked_daemon_watching_pushes(&session);
+        let uid = session.uid.clone();
+        let seeded = daemon.store.get_session(&uid).unwrap().expect("the seed");
+        daemon
+            .store
+            .upsert_session_at_generation(&seeded, Some(generation))
+            .unwrap()
+            .assert_present();
+        let presence = LinkPresence::new();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session.clone(),
+            ControlLink {
+                socket: leg.path.clone(),
+                generation,
+                thread_id: hint.map(str::to_string),
+            },
+            presence.clone(),
+            LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
+        ));
+        let mut published: Vec<CodexAddressee> = Vec::new();
+        let until = Instant::now() + settle;
+        while Instant::now() < until {
+            let now = presence.get();
+            if published.last() != Some(&now) {
+                published.push(now);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let recorded = daemon
+            .store
+            .get_session(&uid)
+            .unwrap()
+            .and_then(|row| row.codex_thread_id);
+        task.abort();
+        let _ = task.await;
+        (recorded, published)
+    }
+
+    /// **The thread the link adopted reaches the session row.**
+    ///
+    /// The column existed and stayed empty on every healthy session: it is written
+    /// by a registration, and a registration happens before `thread/started`, so the
+    /// only rows that ever carried a thread were the ones whose launch already knew
+    /// one. Everything downstream — a restarted daemon, `sessions list`, anything
+    /// reading the row rather than the live link — saw a Codex run on no thread at
+    /// all. The link is the process that learns the thread; it is the one that has
+    /// to write it down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_thread_the_link_adopts_reaches_the_session_row() {
+        let (recorded, published) = drive_reading_the_row(
+            ResumeAnswer::Populated,
+            None,
+            true,
+            1,
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            published
+                .iter()
+                .any(|state| state.thread_id() == Some(LIFECYCLE_THREAD)),
+            "the link must actually adopt the thread before the row can carry it: {published:?}"
+        );
+        assert_eq!(
+            recorded.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "the row must name the thread the link adopted"
+        );
+    }
+
+    /// **A link cannot write a thread onto a generation it does not belong to.**
+    ///
+    /// The row's thread and its generation are one fact — a generation is one visit,
+    /// one thread — so a link whose registration has been superseded must not be able
+    /// to stamp its thread over the visit that replaced it. Driven with the link one
+    /// generation behind the row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_link_from_a_superseded_visit_never_writes_the_row() {
+        let (recorded, published) = drive_reading_the_row(
+            ResumeAnswer::Populated,
+            None,
+            true,
+            1,
+            Duration::from_secs(2),
+        )
+        .await;
+        // The control: at its own generation the same drive does write.
+        assert_eq!(recorded.as_deref(), Some(LIFECYCLE_THREAD), "{published:?}");
+
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(ResumeAnswer::Populated, true);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db, _push) = linked_daemon_watching_pushes(&session);
+        let uid = session.uid.clone();
+        let seeded = daemon.store.get_session(&uid).unwrap().expect("the seed");
+        // The row has moved on to a later visit; the link still speaks for the old one.
+        daemon
+            .store
+            .upsert_session_at_generation(&seeded, Some(2))
+            .unwrap()
+            .assert_present();
+        let presence = LinkPresence::new();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session.clone(),
+            ControlLink {
+                socket: leg.path.clone(),
+                generation: 1,
+                thread_id: None,
+            },
+            presence.clone(),
+            LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
+        ));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let stale = daemon
+            .store
+            .get_session(&uid)
+            .unwrap()
+            .and_then(|row| row.codex_thread_id);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(
+            stale, None,
+            "a superseded link must not stamp its thread onto the visit that replaced it"
+        );
+    }
+
     /// **The same drive, keeping the CARRY — and never joining the link task.**
     ///
     /// Both halves are what separate this from [`drive_watching_presence`], and neither is
@@ -10247,8 +10486,8 @@ mod tests {
     /// The **join is bounded**, and that is not tidiness either. Joining at all is what keeps
     /// an aborted link from overlapping the next leg's budget, so it is worth doing — but the
     /// failure these two tests report is a link stuck on a deadline no arm consumes, and a
-    /// task that stops reaching an await point never observes an abort. Measured, the round-3
-    /// P7 spin does keep yielding, so the join returns at once; the bound is there so that if
+    /// task that stops reaching an await point never observes an abort. Measured, the spin
+    /// does keep yielding, so the join returns at once; the bound is there so that if
     /// it ever does not, the test says what went wrong instead of hanging while it tidies up.
     ///
     /// Returns `(events recorded, connections accepted, the thread each resume asked
@@ -10307,7 +10546,7 @@ mod tests {
         out
     }
 
-    /// **A RECOVERY WHOSE WRITE FAILS LEAVES THE THREAD STILL NAMED** (round-3 P7).
+    /// **A RECOVERY WHOSE WRITE FAILS LEAVES THE THREAD STILL NAMED.**
     ///
     /// The debt used to be cleared from the carry at the send site but **ahead of the
     /// send**. The site was right — a debt discharged where it was noticed is a debt lost,
@@ -10626,7 +10865,7 @@ mod tests {
         );
     }
 
-    /// **AN UNANSWERED RECOVERY IS GIVEN UP, AND THE LINK GOES ON OBSERVING** (round-3 P7).
+    /// **AN UNANSWERED RECOVERY IS GIVEN UP, AND THE LINK GOES ON OBSERVING.**
     ///
     /// `Attach::Recovering` contributed its deadline to the connection's `timeout_at` and no
     /// arm anywhere consumed an elapsed one. The timeout returned `Err`, the loop `continue`d
@@ -10648,13 +10887,14 @@ mod tests {
     /// silent for good. Only a link that re-checks what it owes at the moment it leaves
     /// `Recovering` asks B's follow-up, and only that answer lands the item.
     ///
-    /// **The ordering is the test** (round-7 F2). Sending B's terminal after the budget
-    /// had elapsed, as this leg first did, meant the frame that made the follow-up due was
-    /// also a frame that ran the loop to its bottom-of-loop scheduler — which by then saw
-    /// `Attached` and fired. That passed with the re-check deleted, because the socket was
-    /// obliging enough to knock twice. Delivered during the recovery, the debt is recorded
-    /// against `Recovering`, the scheduler declines, and the only remaining chance to ask
-    /// is the state change itself: on a quiet socket there is no later pass at all.
+    /// **The ordering is the test.** Sending B's terminal after the budget had elapsed,
+    /// as this leg first did, meant the frame that made the follow-up due was also a
+    /// frame that ran the loop to its bottom-of-loop scheduler — which by then saw
+    /// `Attached` and fired. That passed with the re-check deleted, because the socket
+    /// was obliging enough to knock twice. Delivered during the recovery, the debt is
+    /// recorded against `Recovering`, the scheduler declines, and the only remaining
+    /// chance to ask is the state change itself: on a quiet socket there is no later pass
+    /// at all.
     ///
     /// And giving up is not a `bail!`: the recovery has cost the session the
     /// pre-subscription items of a thread nobody is on, which is not a reason to tear down
@@ -10716,14 +10956,13 @@ mod tests {
         );
     }
 
-    /// **THE ANSWERED EXIT FROM `Recovering` RE-CHECKS WHAT IS OWED — ON ITS OWN**
-    /// (round-8 F5).
+    /// **THE ANSWERED EXIT FROM `Recovering` RE-CHECKS WHAT IS OWED — ON ITS OWN.**
     ///
     /// `leaving_recovery` is one rule applied at two exits, and until this test only the
-    /// TIMEOUT exit was pinned: the never-answered script reaches
-    /// [`leaving_recovery`] through the expired deadline, so replacing the ANSWERED
-    /// arm's call with a bare `Attach::Attached` left it green. That is a masking
-    /// residual the round-7 report stated rather than hid, and this closes it.
+    /// TIMEOUT exit was pinned: the never-answered script reaches [`leaving_recovery`]
+    /// through the expired deadline, so replacing the ANSWERED arm's call with a bare
+    /// `Attach::Attached` left it green. That is a masking residual that was stated
+    /// rather than hidden, and this closes it.
     ///
     /// The arc is the same up to the on-demand ask about A, and then: B's turn
     /// terminalizes **while the recovery is outstanding**, so B's follow-up debt is
@@ -10779,7 +11018,7 @@ mod tests {
         );
     }
 
-    /// **A `/new` DURING THE ON-DEMAND RECOVERY DOES NOT PIPELINE OVER IT** (round-8 F1).
+    /// **A `/new` DURING THE ON-DEMAND RECOVERY DOES NOT PIPELINE OVER IT.**
     ///
     /// `Recovering` is a resume outstanding, and the candidate block tested only for
     /// `Awaiting`. So the third exit from `Recovering` was the candidate block itself:
@@ -10792,11 +11031,11 @@ mod tests {
     /// The obvious claim would be A's withheld item: the recovery answer is the only
     /// thing that can name it, so a dropped answer loses it. **Measured, that is no
     /// longer true on this tree, and the test says so rather than claiming a kill it
-    /// does not make.** Round-8 F2 keeps the carried debt until the answer is
-    /// *persisted*, so the dropped answer leaves the obligation owed, adopting C re-arms
-    /// it, and the item is recovered on the retry. The two fixes compose: F2 repairs what
-    /// F1 breaks, which is the right relationship and the reason neither substitutes for
-    /// the other.
+    /// does not make.** The carried debt is kept until the answer is *persisted*, so the
+    /// dropped answer leaves the obligation owed, adopting C re-arms it, and the item is
+    /// recovered on the retry. The two rules compose: keeping the debt repairs what the
+    /// pipelining breaks, which is the right relationship and the reason neither
+    /// substitutes for the other.
     ///
     /// What the pipelining cannot hide is the SEQUENCE. The retry is a SIXTH question
     /// about A that a link honouring A2 never asks, and it is asked because a resume went
@@ -10856,9 +11095,9 @@ mod tests {
         );
     }
 
-    /// **A RECOVERY THAT WAS ASKED AND NEVER ANSWERED KEEPS ITS DEBT** (round-8 F2).
+    /// **A RECOVERY THAT WAS ASKED AND NEVER ANSWERED KEEPS ITS DEBT.**
     ///
-    /// The debt used to be discharged the moment `send_resume` returned. Round 7 moved it
+    /// The debt used to be discharged the moment `send_resume` returned. It was moved
     /// there from the noticing site for a good reason — a debt cleared against a state
     /// that could not issue a request is a debt lost — but a request on the wire is not a
     /// recovery. The answer still has to arrive, be readable, and be WRITTEN, and the
@@ -10912,7 +11151,7 @@ mod tests {
         );
     }
 
-    /// **AN ANSWER THAT SAYS THE TURN IS STILL RUNNING HAS PAID NOTHING** (round-9 F1).
+    /// **AN ANSWER THAT SAYS THE TURN IS STILL RUNNING HAS PAID NOTHING.**
     ///
     /// The third way an on-demand recovery can fail to be one, and the only one where
     /// nothing goes wrong at all: the request is written, the answer arrives, it is
@@ -10926,7 +11165,7 @@ mod tests {
     /// nothing on that connection settles the debt afterwards. A discharge on the
     /// strength of "the answer was consumed to completion" therefore loses A's
     /// pre-subscription items exactly as a discharge on the strength of the send did —
-    /// the failure round 8 fixed, arriving through the one door it left open.
+    /// the same failure, arriving through the one door the earlier fix left open.
     ///
     /// The observable is A's withheld `userMessage`. Only connection 2's answer carries
     /// it, and connection 2 asks about A only if the debt survived an answer this
@@ -10972,7 +11211,7 @@ mod tests {
         );
     }
 
-    /// **A RECOVERY WHOSE WRITE FAILS STAYS OWED** (round-8 F2, the other half).
+    /// **A RECOVERY WHOSE WRITE FAILS STAYS OWED** — the other half.
     ///
     /// The scripted-leg case above proves the debt survives an answer that never comes.
     /// This proves the other thing [`Connection::recover_from`] now decides: an answer
@@ -11022,6 +11261,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // The healthy answer first, so the failure below is plainly the write and not the
@@ -11064,6 +11306,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
         assert!(
             !conn.recover_from(&answer, LIFECYCLE_THREAD).await,
@@ -11186,13 +11431,13 @@ mod tests {
             ResumeAnswer::PartialItemsView,
             ResumeAnswer::ItemWithoutType,
         ] {
-            // **A policy refusal is now reported after a BOUNDED delay, not instantly**
-            // (round-1 P5). A followed switch re-targets off a broadcast and the broker
-            // adopts the new thread one round trip later, so a `-32001` for a thread that
-            // is simply "not adopted YET" is retried a few times before it is believed.
-            // The disposition is unchanged — end the connection and report loudly — but it
-            // now costs `ADOPTION_RETRIES * ADOPTION_RETRY_DELAY` first, so this budget
-            // covers three connections' worth of that instead of three instant refusals.
+            // **A policy refusal is now reported after a BOUNDED delay, not instantly.**
+            // A followed switch re-targets off a broadcast and the broker adopts the new
+            // thread one round trip later, so a `-32001` for a thread that is simply "not
+            // adopted YET" is retried a few times before it is believed. The disposition
+            // is unchanged — end the connection and report loudly — but it now costs
+            // `ADOPTION_RETRIES * ADOPTION_RETRY_DELAY` first, so this budget covers
+            // three connections' worth of that instead of three instant refusals.
             let budget = if matches!(answer, ResumeAnswer::Refused) {
                 4 * ADOPTION_RETRIES * ADOPTION_RETRY_DELAY
             } else {
@@ -11337,7 +11582,7 @@ mod tests {
         );
     }
 
-    /// **AN IN-FLIGHT RECOVERY IS CONSUMED BEFORE THE SWITCH IS FOLLOWED** (round-1 P6).
+    /// **AN IN-FLIGHT RECOVERY IS CONSUMED BEFORE THE SWITCH IS FOLLOWED.**
     ///
     /// The defect this closes: the link attached mid-turn, so it owes itself one follow-up
     /// resume — the only thing that can ever name the items which finished before it
@@ -11383,7 +11628,7 @@ mod tests {
         assert_eq!(connections, 1, "and without a reconnect");
     }
 
-    /// **A NOT-YET-ADOPTED SWITCH TARGET IS RETRIED, NOT ABANDONED** (round-1 P5).
+    /// **A NOT-YET-ADOPTED SWITCH TARGET IS RETRIED, NOT ABANDONED.**
     ///
     /// The link re-targets off a `thread/started` BROADCAST; only the broker's own
     /// correlated verification of that creation makes the thread resumable. In between, a
@@ -11469,17 +11714,17 @@ mod tests {
         );
     }
 
-    /// **A CROSSING RECOVERY IS PAID AFTER THE SWITCH, ON DEMAND** (round-3 P7).
+    /// **A CROSSING RECOVERY IS PAID AFTER THE SWITCH, ON DEMAND.**
     ///
     /// The link attaches to A mid-turn, so A owes it a follow-up — the items that finished
     /// before the subscription existed are reachable from nowhere else. The follow-up goes
     /// out, a switch is announced, and the follow-up comes back NOT-READY: the recovery
     /// never lands. The link follows the switch and adopts B.
     ///
-    /// Round-2 stopped there, and the honest reading of that is that A's history was simply
-    /// lost — the P8 doctrine says "retired threads are recovered on demand", and nothing
-    /// was demanding. Now the obligation outlives the switch and the connection, and is paid
-    /// once after B is adopted.
+    /// An earlier build stopped there, and the honest reading of that is that A's history
+    /// was simply lost — the doctrine says "retired threads are recovered on demand", and
+    /// nothing was demanding. Now the obligation outlives the switch and the connection,
+    /// and is paid once after B is adopted.
     ///
     /// The assertion is the WITHHELD item, not a count: `capture_tail()` omits the
     /// userMessage precisely so that only a completed answer about A can supply it.
@@ -11549,7 +11794,7 @@ mod tests {
         );
     }
 
-    /// **A CANDIDATE OUTLIVES THE CONNECTION THAT HEARD IT** (round-2 P6b).
+    /// **A CANDIDATE OUTLIVES THE CONNECTION THAT HEARD IT.**
     ///
     /// The link adopts A; the leg announces B and drops before the link's next pass can
     /// apply the candidate. `thread/started` is broadcast once and never replayed, so if
@@ -11606,8 +11851,7 @@ mod tests {
         );
     }
 
-    /// **A RECONNECT CARRYING AN ADOPTED TARGET TREATS AN ANNOUNCEMENT AS A CANDIDATE**
-    /// (round-2 P6c).
+    /// **A RECONNECT CARRYING AN ADOPTED TARGET TREATS AN ANNOUNCEMENT AS A CANDIDATE.**
     ///
     /// Uniformity: an announcement is never an instant repoint. On a fresh connection the
     /// link is technically unbound, but a target it ADOPTED is not a guess — it is a thread
@@ -11658,7 +11902,7 @@ mod tests {
              conn 2 verifies what was published. A fourth connection means the link had to \
              reconnect to reach A, i.e. no fallback was ever recorded: {targets:?}"
         );
-        // **And what was PUBLISHED is the ADOPTED thread, never the chased one** (P6a).
+        // **And what was PUBLISHED is the ADOPTED thread, never the chased one.**
         // Connection 2 starts from the published target, so its first ask is the evidence.
         let last_b = targets
             .iter()
@@ -11673,7 +11917,7 @@ mod tests {
         );
     }
 
-    /// **TWO SWITCHES IN A ROW: B's FACT SURVIVES, C WINS THE SUBSCRIPTION** (round-2 P8).
+    /// **TWO SWITCHES IN A ROW: B's FACT SURVIVES, C WINS THE SUBSCRIPTION.**
     ///
     /// The candidate slot holds ONE thread, so a second `/new` while a recovery is
     /// outstanding replaces the first. The question is what that costs, and the
@@ -11731,8 +11975,7 @@ mod tests {
         assert_eq!(connections, 1, "and none of it costs a reconnect");
     }
 
-    /// **AN UNREADABLE ANSWER STILL ENDS THE LEG, AND THE CANDIDATE SURVIVES** (round-2
-    /// P7 + P6b).
+    /// **AN UNREADABLE ANSWER STILL ENDS THE LEG, AND THE CANDIDATE SURVIVES.**
     ///
     /// The `Refused` bail used to sit at the very bottom of the loop, after the candidate
     /// block — so a switch announcement arriving on the same pass applied a candidate,
@@ -11778,7 +12021,7 @@ mod tests {
         );
     }
 
-    /// **THE FALLBACK COMPLETES** (round-2 P5).
+    /// **THE FALLBACK COMPLETES.**
     ///
     /// A followed switch whose target the broker never adopts must not strand the session.
     /// The link spends its adoption budget on B, gives up, and goes back to A — and the
@@ -11789,7 +12032,8 @@ mod tests {
     ///
     /// Scripted with B refused FOR EVER, so the fallback is genuinely reached — a script
     /// that relented after a few refusals would let this pass without the fallback ever
-    /// running, which is precisely how the round-1 version masked the defect.
+    /// running, which is precisely how an earlier version of this script masked the
+    /// defect.
     ///
     /// It also carries the measurement that keeps [`Carried`] in memory: the last
     /// assertion pins the state in which the durable log's newest identity fact and the
@@ -11872,7 +12116,7 @@ mod tests {
              announcement and nothing else"
         );
 
-        // ------------- why the carry is a CELL and not a query (round-6)
+        // ------------- why the carry is a CELL and not a query
         //
         // It is a fair question whether [`Carried`] needs to exist at all, given that
         // the daemon already files a durable identity fact for every thread the wire
@@ -11893,8 +12137,8 @@ mod tests {
         // link demonstrably could not read, and hand it over WITHOUT the fallback that
         // rescued this one — `Carried::fallback` has no representation in the log at
         // all, because "adopted" is a fact about a resume being accepted and the log
-        // only ever saw an announcement. Asserted rather than argued, so a later round
-        // that reaches for the tidier design meets the measurement first.
+        // only ever saw an announcement. Asserted rather than argued, so a later reach
+        // for the tidier design meets the measurement first.
         let newest_identity = events
             .iter()
             .rfind(|e| e.kind == protocol::event::EventKind::SessionStart)
@@ -11943,7 +12187,217 @@ mod tests {
         );
     }
 
-    /// **A DEBT IS KEYED BY (THREAD, TURN)** (round-1 P7).
+    // ------------------------------------- what the session row learns, and when
+
+    /// A connection wired to `daemon`, on `thread`, registered at `generation`.
+    /// Every other field is the quiet default; these three are what the row cares
+    /// about.
+    fn a_connection_on<'a>(
+        daemon: &'a Arc<Daemon>,
+        session: &'a SessionKey,
+        adapter: &'a mut CodexAdapter,
+        amend: &'a mut AmendThrottle,
+        generation: u64,
+        thread: &str,
+    ) -> Connection<'a> {
+        Connection {
+            daemon,
+            session,
+            adapter,
+            visit: Visit {
+                generation,
+                upstream_epoch: 0,
+                thread_id: Some(thread.to_string()),
+            },
+            filtered: 0,
+            next_id: 1,
+            amend,
+            debts: std::collections::BTreeMap::new(),
+            unadopted_retries: 0,
+            fallback_due: false,
+            switch_candidate: None,
+            carried_target: None,
+            carried: Arc::new(Mutex::new(Carried::default())),
+            adopted_thread: None,
+            outstanding: std::collections::BTreeMap::new(),
+            open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
+            swept_generation: None,
+            registered_generation: generation,
+            recorded_thread: None,
+            thread_record_retry_at: None,
+        }
+    }
+
+    /// Put the session's row at `generation`, which is what a registration does and
+    /// what [`crate::store::Store::bind_codex_thread`] is scoped to.
+    fn register_at(store: &crate::store::Store, session: &SessionKey, generation: u64) {
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session_at_generation(
+                &crate::store::SessionRow {
+                    session_uid: session.uid.clone(),
+                    session_id: session.name.clone(),
+                    tmux_session: session.name.clone(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    agent: protocol::agent::AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                },
+                Some(generation),
+            )
+            .unwrap()
+            .assert_present();
+    }
+
+    fn thread_on_row(store: &crate::store::Store, session: &SessionKey) -> Option<String> {
+        store
+            .get_session(&session.uid)
+            .unwrap()
+            .unwrap()
+            .codex_thread_id
+    }
+
+    /// **One failed write must not retire the retry for the life of the connection.**
+    ///
+    /// The write is memoized so the idle moment — which is every frame — does not
+    /// cost a store round trip per frame. Memoizing an outcome that was never
+    /// examined meant a single `database is locked` was remembered as "recorded":
+    /// the session went on running on that thread and every later pass skipped the
+    /// write, so a restart read a column that had stayed empty for the whole run.
+    /// That is the exact emptiness this write exists to fix, arriving through the
+    /// retry instead of through the absence.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_thread_write_is_retried_by_a_later_idle_pass_and_lands() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000RET".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let store = crate::store::Store::open(db.path()).unwrap();
+        register_at(&store, &session, 4);
+
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            4,
+            LIFECYCLE_THREAD,
+        );
+
+        // The failure, staged the way another process would cause one: the table the
+        // write needs is not there when the statement runs. A rename rather than a
+        // drop, so the same rows come back untouched.
+        let saboteur = rusqlite::Connection::open(db.path()).expect("the same file");
+        saboteur
+            .execute_batch("ALTER TABLE codex_sessions RENAME TO codex_sessions_hidden;")
+            .expect("the table exists until now");
+
+        conn.record_adopted_thread().await;
+        assert_eq!(
+            conn.recorded_thread, None,
+            "a write that failed is not a thread this connection has recorded"
+        );
+        assert_eq!(
+            thread_on_row(&store, &session),
+            None,
+            "and the row really did not learn it"
+        );
+
+        // An idle pass arriving immediately is throttled — the idle moment is every
+        // frame, and a locked store must not become a hot loop.
+        conn.record_adopted_thread().await;
+        assert_eq!(conn.recorded_thread, None);
+
+        saboteur
+            .execute_batch("ALTER TABLE codex_sessions_hidden RENAME TO codex_sessions;")
+            .expect("put it back");
+        tokio::time::sleep(THREAD_RECORD_RETRY_INTERVAL + Duration::from_millis(100)).await;
+
+        conn.record_adopted_thread().await;
+        assert_eq!(
+            thread_on_row(&store, &session),
+            Some(LIFECYCLE_THREAD.to_string()),
+            "the next idle pass after the store recovers must land the write"
+        );
+        assert_eq!(
+            conn.recorded_thread.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "and only then is it remembered"
+        );
+    }
+
+    /// **A `/new` writes the new thread against the REGISTRATION's generation, not
+    /// the visit's — and the row is keyed by the registration's.**
+    ///
+    /// The two numbers start equal and then diverge: `Visit::generation` moves with
+    /// every thread this connection adopts, while the row's `codex_generation` is
+    /// the one its registration was written at and does not move at all. A write
+    /// scoped to the live visit number would therefore stop matching at exactly the
+    /// moment the row most needs updating — the second thread of a session — and the
+    /// column would keep naming the first thread for the rest of the run.
+    ///
+    /// **Mutation:** pass `self.visit.generation` to `note_codex_thread` instead of
+    /// `self.registered_generation`. The `/new` half below fails; nothing else in the
+    /// suite does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_thread_lands_on_the_row_the_registration_keyed() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000NEW".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let store = crate::store::Store::open(db.path()).unwrap();
+        register_at(&store, &session, 4);
+
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            4,
+            LIFECYCLE_THREAD,
+        );
+
+        conn.record_adopted_thread().await;
+        assert_eq!(
+            thread_on_row(&store, &session),
+            Some(LIFECYCLE_THREAD.to_string()),
+            "the first thread lands on the row"
+        );
+
+        // The `/new`: a new thread is a new VISIT, so the visit generation moves.
+        // The registration's does not, and neither does the row's.
+        conn.move_visit_to(SWITCHED_THREAD);
+        assert_eq!(conn.visit.generation, 5, "a new visit is a new generation");
+        assert_eq!(
+            conn.registered_generation, 4,
+            "the registration is still the one the row was written at"
+        );
+
+        conn.record_adopted_thread().await;
+        assert_eq!(
+            thread_on_row(&store, &session),
+            Some(SWITCHED_THREAD.to_string()),
+            "after a `/new` the row must name the thread the session is actually on; \
+             a write scoped to the live visit number matches nothing and leaves the \
+             first thread standing for the rest of the run"
+        );
+    }
+
+    /// **A DEBT IS KEYED BY (THREAD, TURN).**
     ///
     /// Turn ids are unique per thread, not per session, and one connection now carries more
     /// than one thread's turns. A bare turn-id key lets a resume of thread B settle a debt
@@ -11982,6 +12436,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
         // The SAME turn id, owed on two different threads.
         let turn = "01a0-turn".to_string();
@@ -12057,6 +12514,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
         let first: Value = serde_json::from_str(&announce(LIFECYCLE_THREAD)).unwrap();
         conn.note_switch_candidate(&first);
@@ -12078,8 +12538,8 @@ mod tests {
         assert_eq!(conn.visit.generation, 7, "and still does not");
         assert_eq!(conn.visit.thread_id.as_deref(), Some(LIFECYCLE_THREAD));
 
-        // A DIFFERENT thread is a switch — but it is HELD as a candidate first
-        // (round-1 P5/P6), so nothing about the visit moves until the loop applies it.
+        // A DIFFERENT thread is a switch — but it is HELD as a candidate first, so
+        // nothing about the visit moves until the loop applies it.
         let second: Value = serde_json::from_str(&announce(SWITCHED_THREAD)).unwrap();
         conn.note_switch_candidate(&second);
         assert_eq!(
@@ -12090,12 +12550,12 @@ mod tests {
         );
         assert_eq!(conn.visit.generation, 7, "nor bump the generation");
 
-        // **The broker's head delivery cannot walk this link back** (2e-7b round-2
-        // F1's D4 interaction, verified here rather than assumed). The broker
-        // delivers the head it has VERIFIED, which lags the announcement — so the
-        // frame that can arrive while a candidate is held is one naming the thread
-        // the visit is still bound to. It must move neither: it names the bound
-        // thread, so it is `Passed` to the ordinary filter and the candidate stands.
+        // **The broker's head delivery cannot walk this link back** (2e-7b's D4
+        // interaction, verified here rather than assumed). The broker delivers the head
+        // it has VERIFIED, which lags the announcement — so the frame that can arrive
+        // while a candidate is held is one naming the thread the visit is still bound to.
+        // It must move neither: it names the bound thread, so it is `Passed` to the
+        // ordinary filter and the candidate stands.
         assert_eq!(
             conn.note_switch_candidate(&first),
             Switch::Passed,
@@ -12208,7 +12668,7 @@ mod tests {
         assert_only_the_announcement_recorded(&events);
     }
 
-    /// **P4: `method` must be a STRING.**
+    /// **`method` must be a STRING.**
     ///
     /// `get("method").is_some()` calls `"method": null` method-bearing, which would
     /// route it into the notification path. Today that is survivable by accident —
@@ -12240,7 +12700,7 @@ mod tests {
         );
     }
 
-    /// **M3: the handshake survives frames that are not notifications.**
+    /// **The handshake survives frames that are not notifications.**
     ///
     /// Before the `initialize` answer the leg sends an unmatched method-less
     /// response and a `"method": null` frame, both naming a thread this session
@@ -12758,6 +13218,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // A turn ended a moment ago; its doorbell is waiting out the grace.
@@ -12833,7 +13296,7 @@ mod tests {
         }
     }
 
-    /// **A `/new` INSIDE THE GRACE CANCELS THE DOORBELL** (round-9 F4).
+    /// **A `/new` INSIDE THE GRACE CANCELS THE DOORBELL.**
     ///
     /// The hole the test above cannot reach, because it is not about turns at all.
     /// A turn on A completes and its doorbell waits out the 400 ms grace; the
@@ -12892,6 +13355,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // A re-announcement of the thread this connection is on. Nobody moved.
@@ -12934,7 +13400,7 @@ mod tests {
     }
 
     /// **A switch cancels the doorbell once, and only when it is a switch the
-    /// adapter can read** (round-10 F2).
+    /// adapter can read.**
     ///
     /// The witness above proves the positive half and one negative — a
     /// re-announcement of the thread this connection is BOUND to is nobody moving.
@@ -12992,6 +13458,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // The premise: one `/new`, which really does cancel.
@@ -13053,7 +13522,7 @@ mod tests {
         );
     }
 
-    /// **The switch cancel does not wait for the write** (round-11 F1).
+    /// **The switch cancel does not wait for the write.**
     ///
     /// The two witnesses above both await the ingest to completion, so both prove
     /// only that the cancellation happens *eventually*. Eventually is not the
@@ -13108,6 +13577,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // Another process takes the write lock and keeps it. The daemon's own writer
@@ -13153,8 +13625,7 @@ mod tests {
         );
     }
 
-    /// **Only the MEASURED `turn/started` shape counts as this run's movement**
-    /// (round-4 F7).
+    /// **Only the MEASURED `turn/started` shape counts as this run's movement.**
     ///
     /// The frame under test is the committed capture itself, not a hand-written
     /// stand-in, and every negative below is that same frame with one field changed.
@@ -13223,6 +13694,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // **The wire's own frame must still cancel.** This is the half that makes the
@@ -13318,8 +13792,8 @@ mod tests {
     /// running" can land while the doorbell is still cancellable.
     ///
     /// The other two legs are the boundary that keeps it from becoming a blanket
-    /// "recovery silences everything", and the third of them is what round-4 F5
-    /// bought. **Novelty is a question for the LOG, not for `self.debts`.** That map
+    /// "recovery silences everything", and the third of them is the one that matters
+    /// most. **Novelty is a question for the LOG, not for `self.debts`.** That map
     /// gains an entry in exactly two places — `attach_from_seed`'s own seeding, and
     /// `note_terminal`, which only transitions one already there — and it starts empty
     /// on every `Connection`. So a turn watched completing normally, live and
@@ -13331,9 +13805,9 @@ mod tests {
     /// link meets them, and the middle one has to name a turn the log holds no terminal
     /// for — which is why [`lifecycle_answer_novel_turn`] exists.
     ///
-    /// **The fourth leg is the log's SCOPE** (round-5 F3). Turn ids are unique per
-    /// thread, and the ask has to be too: a session-wide question about a turn id reads
-    /// thread A's settled turn as thread B's running one and stops cancelling.
+    /// **The fourth leg is the log's SCOPE.** Turn ids are unique per thread, and the ask
+    /// has to be too: a session-wide question about a turn id reads thread A's settled
+    /// turn as thread B's running one and stops cancelling.
     ///
     /// **Mutations**, each killing a different leg:
     ///
@@ -13384,6 +13858,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         // **QUIET.** An answer describing a finished thread is a re-attach, not news.
@@ -13509,7 +13986,7 @@ mod tests {
         );
     }
 
-    /// **The cancellation survives a recovery whose writes all fail** (round-4 F6).
+    /// **The cancellation survives a recovery whose writes all fail.**
     ///
     /// The cancel used to sit at the bottom of `attach_from_seed`, after an ingest
     /// loop that returns on its first error. So the one case where the evidence is
@@ -13564,6 +14041,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         let ticket = daemon.push_gate.admit_turn_end(&session.uid);
@@ -13735,6 +14215,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
         let subscribed_to_a = CodexAddressee::Subscribed {
             thread_id: LIFECYCLE_THREAD.to_string(),
@@ -13840,6 +14323,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         };
 
         assert_eq!(
@@ -14914,6 +15400,9 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running_turn: None,
             swept_generation: None,
+            registered_generation: 1,
+            recorded_thread: None,
+            thread_record_retry_at: None,
         }
     }
 
@@ -17620,9 +18109,9 @@ mod tests {
     /// 12 runs out of 12, on both arcs.** A spawned task on the multi-thread runtime
     /// starts on another worker immediately and its store call is microseconds, while the
     /// terminal behind it has to cross a unix socket first; the spawn wins essentially
-    /// always here. An earlier round documented that mutation as a coin toss, and it is
-    /// not one — on this machine it is not a discriminator at all, so treating it as
-    /// evidence would have been treating a green run as proof.
+    /// always here. That mutation reads like a coin toss and is not one — on this
+    /// machine it is not a discriminator at all, so treating it as evidence would have
+    /// been treating a green run as proof.
     ///
     /// What IS discriminated, and by a deterministic test, is the other half of the same
     /// guard: `note_response_disposition` spends the `outstanding` mapping BEFORE it

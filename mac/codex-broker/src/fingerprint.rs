@@ -74,12 +74,12 @@
 //!    [`crate::session`] binds only when the classifier claimed a creation slot at forward
 //!    time AND the correlated `(leg role, request id)` RESPONSE carried
 //!    `result.thread.id` + `result.cwd` + `result.runtimeWorkspaceRoots`. A notification
-//!    can no longer seed a binding, and P3's single-thread invariant means no later
+//!    can no longer seed a binding, and the single-thread invariant means no later
 //!    creation can re-point the head.
 //! 5. The turn must name that thread AND carry exactly the `cwd`/`runtimeWorkspaceRoots`
 //!    recorded from its creation response, so the deferral cannot be discharged for a turn
 //!    aimed at a different workspace than the one the thread's policy was proven over
-//!    ([`crate::refusal`], P5). Both recorded values are anchored to the coordinator-owned
+//!    ([`crate::refusal`]). Both recorded values are anchored to the coordinator-owned
 //!    launch cwd at creation time — `cwd` equal to it, `runtimeWorkspaceRoots` equal to
 //!    `[it]` ([`is_launch_workspace_roots`], A10 follow-on) — so clause 5 inherits an anchor
 //!    rather than merely pinning the thread to its own first frame.
@@ -98,7 +98,7 @@
 //! owned dimension: only the sandbox null shape was captured, and every shape that was
 //! not captured stays fail-closed.
 //!
-//! ## The `turn/start` sandbox boundary (P6)
+//! ## The `turn/start` sandbox boundary
 //!
 //! On `turn/start` the ONLY provable sandbox shape is the captured one: the key
 //! `params.sandboxPolicy` present with an exact JSON `null`, and no other sandbox-adjacent
@@ -109,7 +109,7 @@
 //! accepted a matching sandbox STRING on a turn; that arm was never observed on the wire
 //! and is deleted, along with the tests that asserted it.
 //!
-//! ## The `turn/start` captured boundary (P4)
+//! ## The `turn/start` captured boundary
 //!
 //! Six `turn/start` params were measured as PRESENT and exactly JSON `null` on every real
 //! turn: `permissions`, `environments`, `multiAgentMode`, `responsesapiClientMetadata`,
@@ -119,16 +119,16 @@
 //! value, so a populated one is unprovable. A **missing** key is equally unprovable: the
 //! real TUI always sends the key, so its absence is a client this broker has not measured,
 //! and widening any of these requires a NEW capture, not an argument.
-//! `collaborationMode` was the one non-null nullable field in the capture. Round 2 tightens
-//! it from a shape class to **exact equality with the captured value** — it carries
+//! `collaborationMode` was the one non-null nullable field in the capture, and it is pinned
+//! to **exact equality with the captured value** rather than to a shape class — it carries
 //! `settings.developer_instructions`, so it is an instruction channel and a shape class
 //! proves nothing; see [`check_collaboration_mode`] for the loudly-accepted consequence
 //! (a codex bump or a Plan-mode switch surfaces as a refusal to be re-grounded).
 //!
-//! (Measured correction to the 2e-4a review, which asserted `multiAgentMode` was non-null:
-//! in the capture it was `null`. `collaborationMode` was the only non-null one.)
+//! (MEASURED: in the capture `multiAgentMode` was `null`. `collaborationMode` was the only
+//! non-null one.)
 //!
-//! ## The `turn/start` top-level allowlist (round-2 P5)
+//! ## The `turn/start` top-level allowlist
 //!
 //! Beyond the shape of the individual gated params, the SET of top-level params is itself
 //! pinned to the capture ([`TURN_START_CAPTURED_PARAMS`]): any key outside it refuses.
@@ -141,13 +141,13 @@
 //! `runtimeWorkspaceRoots`. The first five are model/UX knobs — they select which model
 //! answers and how it talks, not what it is permitted to do; `input` and `threadId` are the
 //! turn's payload and routing; and `cwd`/`runtimeWorkspaceRoots` are governed instead by
-//! P5's exact equality against the values bound at thread creation ([`crate::refusal`]),
+//! exact equality against the values bound at thread creation ([`crate::refusal`]),
 //! which is a stronger rule than a shape class — and since 2e-7c (gate A10 follow-on) BOTH of
 //! those bound values are themselves anchored to the coordinator-owned launch cwd at creation
 //! time, so the turn-side equality is a transitive anchor rather than mere self-consistency.
 //! See [`is_launch_workspace_roots`], which is that anchor's one definition.
 //!
-//! ## The `thread/start` capability boundary (round-5 finding 5)
+//! ## The `thread/start` capability boundary
 //!
 //! The 2e-7c anchor closed `cwd` and `runtimeWorkspaceRoots` on a creation and stopped
 //! there, so the rest of the creation frame was still forwarded on a shape nobody had
@@ -234,7 +234,7 @@
 //! Note the boundary this does NOT cross: `thread/resume`'s own allowlist still refuses
 //! `serviceTier`, because no captured resume carries it.
 //!
-//! ## The `thread/resume` captured boundary (round-5 finding 6)
+//! ## The `thread/resume` captured boundary
 //!
 //! `thread/resume` is a BROADER binding bypass than the creation frame, and until now the
 //! only thing checked on it was that `params.threadId` names a session thread
@@ -262,7 +262,7 @@
 //!                                                    id appears nowhere — `path` won
 //! ```
 //!
-//! D2 is the whole finding in one frame: the SAME request that fails without `history`
+//! D2 is the whole bypass in one frame: the SAME request that fails without `history`
 //! SUCCEEDS with it, and what comes back is a thread this broker never bound, populated from
 //! client-supplied content — a thread CREATION through a method that never touches the
 //! creation slot, the launch-cwd guards, or the presence rule. D3 then binds `/` as that
@@ -301,7 +301,7 @@
 //! (the effective root/typed fields stay absent ⇒ Absent refuse), while a decoy that
 //! *conflicts* still refuses.
 //!
-//! ## Refusal details are audit-log-safe (round-3 P3)
+//! ## Refusal details are audit-log-safe
 //!
 //! Every `FingerprintRefusal::detail` is written to a durable `broker.log` that operators and
 //! the live gates read, and every input this module inspects is attacker-chosen: a params
@@ -346,8 +346,8 @@ pub struct LaunchFingerprint {
     pub sandbox: String,
     /// Whether hooks are enabled for the session.
     pub hooks_enabled: bool,
-    /// The workspace this session was LAUNCHED in — the fifth dimension (round-2 P4),
-    /// plumbed exactly like the other four (`--launch-cwd` on the host argv).
+    /// The workspace this session was LAUNCHED in — the fifth dimension, plumbed exactly
+    /// like the other four (`--launch-cwd` on the host argv).
     ///
     /// It exists because every other workspace signal the broker can see is
     /// **client-chosen**: `thread/start`'s `cwd` comes from the client, and the creation
@@ -534,7 +534,7 @@ pub fn assert_fingerprint(
         ));
     };
 
-    // 0a) `turn/start` only: the captured boundary (P4). Six authorization-adjacent params
+    // 0a) `turn/start` only: the captured boundary. Six authorization-adjacent params
     //     were measured PRESENT and exactly JSON null on every real turn, and
     //     `collaborationMode` was measured as null-or-object; any divergence — including a
     //     MISSING key — is a shape this broker never captured and cannot prove.
@@ -542,7 +542,7 @@ pub fn assert_fingerprint(
         check_turn_start_captured_shape(params)?;
     }
 
-    // 0b) `thread/start` only: the capability boundary (round-5 finding 5). Three
+    // 0b) `thread/start` only: the capability boundary. Three
     //     measured-null creation params are capability channels — an execution-environment
     //     selection that carries its own workspace roots, a set of capability roots that
     //     carry absolute paths, and a set of injected tool definitions. Two of the three were
@@ -575,9 +575,9 @@ pub fn assert_fingerprint(
         ));
     }
 
-    // 1b) permissions / default_permissions: the SECOND sandbox channel (round-4
-    //     finding 1). Measured null everywhere it was ever captured; a populated one
-    //     is a permission profile this broker never observed and cannot prove.
+    // 1b) permissions / default_permissions: the SECOND sandbox channel. Measured null
+    //     everywhere it was ever captured; a populated one is a permission profile this
+    //     broker never observed and cannot prove.
     check_permission_profiles(params)?;
 
     // 2) hooks: only a bare bool equal to the fingerprint is provable.
@@ -616,17 +616,17 @@ pub fn assert_fingerprint(
     //    the other dimensions, which are proven outright above or refuse (O13).
     let sandbox_deferred = check_sandbox(fp, method, params, policy_setting, config_effective)?;
 
-    // 5) `turn/start` only: the EXHAUSTIVE top-level allowlist (round-2 P5). Runs LAST so
-    //    every earlier, more specific rule keeps its own refusal — a top-level `sandbox`
-    //    key is still the sandbox boundary's refusal (P6), not a generic "unknown param".
+    // 5) `turn/start` only: the EXHAUSTIVE top-level allowlist. Runs LAST so every
+    //    earlier, more specific rule keeps its own refusal — a top-level `sandbox` key is
+    //    still the sandbox boundary's refusal, not a generic "unknown param".
     if method == "turn/start" {
         check_turn_start_top_level_allowlist(named_params)?;
     }
 
-    // 5b) `thread/resume` only: the EXHAUSTIVE top-level allowlist (round-5 finding 6), for
-    //      the same reason and in the same position as the turn's — last, so `path`,
-    //      `history`, `notify`, `permissions` and every ownership dimension keep their own,
-    //      more specific refusal instead of collapsing into "unknown param".
+    // 5b) `thread/resume` only: the EXHAUSTIVE top-level allowlist, for the same reason
+    //      and in the same position as the turn's — last, so `path`, `history`, `notify`,
+    //      `permissions` and every ownership dimension keep their own, more specific
+    //      refusal instead of collapsing into "unknown param".
     if method == "thread/resume" {
         check_thread_resume_top_level_allowlist(named_params)?;
     }
@@ -660,7 +660,7 @@ const TURN_START_CAPTURED_NULL_PARAMS: [&str; 6] = [
     "outputSchema",
 ];
 
-/// Enforce the captured `turn/start` shape class (P4) for the authorization-adjacent params.
+/// Enforce the captured `turn/start` shape class for the authorization-adjacent params.
 fn check_turn_start_captured_shape(params: &Value) -> Result<(), FingerprintRefusal> {
     for key in TURN_START_CAPTURED_NULL_PARAMS {
         match params.get(key) {
@@ -1159,7 +1159,7 @@ fn check_thread_resume_top_level_allowlist(
 /// The FULL set of top-level `turn/start` params measured on the wire, enumerated exactly
 /// from the verbatim capture (`fixtures/codex/turn-start-request.json`). Any key outside
 /// this set is a param this broker has never measured and whose authorization effect it
-/// therefore cannot reason about — so it refuses (round-2 P5).
+/// therefore cannot reason about — so it refuses.
 ///
 /// **Consequence, stated so it is not discovered by accident:** `config` is NOT in the
 /// captured turn/start set (the bundled 0.147 schema does not give `turn/start` a `config`
@@ -1248,7 +1248,7 @@ const TURN_START_CAPTURED_PARAMS: [&str; 23] = [
 /// introduce a new authorization channel, and a broker that ignored unknown keys would
 /// forward that channel unexamined the day it appears.
 ///
-/// ## The refusal detail names NO key (round-3 P3)
+/// ## The refusal detail names NO key
 ///
 /// The offending key is by definition one this broker has no vocabulary for — it is
 /// whatever the client sent. Interpolating it into the detail put attacker-chosen text,
@@ -1431,7 +1431,7 @@ fn check_collaboration_mode(params: &Value) -> Result<(), FingerprintRefusal> {
             ))
         }
     };
-    // **There is deliberately NO fast path for the verbatim captured object** (round-1 P8).
+    // **There is deliberately NO fast path for the verbatim captured object.**
     //
     // An earlier form short-circuited on `v == captured_collaboration_mode()`, and that
     // short-circuit was a hole rather than an optimization: the cross-field equality below
@@ -1533,7 +1533,7 @@ fn check_collaboration_mode(params: &Value) -> Result<(), FingerprintRefusal> {
         }
     }
 
-    // **CROSS-FIELD EQUALITY — the nested pair must EQUAL the outer pair** (round-1 P8).
+    // **CROSS-FIELD EQUALITY — the nested pair must EQUAL the outer pair.**
     //
     // This is what makes type-checking `settings.model` safe instead of merely permissive.
     // `params.model`/`params.effort` are on this module's ungated list; `collaborationMode`
@@ -1628,9 +1628,9 @@ fn check_string_dimension(
                 ))
             }
             Some(s) if normalize(s) != normalize(expected) => {
-                // P3 (round 3): the CLIENT-SUPPLIED token is withheld — only its shape is
-                // logged. The fingerprint side is the broker's own launch record, so it is
-                // named in full, which is what an operator actually needs to act on.
+                // The CLIENT-SUPPLIED token is withheld — only its shape is logged. The
+                // fingerprint side is the broker's own launch record, so it is named in
+                // full, which is what an operator actually needs to act on.
                 return Err(refusal(
                     FpRefuseKind::Conflict,
                     format!(
@@ -1663,7 +1663,7 @@ fn check_string_dimension(
 /// unprovable against a mode-only fingerprint and is refused.
 ///
 /// Returns whether the request DEFERRED this dimension. On `turn/start` that is the ONLY
-/// acceptable outcome and it is bounded to the exact captured shape (P6, see
+/// acceptable outcome and it is bounded to the exact captured shape (see
 /// [`check_turn_start_sandbox`]); a deferral proves presence (it is a positive "inherit",
 /// satisfying the absence rule) but proves no token, so the caller must discharge it
 /// against the session thread binding. Null anywhere else — a creating method, or a
@@ -1691,8 +1691,8 @@ fn check_sandbox(
             Value::Object(map) => {
                 // A sandbox object may only carry `mode`; anything else is a policy field
                 // (writable roots, network, …) we cannot prove matches.
-                // P3 (round 3): the extra KEY NAMES are client-chosen, so only their count
-                // is logged — the rule is "any field beyond `mode`", which a count states
+                // The extra KEY NAMES are client-chosen, so only their count is logged —
+                // the rule is "any field beyond `mode`", which a count states
                 // exactly as well as a list.
                 let extra = map.keys().filter(|k| k.as_str() != "mode").count();
                 if extra > 0 {
@@ -1747,7 +1747,7 @@ fn check_sandbox(
     Ok(false)
 }
 
-/// The `turn/start` sandbox boundary (P6).
+/// The `turn/start` sandbox boundary.
 ///
 /// The measured wire sends exactly one sandbox-adjacent thing on a turn: the typed key
 /// `params.sandboxPolicy` with an exact JSON `null`, which DEFERS to the named thread.
@@ -1782,7 +1782,7 @@ fn check_turn_start_sandbox(params: &Value) -> Result<bool, FingerprintRefusal> 
                 shape_class(v)
             ),
         )),
-        // Round-3 P3: the paths listed here are already audit-log-safe — a typed path is one
+        // The paths listed here are already audit-log-safe — a typed path is one
         // of this module's own constants and a config path collapses every client-chosen
         // segment to a depth (see `config_path`) — so listing them carries fixed vocabulary
         // and numbers only, which is exactly what an operator needs to see WHERE the extra
@@ -1834,7 +1834,7 @@ fn check_hooks(fp: &LaunchFingerprint, node: &Value) -> Result<(), FingerprintRe
                             }
                         }
                     } else {
-                        // P3 (round 3): `k` is client-chosen (`hooks.<anything>`,
+                        // `k` is client-chosen (`hooks.<anything>`,
                         // `codex_hooks.<anything>`), so the detail names the FAMILY — one of
                         // two broker-owned constants — plus whether it was dotted and how
                         // long it was, never the key text.
@@ -1879,7 +1879,7 @@ fn check_hooks(fp: &LaunchFingerprint, node: &Value) -> Result<(), FingerprintRe
 ///
 /// Dotted config keys never reach here as matches: they are refused categorically upstream
 /// (`reject_dotted_config_keys`).
-/// ## The reported path carries NO client-chosen text (round-3 P3)
+/// ## The reported path carries NO client-chosen text
 ///
 /// A collected path is written into a refusal detail and thence into a durable `broker.log`.
 /// The last segment of a config path is always one of the broker's own `config_leaves`
@@ -1964,8 +1964,8 @@ fn method_carries_config(method: &str) -> bool {
 /// objects OR array elements). A dotted config key never appears in legitimate TUI traffic
 /// (which sends nested objects) and may path-expand onto an owned dimension during codex's
 /// config merge, so it cannot be proven either way. Fail closed for ALL dimensions.
-/// P3 (round 3): the dotted key is 100% client-chosen text at a client-chosen path, so the
-/// detail reports only WHERE (a depth below `params.config`) and HOW BIG (a byte count).
+/// The dotted key is 100% client-chosen text at a client-chosen path, so the detail
+/// reports only WHERE (a depth below `params.config`) and HOW BIG (a byte count).
 fn reject_dotted_config_keys(params: &Value) -> Result<(), FingerprintRefusal> {
     if let Some(cfg) = params.get("config") {
         if let Some((depth, bytes)) = first_dotted_key(cfg, 0) {
@@ -2005,7 +2005,7 @@ fn first_dotted_key(node: &Value, depth: usize) -> Option<(usize, usize)> {
 }
 
 /// Refuse a POPULATED `permissions`, and ANY `default_permissions`, anywhere in `params`
-/// — on EVERY method, not only `turn/start` (round-4 finding 1).
+/// — on EVERY method, not only `turn/start`.
 ///
 /// ## Why this is its own rule and not a line in the sandbox check
 ///
@@ -2168,9 +2168,9 @@ mod tests {
         )
     }
 
-    /// A `turn/start` params body in the CAPTURED shape class (satisfies P4 and the P6
-    /// sandbox boundary), plus `extra`. Every turn/start test starts from this so a test
-    /// aimed at one rule is not silently answered by another.
+    /// A `turn/start` params body in the CAPTURED shape class (it satisfies both the
+    /// captured boundary and the sandbox boundary), plus `extra`. Every turn/start test
+    /// starts from this so a test aimed at one rule is not silently answered by another.
     fn full_turn(extra: Value) -> Value {
         merge(
             json!({
@@ -2199,10 +2199,10 @@ mod tests {
         );
     }
 
-    /// Round-4 finding 1, the wire half. `thread/start` SETS the policy every later turn
-    /// inherits, and it had no pin on the permission-profile channel at all — the
-    /// captured-null boundary runs on `turn/start` only. The exact shape codex 0.147 was
-    /// measured to accept and activate must refuse here.
+    /// **The permission-profile channel on a creation, the wire half.** `thread/start`
+    /// SETS the policy every later turn inherits, and the captured-null boundary runs on
+    /// `turn/start` only, so the creation frame needs a pin of its own. The exact shape
+    /// codex 0.147 was measured to accept and activate must refuse here.
     #[test]
     fn populated_permission_profiles_refuse_on_thread_start() {
         for extra in [
@@ -2316,7 +2316,7 @@ mod tests {
         // On `thread/start` a sandbox STRING is the captured shape (the measured TUI sent
         // `"sandbox": "read-only"`), so this is where token normalization is exercised.
         // It is deliberately NOT exercised on `turn/start`: the captured turn never sent a
-        // sandbox string, and P6 refuses one there.
+        // sandbox string, and the sandbox boundary refuses one there.
         let mut f = fp();
         f.sandbox = "workspace-write".into();
         let p = json!({"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"workspaceWrite"});
@@ -2486,7 +2486,7 @@ mod tests {
             FpRefuseKind::Absent
         );
         // Missing sandbox on turn/start: captured-shape-clean otherwise, so the Absent
-        // refusal is the sandbox rule's and not P4's.
+        // refusal is the sandbox rule's and not the captured boundary's.
         let mut p2 = full_turn(json!({}));
         p2.as_object_mut().unwrap().remove("sandboxPolicy");
         assert_eq!(
@@ -2545,7 +2545,8 @@ mod tests {
             "sandbox_mode": "read-only"
         }});
         // Captured-shape-clean turn, but with the typed ownership fields replaced by a
-        // config root: the Absent refusal is the presence rule's, not P4's.
+        // config root: the Absent refusal is the presence rule's, not the captured
+        // boundary's.
         let mut p = full_turn(cfg.clone());
         for k in ["approvalPolicy", "approvalsReviewer", "sandboxPolicy"] {
             p.as_object_mut().unwrap().remove(k);
@@ -2629,10 +2630,10 @@ mod tests {
 
     /// The fingerprint the captured session actually launched under.
     ///
-    /// Load-bearing for every test that drives COMPLETE captured params (round-1 M12): the
-    /// real 0.147 TUI asserts `approvalPolicy: "on-request"`, so pairing real params with
-    /// [`fp`]'s `untrusted` refuses on `approvalPolicy` long before any
-    /// `collaborationMode` rule is reached. A12 measured the production consequence of the
+    /// Load-bearing for every test that drives COMPLETE captured params: the real 0.147
+    /// TUI asserts `approvalPolicy: "on-request"`, so pairing real params with [`fp`]'s
+    /// `untrusted` refuses on `approvalPolicy` long before any `collaborationMode` rule is
+    /// reached. A12 measured the production consequence of the
     /// same mismatch — an `untrusted` launch fingerprint kills a real session ~2s in.
     fn captured_fp() -> LaunchFingerprint {
         LaunchFingerprint {
@@ -2646,7 +2647,7 @@ mod tests {
 
     // ANCHOR — the real, unmodified frame off the wire. Its `sandboxPolicy: null` defers
     // to the thread named by `params.threadId`; this module must NOT discharge that. It
-    // also proves the captured boundary (P4) and the sandbox boundary (P6) do not refuse
+    // also proves the captured boundary and the sandbox boundary do not refuse
     // the one shape that was actually measured.
     #[test]
     fn captured_live_turn_start_frame_defers_sandbox_to_named_thread() {
@@ -2658,7 +2659,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // P4 — the captured `turn/start` boundary.
+    // The captured `turn/start` boundary.
     // ---------------------------------------------------------------------
 
     #[test]
@@ -2684,9 +2685,9 @@ mod tests {
         }
     }
 
-    // ROUND-2 P5 — `collaborationMode` is null, or EXACTLY the captured value. It carries
-    // `settings.developer_instructions` (an instruction channel), so the round-1 shape class
-    // ("null or an object") proved nothing.
+    // `collaborationMode` is null, or EXACTLY the captured value. It carries
+    // `settings.developer_instructions` (an instruction channel), so a shape class
+    // ("null or an object") proves nothing.
     #[test]
     fn collaboration_mode_is_null_or_exactly_the_captured_value() {
         // null (the base) passes — this is the shape the relay/unit turn frames send.
@@ -2695,7 +2696,7 @@ mod tests {
             FpVerdict::SandboxDeferredToBoundThread
         );
         // The VERBATIM captured value passes — **when it arrives with the outer pair it
-        // was captured beside**. Round-1 P8 made that qualification real: the nested
+        // was captured beside**. That qualification is load-bearing: the nested
         // model/effort must equal `params.model`/`params.effort`, and the byte-perfect
         // captured object buys no exemption from it.
         let cm = captured_collaboration_mode().clone();
@@ -2730,7 +2731,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.kind, FpRefuseKind::Unprovable);
         assert!(e.detail.contains("collaborationMode"), "{}", e.detail);
-        // An EMPTY object — the shape the round-1 class accepted — refuses too.
+        // An EMPTY object — which a bare shape class would accept — refuses too.
         for bad in [
             json!({}),
             json!({"mode": "default", "settings": {}}),
@@ -2765,7 +2766,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// **The COMPLETE captured `turn/start` params** — every top-level field exactly as the
-    /// real 0.147 TUI sent it, for all eleven frames (round-1 M12).
+    /// real 0.147 TUI sent it, for all eleven frames.
     ///
     /// The tests below used to graft a captured `collaborationMode` onto a synthetic
     /// `full_turn(...)` skeleton that carried no outer `model`/`effort` at all. That made
@@ -2824,7 +2825,7 @@ mod tests {
     /// after the user touched `/model`.
     #[test]
     fn every_captured_model_switch_turn_start_passes() {
-        // The COMPLETE captured params, outer pair and nested pair together (M12).
+        // The COMPLETE captured params, outer pair and nested pair together.
         let params = captured_turn_params();
         let mut distinct_models = std::collections::BTreeSet::new();
         let mut distinct_efforts = std::collections::BTreeSet::new();
@@ -2860,7 +2861,7 @@ mod tests {
         );
     }
 
-    /// **The split brain is refused** (round-1 P8): the nested pair must EQUAL the outer
+    /// **The split brain is refused**: the nested pair must EQUAL the outer
     /// pair, and the byte-perfect captured object does not buy an exemption.
     #[test]
     fn a_model_or_effort_that_disagrees_with_its_outer_field_is_refused() {
@@ -3028,7 +3029,7 @@ mod tests {
     #[test]
     fn the_measured_varying_parts_of_collaboration_mode_are_type_checked() {
         // Driven from the COMPLETE captured params, so the outer pair moves WITH the
-        // nested one (M12) — otherwise every case below would be refused by cross-field
+        // nested one — otherwise every case below would be refused by cross-field
         // equality and this test would pass for the wrong reason.
         //
         // ACCEPTED: any non-empty model string, including ones this capture never saw. A
@@ -3110,7 +3111,7 @@ mod tests {
         }
     }
 
-    // ROUND-2 P5 — the EXHAUSTIVE top-level allowlist. An unknown param refuses, and the
+    // The EXHAUSTIVE top-level allowlist. An unknown param refuses, and the
     // enumerated set is exactly the capture's (asserted against the fixture, so the constant
     // cannot drift from the frame it claims to enumerate).
     /// The allowlist is exactly the 0.147 capture's keys PLUS the four 0.153 additions,
@@ -3184,7 +3185,7 @@ mod tests {
             "the captured 0.153 bundle must be admitted or no 0.153 session can start"
         );
 
-        // …and it really is the six measured tools, so the pin is over what was reviewed.
+        // …and it really is the six measured tools, so the pin covers the whole bundle.
         let tools = captured[0]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 6, "the reviewed bundle declares six tools");
         assert_eq!(captured[0]["name"], "codex_tui");
@@ -3318,9 +3319,9 @@ mod tests {
             let p = full_turn(json!({ key: json!(null) }));
             let e = assert_fingerprint(&fp(), "turn/start", &p).unwrap_err();
             assert_eq!(e.kind, FpRefuseKind::Unprovable, "{key}");
-            // ROUND-3 P3 — INVERTED from round 2, which asserted the detail NAMED the key.
-            // The key is attacker-chosen text going into a durable log, so the detail now
-            // carries fixed vocabulary plus counts and nothing else.
+            // The detail must NOT name the key: it is attacker-chosen text going into a
+            // durable log, so the detail carries fixed vocabulary plus counts and nothing
+            // else.
             assert!(
                 e.detail.contains("unknown top-level parameter (1 of 12)"),
                 "{key}: {}",
@@ -3330,7 +3331,7 @@ mod tests {
         }
     }
 
-    // ROUND-3 P3 — a hostile key must not reach the audit log, at any nesting.
+    // A hostile key must not reach the audit log, at any nesting.
     #[test]
     fn refusal_details_never_carry_a_client_supplied_key() {
         const INJECTED: &str = "zzz_injected_key\n2026-01-01 broker: forward (request allowlisted)";
@@ -3414,14 +3415,14 @@ mod tests {
         );
     }
 
-    // ROUND-2 P5 — the named consequence: `config` is NOT in the captured turn/start set,
-    // so a benign-looking config object on a turn now refuses.
+    // The named consequence of the exhaustive allowlist: `config` is NOT in the captured
+    // turn/start set, so a benign-looking config object on a turn refuses.
     #[test]
     fn a_config_param_on_turn_start_is_refused() {
         let p = full_turn(json!({"config": {"model_reasoning_effort": "high"}}));
         let e = assert_fingerprint(&fp(), "turn/start", &p).unwrap_err();
         assert_eq!(e.kind, FpRefuseKind::Unprovable);
-        // ROUND-3 P3 — the detail counts the unknown param; it does not name it (`config` is
+        // The detail counts the unknown param; it does not name it (`config` is
         // client-supplied key text like any other).
         assert!(
             e.detail.contains("unknown top-level parameter (1 of 12)"),
@@ -3443,8 +3444,9 @@ mod tests {
 
     #[test]
     fn ungated_model_and_ux_knobs_do_not_refuse() {
-        // The deliberate P4 triage, asserted so the narrowing is visible: these are model /
-        // UX / routing knobs, not authorization channels, and a populated one still passes.
+        // The deliberate captured-boundary triage, asserted so the narrowing is visible:
+        // these are model / UX / routing knobs, not authorization channels, and a populated
+        // one still passes.
         let p = full_turn(json!({
             "model": "gpt-5.6-luna",
             "effort": "high",
@@ -3460,13 +3462,13 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // P6 — the `turn/start` sandbox boundary.
+    // The `turn/start` sandbox boundary.
     // ---------------------------------------------------------------------
 
     #[test]
     fn turn_start_sandbox_accepts_only_the_captured_null() {
         // A MATCHING string is refused: the measured turn never sent a string, so its
-        // effect cannot be proven (this is the arm the rejected first cut accepted).
+        // effect cannot be proven — matching the fingerprint buys it nothing.
         for shape in [
             json!("read-only"),
             json!("danger-full-access"),
@@ -3528,9 +3530,10 @@ mod tests {
 
     #[test]
     fn present_sandbox_value_on_the_captured_frame_is_refused() {
-        // The null arm must not have widened anything. Under P6 a PRESENT sandbox value on
-        // a turn is refused outright (Unprovable) rather than compared — strictly stricter
-        // than the old Conflict, since a MATCHING string is now refused too.
+        // The null arm must not have widened anything. Under the sandbox boundary a
+        // PRESENT sandbox value on a turn is refused outright (Unprovable) rather than
+        // compared — strictly stricter than a Conflict, since a MATCHING string is refused
+        // too.
         let mut p = captured_turn_start_params();
         p["sandboxPolicy"] = json!("danger-full-access");
         assert_eq!(
@@ -3553,7 +3556,7 @@ mod tests {
     #[test]
     fn null_sandbox_at_a_non_effective_path_is_still_unprovable() {
         // A null under a config decoy proves nothing and defers nothing; alongside the
-        // captured typed null it is a second sandbox-adjacent path (P6).
+        // captured typed null it is a second sandbox-adjacent path.
         let p = full_turn(json!({"config": {"decoy": {"sandbox": null}}}));
         assert_eq!(
             assert_fingerprint(&fp(), "turn/start", &p)
@@ -3577,9 +3580,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // round-5 findings 5 and 6: the `thread/start` capability boundary and the
-    // `thread/resume` captured boundary, both driven off the VERBATIM captured frames
-    // rather than hand-written params, so the rules and their evidence cannot drift.
+    // The `thread/start` capability boundary and the `thread/resume` captured
+    // boundary, both driven off the VERBATIM captured frames rather than
+    // hand-written params, so the rules and their evidence cannot drift.
     // ---------------------------------------------------------------------
 
     /// Every client→server frame of the four-connection `/new` switch capture.
@@ -3659,9 +3662,10 @@ mod tests {
     }
 
     /// **The census pin.** The captured creation's key SET, verbatim. This is the list the
-    /// round-5 finding-5 census was taken over, and it is asserted rather than described so a
-    /// re-capture that adds, drops or renames a creation param fails HERE — the exact defect
-    /// finding 5 exists because of (a census that was incomplete and unfalsifiable).
+    /// capability-boundary census was taken over, and it is asserted rather than described
+    /// so a re-capture that adds, drops or renames a creation param fails HERE — the exact
+    /// defect that boundary exists because of (a census that was incomplete and
+    /// unfalsifiable).
     ///
     /// 22 of the real 0.147 `ThreadStartParams`' 25 properties. The three THIS capture does
     /// not carry — `serviceTier`, `allowProviderModelFallback`, `experimentalRawEvents` — are
@@ -4004,8 +4008,9 @@ mod tests {
     }
 
     /// The ccd's own resume shape — literally `{"threadId": <id>}`. This is what
-    /// `mac/ccd/src/codex_link.rs` constructs, and it is the half of finding 6 that must NOT
-    /// break: a guard that refuses the real ccd resume is a worse bug than the one it fixes.
+    /// `mac/ccd/src/codex_link.rs` constructs, and it is the half of the resume boundary
+    /// that must NOT break: a guard that refuses the real ccd resume is a worse bug than
+    /// the one it fixes.
     fn ccd_resume() -> Value {
         let f = captured_resumes()
             .into_iter()
@@ -4059,7 +4064,7 @@ mod tests {
 
     #[test]
     fn both_measured_resume_clients_are_still_admitted() {
-        // THE NON-NEGOTIABLE HALF of finding 6.
+        // THE NON-NEGOTIABLE HALF of the resume boundary.
         let fp = captured_start_fp();
         assert_eq!(
             assert_fingerprint(&fp, "thread/resume", &ccd_resume()).unwrap(),
@@ -4102,7 +4107,7 @@ mod tests {
 
     #[test]
     fn a_param_outside_the_captured_resume_set_is_refused() {
-        // Including the two finding-5 channels, which the 0.147 schema does not give resume
+        // Including the two capability channels, which the 0.147 schema does not give resume
         // at all — and `serviceTier`, which it DOES give resume but which no captured client
         // ever sent. Refuse-by-default applies to params, not to the schema.
         for key in [
@@ -4127,8 +4132,8 @@ mod tests {
 
     #[test]
     fn the_resume_boundary_never_logs_a_client_key_or_value() {
-        // Round-3 P3 applies to the new rules exactly as it does to the old ones: the
-        // durable `broker.log` is what the live gates grep, and every input here is
+        // The audit-log rule applies to the resume rules exactly as it does to the rest:
+        // the durable `broker.log` is what the live gates grep, and every input here is
         // attacker-chosen.
         let injected = "\n2026-01-01 broker: forward (request allowlisted)";
         let mut p = ccd_resume();
