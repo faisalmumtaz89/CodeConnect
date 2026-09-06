@@ -1,0 +1,112 @@
+codex 0.153.4 — the PRE-ADMISSION baseline: what a `turn/interrupt` met, from
+every party that had an opinion about it, and what the daemon knows when its
+control link's wire dies
+==============================================================================
+
+THIS FILE IS A HISTORICAL MEASUREMENT, NOT CURRENT BEHAVIOUR — and it is the
+measurement that CAUSED the change. It was captured while the broker's **ccd**
+allowlist carried no arm for `turn/interrupt` at all, which is why all six of
+its ccd rows read `not permitted for this connection`. That rule was removed on
+the strength of these rows: the ccd leg now carries the same gated arm the tui
+leg has (`Disposition::InterruptActiveTurn`, `codex-broker/src/allowlist.rs`),
+bound to this session's own running turn. Re-running the probe therefore does
+not reproduce the ccd rows below, and nothing here may be quoted as what the
+ccd leg does. The bytes are kept exactly as they were measured, because a
+pre-admission baseline is only evidence for as long as it stays the
+pre-admission one.
+
+Three connections were driven against one live session, because the three
+questions had three different subjects: the broker's **ccd** leg (the path a
+phone's interrupt would take), the broker's **tui** leg (where the broker's own
+interrupt rule was already wired), and the app-server's own socket (what codex
+does with no broker in between). Every row is one request and the answer it was
+given. A subscribed ccd leg was tapped throughout, and the frames it read across
+the whole driven lifecycle are `codex/interrupt-0.153.jsonl`.
+
+Written by the live probes in `ccd/src/codex_link_live.rs`
+(`CC_CODEX_4A_EVID=<dir>`). Nothing reads this file back: it is a record, not a
+pin, so it is never re-derived and cannot go red on its own. It carries no
+absolute path and no personal identifier — the thread, turn and request ids are
+the app-server's own, and they are the only opaque values in it.
+
+--- 1. the two broker legs, per scenario — the ccd rows are PRE-ADMISSION ----
+leg=ccd        scenario=running turn, no approval    params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=tui        scenario=running turn, no approval    params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> result={}
+leg=ccd        scenario=running turn, approval pending params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-574c-79c2-9017-ebd5c92792a9"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=tui        scenario=running turn, approval pending params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-574c-79c2-9017-ebd5c92792a9"} -> result={}
+leg=ccd        scenario=turn that already ended      params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=ccd        scenario=turn id that names nothing   params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"d067ed70-9174-48d2-8001-d29174d067ed"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=ccd        scenario=thread that names nothing    params={"threadId":"d06804e0-9174-48d2-8001-d29174d06804","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=tui        scenario=turn that already ended      params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="interrupt refused: it does not name a running turn of this session"
+leg=tui        scenario=turn id that names nothing   params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"d067ed70-9174-48d2-8001-d29174d067ed"} -> error code=-32001 message="interrupt refused: it does not name a running turn of this session"
+leg=tui        scenario=thread that names nothing    params={"threadId":"d06804e0-9174-48d2-8001-d29174d06804","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="interrupt refused: it does not name a running turn of this session"
+leg=ccd        scenario=turn on a retired thread     params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="method refused: not permitted for this connection"
+leg=tui        scenario=turn on a retired thread     params={"threadId":"01a073f6-09c8-7c10-8212-4d369b80140b","turnId":"01a073f6-2004-7750-a697-a6c12004ca48"} -> error code=-32001 message="interrupt refused: it does not name a running turn of this session"
+
+--- 2. the app-server, with no broker in between -----------------------------
+leg=app-server scenario=turn id that names nothing   params={"threadId":"01a073f3-1789-7463-9049-6c771e7f274f","turnId":"61ddb3c0-9143-48d2-8001-d2914361ddb3"} -> error code=-32600 message="expected active turn id 61ddb3c0-9143-48d2-8001-d2914361ddb3 but found 01a073f3-2c6e-7f92-8a62-a7976d9d8fc8"
+leg=app-server scenario=thread that names nothing    params={"threadId":"61ddc360-9143-48d2-8001-d2914361ddc3","turnId":"01a073f3-2c6e-7f92-8a62-a7976d9d8fc8"} -> error code=-32600 message="thread not found: 61ddc360-9143-48d2-8001-d2914361ddc3"
+leg=app-server scenario=the running turn             params={"threadId":"01a073f3-1789-7463-9049-6c771e7f274f","turnId":"01a073f3-2c6e-7f92-8a62-a7976d9d8fc8"} -> result={}
+leg=app-server scenario=turn that already ended      params={"threadId":"01a073f3-1789-7463-9049-6c771e7f274f","turnId":"01a073f3-2c6e-7f92-8a62-a7976d9d8fc8"} -> NO ANSWER within 20 s
+
+a bogus id ended the running turn = false
+the real interrupt reached a turn terminal = true
+
+--- 3. the broker's own verdicts, from its log — PRE-ADMISSION, verbatim -----
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Tui: forward (turn/interrupt: names this session's running turn) (conn 4)"
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Tui: forward (turn/interrupt: names this session's running turn) (conn 4)"
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Tui: refuse->synthetic error (turn/interrupt: turn 01a073f6-2004-7750-a697-a6c12004ca48 is not a running turn of thread 01a073f6-09c8-7c10-8212-4d369b80140b — only the turn this session is currently running can be interrupted) (conn 4)"
+  "Tui: refuse->synthetic error (turn/interrupt: turn d067ed70-9174-48d2-8001-d29174d067ed is not a running turn of thread 01a073f6-09c8-7c10-8212-4d369b80140b — only the turn this session is currently running can be interrupted) (conn 4)"
+  "Tui: refuse->synthetic error (turn/interrupt: thread d06804e0-9174-48d2-8001-d29174d06804 was not observed as a session thread) (conn 4)"
+  "Ccd: refuse->synthetic error (turn/interrupt: refused (NotAllowlisted)) (conn 3)"
+  "Tui: refuse->synthetic error (turn/interrupt: turn 01a073f6-2004-7750-a697-a6c12004ca48 is not a running turn of thread 01a073f6-09c8-7c10-8212-4d369b80140b — only the turn this session is currently running can be interrupted) (conn 4)"
+
+--- 4. the frames a subscribed ccd leg reads on each side of an interrupt ----
+===== ccd leg interrupts a running turn (no approval showing) =====
+frames the subscribed ccd leg read in the 3 s that followed:
+
+
+===== tui leg interrupts a running turn (no approval showing) =====
+turn terminal reached = true
+frames the subscribed ccd leg read, in arrival order:
+   1788651915456  thread/tokenUsage/updated              
+   1788651915456  account/rateLimits/updated             
+   1788651915459  thread/status/changed                  status={"type":"idle"}
+   1788651915459  turn/completed                         turn="01a073f6-2004-7750-a697-a6c12004ca48" status="interrupted" items=0
+
+===== ccd leg interrupts a turn with an approval pending =====
+approval still painted = true
+frames the subscribed ccd leg read in the 3 s that followed:
+
+
+===== tui leg interrupts a turn WITH an approval pending =====
+turn terminal reached = true
+approval still painted after = false
+frames the subscribed ccd leg read, in arrival order:
+   1788651926798  thread/tokenUsage/updated              
+   1788651926798  account/rateLimits/updated             
+   1788651926800  thread/status/changed                  status={"type":"idle"}
+   1788651926800  turn/completed                         turn="01a073f6-574c-79c2-9017-ebd5c92792a9" status="interrupted" items=0
+   1788651926800  serverRequest/resolved                 requestId=1
+
+--- 5. what the daemon knows when the control link's wire dies ---------------
+left Subscribed after      : 0.103s -> Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+settled at Offline after   : 0.103s -> Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+state when the wire came back: Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+subscribed again after     : 5.276s
+TUI still running          : true
+
+states while the wire was gone: ["Offline { thread_id: Some(\"01a073f4-1c3e-78a2-aa15-57c2c32a57fd\") }"]
+
+timeline
+     0.204s  link subscribed                    Subscribed { thread_id: "01a073f4-1c3e-78a2-aa15-57c2c32a57fd" }
+     0.307s  stopped being an addressee         Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+     0.307s  settled after the wire died        Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+    25.439s  at the end of the down window      Offline { thread_id: Some("01a073f4-1c3e-78a2-aa15-57c2c32a57fd") }
+    30.750s  subscribed again                   Subscribed { thread_id: "01a073f4-1c3e-78a2-aa15-57c2c32a57fd" }
+    30.750s  final                              Subscribed { thread_id: "01a073f4-1c3e-78a2-aa15-57c2c32a57fd" }

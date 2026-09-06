@@ -314,7 +314,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         type, so Claude's [`ws::AnswerOutcome`]/[`ws::AnswerResult`] stay
 ///         byte-identical), an additive opaque [`ws::AnswerDecision::OptionId`]
 ///         variant, and an [`ws::ClientMessage::Interrupt`] operation
-///         (**defined, refused daemon-side** until steering ships).
+///         (**defined here, and refused daemon-side at this minor**; honoured
+///         from minor 17).
 ///       - the [`composite_id`] wire-id codec: a versioned, type-tagged,
 ///         length-bounded base64url encoding of `(session_uid, thread_id,
 ///         server_request_id, generation)`, opaque to the phone's request-id
@@ -338,7 +339,39 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     ignores the field entirely. It only ever *withholds* an adoption — there is
 ///     no peer that has to understand it in order to stay correct, which is the
 ///     only thing the minor exists to say.
-pub const PROTOCOL_MINOR: u32 = 16;
+///   * `17` — **`interrupt` is honoured rather than refused.** Minor 15 put the
+///     [`ws::ClientMessage::Interrupt`] operation on the wire and the daemon
+///     answered [`ws::InterruptResult::Rejected`] to every one of them. From here
+///     the daemon actually aborts the turn a Codex session is running: the local
+///     gate binds the ask to the exact turn, thread and visit generation it holds,
+///     the broker binds it again to the session's own active turn, and the
+///     durable claim makes a retry replay a recorded outcome instead of stopping
+///     something twice. Two things a client must know, and a client written
+///     against minor 16 needs neither:
+///       - [`ws::Capabilities::interrupt`] — this daemon honours the operation.
+///         Advertised rather than assumed, because nothing else on the wire
+///         separates a daemon that stops the turn from one that refuses every
+///         ask: both accept the message and both answer an `interrupt_result`. A
+///         phone would otherwise have to tap a Stop button to discover it does
+///         nothing, and this app's rule is that an action the daemon cannot
+///         perform is not offered. Absent decodes `false`, which is exactly what
+///         an older daemon meant. The flag is a build fact and is *not* the whole
+///         test: interrupt exists only for Codex, so a client scopes the control
+///         by the session's [`event::SessionSummary::agent`] as well.
+///       - the other three statuses actually arrive. `aborted`, `duplicate` and
+///         `indeterminate` were wire-legal from minor 15 and never sent; they are
+///         sent now, and they carry different news — the turn stopped, it had
+///         already stopped, or a stop was issued whose outcome nobody can name.
+///         **Sent to every client**, for the reason minor 9 gives about
+///         `SendTextResult`: a `hello` carries no client minor to branch on, so a
+///         decoder that treats an unrecognised status as a decode failure rather
+///         than as indeterminate was always the thing that would break.
+///
+///     Nothing changed shape. [`ws::ClientMessage::Interrupt`]'s fields and
+///     [`ws::InterruptResult`]'s variants are byte-identical to minor 15; what
+///     changed is that the daemon now does the thing, which is precisely the kind
+///     of fact a minor exists to let a peer assume rather than probe for.
+pub const PROTOCOL_MINOR: u32 = 17;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

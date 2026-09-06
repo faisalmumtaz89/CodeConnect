@@ -2204,7 +2204,7 @@ mod tests {
     /// **Every approval shape this repository has captured, and the class each
     /// one gets.**
     ///
-    /// Eight captures across two codex releases — every committed one that
+    /// Nine captures across two codex releases — every committed one that
     /// carries an approval, which is a property the census above checks rather
     /// than a count this comment asserts — replayed through the production card
     /// builder. The list is exact: a changed command, or a classifier whose
@@ -2253,6 +2253,10 @@ mod tests {
         (
             "file-change.jsonl",
             include_str!("../../../fixtures/codex/file-change.jsonl"),
+        ),
+        (
+            "interrupt-0.153.jsonl",
+            include_str!("../../../fixtures/codex/interrupt-0.153.jsonl"),
         ),
         (
             "interrupt.jsonl",
@@ -2321,6 +2325,8 @@ mod tests {
                 "approval-switch-p5-ccd-resume-bound-0.153.jsonl commandExecution \"/bin/zsh -lc 'touch /work/probe.txt'\" -> medium",
                 "command-execution.jsonl commandExecution \"/bin/zsh -lc 'touch marker.txt'\" -> medium",
                 "file-change.jsonl fileChange \"/work/hello.txt\" -> medium",
+                "interrupt-0.153.jsonl commandExecution \"/bin/zsh -lc 'sleep 45 && touch /work/marker.txt'\" -> medium",
+                "interrupt-0.153.jsonl commandExecution \"/bin/zsh -lc 'sleep 45 && touch /work/marker.txt'\" -> medium",
                 "interrupt.jsonl commandExecution \"/bin/zsh -lc 'touch marker.txt'\" -> medium",
             ],
             "the captured shapes, and what this build says about each of them"

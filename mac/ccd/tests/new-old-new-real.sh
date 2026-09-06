@@ -390,8 +390,17 @@ q "INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,ge
 # The live-claim recovery is proven on its own, in its own home, at (6b).
 q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
    VALUES('answer','$CX','$CX_REQ','h','$CX_THREAD',7,'accept','$CX_TURN','indeterminate',NULL,'2026-09-05T00:00:00.000Z','2026-09-05T00:00:01.000Z');"
-[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "1" ] \
-  || { echo "FAIL: the Codex answer seed did not land"; exit 1; }
+# **And a settled interrupt beside it, under the ledger's second kind.** No schema
+# change went with that kind — the column has always been a string and the ledger has
+# always been keyed by it — so this row is here to prove exactly that: the isolation
+# is a property of the TABLE the old daemon cannot name, not of the vocabulary in it,
+# and a kind added later inherits it without a migration or an arm of its own.
+# Terminal, for the reason the row above is: the round trip has to leave it
+# byte-identical.
+q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
+   VALUES('interrupt','$CX','${CX_REQ}-stop','hi','$CX_THREAD',7,'stop','$CX_TURN','done','aborted','2026-09-05T00:00:02.000Z','2026-09-05T00:00:03.000Z');"
+[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "2" ] \
+  || { echo "FAIL: the Codex answer and interrupt seeds did not both land"; exit 1; }
 
 # The complete durable Codex state, hashed. Anything the old daemon or the old
 # CLI touches changes this — the run, its events, AND its open cards.

@@ -421,10 +421,26 @@ pub enum ClientMessage {
     /// A mutating operation, so it carries a ledger identity like every other:
     /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
     /// exact turn it was issued against, so a replay can never abort a *different*
-    /// turn the session has since moved on to. **Defined but not yet honoured**
-    /// — the daemon refuses it with a reason until steering ships (later phase);
-    /// a Claude client never sends it. Interrupt is bound to the exact `turn_id`
-    /// and the thread generation the daemon holds, never to a name.
+    /// turn the session has since moved on to.
+    ///
+    /// **Honoured**: the daemon genuinely aborts the turn a Codex session is
+    /// running, and answers with a typed [`ServerMessage::InterruptResult`]
+    /// whatever becomes of it. A Claude client never sends it — Claude's stop
+    /// control is the keyboard at the Mac, and a Claude session is refused with
+    /// the sentence that says so rather than by a bare no.
+    ///
+    /// Two gates stand between this message and a stopped turn, and they bind
+    /// different things, which is why neither is redundant. The daemon's own gate
+    /// binds the ask to the exact `turn_id` the hash names, to the thread its
+    /// control link is *subscribed* to, and to that link's current visit
+    /// generation — so the same `request_id` carrying a different turn, thread or
+    /// visit is a conflict rather than a replay, and can never become a stop aimed
+    /// at whatever is running now. It is also the only gate that can be checked
+    /// before anything durable is claimed. The broker then binds the ask again, on
+    /// its own side, to the session's *own* active turn, and refuses one that does
+    /// not name it — and that is the only check with sight of the turn the session
+    /// is actually running. Interrupt is bound to identity at both ends, never to
+    /// a name.
     Interrupt {
         session_id: String,
         request_id: String,
@@ -569,8 +585,17 @@ pub enum ServerMessage {
 
     /// The outcome of an [`ClientMessage::Interrupt`]. Typed like every other
     /// mutation result so a retry replays a recorded outcome rather than
-    /// aborting twice. Until steering ships the daemon only ever sends
-    /// [`InterruptResult::Rejected`].
+    /// aborting twice.
+    ///
+    /// **Every status is reachable**, and the four are genuinely different news
+    /// a client has to render apart: the turn reached its aborted boundary
+    /// ([`InterruptResult::Aborted`]); this exact ask already did that and is not
+    /// doing it twice ([`InterruptResult::Duplicate`]); nothing was actuated and
+    /// here is why ([`InterruptResult::Rejected`]); or the stop was issued and
+    /// this daemon did not live to see what it did
+    /// ([`InterruptResult::Indeterminate`]). Collapsing them — treating anything
+    /// that is not `aborted` as a failure, or anything that is not `rejected` as a
+    /// success — tells the operator something untrue about their own session.
     InterruptResult {
         session_id: String,
         request_id: String,
@@ -588,8 +613,18 @@ pub enum InterruptResult {
     Aborted { turn_id: String },
     /// This exact interrupt already ran; the turn was not aborted a second time.
     Duplicate { turn_id: String },
-    /// Refused, with a reason — the only status the daemon sends until steering
-    /// ships (control link down, wrong agent, or the operation not yet honoured).
+    /// Refused, with a reason: **nothing was actuated by this ask, and the record
+    /// says so.** The clean complement of [`Self::Indeterminate`] — that one is an
+    /// outcome nobody can name, because the ask went past the point where it was
+    /// committed and what it did was never observed; this one is named precisely
+    /// because the ask never reached that point. A client may say the turn is
+    /// untouched by this ask, which no other status licenses.
+    ///
+    /// The reason is human text, safe to show verbatim: the run is not a Codex
+    /// session (a Claude one is told where its stop control actually is), the
+    /// control link is not watching the turn's thread so no stop could be
+    /// confirmed, the hash does not bind this ask to the turn it names, or a
+    /// settled claim that stopped nothing is being replayed.
     Rejected { reason: String },
     /// Issued, outcome unknown — the daemon was killed between claiming the
     /// interrupt and observing the turn terminate. Never retried automatically.
@@ -689,6 +724,38 @@ pub struct Capabilities {
     /// See `terminal_close::NOT_AUTHORISED`.
     #[serde(default)]
     pub terminal_pty: bool,
+    /// **This daemon honours a stop for a Codex session whose control link is
+    /// `Subscribed`** — it really aborts the turn and reports what became of it,
+    /// rather than answering [`InterruptResult::Rejected`] to every ask. Nothing
+    /// else on the wire tells those two daemons apart — both accept
+    /// [`ClientMessage::Interrupt`] and both answer an `interrupt_result` — so
+    /// without this flag a phone shipping a Stop button would have to tap one to find
+    /// out, which is exactly the "offered and silently broken" affordance this app's
+    /// rule forbids: an action the daemon cannot perform is not offered.
+    ///
+    /// # What it does NOT say, stated precisely because it was over-read
+    ///
+    /// It is **connection-global and build-shaped**: one capability set is composed
+    /// per `hello_ack`, from this daemon's supported agents and nothing else. It is
+    /// therefore true on a connection whose fleet is entirely Claude, and true for a
+    /// Codex session whose control link is offline, unbound or merely bound — every
+    /// one of which refuses an ask with a sentence of its own. The name carries
+    /// `codex_` for that reason: a bare `interrupt` read as a promise about whatever
+    /// session the reader had in mind, which is the one thing this flag never was.
+    ///
+    /// **Per-session actuatability is `summary.agent` plus the session's link
+    /// state.** The agent is on every [`crate::event::SessionSummary`]; the link state
+    /// is not — the summary carries `codex_thread_id`, which the daemon resolves from
+    /// the addressee and which reads the same whether that link is subscribed,
+    /// bound or reconnecting. So a client that wants to know whether THIS session can
+    /// be stopped right now cannot compute it from the fleet today, and the field that
+    /// would let it is Phase 5's, not this flag's.
+    ///
+    /// Until then the honest client rule is: offer the button on a Codex session
+    /// hosted by a daemon that advertises this, and let the refusal — which always
+    /// names which of the conditions failed — be what the operator reads.
+    #[serde(default)]
+    pub codex_interrupt: bool,
     /// The agents this daemon can actually host, named honestly. A client scopes
     /// what it offers to this set and intersects it with its own
     /// [`ClientFeatures`]. Empty — from any daemon predating the agent seam — is
@@ -1352,10 +1419,17 @@ mod tests {
              writing the app-server's own response, which is neither a hook return nor \
              a keystroke — is minor 16"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 17,
+            "the honoured interrupt — the daemon actually aborting the turn a Codex \
+             session is running rather than refusing every ask, every `InterruptResult` \
+             status therefore reachable, and the `codex_interrupt` capability that \
+             says so — is minor 17"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 16);
+        assert_eq!(crate::PROTOCOL_MINOR, 17);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1617,6 +1691,13 @@ mod tests {
                 assert!(!capabilities.delete_session);
                 assert!(!capabilities.test_push);
                 assert!(!capabilities.push_relay);
+                assert!(!capabilities.terminal_pty);
+                // A daemon predating the honoured interrupt answered `rejected`
+                // to every ask. Absent must therefore read as "does not honour
+                // it", never as the permissive default — a true here would put a
+                // Stop button on a phone talking to a daemon that cannot stop
+                // anything.
+                assert!(!capabilities.codex_interrupt);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -1756,6 +1837,7 @@ mod tests {
             command_catalog: true,
             slash_composer_recovery: true,
             terminal_pty: true,
+            codex_interrupt: true,
             supported_agents: vec![crate::agent::AgentKind::Claude],
         }
     }

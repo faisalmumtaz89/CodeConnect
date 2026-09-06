@@ -1409,23 +1409,26 @@ where
         | ClientMessage::TerminalDetach { .. } => {
             unreachable!("terminal messages are routed by handle_terminal, not handle_message")
         }
-        // Interrupt is a Codex steering operation whose actuation lands in a
-        // later phase. It is **refused honestly** here, not dropped: the client
-        // that sent it gets a typed `Rejected` naming the reason, so a mutation
-        // result is never a silence. A Claude client never sends one.
+        // Stop the turn a Codex session is running. Every refusal is a typed
+        // `Rejected` naming the reason, so a mutation result is never a silence,
+        // and a Claude session is refused by the agent branch inside rather than
+        // by this arm — the daemon is the one place that knows which agent a run
+        // is hosting.
         ClientMessage::Interrupt {
             session_id,
             request_id,
-            ..
+            turn_id,
+            payload_hash,
         } => {
+            let result = daemon
+                .interrupt(&session_id, &request_id, &turn_id, &payload_hash)
+                .await;
             send(
                 sink,
                 &ServerMessage::InterruptResult {
                     session_id,
                     request_id,
-                    result: protocol::ws::InterruptResult::Rejected {
-                        reason: "interrupt is not supported yet".into(),
-                    },
+                    result,
                 },
             )
             .await?;
@@ -2086,6 +2089,44 @@ where
                 )
                 .await?;
                 return Ok(());
+            }
+            // **A terminal is offered for Claude runs and no others, and that is
+            // decided here — before anything attaches, leases or is torn down.**
+            //
+            // This is the one phone-facing actuation that does not go through the
+            // broker: it hands a real tmux client to the session's pane and types into
+            // it, so every rule the broker keeps about what may reach a Codex session
+            // is simply not on this path. A Codex pane belongs to the codex TUI, whose
+            // keystrokes, prompts and confirmation views this build has measured
+            // nothing about — and typing into a screen nothing has measured is the
+            // definition of the speculative surface this build refuses.
+            //
+            // Placed after the id, authority, transport, geometry and uid checks and
+            // before the supersede below, so a refused attach costs the connection's
+            // existing terminal nothing. `not_authorised` and not
+            // `session_not_hosted`: the run is hosted and healthy, and this connection
+            // may simply not open a terminal onto it — which is what that code has
+            // always meant here.
+            //
+            // **Two refusals, two codes.** `not_authorised` says the run is hosted and
+            // healthy and this connection may simply not open a terminal onto it. A
+            // reference this daemon cannot vouch for is a different statement and gets
+            // `session_not_hosted` — and it is refused at all because this is the one
+            // call site with no later existence check behind it: everything after this
+            // line takes the lease and opens the client.
+            match daemon
+                .refuse_unless_claude(&session_uid, "the terminal")
+                .await
+            {
+                crate::state::ClaudeOnly::Admitted => {}
+                crate::state::ClaudeOnly::WrongAgent(reason) => {
+                    close_terminal(sink, &attachment_id, tc::NOT_AUTHORISED, &reason).await?;
+                    return Ok(());
+                }
+                crate::state::ClaudeOnly::Unknown(reason) => {
+                    close_terminal(sink, &attachment_id, tc::SESSION_NOT_HOSTED, &reason).await?;
+                    return Ok(());
+                }
             }
 
             // The attach is good, so it may now take the connection's terminal
@@ -2803,6 +2844,20 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // enforces the same rule independently, so a client that ignores this
         // capability still cannot open one.
         terminal_pty: terminal_allowed,
+        // **Derived from the agent list rather than written true**, so the flag
+        // cannot outlive the ability it advertises: a stop is something this
+        // daemon can perform only for a Codex session, and a build that stopped
+        // hosting Codex would go on claiming a Stop button the phone could tap
+        // for nothing.
+        //
+        // **And that is the whole of what it says.** This set is composed once per
+        // connection and has no session in hand, so the flag is true on a Claude-only
+        // fleet and true for a Codex run whose control link is offline — see
+        // `Capabilities::codex_interrupt`, which names what a client must add to it to
+        // know whether one particular session can be stopped right now.
+        codex_interrupt: daemon
+            .supported_agents()
+            .contains(&protocol::agent::AgentKind::Codex),
         // **Omitted while the phone can do nothing with it.** This used to read
         // "omitted while it would only say Claude", and the set is no longer only
         // Claude: `supported_agents()` admits Codex now that a coordinator can
@@ -2931,6 +2986,37 @@ mod tests {
     }
 
     /// A daemon with a private store holding exactly one paired device.
+    /// **Give the daemon a row for the fixture's run, hosted by Claude.**
+    ///
+    /// The tmux fixture stamps a real uid onto a real pane, which is what the
+    /// terminal carrier resolves against — but the AGENT is a fact about the run,
+    /// and the run is a row. A daemon that has never heard of a uid cannot say what
+    /// is running under it, and the attach refuses rather than guessing; a fixture
+    /// with no row was therefore exercising the carrier through a gate it had not
+    /// satisfied.
+    fn hosting_a_claude_run(daemon: &Arc<Daemon>, uid: &str) {
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: uid.to_string(),
+                session_id: "cc-term".into(),
+                tmux_session: "cc-term".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+    }
+
     fn daemon_with_a_device() -> (Arc<Daemon>, String) {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -4850,6 +4936,7 @@ mod tests {
         let charged_budget = stall * crate::terminal::PEER_STALL_BUDGET_DEADLINES;
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
         let backlog_uid = seed_backlog(&server.daemon, REPLAY_TEST_EVENTS);
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
@@ -5318,6 +5405,10 @@ mod tests {
         let _deadline = AttachDeadline::shortened_to(Duration::from_millis(300));
         let held = crate::terminal::OpenHold::close();
         let (daemon, device) = daemon_with_a_device();
+        // The run is hosted and is Claude's — the attach must get past the agent gate
+        // so the thing being measured is the deadline and not a refusal before it.
+        let uid = some_uid();
+        hosting_a_claude_run(&daemon, &uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -5327,11 +5418,7 @@ mod tests {
             &mut sink,
             "cc-no-server-here",
             Some(&device),
-            attach_msg(
-                "att-1",
-                &some_uid(),
-                protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
-            ),
+            attach_msg("att-1", &uid, protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT),
         )
         .await;
         drop(held);
@@ -5529,6 +5616,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let sink = GatedSink::default();
 
@@ -5575,7 +5663,7 @@ mod tests {
                     true,
                     attach_msg(
                         "att-2",
-                        &some_uid(),
+                        &a_hosted_uid(&daemon),
                         protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
                     ),
                 )
@@ -5652,6 +5740,7 @@ mod tests {
         };
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -5778,6 +5867,7 @@ mod tests {
         let _deadline = crate::terminal::StallDeadline::shortened_to(stall);
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -5972,6 +6062,19 @@ mod tests {
         protocol::uid::new().unwrap()
     }
 
+    /// A minted uid this daemon actually hosts, running Claude.
+    ///
+    /// [`some_uid`]'s counterpart, and the difference is the whole of what the
+    /// terminal's agent gate reads: a uid alone is a string, and the gate asks what is
+    /// running under it. A run this daemon has no row for is one it cannot vouch for,
+    /// so a terminal onto it is refused rather than opened on the strength of a tmux
+    /// pane that happens to carry the id.
+    fn a_hosted_uid(daemon: &Arc<Daemon>) -> String {
+        let uid = some_uid();
+        hosting_a_claude_run(daemon, &uid);
+        uid
+    }
+
     /// The wired path against real tmux: attach streams the active pane under
     /// the output-credit protocol; input's byte credit is replenished only once
     /// the writer has handed it to the client (the ack arm); and the exact
@@ -5988,6 +6091,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -6242,6 +6346,7 @@ mod tests {
         };
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -6348,7 +6453,7 @@ mod tests {
                 serde_json::json!({
                     "type": "terminal_attach",
                     "attachment_id": "att-1",
-                    "session_uid": some_uid(),
+                    "session_uid": a_hosted_uid(&server.daemon),
                     "cols": 80,
                     "rows": 24,
                     "output_credit": protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
@@ -6397,6 +6502,7 @@ mod tests {
         };
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
 
         let (mut incumbent, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
@@ -6463,7 +6569,7 @@ mod tests {
 
         // An incumbent nothing will release — the stuck child, without needing
         // one. Held for the whole test.
-        let uid = some_uid();
+        let uid = a_hosted_uid(&server.daemon);
         let held = server.daemon.terminal_leases.hold_for_test(&uid);
 
         socket
@@ -6516,7 +6622,7 @@ mod tests {
                 serde_json::json!({
                     "type": "terminal_attach",
                     "attachment_id": "att-1",
-                    "session_uid": some_uid(),
+                    "session_uid": a_hosted_uid(&server.daemon),
                     "cols": 80,
                     "rows": 24,
                     "output_credit": protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
@@ -6601,6 +6707,7 @@ mod tests {
 
         let _socket = FixtureSocket::set(&fx.sock);
         let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        hosting_a_claude_run(&server.daemon, &fx.uid);
         let (mut socket, reply) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -6786,6 +6893,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -6878,7 +6986,7 @@ mod tests {
             Some(&device),
             attach_msg(
                 "att-2",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )
@@ -6926,7 +7034,7 @@ mod tests {
             Some(&device),
             attach_msg(
                 "att-1",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )
@@ -6943,7 +7051,7 @@ mod tests {
             Some(&device),
             attach_msg(
                 "att-2",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )
@@ -6989,6 +7097,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -7145,6 +7254,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -7306,7 +7416,7 @@ mod tests {
             Some(&device),
             attach_msg(
                 "att-1",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )
@@ -7400,7 +7510,7 @@ mod tests {
                 Some(device),
                 attach_msg(
                     "att-1",
-                    &some_uid(),
+                    &a_hosted_uid(daemon),
                     protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
                 ),
             )
@@ -7609,6 +7719,75 @@ mod tests {
         );
     }
 
+    /// **A Codex run is refused a terminal, before anything attaches.**
+    ///
+    /// The terminal is the one phone-facing actuation that does not go through the
+    /// broker: it hands a real tmux client to the session's pane and types into it, so
+    /// none of the rules that scope what may reach a Codex session apply to this path.
+    /// A Codex pane belongs to the codex TUI, whose keystrokes and prompts this build
+    /// has measured nothing about.
+    ///
+    /// **`not_authorised` and not `session_not_hosted`**: the run is hosted and
+    /// healthy, and this connection may simply not open a terminal onto it. Telling a
+    /// phone the run is not hosted would be false about a session it can see in the
+    /// fleet.
+    ///
+    /// **Mutation:** delete the `refuse_unless_claude` call from the attach arm and
+    /// this passes the gate and reaches the open — a Codex pane would take keystrokes.
+    #[tokio::test]
+    async fn a_codex_run_is_refused_a_terminal_before_anything_attaches() {
+        use protocol::ws::terminal_close as tc;
+
+        let (daemon, device) = daemon_with_a_device();
+        let uid = some_uid();
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: uid.clone(),
+                session_id: "cc-1".into(),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+
+        let mut conn = Locals::default();
+        let mut sink = CollectSink::default();
+        drive_over(
+            &daemon,
+            &mut conn,
+            &mut sink,
+            "unused",
+            Some(&device),
+            true,
+            attach_msg("att-1", &uid, protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT),
+        )
+        .await;
+        assert!(
+            matches!(sink.last(), ServerMessage::TerminalClosed { attachment_id, code, reason }
+                if attachment_id == "att-1"
+                    && code == tc::NOT_AUTHORISED
+                    && reason.contains("Codex session")
+                    && reason.contains("terminal")),
+            "a Codex run is refused a terminal, and told why, got {:?}",
+            sink.last()
+        );
+        assert!(
+            conn.opening.is_none() && conn.terminal.is_none(),
+            "and nothing was spawned, leased or attached for it"
+        );
+    }
+
     /// A terminal is refused on a connection whose bytes are not private in
     /// transit, and the capability says so before the phone ever asks.
     ///
@@ -7634,7 +7813,7 @@ mod tests {
             false,
             attach_msg(
                 "att-1",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )
@@ -7833,6 +8012,7 @@ mod tests {
             return;
         };
         let (daemon, device) = daemon_with_a_device();
+        hosting_a_claude_run(&daemon, &fx.uid);
         let mut conn = Locals::default();
         let mut sink = CollectSink::default();
 
@@ -7999,7 +8179,7 @@ mod tests {
             Some(&device),
             attach_msg(
                 "att-1",
-                &some_uid(),
+                &a_hosted_uid(&daemon),
                 protocol::ws::TERMINAL_INITIAL_OUTPUT_CREDIT,
             ),
         )

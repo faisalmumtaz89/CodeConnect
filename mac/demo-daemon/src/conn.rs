@@ -467,6 +467,9 @@ fn capabilities() -> Capabilities {
         command_catalog: false,
         slash_composer_recovery: false,
         terminal_pty: false,
+        // No Codex link and no turn to stop: an action this server cannot perform
+        // is not offered.
+        codex_interrupt: false,
         // Omitted while it would only name the Claude floor — same as ccd, so the
         // demo does not make a phone render a diagnostic capability row that
         // means nothing yet. An empty list is skipped on the wire.
@@ -779,6 +782,7 @@ mod tests {
         // `tls` true on a plaintext link, and would flap for ever.
         for withheld in [
             "terminal_pty",
+            "codex_interrupt",
             "push",
             "push_relay",
             "test_push",

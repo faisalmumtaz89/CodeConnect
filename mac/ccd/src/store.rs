@@ -679,14 +679,38 @@ pub enum AnswerStatus {
     Indeterminate,
 }
 
-/// One unsettled claim under [`OPERATION_ANSWER`], for recovery to make terminal.
+/// **Where one claim stands, together with the material it was claimed with.**
+///
+/// The two are read as one because a replay needs both and reading them apart is
+/// where the law goes wrong: the status alone says an id has been used before, and
+/// only the material says whether it was used for *this*. An id reused for a
+/// different turn wears the same status as an honest retry, and answering from the
+/// status alone tells an operator the turn in front of them has already been stopped.
+///
+/// The same all-field comparison [`Store::claim_mutation`] makes before it will call
+/// a second ask a duplicate, made available to the readers that decide before a claim
+/// is attempted at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnswerClaimRow {
+pub struct MutationState {
+    pub status: AnswerStatus,
+    /// The material the row was claimed with, verbatim.
+    pub claimed: ClaimedMaterial,
+}
+
+/// One unsettled claim under any operation kind, for recovery to make terminal.
+///
+/// Named for the ledger rather than for one of its operations: the row is the same
+/// row whichever kind wrote it, and a type called after the first caller would have
+/// to be either renamed or lied about by the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationClaimRow {
     pub session_uid: String,
-    /// The card's durable, item-derived request id.
+    /// The durable id the phone retried under. For an answer it is the card's
+    /// item-derived id; for an interrupt it is the id the ask carried.
     pub client_request_id: String,
-    /// The material the answer was claimed with. `route` is the option the phone
-    /// named, which is what lets a recovered terminal say what was attempted.
+    /// The material the mutation was claimed with. `route` is the operation kind's
+    /// own word for which way the actuation went, which is what lets a recovered
+    /// terminal say what was attempted.
     pub claimed: ClaimedMaterial,
     pub started_at: String,
 }
@@ -729,11 +753,91 @@ pub fn replayed_answer_sentence(outcome: &str) -> String {
     }
 }
 
+/// **The one route an interrupt can take.**
+///
+/// `route` is the ledger's field for "which way did this actuation go?", and for an
+/// interrupt there is exactly one way: stop the turn. Written anyway rather than left
+/// empty, because the column is part of the claimed material a duplicate is compared
+/// against, and an empty string is a value a bug can also produce.
+pub const INTERRUPT_ROUTE: &str = "stop";
+
+/// **The three outcomes a settled interrupt claim records.**
+///
+/// Spelled once so a duplicate replays the same word the first attempt wrote, and so
+/// a reader that has to tell them apart cannot do it with a literal that drifts.
+/// They are the three things that can become of a written interrupt, and no fourth:
+/// the turn stopped, the turn ended for its own reasons first, or the write was
+/// refused with a reason.
+///
+/// The turn reached its terminal with `interrupted`, which is this ask taking effect
+/// and the only outcome that stopped anything.
+pub const INTERRUPT_ABORTED: &str = "aborted";
+/// The turn ended for its own reasons while the ask was in flight. Nothing was
+/// stopped from here, and the record must not let anyone say otherwise.
+pub const INTERRUPT_TURN_ENDED: &str = "turn_ended";
+/// The write itself was refused — by the broker before a byte left, or by the
+/// app-server with an error. Proven not to have actuated.
+pub const INTERRUPT_REFUSED: &str = "refused";
+
+/// **What a settled interrupt claim is replayed as, in the operator's words.**
+///
+/// The same rule [`replayed_answer_sentence`] keeps, and for the same reason: telling
+/// somebody their tap stopped a turn when the record says it did not is the one thing
+/// this sentence must never do. An outcome this build has no words for names itself
+/// rather than being guessed at — the terminal is what governs, not the vocabulary.
+pub fn replayed_interrupt_sentence(outcome: &str) -> String {
+    match outcome {
+        INTERRUPT_ABORTED => "that turn was already stopped from a phone; nothing was sent \
+                              again"
+            .to_string(),
+        INTERRUPT_TURN_ENDED => "that turn had already ended on its own when this was sent \
+                                 before, so nothing was stopped; nothing was sent again"
+            .to_string(),
+        INTERRUPT_REFUSED => "an earlier request to stop that turn was refused, so nothing \
+                              was sent again"
+            .to_string(),
+        other => format!("this interrupt is already settled ({other}); nothing was sent again"),
+    }
+}
+
 /// **The one `operation_kind` a phone answer is claimed under.**
 ///
 /// Spelled once so a typo is a compile error rather than a claim nothing can find
 /// again — the same reason every other wire vocabulary in this file is a constant.
 pub const OPERATION_ANSWER: &str = "answer";
+
+/// **The `operation_kind` a phone interrupt is claimed under.**
+///
+/// The second producer for the generalized ledger, and the reason the ledger was
+/// generalized: an interrupt is a mutation with the same idempotency law as an
+/// answer — claimed before the write, settled by the outcome, replayed rather than
+/// re-actuated — differing only in what it writes and what tells it what happened.
+///
+/// Spelled once for the same reason [`OPERATION_ANSWER`] is: a typo would be a claim
+/// nothing can find again rather than a compile error. No schema change goes with
+/// it — the column has always been a string and the ledger has always been keyed by
+/// it.
+pub const OPERATION_INTERRUPT: &str = "interrupt";
+
+/// **Every `operation_kind` the ledger has, in one list.**
+///
+/// The kinds are still named individually by the paths that *write* them, because each
+/// writes something different: an answer retires an approval card beside its row, an
+/// interrupt has only the row, and one of the two recoveries is rightly gated on the
+/// cards being back while the other must not be.
+///
+/// What they must NOT differ about is being made **terminal**. A claim of any kind left
+/// `applying` by a process — or by a link — that stopped is one no phone can ever
+/// re-ask under the same id, and the second kind spent a while with half a recovery
+/// precisely because "which kinds are covered" lived only in a reader's head.
+///
+/// **Production reads it now, and that is the change.** Every in-process abort path
+/// sweeps the outgoing session's claims by iterating this list — see
+/// [`crate::state::Daemon::sweep_stranded_claims`] — so a third kind added here is
+/// swept by every abort path the day it exists, rather than by whichever ones somebody
+/// remembered. That is worth the one `match` on the kind inside the loop, which is the
+/// price of the two closers genuinely differing.
+pub const OPERATION_KINDS: [&str; 2] = [OPERATION_ANSWER, OPERATION_INTERRUPT];
 
 /// Close one answer claim inside a caller's transaction, **or fail the whole
 /// transaction**.
@@ -3530,29 +3634,72 @@ impl Store {
         session_uid: &str,
         client_request_id: &str,
     ) -> Result<Option<AnswerStatus>> {
-        let status = self
+        Ok(self
+            .mutation_status(OPERATION_ANSWER, session_uid, client_request_id)?
+            .map(|state| state.status))
+    }
+
+    /// **Where one claim of any kind stands, durably.**
+    ///
+    /// The general form of [`Store::answer_status`], read by every path that must
+    /// refuse a mutation whose claim is already terminal — and refuse it with the
+    /// reason the record gives rather than with whatever the link happens to say.
+    /// **The claimed material comes back with the status**, because a caller that
+    /// replays a terminal has to apply the ledger's own law: a duplicate is a second
+    /// ask carrying the SAME material, and an id reused for different material is two
+    /// mutations under one key. A reader given only the status cannot tell them apart
+    /// and answers the second as though it were the first.
+    pub fn mutation_status(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+    ) -> Result<Option<MutationState>> {
+        let row = self
             .read()
             .query_row(
-                "SELECT status, outcome FROM mutation_ledger
+                "SELECT status, outcome, claimed_hash, thread_id, generation, route,
+                        target_turn_id
+                   FROM mutation_ledger
                   WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3",
-                params![OPERATION_ANSWER, session_uid, client_request_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                params![operation_kind, session_uid, client_request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        ClaimedMaterial {
+                            thread_id: row.get(3)?,
+                            generation: row.get::<_, i64>(4)? as u64,
+                            route: row.get(5)?,
+                            target_turn_id: row.get(6)?,
+                            claimed_hash: row.get(2)?,
+                        },
+                    ))
+                },
             )
             .optional()?;
-        Ok(status.map(|(status, outcome)| match status.as_str() {
-            "done" => AnswerStatus::Settled(outcome.unwrap_or_default()),
-            "applying" => AnswerStatus::Applying,
-            _ => AnswerStatus::Indeterminate,
+        Ok(row.map(|(status, outcome, claimed)| MutationState {
+            status: match status.as_str() {
+                "done" => AnswerStatus::Settled(outcome.unwrap_or_default()),
+                "applying" => AnswerStatus::Applying,
+                _ => AnswerStatus::Indeterminate,
+            },
+            claimed,
         }))
     }
 
-    /// **Every phone answer this daemon was in the middle of when it stopped.**
+    /// **Every mutation of one kind this daemon was in the middle of when it
+    /// stopped.**
     ///
-    /// Filtered to [`OPERATION_ANSWER`] because these settle by retiring an
-    /// approval card, and no other operation has one to retire. The claimed
-    /// material comes back with them so a recovered terminal can name the decision
-    /// that was attempted rather than only the card it was attempted against.
-    pub fn unsettled_answer_claims(&self) -> Result<Vec<AnswerClaimRow>> {
+    /// The claimed material comes back with the rows, so a recovered terminal can
+    /// name what was attempted rather than only the key it was attempted under —
+    /// which for an answer is the decision and for an interrupt is the turn.
+    ///
+    /// Taking the kind as an argument rather than having one function per operation
+    /// is what keeps the two recoveries reading the same rows by the same rule: the
+    /// ledger is one table with one law, and a second copy of this query would be a
+    /// second chance for the law to drift.
+    pub fn unsettled_claims(&self, operation_kind: &str) -> Result<Vec<MutationClaimRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
@@ -3561,8 +3708,8 @@ impl Store {
               WHERE operation_kind = ?1 AND status = 'applying'
               ORDER BY started_at ASC",
         )?;
-        let rows = stmt.query_map(params![OPERATION_ANSWER], |row| {
-            Ok(AnswerClaimRow {
+        let rows = stmt.query_map(params![operation_kind], |row| {
+            Ok(MutationClaimRow {
                 session_uid: row.get(0)?,
                 client_request_id: row.get(1)?,
                 claimed: ClaimedMaterial {
@@ -3582,16 +3729,21 @@ impl Store {
         Ok(out)
     }
 
-    /// **The applying answer claims that belong to one session.**
+    /// **The applying claims of one kind that belong to one session.**
     ///
-    /// The scoped twin of [`Store::unsettled_answer_claims`], for settling the
-    /// claims of a single outgoing session at a handover rather than the whole
-    /// store at a restart. The claim row is the authoritative record of an answer
-    /// in flight — it is committed before the answer enters any in-memory ledger,
-    /// and the write that commits it cannot be cancelled — so a handover that has
-    /// to abandon a session reads its claims from here and makes each terminal,
-    /// catching one that was committed but never reached the daemon's own ledger.
-    pub fn unsettled_answer_claims_for(&self, session_uid: &str) -> Result<Vec<AnswerClaimRow>> {
+    /// The scoped twin of [`Store::unsettled_claims`], for settling the claims of a
+    /// single outgoing session at an in-process abort — a handover, a registration, a
+    /// disconnect — rather than the whole store at a restart. The claim row is the
+    /// authoritative record of a mutation in flight —
+    /// it is committed before the mutation enters any in-memory ledger, and the
+    /// write that commits it cannot be cancelled — so a handover that has to abandon
+    /// a session reads its claims from here and makes each terminal, catching one
+    /// that was committed but never reached the daemon's own ledger.
+    pub fn unsettled_claims_for(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+    ) -> Result<Vec<MutationClaimRow>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT session_uid, client_request_id, claimed_hash, thread_id, generation,
@@ -3600,8 +3752,8 @@ impl Store {
               WHERE operation_kind = ?1 AND session_uid = ?2 AND status = 'applying'
               ORDER BY started_at ASC",
         )?;
-        let rows = stmt.query_map(params![OPERATION_ANSWER, session_uid], |row| {
-            Ok(AnswerClaimRow {
+        let rows = stmt.query_map(params![operation_kind, session_uid], |row| {
+            Ok(MutationClaimRow {
                 session_uid: row.get(0)?,
                 client_request_id: row.get(1)?,
                 claimed: ClaimedMaterial {
@@ -6152,7 +6304,7 @@ mod tests {
             .settle_mutation("answer", &session.uid, "req-3", "delivered", &now)
             .unwrap());
 
-        let open = store.unsettled_answer_claims().unwrap();
+        let open = store.unsettled_claims(OPERATION_ANSWER).unwrap();
         assert_eq!(
             open.iter()
                 .map(|claim| (
@@ -6190,7 +6342,7 @@ mod tests {
             Some(AnswerStatus::Settled("delivered".into())),
             "req-3 settled `delivered` before recovery ran, and stays that way"
         );
-        assert!(store.unsettled_answer_claims().unwrap().is_empty());
+        assert!(store.unsettled_claims(OPERATION_ANSWER).unwrap().is_empty());
     }
 
     /// **What the column holds, and what each shape of it authorizes.**

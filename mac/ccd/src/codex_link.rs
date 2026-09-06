@@ -644,6 +644,15 @@ pub fn is_measured_not_ready(frame: &Value, requested_thread: &str) -> bool {
 /// other, and the whole point of both is that they are what was *observed*.
 const LIVE_TURN_IN_PROGRESS: &str = "inProgress";
 
+/// The `status` a turn wears when it was stopped rather than finished.
+///
+/// Measured on real codex 0.153.4 (`fixtures/codex/interrupt-0.153.jsonl`): an
+/// interrupt's `turn/completed` carries `status:"interrupted"` and `items:[]`, and it
+/// is the only terminal that credits an interrupt with having worked. Spelled here
+/// beside the running status rather than shared with the adapter's own copy, for the
+/// reason above: two measurements of two wire shapes that agree today.
+const TURN_INTERRUPTED: &str = "interrupted";
+
 /// The JSON-RPC code the app-server answers a rollout-less resume with.
 const NOT_READY_CODE: i64 = -32600;
 /// Its message, up to the thread id. Captured verbatim from codex 0.147.
@@ -1324,16 +1333,36 @@ impl CodexAddressee {
 /// `Inner`, and an async lock would make a trivially-uncontended read into an await
 /// point on the session-list path.
 #[derive(Clone)]
-pub struct LinkPresence(Arc<Mutex<CodexAddressee>>);
+pub struct LinkPresence(Arc<Mutex<(CodexAddressee, LinkVisit)>>);
+
+/// **Which visit, on which connection**, published beside the addressee.
+///
+/// Two numbers because they answer two different questions, and an ask has to pass
+/// both. The generation says which VISIT the ask belongs to — a thread revisited
+/// after a `/new` and back again wears the same id under a different visit. The
+/// upstream epoch says which CONNECTION it was aimed at — a link that reconnected is
+/// a different socket, watching a different `turn/started`, with a different idea of
+/// what is running.
+///
+/// **Both are `0` before the link has run, and `0` is a value no live visit or live
+/// connection ever has**, so an ask carrying either can only fail the link's own
+/// comparison. That is the fail-closed direction, and it is what the teardown
+/// publishes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkVisit {
+    pub generation: u64,
+    pub upstream_epoch: u64,
+}
 
 impl Default for LinkPresence {
     /// A link that has been created and has not dialled yet — emphatically not the
     /// same fact as no link at all, and holding no thread because it has adopted
     /// none.
     fn default() -> LinkPresence {
-        LinkPresence(Arc::new(Mutex::new(CodexAddressee::Offline {
-            thread_id: None,
-        })))
+        LinkPresence(Arc::new(Mutex::new((
+            CodexAddressee::Offline { thread_id: None },
+            LinkVisit::default(),
+        ))))
     }
 }
 
@@ -1346,6 +1375,23 @@ impl LinkPresence {
     /// was — this is a state, not a subscription, and it is never newer than the
     /// link's last idle moment.
     pub fn get(&self) -> CodexAddressee {
+        self.0.lock().expect("the codex link presence").0.clone()
+    }
+
+    /// **The addressee and the visit it belongs to, read together.**
+    ///
+    /// Two reads of this cell are two instants, and a switch between them would pair
+    /// one visit's thread with another visit's number — which is precisely the
+    /// staleness the generation exists to detect. Anything that has to act on the
+    /// pair takes it in one acquisition.
+    ///
+    /// **The generation is the LINK's own count of its visits**, and there is no
+    /// other honest source for it: a thread revisited after a `/new` and back again
+    /// wears the same id under a different visit, so a caller deriving its own number
+    /// would be comparing two things that agree by luck. It is `0` before the link
+    /// has run, which is a value no live visit ever has — so an ask carrying it can
+    /// only fail the link's own comparison, which is the fail-closed direction.
+    pub fn get_with_generation(&self) -> (CodexAddressee, LinkVisit) {
         self.0.lock().expect("the codex link presence").clone()
     }
 
@@ -1362,8 +1408,8 @@ impl LinkPresence {
     /// expose half-applied states — a visit moved to a switched thread a moment
     /// before the adoption that goes with it. One site, after the dust settles,
     /// says what a reader can act on.
-    fn publish(&self, state: CodexAddressee) {
-        *self.0.lock().expect("the codex link presence") = state;
+    fn publish(&self, state: CodexAddressee, visit: LinkVisit) {
+        *self.0.lock().expect("the codex link presence") = (state, visit);
     }
 
     /// **What this cell says before the link it belongs to has run at all.**
@@ -1386,7 +1432,9 @@ impl LinkPresence {
     /// link to publish anything, and keeping the two apart is what keeps that claim
     /// true.
     pub fn publish_seed(&self, state: CodexAddressee) {
-        self.publish(state);
+        // Zero on both counts: no visit has begun and no connection has been opened,
+        // and those are the values every live visit and every live connection are not.
+        self.publish(state, LinkVisit::default());
     }
 
     /// **Test-only.** Put a link in a given state without standing one up.
@@ -1398,7 +1446,25 @@ impl LinkPresence {
     /// need a socket to make.
     #[cfg(test)]
     pub fn publish_for_tests(&self, state: CodexAddressee) {
-        self.publish(state);
+        self.publish(
+            state,
+            LinkVisit {
+                generation: 1,
+                upstream_epoch: 1,
+            },
+        );
+    }
+
+    /// **Test-only.** Put a link in a given state on a given visit.
+    #[cfg(test)]
+    pub fn publish_for_tests_on(&self, state: CodexAddressee, generation: u64) {
+        self.publish(
+            state,
+            LinkVisit {
+                generation,
+                upstream_epoch: 1,
+            },
+        );
     }
 }
 
@@ -1472,11 +1538,92 @@ impl AnswerReport {
     }
 }
 
+/// **What became of one interrupt the phone asked this link to write.**
+///
+/// Three endings, and they differ in what they left behind rather than in how they
+/// read — the same distinction [`AnswerReport`] draws, for the same reason: a caller
+/// that cannot tell "nothing was written and the turn is still running" from "this
+/// may have actuated and nothing can say" cannot tell an ask worth repeating from
+/// one that must never be repeated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InterruptReport {
+    /// The turn this ask named reached its terminal, and this link watched it do so.
+    /// The turn id is carried back because the phone names the turn it stopped.
+    Aborted { turn_id: String },
+    /// **This exact ask already stopped this exact turn**, and the record says so.
+    /// A retry under the same id, carrying the same material — the thing an operator
+    /// does when a reply is slow — and the honest answer to "again?" is that it
+    /// already happened. Distinct from [`InterruptReport::Aborted`] only in that
+    /// nothing was written this time, which is the whole of what a duplicate means.
+    Duplicate { turn_id: String },
+    /// **Nothing was actuated by THIS ask, and the record says so.** Reached from a
+    /// refusal before the claim — the link is not on the ask's thread, a switch is in
+    /// flight, or the connection is gone — where no ledger row exists and the
+    /// operator's next tap is a first attempt; and from a proven refusal of the
+    /// write, where the broker or the app-server answered with an error rather than
+    /// with silence.
+    NotApplied(String),
+    /// The interrupt may have reached the app-server and nothing that survives can
+    /// say. Terminal precisely so that it is never sent again: the budget expiring,
+    /// the connection ending, the task being dropped, and the turn reaching a
+    /// terminal this ask cannot claim to have caused.
+    Unknown(String),
+}
+
+/// **What became of the attempt to RECORD one interrupt's terminal outcome.**
+///
+/// Three endings, and they existed before this type did — they were simply logged and
+/// thrown away, and the caller went on to report the outcome it had hoped to write as
+/// though it had written it. That is the one thing a ledger must not allow: the whole
+/// promise of a durable claim is that what the phone is told and what the record says
+/// are the same sentence, and a settle that lost or failed breaks exactly that.
+#[derive(Debug)]
+enum Settlement {
+    /// This call wrote the terminal. What the phone is told is what the record says.
+    Recorded,
+    /// **Something else made the claim terminal first**, and first-terminal-wins means
+    /// that one stands. For an interrupt the other writer is a restart's recovery or a
+    /// handover sweep, both of which record an unprovable ending — so the outcome this
+    /// call was carrying is not the record, and reporting it would tell the phone
+    /// something a retry of the same id would contradict.
+    Superseded,
+    /// The write failed. Nothing may claim the record says anything, in either
+    /// direction: the row is still `applying`, so a retry is refused rather than
+    /// re-actuated, but "already stopped" is a promise this Mac cannot keep.
+    Unrecorded(String),
+}
+
+/// **What a recorded interrupt outcome means, in one place.**
+///
+/// Both moments that can meet a terminal row read it through here: the daemon's
+/// pre-claim replay of a settled row, and the link's own duplicate arm when a claim
+/// comes back `Applied`. They used to be two mappings and they disagreed — an exact
+/// aborted duplicate was a `Duplicate` at one and a refusal at the other — which is a
+/// difference an operator feels as the daemon changing its mind about whether their
+/// tap worked.
+///
+/// **A known ending is never `Unknown`.** `turn_ended` and `refused` are both
+/// statements that nothing was actuated and that the record can say so, which is
+/// exactly what a refusal is; reporting them as unknown would tell a phone the
+/// outcome is unnameable when the ledger has named it, and would earn a turn that
+/// demonstrably ended on its own the same treatment as a daemon killed mid-write.
+pub(crate) fn replayed_interrupt_report(outcome: &str, turn_id: &str) -> InterruptReport {
+    if outcome == crate::store::INTERRUPT_ABORTED {
+        return InterruptReport::Duplicate {
+            turn_id: turn_id.to_string(),
+        };
+    }
+    InterruptReport::NotApplied(crate::store::replayed_interrupt_sentence(outcome))
+}
+
 /// One thing the daemon asks the live connection to do on its socket.
 ///
-/// A struct rather than a one-variant enum: this is the only verb, and inventing a
-/// vocabulary for verbs that do not exist is the speculative half-surface this build
-/// refuses. Phase 4's steer and interrupt will make it an enum when they are real.
+/// A struct rather than a one-variant enum, and it stays one now that a second verb
+/// exists: an interrupt travels on [`LinkInterrupts`], its own channel, because the
+/// two asks are alike only in being writes. An answer quotes a wire id this
+/// connection was handed and learns its fate from the broker; an interrupt mints its
+/// own id and learns its fate from a turn terminal. Folding them into one enum would
+/// make every field of both optional and every settlement site ask which it had.
 ///
 /// **The durable claim is not taken before this is sent, and that is deliberate.**
 /// Only the connection knows whether it holds a live wire id for this card, on the
@@ -1580,6 +1727,136 @@ impl LinkAnswers {
         })
     }
 }
+
+/// **One interrupt the daemon asks the live connection to write.**
+///
+/// The claim is taken by the LINK and not by the caller, for [`AnswerRequest`]'s
+/// reason read across: only the connection knows whether it is on the ask's thread
+/// with no switch in flight, so only the connection can say whether the ask is
+/// addressable at all. Claiming first would leave an `applying` row behind for every
+/// ask that was never addressable, and recovery would later record an interrupt that
+/// was never written as one whose fate is unknown.
+pub(crate) struct InterruptRequest {
+    /// The durable id the phone retried under, and the ledger's key.
+    pub(crate) client_request_id: String,
+    /// **The upstream connection this ask was aimed at.**
+    ///
+    /// Not part of the claimed material and deliberately not durable: a connection is
+    /// the most ephemeral thing in this design, and a ledger row that carried one
+    /// could never be replayed. It rides the ask instead, because the hazard it closes
+    /// is entirely about the moment of the write.
+    ///
+    /// A connection's teardown drains this channel once and only then publishes that
+    /// it is gone, so a caller that snapshotted `Subscribed` an instant earlier can
+    /// still enqueue behind the drain. Without this the ask waited in the channel and
+    /// was handed to whatever connection came up next — a socket nobody asked about,
+    /// watching a turn nobody was looking at.
+    pub(crate) upstream_epoch: u64,
+    /// The immutable material this interrupt is claimed with. `thread_id` is also the
+    /// gate — an interrupt is written only on a connection bound to the turn's own
+    /// thread — and `target_turn_id` is the turn, which is the whole authorization.
+    pub(crate) claimed: crate::store::ClaimedMaterial,
+    /// Where the outcome goes.
+    pub(crate) reply: tokio::sync::oneshot::Sender<InterruptReport>,
+    /// The actuation gate's read guard, owned and travelling with the ask, for
+    /// [`AnswerRequest::gate`]'s reason: dropping the caller must not release it
+    /// while the write is still outstanding on this link.
+    pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+/// The daemon's end of [`InterruptRequest`].
+///
+/// Unbounded for [`LinkAnswers`]'s reason: it carries at most one entry per turn a
+/// person is watching, and a person is watching because they are looking at it.
+#[derive(Clone)]
+pub(crate) struct LinkInterrupts(tokio::sync::mpsc::UnboundedSender<InterruptRequest>);
+
+/// Mint the daemon's end and the link's end of the interrupt channel.
+///
+/// Split where the link is installed, so the sender travels on the handle and dies
+/// with it — the same lifetime rule the presence, the carry and the answer channel
+/// keep, and what makes an ask against a session that has been handed on unable to
+/// reach the task that is winding down.
+pub(crate) fn interrupt_channel() -> (
+    LinkInterrupts,
+    tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (LinkInterrupts(tx), rx)
+}
+
+impl LinkInterrupts {
+    /// Ask the link to stop `target_turn_id`, and wait for what became of it.
+    ///
+    /// The two `Err` arms are the honest half, exactly as they are for an answer. A
+    /// send that fails means the link task was already gone, so nothing was claimed
+    /// and nothing was written — the turn is still running and the ask is worth
+    /// repeating. A receive that fails means the task went away after taking the
+    /// ask, which its own teardown normally forestalls; reaching it means the task
+    /// was aborted mid-write, and the only truthful thing to say is that nothing here
+    /// knows what happened.
+    pub(crate) async fn interrupt(
+        &self,
+        client_request_id: &str,
+        claimed: crate::store::ClaimedMaterial,
+        upstream_epoch: u64,
+        gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> InterruptReport {
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        if self
+            .0
+            .send(InterruptRequest {
+                client_request_id: client_request_id.to_string(),
+                upstream_epoch,
+                claimed,
+                reply,
+                gate,
+            })
+            .is_err()
+        {
+            return InterruptReport::NotApplied(
+                "the link to this Codex session is not running, so nothing was sent; \
+                 stop the turn at the Mac"
+                    .into(),
+            );
+        }
+        outcome.await.unwrap_or_else(|_| {
+            InterruptReport::Unknown(
+                "the link stopped while this interrupt was being written, so whether it \
+                 reached Codex is not known; it will not be sent again. Check the Mac."
+                    .into(),
+            )
+        })
+    }
+}
+
+/// **Interrupts written on one connection whose turn has not reached a terminal yet,
+/// keyed by the wire id they were written under.**
+///
+/// A map for [`OpenAnswers`]'s reason — the daemon serialises taps on ONE turn, not
+/// across turns — and shared with [`run`] so that every way a connection can end
+/// settles them. A claim is durable and a person is waiting to be told whether the
+/// thing they stopped stopped.
+pub(crate) type OpenInterrupts = Arc<Mutex<std::collections::BTreeMap<i64, PendingInterrupt>>>;
+
+/// **How long an interrupt waits for the turn it named to end.**
+///
+/// The wire does not answer this question in its response: `turn/interrupt` returns
+/// `result:{}` and says nothing about what it did, so the terminal is the only
+/// evidence there is. Measured on real codex 0.153.4: the `turn/completed` an
+/// interrupt causes arrives within a few hundred milliseconds of the write, and the
+/// whole of the app-server's own bookkeeping — token usage, rate limits, the status
+/// change — lands with it.
+///
+/// Fifteen seconds is two orders of magnitude above the measurement, and the same
+/// budget an answer's disposition gets, so the derivation the registration handover
+/// makes from the answer's worst case still bounds this one. Either way the wait is
+/// bounded, because a claim that waits for ever holds a phone on a question nothing
+/// will answer.
+#[cfg(not(test))]
+pub(crate) const INTERRUPT_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub(crate) const INTERRUPT_BUDGET: Duration = Duration::from_millis(750);
 
 /// **Answers written on one connection and not yet reported on, keyed by the wire id
 /// they were written on.**
@@ -1784,6 +2061,35 @@ const LEDGER_NOT_RECORDED: &str =
 /// what became of it — so the claim goes terminal, the card is retired saying exactly
 /// that, and the caller is told rather than left holding a sender that will never
 /// fire. The alternative is a card on a phone that no tap can ever answer again.
+/// **Test-only.** Put an interrupt in the pending map without a socket to write on.
+///
+/// The settlement half is what the terminal drives, and it is a different claim from
+/// the write; standing up a connection to assert it would test both at once and tell
+/// a reader which failed only by luck.
+#[cfg(test)]
+pub(crate) fn insert_pending_interrupt_for_tests(
+    open: &OpenInterrupts,
+    wire_id: i64,
+    client_request_id: &str,
+    thread_id: &str,
+    turn_id: &str,
+    gate: tokio::sync::OwnedRwLockReadGuard<()>,
+) -> tokio::sync::oneshot::Receiver<InterruptReport> {
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    open.lock().expect("open interrupts").insert(
+        wire_id,
+        PendingInterrupt {
+            client_request_id: client_request_id.to_string(),
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            deadline: tokio::time::Instant::now() + INTERRUPT_BUDGET,
+            replies: vec![reply],
+            _gates: vec![gate],
+        },
+    );
+    outcome
+}
+
 /// **Test-only.** Put an admitted answer into an open-answers ledger without
 /// standing up a connection, so a caller can prove that aborting the link settles
 /// it durably. The fields are this module's; the guard is the caller's, moved in the
@@ -1823,6 +2129,64 @@ pub(crate) async fn settle_open_answers(
         .collect();
     for answer in held {
         settle_unknown_answer(daemon, session, answer, cause).await;
+    }
+}
+
+/// **Settle every interrupt a connection was still waiting on, terminally.**
+///
+/// The counterpart of [`settle_open_answers`], and simpler for one reason: an
+/// interrupt has no approval card, so there is nothing to retire alongside the
+/// ledger. What must still be true is what makes both of these exist — a claim that
+/// nothing settles is one a restart has to reason about, and a caller holding a
+/// sender that never fires is a phone that never hears back.
+///
+/// Terminal `indeterminate` and not a refusal, and the distinction is the whole
+/// point: the write may have reached the app-server, so the truthful statement is
+/// that nothing here knows, and the truthful consequence is that it is never sent
+/// again.
+pub(crate) async fn settle_open_interrupts(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    open: &OpenInterrupts,
+    cause: &str,
+) {
+    let held: Vec<PendingInterrupt> = std::mem::take(&mut *open.lock().expect("open interrupts"))
+        .into_values()
+        .collect();
+    for mut pending in held {
+        // **The sentence is chosen by what the write did**, not by what it was for. A
+        // terminal row is what makes "it will not be sent again" a promise this Mac
+        // keeps; without one the claim is left `applying`, which still refuses a
+        // retry — but saying so as though the record backed it is the kind of small
+        // untruth that makes a ledger untrustworthy in the one case it matters.
+        let recorded = daemon
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                session.uid.clone(),
+                pending.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await;
+        let report = match recorded {
+            Ok(_) => InterruptReport::Unknown(format!(
+                "{cause}, so whether that turn was stopped is not known; it will not be \
+                 sent again. Check the Mac."
+            )),
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not record that the interrupt {} was left \
+                     unsettled: {err:#}",
+                    session.name,
+                    pending.client_request_id
+                );
+                InterruptReport::Unknown(format!(
+                    "{cause}, and this Mac could not record that either ({err}), so it \
+                     cannot say what became of it. Check the Mac."
+                ))
+            }
+        };
+        pending.tell(report);
     }
 }
 
@@ -2013,6 +2377,19 @@ pub struct LinkCarry {
     /// starts with an empty ledger, and [`LinkCarry::resume_from`] copies only the
     /// chase, so a replacement never inherits a predecessor's in-flight answers.
     open_answers: OpenAnswers,
+    /// **The interrupts this link has written and is still waiting on**, riding the
+    /// carry for exactly the reason the answers do.
+    ///
+    /// It used to be owned by [`run`]'s own loop, on the reasoning that an interrupt
+    /// has no approval card to retire and so needs no handle a replacement
+    /// registration can reach. That reasoning was about the wrong hazard: the thing
+    /// the carry buys is not the card, it is reachability from OUTSIDE the task, and
+    /// an aborted task never runs its own teardown. Two ordinary paths abort one —
+    /// a supervisor disconnecting, and an exit replay's registration, neither of
+    /// which passes through the quiesce timeout that sweeps the store — and on both
+    /// of them a written interrupt's claim stayed `applying` for ever while the
+    /// person who asked for it was never told anything at all.
+    open_interrupts: OpenInterrupts,
 }
 
 impl LinkCarry {
@@ -2030,6 +2407,13 @@ impl LinkCarry {
     /// the ledger its connection loop fills and drains.
     pub(crate) fn open_answers(&self) -> OpenAnswers {
         Arc::clone(&self.open_answers)
+    }
+
+    /// **The open-interrupts ledger this carry rides**, shared with the link task
+    /// that writes it. Read by the daemon to settle a link it aborted, and by
+    /// [`run`] as the ledger its connection loop fills and drains.
+    pub(crate) fn open_interrupts(&self) -> OpenInterrupts {
+        Arc::clone(&self.open_interrupts)
     }
 
     /// **What this link knows, taken by value.** The one thing retention reads.
@@ -2109,6 +2493,7 @@ pub async fn run(
     presence: LinkPresence,
     carry: LinkCarry,
     mut answers: tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
+    mut interrupts: tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
 ) {
     let mut adapter = CodexAdapter::new(session.clone());
     // **The chase survives a reconnect** (round-2 P6b) — see [`Carried`] — and, in
@@ -2135,6 +2520,14 @@ pub async fn run(
     // task before it reaches the settle below — is settled by the daemon instead,
     // out of this very map. See [`LinkCarry::open_answers`].
     let open_answers: OpenAnswers = carry.open_answers();
+    // **Outlives the connection for [`OpenAnswers`]'s reason, and owned by the daemon
+    // through the carry for the same reason again.** A written interrupt holds a
+    // durable claim and a person waiting to be told whether the thing they stopped
+    // stopped; a connection that dies mid-interrupt must not leave either. The one
+    // ending this loop cannot settle — an abort, which stops the task before it
+    // reaches the settle below — is settled by the daemon instead, out of this very
+    // map. See [`LinkCarry::open_interrupts`].
+    let open_interrupts: OpenInterrupts = carry.open_interrupts();
 
     crate::log_info!(
         "codex link for {} ({}) attaching to {} at generation {}",
@@ -2161,6 +2554,8 @@ pub async fn run(
             &presence,
             &mut answers,
             &open_answers,
+            &mut interrupts,
+            &open_interrupts,
         )
         .await;
         // **Whatever the connection was still waiting to hear about is settled
@@ -2176,6 +2571,17 @@ pub async fn run(
             "the link's connection to Codex ended while this answer was in flight",
         )
         .await;
+        // The same promise for the other verb: whatever this connection was still
+        // waiting to see a terminal for is settled here, terminally, and its caller
+        // is told rather than left holding a sender that will never fire.
+        settle_open_interrupts(
+            &daemon,
+            &session,
+            &open_interrupts,
+            "the link's connection to Codex ended while this request to stop the turn \
+             was in flight",
+        )
+        .await;
         // **Refused, not queued, once there is no connection to write on.** An ask
         // that never reached a connection was never claimed and never written, so
         // the card it names is still answerable. Leaving it in the channel would
@@ -2186,6 +2592,18 @@ pub async fn run(
             let _ = ask.reply.send(AnswerReport::NotApplied(
                 "the link to this Codex session has no live connection, so nothing was \
                  sent; answer at the Mac"
+                    .into(),
+            ));
+        }
+        // Refused rather than queued, for the same reason: an interrupt that never
+        // reached a connection was never claimed and never written, so the turn it
+        // names is still running and the ask is still worth making — but making it
+        // against whatever socket comes up next is a decision nobody is still looking
+        // at, applied to a turn that may by then be a different one.
+        while let Ok(ask) = interrupts.try_recv() {
+            let _ = ask.reply.send(InterruptReport::NotApplied(
+                "the link to this Codex session has no live connection, so nothing was \
+                 sent; stop the turn at the Mac"
                     .into(),
             ));
         }
@@ -2201,13 +2619,26 @@ pub async fn run(
         // fleet back to the registration's launch-time claim for the length of
         // every backoff — and after a `/new` switch that claim names a thread the
         // session left.
-        presence.publish(CodexAddressee::Offline {
-            thread_id: carried
-                .lock()
-                .expect("the carried link state")
-                .adopted
-                .clone(),
-        });
+        presence.publish(
+            CodexAddressee::Offline {
+                thread_id: carried
+                    .lock()
+                    .expect("the carried link state")
+                    .adopted
+                    .clone(),
+            },
+            // **No visit and no connection, and those are the honest numbers.** There
+            // is no socket, so there is nothing an ask could be checked against; zero
+            // is the value the link's own comparisons refuse.
+            //
+            // **This is also what closes the enqueue-after-drain race.** The drain
+            // above empties the channel once and then this publishes; a caller that
+            // had already snapshotted `Subscribed` can still enqueue after the drain,
+            // and its ask now carries the dead connection's epoch. The next connection
+            // is a different epoch, so that ask is refused when it is finally read
+            // rather than being written on a socket nobody asked about.
+            LinkVisit::default(),
+        );
         match outcome {
             // A clean end is the wrapper going away, which the supervisor's own
             // disconnect will report; until it does, reattaching is correct.
@@ -2397,6 +2828,8 @@ async fn serve_connection(
     presence: &LinkPresence,
     answers: &mut tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
     open_answers: &OpenAnswers,
+    interrupts: &mut tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
+    open_interrupts: &OpenInterrupts,
 ) -> Result<()> {
     let stream = tokio::time::timeout(CONNECT_BUDGET, UnixStream::connect(&link.socket))
         .await
@@ -2478,6 +2911,8 @@ async fn serve_connection(
         // store, which is keyed by the item.
         outstanding: std::collections::BTreeMap::new(),
         open_answers: Arc::clone(open_answers),
+        open_interrupts: Arc::clone(open_interrupts),
+        running_turn: None,
         swept_generation: None,
     };
 
@@ -2711,7 +3146,13 @@ async fn serve_connection(
         // this iteration was going to issue has been sent; the next statement blocks
         // on the wire. A reader asking now gets a settled state rather than a
         // half-applied one — see [`LinkPresence::publish`].
-        presence.publish(conn.addressee());
+        presence.publish(
+            conn.addressee(),
+            LinkVisit {
+                generation: conn.visit.generation,
+                upstream_epoch: conn.visit.upstream_epoch,
+            },
+        );
         // The same moment, for the same reason: every visit movement the last
         // frame caused has landed, so this is where a card belonging to a visit
         // the link has left is retired. Guarded on the generation, so it reads
@@ -2736,6 +3177,24 @@ async fn serve_connection(
                  dropping the ccd leg so it reconnects"
             );
         }
+        // **An interrupt that never sees its turn end leaves a person watching a
+        // turn they think they stopped.** The terminal is the only evidence there is,
+        // so one that has not arrived within the budget is not late — the turn is not
+        // going to end on this connection's watch. The connection is dropped so it
+        // reconnects, and `run` settles what it left on the way out.
+        let interrupt_due = conn
+            .open_interrupts
+            .lock()
+            .expect("open interrupts")
+            .values()
+            .map(|held| held.deadline)
+            .min();
+        if interrupt_due.is_some_and(|at| Instant::now() >= at) {
+            bail!(
+                "no turn terminal arrived for an interrupt within {INTERRUPT_BUDGET:?}; \
+                 dropping the ccd leg so it reconnects"
+            );
+        }
         let deadline = match &attach {
             Attach::Awaiting { deadline, .. } | Attach::Recovering { deadline, .. } => {
                 Some(*deadline)
@@ -2743,10 +3202,10 @@ async fn serve_connection(
             Attach::Backoff { until, .. } => Some(*until),
             _ => None,
         };
-        let deadline = match (deadline, answer_due) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (only, None) | (None, only) => only,
-        };
+        let deadline = [deadline, answer_due, interrupt_due]
+            .into_iter()
+            .flatten()
+            .min();
 
         // **The wire first, and the daemon's ask second.** `biased`, because a frame
         // already on the socket is never stale while an ask can always wait one more
@@ -2772,6 +3231,10 @@ async fn serve_connection(
             },
             Some(ask) = answers.recv() => {
                 conn.answer_approval(&mut ws, ask).await?;
+                continue;
+            }
+            Some(ask) = interrupts.recv() => {
+                conn.interrupt_turn(&mut ws, ask).await?;
                 continue;
             }
         };
@@ -2819,6 +3282,14 @@ async fn serve_connection(
         if !is_our_response {
             match kind {
                 FrameKind::Notification => conn.observe_notification(&frame).await,
+                // **A response to an interrupt THIS connection wrote is this
+                // connection's, and is consumed before the drop.** It is not the
+                // attach's answer, so `is_our_response` — which asks only about the
+                // outstanding resume — says nothing about it, and without this arm a
+                // refusal of an interrupt would be dropped as unroutable and the
+                // caller would wait out the whole budget for a terminal that was
+                // never coming.
+                FrameKind::Response if conn.note_interrupt_response(&frame).await => {}
                 // Not the answer this link is waiting on (a late one, or one from a
                 // superseded attach), or not a frame at all. Neither goes near the
                 // bind/filter/normalize path: that path is for notifications, and
@@ -3199,6 +3670,29 @@ struct Connection<'a> {
     /// [`OpenAnswers`]. Held by handle rather than by value so that a connection
     /// ending, however it ends, still settles them.
     open_answers: OpenAnswers,
+    /// **Interrupts written on this socket whose turn has not ended yet** — see
+    /// [`OpenInterrupts`]. Held by handle for [`Connection::open_answers`]'s reason:
+    /// a connection ending, however it ends, still owes every one of them a terminal.
+    open_interrupts: OpenInterrupts,
+    /// **The turn this connection has watched start and has not watched end.**
+    ///
+    /// The one fact that lets a stop be refused *here* rather than at the broker,
+    /// and a live gate is what put it in: without it, a phone naming a turn that had
+    /// already ended took a durable claim and a socket write and was refused
+    /// upstream — leaving a ledger row recording an actuation that never happened,
+    /// which is the exact thing claiming-before-writing exists to avoid.
+    ///
+    /// Set from the measured `turn/started` body — the same one
+    /// [`Connection::note_turn_start`] already validates for the push gate, so this
+    /// costs no new reading of the wire — and cleared by that turn's own terminal and
+    /// by every move of the visit. **A reconnect that lands mid-turn seeds it from the
+    /// accepted `thread/resume` answer** ([`Connection::attach_from_seed`]), which is
+    /// the only witness a connection that missed the `turn/started` will ever get: the
+    /// app-server broadcasts that frame once and never replays it, so without the seed
+    /// a link that came up during a long turn refused every stop for the whole of it.
+    /// The broker's own running-turn gate is the second lock behind this one, so being
+    /// out of date here costs a refusal rather than a stray interrupt.
+    running_turn: Option<RunningTurn>,
     /// The visit generation the superseded sweep last ran at.
     ///
     /// `None` until the first idle moment, so a connection that comes up on a
@@ -3230,6 +3724,81 @@ pub(crate) struct PendingAnswer {
     _gate: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
+/// **One interrupt written on this connection, waiting for the turn it named to
+/// end.**
+pub(crate) struct PendingInterrupt {
+    /// The ledger's key, so the terminal this interrupt earns settles the claim the
+    /// phone retried under.
+    client_request_id: String,
+    /// The thread the turn belongs to. A terminal naming another thread is not this
+    /// interrupt's, however the turn id reads.
+    thread_id: String,
+    /// The turn this ask was authorized against, and the only turn whose terminal
+    /// may settle it.
+    turn_id: String,
+    /// When this wait stops being a wait and becomes an unknown.
+    deadline: tokio::time::Instant,
+    /// **Everyone waiting on this one write, and there can be more than one.**
+    ///
+    /// A phone that retries under the SAME id while the first ask is still in flight
+    /// is asking the same question, and the ledger's law is that one id is one
+    /// mutation. Refusing the second told two people two different things about one
+    /// actuation — the first eventually heard the turn stopped, the second heard
+    /// nothing was sent — so instead the second joins this entry and hears exactly
+    /// what the first hears. See [`Connection::join_open_interrupt`].
+    replies: Vec<tokio::sync::oneshot::Sender<InterruptReport>>,
+    /// The actuation-gate read guards, held from each ask until this interrupt
+    /// reaches a terminal, for [`PendingAnswer::_gate`]'s reason. One per waiter,
+    /// because each ask took its own and dropping any of them early would release a
+    /// stake the write still depends on.
+    _gates: Vec<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
+impl PendingInterrupt {
+    /// **Tell everyone waiting on this write the same thing, once.**
+    ///
+    /// Draining rather than borrowing: a `oneshot` sender is consumed by its send,
+    /// and an entry that has reported is finished with — every caller of this is one
+    /// of the terminals that also removes the entry from the ledger.
+    fn tell(&mut self, report: InterruptReport) {
+        for reply in std::mem::take(&mut self.replies) {
+            let _ = reply.send(report.clone());
+        }
+    }
+}
+
+/// **The turn a stop may name, and the visit it belongs to.**
+///
+/// Not a bare turn id, and the two extra fields are the difference between a gate and
+/// a coincidence. A turn belongs to the visit it started in: a thread revisited after
+/// a `/new` and back again wears the same id under a different generation, so an id
+/// alone cannot say which visit a turn was shown under. Carrying the whole triple
+/// makes the cross-visit property hold **by construction** — a stop is admitted only
+/// when the thread, the visit and the turn all agree — rather than resting on every
+/// site that moves a visit remembering to clear this one.
+///
+/// The clears are still there ([`Connection::move_visit_to`]), and they are not
+/// redundant: they are what stops a turn from a visit the session has left being
+/// carried around as live state at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningTurn {
+    /// The thread the turn is running on.
+    thread_id: String,
+    /// The visit generation it began under.
+    generation: u64,
+    /// The turn itself, as the wire named it.
+    turn_id: String,
+}
+
+impl RunningTurn {
+    /// Whether `claimed` names exactly this turn, on this thread, in this visit.
+    fn is_named_by(&self, claimed: &crate::store::ClaimedMaterial) -> bool {
+        claimed.thread_id == self.thread_id
+            && claimed.generation == self.generation
+            && claimed.target_turn_id.as_deref() == Some(self.turn_id.as_str())
+    }
+}
+
 /// Where one turn stands in the follow-up settlement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnDebt {
@@ -3240,6 +3809,100 @@ enum TurnDebt {
     /// A follow-up has been launched for it. **Terminal state** — one per turn, ever,
     /// which is what makes the follow-up a settlement rather than a loop.
     Settled,
+}
+
+/// **Everything that refuses an interrupt before a byte is written, in one place.**
+///
+/// A free function taking the facts rather than a method reaching for them, for
+/// [`addressee_of`]'s reason: these are the checks the whole design rests on, and each
+/// of them should be assertable without standing up a socket. `interrupt_turn` is then
+/// the write and nothing else.
+///
+/// **The order is not arbitrary.** The thread is asked before the visit because a
+/// frame for another thread is not this session's at all, and the visit before the
+/// switch because a stale generation is a fact about the ask while a pending switch is
+/// a fact about the moment. The duplicate check is last because it is the only one
+/// that is about this connection's own bookkeeping rather than about the ask.
+fn interrupt_refusal(
+    visit: &Visit,
+    running_turn: Option<&RunningTurn>,
+    switch_pending: bool,
+    claimed: &crate::store::ClaimedMaterial,
+    upstream_epoch: u64,
+    already_waiting: bool,
+) -> Option<&'static str> {
+    if claimed
+        .target_turn_id
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Some("this request names no turn, so there is nothing to stop; nothing was sent");
+    }
+    // **The connection is asked before anything else about the ask**, because an ask
+    // aimed at a socket that is gone is not a question about this one. A teardown
+    // drains the channel once and then publishes that it is gone, so an ask that
+    // slipped in behind the drain is still in the queue when the next connection
+    // reads it — and every other check below would pass, because the visit survives a
+    // reconnect and the turn may well still be running.
+    if visit.upstream_epoch != upstream_epoch {
+        return Some(
+            "this Mac's link to the Codex session reconnected while that request was \
+             in flight, so nothing was sent; try again",
+        );
+    }
+    if visit.thread_id.as_deref() != Some(claimed.thread_id.as_str()) {
+        return Some(
+            "this Codex session is not on the thread that turn belongs to, so nothing was \
+             sent; stop it at the Mac",
+        );
+    }
+    // **The generation is the visit, and a visit this link has left is not the one the
+    // phone was looking at.** A thread revisited after a `/new` and back again wears
+    // the same id under a different visit, so the id alone does not say which visit a
+    // turn belonged to. This is the check the broker structurally cannot make: it has
+    // no notion of a visit, so a turn id replayed from a visit this session has left
+    // passes its rule and fails ours.
+    if visit.generation != claimed.generation {
+        return Some(
+            "this Codex session has moved on since that turn was shown, so nothing was \
+             sent; open the run again",
+        );
+    }
+    // **The turn must be the one this connection watched start and has not watched
+    // end.** The broker refuses any other, but its refusal arrives after a claim has
+    // been taken and a frame written — so relying on it alone files a durable record
+    // of an actuation that never happened. Measured live: a phone naming an ended
+    // turn was refused upstream and left exactly that row behind, which is what put
+    // this check here.
+    //
+    // **The whole triple, not the id.** The thread and the generation are compared
+    // against the visit above and against the running turn here, and the second
+    // comparison is what makes the cross-visit property structural: a turn recorded
+    // under a visit this link has left cannot match, however the ids read, even if
+    // some future move of the visit forgot to clear it.
+    if !running_turn.is_some_and(|running| running.is_named_by(claimed)) {
+        return Some(
+            "that turn is not the one this Codex session is running, so nothing was \
+             sent; it may have finished already",
+        );
+    }
+    if switch_pending {
+        return Some(
+            "this Codex session is moving to another thread, so nothing was sent; try \
+             again once it has settled",
+        );
+    }
+    // **One interrupt per turn.** Two taps on ONE turn are already serialised by the
+    // daemon's ledger, so a turn already awaiting a terminal here means a duplicate
+    // that serialisation could not have produced.
+    if already_waiting {
+        return Some(
+            "an interrupt for that turn is already waiting to take effect, so nothing \
+             was sent again",
+        );
+    }
+    None
 }
 
 /// **The binding and the subscription, resolved into one answer.**
@@ -3898,6 +4561,7 @@ impl Connection<'_> {
                 .entry((thread.to_string(), turn.clone()))
                 .or_insert(TurnDebt::AwaitingTerminal);
         }
+        self.seed_running_turn(&seed, thread).await;
         crate::log_info!(
             "codex link for {}: attached to thread {thread} by resume. The answer \
              described {described} turn(s) ({terminal} finished, {running} still \
@@ -3906,6 +4570,80 @@ impl Connection<'_> {
             self.session.name
         );
         Ok(())
+    }
+
+    /// **Restore the stop control for a turn that began before this connection did.**
+    ///
+    /// A connection watches no `turn/started` for such a turn — the app-server
+    /// broadcasts that frame once and never replays it — so
+    /// [`Connection::note_turn_start`] can never fire for it and the local gate
+    /// refuses every stop for the whole of the turn the operator is watching. Two
+    /// perfectly ordinary things land in exactly that state: a reconnect during a long
+    /// turn, and the first turn after a `/new`, whose `turn/started` is measured to go
+    /// to the TUI's own connection and not to this one. The refusal a phone got there
+    /// said the turn "may have finished already" while this daemon's own log was
+    /// saying it was still running, which is the kind of untruth the whole gate exists
+    /// to avoid.
+    ///
+    /// The accepted `thread/resume` answer is the only witness there is, and two rules
+    /// keep it from being a guess.
+    ///
+    ///   * **Exactly one.** An answer describing two turns `inProgress` says nothing
+    ///     about which one the phone was shown, and picking one would aim a stop at a
+    ///     turn nobody asked about. Nothing bounds how many an answer may report, so
+    ///     this is a real shape rather than a defensive one.
+    ///   * **And not one this daemon already watched finish.** A snapshot taken before
+    ///     a completion describes that turn `inProgress` for ever after; the log is
+    ///     what actually watched it end, so the log is what is asked. The same question
+    ///     the doorbell gate above asks, asked again here because that gate stops at
+    ///     the first decisive answer and this one needs the answer about *this* turn.
+    ///     One point query on the dedup index, on the mid-turn reconnect path only.
+    ///
+    /// A read that fails seeds nothing, which is the fail-closed direction: the cost
+    /// is a Stop button that refuses until the turn's own terminal or the next
+    /// `turn/started`, against aiming a durable claim at a turn that may be over.
+    ///
+    /// The turn is stamped with the visit it is being adopted into, so the ordinary
+    /// cross-visit rule applies to a seeded turn exactly as it does to a watched one.
+    async fn seed_running_turn(&mut self, seed: &ResumeSeed, thread: &str) {
+        let [turn_id] = seed.running_turn_ids() else {
+            return;
+        };
+        match self
+            .daemon
+            .db
+            .turn_terminal_filed(
+                self.session.uid.clone(),
+                crate::codex_adapter::turn_terminal_source_event_id(thread, turn_id),
+            )
+            .await
+        {
+            Ok(false) => {
+                self.running_turn = Some(RunningTurn {
+                    thread_id: thread.to_string(),
+                    generation: self.visit.generation,
+                    turn_id: turn_id.clone(),
+                });
+                crate::log_info!(
+                    "codex link for {}: the resume answer for {thread} reports turn \
+                     {turn_id} still running and this daemon has filed no terminal for \
+                     it, so it is the turn a stop may name until it ends",
+                    self.session.name
+                );
+            }
+            Ok(true) => crate::log_debug!(
+                "codex link for {}: the resume answer for {thread} reports turn \
+                 {turn_id} still running, but this daemon already filed its terminal — \
+                 a stale snapshot names no turn a stop may aim at",
+                self.session.name
+            ),
+            Err(err) => crate::log_warn!(
+                "codex link for {}: could not ask the log whether turn {turn_id} had \
+                 already finished ({err:#}); no turn is offered as stoppable, so a stop \
+                 waits for this turn's own terminal or the next turn to begin",
+                self.session.name
+            ),
+        }
     }
 
     /// Stamp one inbound frame at ingress, admit it or retire it, and — for a
@@ -4018,6 +4756,40 @@ impl Connection<'_> {
                 self.session.name,
                 self.filtered
             );
+            return;
+        }
+        // **A turn terminal is FILED before it is acted on, and it is the one frame
+        // whose order here is reversed.**
+        //
+        // The seam matters because the two halves say different things to different
+        // people about the same event. The approval half retires the card and settles
+        // the interrupt — which is what tells a phone "that turn was stopped" and
+        // writes the durable row a retry replays — while the adapter half is what puts
+        // the turn's ending in the timeline the phone reads on its next connect. Done
+        // in the old order, a process that died between them left the worst possible
+        // pair of records: a ledger and a person both saying the turn had been
+        // stopped, and a timeline in which that turn never ended. A retry then said
+        // `Duplicate` while the run still looked busy.
+        //
+        // Filing first inverts that into the only honest failure. The boundary is
+        // durable, so a restart shows the turn ended; the claim is still `applying`,
+        // so recovery makes it terminal-unknown and the phone is told the outcome
+        // cannot be confirmed rather than being told it worked. Both statements are
+        // then true, which is the property the ordering buys.
+        //
+        // **Not one transaction, and the difference is named rather than glossed.**
+        // The boundary is an event insert, the card is a row in another table, and
+        // the claim is a row in a third; folding all three into one commit is a
+        // larger change than the hazard needs, because the residual window this
+        // leaves fails safe in the direction above. What it does NOT leave is the
+        // direction that fails unsafe.
+        //
+        // Safe to reorder for this method alone: the approval half of a
+        // `turn/completed` reads only the frame, and the adapter's own reading of it
+        // touches nothing the approval half depends on.
+        if frame.get("method").and_then(Value::as_str) == Some("turn/completed") {
+            self.ingest_frame(frame).await;
+            self.observe_approval(frame).await;
             return;
         }
         self.observe_approval(frame).await;
@@ -4338,6 +5110,499 @@ impl Connection<'_> {
         .await
     }
 
+    /// **Write one interrupt, having asked everything that could refuse it first.**
+    ///
+    /// The shape is [`Connection::answer_approval`]'s, and the differences are the
+    /// two facts that make an interrupt a different mutation. It mints its own wire
+    /// id rather than quoting one the server sent, because `turn/interrupt` is a
+    /// request and not a response. And it learns nothing from the answer to that id:
+    /// the app-server returns `result:{}` whatever it did, so the **turn's own
+    /// terminal** is the evidence, and that is what settles the claim.
+    ///
+    /// # What is refused here, and why the broker's refusal is not enough
+    ///
+    /// The broker refuses an interrupt that does not name this session's running
+    /// turn, and that refusal is what keeps a measured hang unreachable — a real
+    /// app-server never answers an interrupt for a turn that has already ended. So
+    /// this could rely on it. It does not, for two reasons that are about this side
+    /// of the wire rather than that one. A claim taken for a write the broker was
+    /// always going to refuse is a durable row recording an actuation that never
+    /// happened; and the generation is a fact only the daemon holds — the broker has
+    /// no notion of a visit, so a turn id replayed from a visit this session has left
+    /// would pass its rule and fail ours.
+    /// **Test-only.** The turn a stop may name on this connection right now.
+    ///
+    /// The field itself carries the visit it belongs to, which is what the refusal
+    /// compares; a test that only wants to know *whether* there is a stoppable turn
+    /// should not have to take that apart. The same window
+    /// [`insert_pending_interrupt_for_tests`] opens on the other half of this seam.
+    #[cfg(test)]
+    fn stoppable_turn(&self) -> Option<&str> {
+        self.running_turn
+            .as_ref()
+            .map(|running| running.turn_id.as_str())
+    }
+
+    async fn interrupt_turn<S>(
+        &mut self,
+        ws: &mut tokio_tungstenite::WebSocketStream<S>,
+        ask: InterruptRequest,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let refuse = |ask: InterruptRequest, why: &str| {
+            let _ = ask.reply.send(InterruptReport::NotApplied(why.to_string()));
+        };
+        // **A retry of an ask still in flight joins it rather than being refused.**
+        // One id is one mutation, and telling its second caller something different
+        // from its first is the daemon disagreeing with itself about one actuation.
+        let Some(ask) = self.join_open_interrupt(ask) else {
+            return Ok(());
+        };
+        // **Nothing to join is not the same as nothing to say.**
+        //
+        // The daemon reads the ledger before it enqueues, so two asks under one id
+        // can both be past that read while the row is still `applying` — and the
+        // connection's own select is biased toward the socket, so the ordinary way a
+        // busy connection schedules them is: the first is written, the turn's terminal
+        // arrives and settles it, and only then does the second come off the queue.
+        // By that moment there is no entry to join and no live turn to name, and
+        // every check under this line would refuse the second for a turn the first
+        // was just told it stopped. One actuation, two contradictory sentences.
+        //
+        // So the record is asked before the ask is judged. It is the same question
+        // the claim below asks a moment later and answers with `Applied`; asking it
+        // here as well is what stops the refusals in between from getting there
+        // first.
+        if let Some(recorded) = self.recorded_interrupt_outcome(&ask).await {
+            let _ = ask.reply.send(recorded);
+            return Ok(());
+        }
+        let already_waiting = ask.claimed.target_turn_id.as_deref().is_some_and(|turn| {
+            self.open_interrupts
+                .lock()
+                .expect("open interrupts")
+                .values()
+                .any(|held| held.turn_id == turn)
+        });
+        if let Some(why) = interrupt_refusal(
+            &self.visit,
+            self.running_turn.as_ref(),
+            self.switch_candidate.is_some(),
+            &ask.claimed,
+            ask.upstream_epoch,
+            already_waiting,
+        ) {
+            refuse(ask, why);
+            return Ok(());
+        }
+        let turn_id = ask
+            .claimed
+            .target_turn_id
+            .clone()
+            .expect("the refusal above rejects an ask that names no turn");
+
+        // The durable claim, taken now that everything that could refuse has been
+        // asked, and before a byte is written.
+        let now = protocol::time::now_rfc3339();
+        let claimed = self
+            .daemon
+            .db
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                ask.client_request_id.clone(),
+                ask.claimed.clone(),
+                now,
+            )
+            .await;
+        match claimed {
+            Ok(crate::store::MutationClaim::Claimed) => {}
+            // Already terminal. `Applied` and `Conflict` are statements that this
+            // attempt wrote nothing; `Indeterminate` is a statement that an EARLIER
+            // one may have, and a caller told "not applied" would reasonably retry.
+            //
+            // `Applied` reaches the SAME answer the daemon's own pre-claim replay
+            // gives — see [`replayed_interrupt_report`] — because this is that
+            // question asked a moment later, on the same row, and the two disagreeing
+            // is the daemon changing its mind about whether a tap worked.
+            Ok(crate::store::MutationClaim::Applied { outcome, .. }) => {
+                let _ = ask
+                    .reply
+                    .send(replayed_interrupt_report(&outcome, &turn_id));
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
+                let _ = ask.reply.send(InterruptReport::Unknown(
+                    "this interrupt was already sent and what became of it is not known; \
+                     it will not be sent again. Check the Mac."
+                        .into(),
+                ));
+                return Ok(());
+            }
+            // **A generic sentence, deliberately.** The material a conflict compares
+            // includes the visit generation, which is this daemon's own bookkeeping:
+            // after a visit has moved, a perfectly honest retry of the same turn under
+            // the same id conflicts on a field the operator cannot see and did not
+            // choose. Naming the turn here would blame them for it. The case where the
+            // CALLER really did reuse an id for another turn is caught before a claim
+            // is attempted at all, by [`crate::state::Daemon::interrupt`], and that one
+            // says so plainly.
+            Ok(crate::store::MutationClaim::Conflict) => {
+                refuse(
+                    ask,
+                    "this request id has already been used for a different stop on this \
+                     run, so nothing was sent; ask again under a new one",
+                );
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::NoSession) => {
+                refuse(ask, "this run is gone, so its turn cannot be stopped");
+                return Ok(());
+            }
+            Err(err) => {
+                refuse(
+                    ask,
+                    &format!(
+                        "could not record that this interrupt is being sent ({err}); \
+                         nothing was sent"
+                    ),
+                );
+                return Ok(());
+            }
+        }
+
+        let wire_id = self.next_id;
+        self.next_id += 1;
+        self.open_interrupts
+            .lock()
+            .expect("open interrupts")
+            .insert(
+                wire_id,
+                PendingInterrupt {
+                    client_request_id: ask.client_request_id.clone(),
+                    thread_id: ask.claimed.thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    deadline: tokio::time::Instant::now() + INTERRUPT_BUDGET,
+                    replies: vec![ask.reply],
+                    // The write is happening now; the guard moves from the ask to the
+                    // pending entry and is released only when it is drained.
+                    _gates: vec![ask.gate],
+                },
+            );
+        // The measured frame, and exactly it: two string keys and no third. The
+        // broker holds the same shape, so a wider one is refused rather than sent.
+        self.send(
+            ws,
+            json!({
+                "id": wire_id,
+                "method": "turn/interrupt",
+                "params": {"threadId": ask.claimed.thread_id, "turnId": turn_id},
+            }),
+        )
+        .await
+    }
+
+    /// **Attach a retry to the ask it is a retry OF, or hand it back.**
+    ///
+    /// `None` when the ask joined an entry already waiting — it will be told whatever
+    /// that entry is told, at the same moment, by the same terminal. `Some(ask)` when
+    /// there was nothing to join and the ask must go on to be refused or written.
+    ///
+    /// **Only for an ask carrying the SAME material.** The ledger's law is that a
+    /// duplicate is a second ask with identical material; the same id carrying
+    /// different material is two mutations under one key, and that falls through to
+    /// the claim, which is the thing that decides it. So this can only ever collapse
+    /// asks the ledger would itself call one.
+    ///
+    /// **A free-standing method for [`interrupt_refusal`]'s reason**: it is a rule
+    /// about the ask and the ledger, and it should be assertable without standing up
+    /// a socket.
+    fn join_open_interrupt(&self, ask: InterruptRequest) -> Option<InterruptRequest> {
+        let mut open = self.open_interrupts.lock().expect("open interrupts");
+        let joined = open.values_mut().find(|held| {
+            held.client_request_id == ask.client_request_id
+                && held.thread_id == ask.claimed.thread_id
+                && Some(held.turn_id.as_str()) == ask.claimed.target_turn_id.as_deref()
+        });
+        match joined {
+            Some(held) => {
+                held.replies.push(ask.reply);
+                // The retry's own gate guard rides along, released with the rest when
+                // this entry reaches its terminal.
+                held._gates.push(ask.gate);
+                None
+            }
+            None => Some(ask),
+        }
+    }
+
+    /// **What the record already says about this exact ask, if it says anything.**
+    ///
+    /// `Some` when the ledger holds a terminal for this id carrying this material, in
+    /// which case that terminal is the answer and nothing is written. `None` when the
+    /// row is absent or still `applying`, or when it was claimed with different
+    /// material — all three of which are for the claim below to decide, which is where
+    /// they were always decided.
+    ///
+    /// **The material is compared in full, and that is the ledger's own law.**
+    /// [`crate::store::Store::claim_mutation`] will not call a second ask a duplicate
+    /// unless every field agrees; replaying on the id alone here would answer one id
+    /// reused for another turn with the first turn's outcome, which is the exact
+    /// untruth the daemon's own pre-claim replay is careful to avoid.
+    ///
+    /// **A read that fails is `None`.** It is not evidence of a terminal, and the
+    /// claim below reads the same row a moment later and reports the failure with a
+    /// sentence of its own; answering here from a failed read would either invent an
+    /// outcome or say "cannot read" twice.
+    async fn recorded_interrupt_outcome(&self, ask: &InterruptRequest) -> Option<InterruptReport> {
+        let state = match self
+            .daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                ask.client_request_id.clone(),
+            )
+            .await
+        {
+            Ok(state) => state?,
+            Err(err) => {
+                crate::log_warn!(
+                    "codex link for {}: could not read the interrupt ledger for {} \
+                     ({err:#}); the claim decides it",
+                    self.session.name,
+                    ask.client_request_id
+                );
+                return None;
+            }
+        };
+        if state.claimed != ask.claimed {
+            return None;
+        }
+        let turn_id = ask.claimed.target_turn_id.as_deref().unwrap_or_default();
+        match state.status {
+            // Through the one mapping the daemon's pre-claim replay and the claim's
+            // own `Applied` arm use, so all three can never disagree about what a
+            // recorded outcome means.
+            crate::store::AnswerStatus::Settled(outcome) => {
+                Some(replayed_interrupt_report(&outcome, turn_id))
+            }
+            crate::store::AnswerStatus::Indeterminate => Some(InterruptReport::Unknown(
+                "this interrupt was already sent and what became of it is not known; \
+                 it will not be sent again. Check the Mac."
+                    .into(),
+            )),
+            crate::store::AnswerStatus::Applying => None,
+        }
+    }
+
+    /// **A response to an interrupt this connection wrote.**
+    ///
+    /// `result:{}` says the app-server accepted the ask and says nothing about the
+    /// turn, so it is deliberately not a settlement: the entry stays open and the
+    /// turn's terminal settles it. An **error** is a settlement, and the only one
+    /// that can say the write changed nothing — the broker composes its refusals in
+    /// this process without writing upstream, and an app-server error is a refusal
+    /// it made before acting.
+    ///
+    /// Returns whether the frame was this connection's to consume.
+    async fn note_interrupt_response(&mut self, frame: &Value) -> bool {
+        let Some(wire_id) = frame.get("id").and_then(Value::as_i64) else {
+            return false;
+        };
+        let mut held = {
+            let mut open = self.open_interrupts.lock().expect("open interrupts");
+            if !open.contains_key(&wire_id) {
+                return false;
+            }
+            // A `result` leaves the entry open for the terminal to settle.
+            if frame.get("error").is_none() {
+                return true;
+            }
+            open.remove(&wire_id).expect("just matched as present")
+        };
+        let why = frame
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given");
+        crate::log_info!(
+            "codex link for {}: the interrupt for turn {} was refused ({why}); the turn \
+             is still whatever it was",
+            self.session.name,
+            held.turn_id
+        );
+        let settlement = self
+            .settle_interrupt_claim(&held, crate::store::INTERRUPT_REFUSED)
+            .await;
+        self.report_settled_interrupt(
+            &mut held,
+            settlement,
+            InterruptReport::NotApplied(format!(
+                "Codex refused to stop that turn ({why}); nothing was changed"
+            )),
+        )
+        .await;
+        true
+    }
+
+    /// **A turn terminal settles every interrupt that named it.**
+    ///
+    /// The one evidence there is. The response carries nothing, so a turn reaching a
+    /// terminal is what turns "the ask was written" into "the turn stopped" — and the
+    /// terminal's own `status` is what decides which of those two sentences is true.
+    /// An `interrupted` turn is the ask taking effect. Any other terminal is a turn
+    /// that ended for its own reasons while this ask was in flight, and saying it was
+    /// aborted would credit the phone with something it did not do.
+    async fn settle_interrupts_for_turn(&mut self, thread_id: &str, turn_id: &str, status: &str) {
+        for mut held in self.take_interrupts_for_turn(thread_id, turn_id) {
+            if status == TURN_INTERRUPTED {
+                let settlement = self
+                    .settle_interrupt_claim(&held, crate::store::INTERRUPT_ABORTED)
+                    .await;
+                let turn_id = held.turn_id.clone();
+                self.report_settled_interrupt(
+                    &mut held,
+                    settlement,
+                    InterruptReport::Aborted { turn_id },
+                )
+                .await;
+            } else {
+                // Terminal either way — the turn is over and the question cannot be
+                // asked again — but not this ask's doing, and the record says so.
+                //
+                // **`NotApplied` and not `Unknown`, because this is known.** This link
+                // watched the terminal arrive and read its status; "unknown" is
+                // reserved for an outcome nothing that survives can name, which is a
+                // different and much worse thing to tell a phone. Reporting it as
+                // unknown here also disagreed with the replay of the very row this
+                // settles, which reads it back as the refusal it is.
+                let settlement = self
+                    .settle_interrupt_claim(&held, crate::store::INTERRUPT_TURN_ENDED)
+                    .await;
+                self.report_settled_interrupt(
+                    &mut held,
+                    settlement,
+                    InterruptReport::NotApplied(format!(
+                        "that turn ended on its own ({status}) while the request to stop \
+                         it was in flight, so it was not stopped from here; it will not \
+                         be sent again"
+                    )),
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Record one interrupt's terminal outcome, so a retry replays it verbatim, and
+    /// **say whether that actually happened**.
+    ///
+    /// The answer is returned rather than logged because the caller's next act is to
+    /// tell a person what became of their tap, and it has no other way to know whether
+    /// the sentence it is about to say is the one the record holds. A settle that lost
+    /// or failed used to be a log line under a reply that claimed the turn had been
+    /// stopped and that the claim was safe to replay — neither of which the ledger
+    /// would have agreed with a moment later.
+    async fn settle_interrupt_claim(
+        &self,
+        held: &PendingInterrupt,
+        outcome: &'static str,
+    ) -> Settlement {
+        match self
+            .daemon
+            .db
+            .settle_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+                outcome,
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => {
+                crate::log_warn!(
+                    "codex link for {}: the interrupt claim {} was already terminal when \
+                     {outcome} arrived; the earlier terminal stands and is what the caller \
+                     is told",
+                    self.session.name,
+                    held.client_request_id
+                );
+                Settlement::Superseded
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not settle the interrupt claim {}: {err:#}",
+                    self.session.name,
+                    held.client_request_id
+                );
+                Settlement::Unrecorded(format!("{err}"))
+            }
+        }
+    }
+
+    /// **Say what became of this interrupt, and say only what the record supports.**
+    ///
+    /// `ordinary` is the report the terminal earned — what this link watched happen.
+    /// It is sent only when the ledger actually holds it. When something else won the
+    /// row, the winner is read back and replayed instead, so the caller hears the same
+    /// thing a retry under the same id would hear. When the write failed, the caller
+    /// is told the outcome is not recorded, which is the one statement that is true
+    /// whichever way it went.
+    async fn report_settled_interrupt(
+        &self,
+        held: &mut PendingInterrupt,
+        settlement: Settlement,
+        ordinary: InterruptReport,
+    ) {
+        let report = match settlement {
+            Settlement::Recorded => ordinary,
+            Settlement::Superseded => self.winning_interrupt_terminal(held).await,
+            Settlement::Unrecorded(err) => InterruptReport::Unknown(format!(
+                "this Mac could not record what became of that request to stop the turn \
+                 ({err}), so it cannot say; it will not be sent again. Check the Mac."
+            )),
+        };
+        held.tell(report);
+    }
+
+    /// The terminal that beat this one, read back from the record it is written in.
+    ///
+    /// A read that cannot answer is `Unknown` too, and for the same reason the
+    /// settlement failure is: the point of this path is that this link's own opinion
+    /// is no longer the record, so guessing at the record would be worse than saying
+    /// it cannot be read.
+    async fn winning_interrupt_terminal(&self, held: &PendingInterrupt) -> InterruptReport {
+        match self
+            .daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+            )
+            .await
+        {
+            Ok(Some(state)) => match state.status {
+                crate::store::AnswerStatus::Settled(outcome) => {
+                    replayed_interrupt_report(&outcome, &held.turn_id)
+                }
+                _ => InterruptReport::Unknown(
+                    "this request to stop the turn was already settled elsewhere and what \
+                     became of it is not known; it will not be sent again. Check the Mac."
+                        .into(),
+                ),
+            },
+            Ok(None) | Err(_) => InterruptReport::Unknown(
+                "this request to stop the turn was settled elsewhere and this Mac cannot \
+                 read what became of it; it will not be sent again. Check the Mac."
+                    .into(),
+            ),
+        }
+    }
+
     /// **What the broker says became of the answer this connection just wrote, and
     /// the phone-won terminal it earns.**
     ///
@@ -4604,10 +5869,208 @@ impl Connection<'_> {
             "completed" => protocol::ws::ClearCause::TurnCompleted,
             _ => protocol::ws::ClearCause::TurnAborted,
         };
+        // **One aborted boundary, and this is it.** An interrupt that a phone asked
+        // for and the card the turn was blocked on are settled by the SAME terminal,
+        // in the order the wire delivers them: the card is retired here as
+        // `Cleared{turn_aborted}` by the existing first-terminal-wins rule, and the
+        // `serverRequest/resolved` that follows a millisecond later finds it already
+        // gone and files nothing. Measured on real codex 0.153.4
+        // (`fixtures/codex/interrupt-0.153.jsonl`): a wire-driven interrupt puts
+        // `turn/completed{interrupted}` FIRST and `resolved` after it — the reverse of
+        // the keyboard case, where the prompt consumes the keystroke as its own
+        // decline. Both orderings are real for their own producer, and neither needs
+        // a second boundary, because the retirement is order-agnostic.
+        let status = status.to_string();
+        // The turn is over, so it is no longer one a stop may name. Cleared before
+        // anything else this terminal does, so nothing downstream reads it as live.
+        //
+        // **Matched on the thread as well as the turn**, for the reason
+        // `settle_interrupts_for_turn` matches on both: a turn id names a turn only
+        // inside a thread, and a terminal for another thread's turn is not this one's.
+        if self
+            .running_turn
+            .as_ref()
+            .is_some_and(|running| running.thread_id == thread_id && running.turn_id == turn_id)
+        {
+            self.running_turn = None;
+        }
         self.retire_codex_cards(protocol::ws::CodexResolution::Cleared { cause }, |row| {
             row.thread_id == thread_id && row.turn_id == turn_id
         })
         .await;
+        // The turn's terminal is also the only evidence an interrupt ever gets, so
+        // the same frame settles any this connection wrote against that turn. After
+        // the card, deliberately: a phone watching both wants the question it was
+        // answering to be gone before it is told the turn stopped.
+        //
+        // **And only if the boundary that precedes it is durable** — see
+        // [`Connection::settle_interrupts_against_the_boundary`], which is where the
+        // ordering above stops being an ordering and becomes a condition.
+        self.settle_interrupts_against_the_boundary(&thread_id, &turn_id, &status)
+            .await;
+    }
+
+    /// **Settle this turn's interrupts, or refuse to — the turn boundary decides.**
+    ///
+    /// [`Connection::observe_notification`] files the boundary before it acts on a
+    /// terminal, and the reason is stated there: a process that died between the two
+    /// used to leave a ledger and a person both saying the turn had been stopped and a
+    /// timeline in which that turn never ended. Ordering the write first inverts that
+    /// into the only honest failure — **provided the settle actually depends on it**.
+    /// It did not. The filing's error was logged and discarded, so an `events` insert
+    /// that failed under a working ledger produced exactly the pair the ordering was
+    /// supposed to make unreachable.
+    ///
+    /// So the record is asked rather than the return value. The boundary is looked up
+    /// in the log by its own source-event id, which is a stronger question than
+    /// "did our write return `Ok`": it is also satisfied by a boundary some earlier
+    /// `thread/resume` already filed, which is a turn whose ending the reader really
+    /// does hold.
+    ///
+    /// **Only when something is waiting.** A terminal with no interrupt against it
+    /// settles nothing and asks nothing, so the ordinary turn costs no read at all.
+    ///
+    /// **A read that cannot answer refuses too.** It is not evidence that the boundary
+    /// is there, and "the turn was stopped" is a promise this Mac would be making
+    /// without the one record that backs it.
+    async fn settle_interrupts_against_the_boundary(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        status: &str,
+    ) {
+        let waiting = self
+            .open_interrupts
+            .lock()
+            .expect("open interrupts")
+            .values()
+            .any(|held| held.thread_id == thread_id && held.turn_id == turn_id);
+        if !waiting {
+            return;
+        }
+        let filed = self
+            .daemon
+            .db
+            .turn_terminal_filed(
+                self.session.uid.clone(),
+                crate::codex_adapter::turn_terminal_source_event_id(thread_id, turn_id),
+            )
+            .await;
+        match filed {
+            Ok(true) => {
+                self.settle_interrupts_for_turn(thread_id, turn_id, status)
+                    .await
+            }
+            Ok(false) => {
+                crate::log_error!(
+                    "codex link for {}: the turn {turn_id} ended and this Mac could not \
+                     record that it did, so the interrupts waiting on it are recorded \
+                     as unknown rather than as aborts nothing in the log supports",
+                    self.session.name
+                );
+                self.abandon_interrupts_for_turn(
+                    thread_id,
+                    turn_id,
+                    "this Mac could not record that the turn ended (turn boundary \
+                     unrecorded), so it cannot say the turn was stopped from here; \
+                     it will not be sent again. Check the Mac.",
+                )
+                .await
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not read whether the turn {turn_id} boundary \
+                     is durable ({err:#}); the interrupts waiting on it are recorded \
+                     as unknown",
+                    self.session.name
+                );
+                self.abandon_interrupts_for_turn(
+                    thread_id,
+                    turn_id,
+                    "this Mac could not read whether the turn boundary was recorded, so it \
+                     cannot say the turn was stopped from here; it will not be sent \
+                     again. Check the Mac.",
+                )
+                .await
+            }
+        }
+    }
+
+    /// **Every interrupt this connection wrote against one turn, taken out of the
+    /// ledger.**
+    ///
+    /// Removed rather than borrowed, because both callers are terminals: an entry that
+    /// has been reported on is finished with, and leaving it behind would let a second
+    /// frame report it again.
+    fn take_interrupts_for_turn(&self, thread_id: &str, turn_id: &str) -> Vec<PendingInterrupt> {
+        let mut open = self.open_interrupts.lock().expect("open interrupts");
+        let named: Vec<i64> = open
+            .iter()
+            .filter(|(_, held)| held.thread_id == thread_id && held.turn_id == turn_id)
+            .map(|(wire_id, _)| *wire_id)
+            .collect();
+        named
+            .into_iter()
+            .filter_map(|wire_id| open.remove(&wire_id))
+            .collect()
+    }
+
+    /// **Make this turn's interrupts terminal WITHOUT claiming they did anything.**
+    ///
+    /// The turn is over — the wire said so — and there is no durable ending to point
+    /// at, so neither "it was stopped" nor "it was not sent" can be said. Terminal
+    /// `indeterminate` is the only statement left that is true either way, and
+    /// terminal is the point: an id whose outcome nothing can name must never be
+    /// actuated again under that id.
+    async fn abandon_interrupts_for_turn(&mut self, thread_id: &str, turn_id: &str, why: &str) {
+        for mut held in self.take_interrupts_for_turn(thread_id, turn_id) {
+            let settlement = self.abandon_interrupt_claim(&held).await;
+            self.report_settled_interrupt(
+                &mut held,
+                settlement,
+                InterruptReport::Unknown(why.to_string()),
+            )
+            .await;
+        }
+    }
+
+    /// [`Connection::settle_interrupt_claim`]'s twin for an ending nothing can name.
+    ///
+    /// The same three answers for the same three reasons — first terminal wins here as
+    /// it does everywhere else in this ledger — differing only in the column it
+    /// writes.
+    async fn abandon_interrupt_claim(&self, held: &PendingInterrupt) -> Settlement {
+        match self
+            .daemon
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => {
+                crate::log_warn!(
+                    "codex link for {}: the interrupt claim {} was already terminal when \
+                     its turn ended unrecorded; the earlier terminal stands",
+                    self.session.name,
+                    held.client_request_id
+                );
+                Settlement::Superseded
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not record the interrupt claim {} as \
+                     unknown: {err:#}",
+                    self.session.name,
+                    held.client_request_id
+                );
+                Settlement::Unrecorded(format!("{err}"))
+            }
+        }
     }
 
     /// **Retire every card the visit has moved away from.**
@@ -4809,7 +6272,7 @@ impl Connection<'_> {
     /// resolver's generosity is load-bearing for the admit filter and the switch
     /// announcement, and narrowing it to satisfy this one caller would break the
     /// two paths it was written for.
-    fn note_turn_start(&self, frame: &Value) {
+    fn note_turn_start(&mut self, frame: &Value) {
         if frame.get("method").and_then(Value::as_str) != Some("turn/started") {
             return;
         }
@@ -4847,6 +6310,18 @@ impl Connection<'_> {
             );
             return;
         }
+        // The turn a stop may name, from the one frame that says a turn began — read
+        // off the same validated body the push gate reads, so the two can never
+        // disagree about what a `turn/started` is. Stamped with the visit it began
+        // under, because that is what a stop is authorized against.
+        self.running_turn = turn
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .map(|turn_id| RunningTurn {
+                thread_id: id.to_string(),
+                generation: self.visit.generation,
+                turn_id: turn_id.to_string(),
+            });
         self.daemon.note_codex_turn_running(&self.session.uid);
     }
 
@@ -5145,8 +6620,7 @@ impl Connection<'_> {
             // A DIFFERENT thread: the operator pressed `/new`.
             Some(retired) => {
                 let retired = retired.to_string();
-                self.visit.generation += 1;
-                self.visit.thread_id = Some(id.to_string());
+                self.move_visit_to(id);
                 crate::log_info!(
                     "codex link for {}: thread {id} was announced while bound to \
                      {retired} — following the switch; the visit is now generation {} \
@@ -5183,9 +6657,27 @@ impl Connection<'_> {
         if self.visit.thread_id.as_deref() == Some(previous) {
             return;
         }
-        self.visit.generation += 1;
-        self.visit.thread_id = Some(previous.to_string());
+        self.move_visit_to(previous);
         self.switch_candidate = None;
+    }
+
+    /// **Move the visit, and drop with it everything that was only true of the visit
+    /// being left.**
+    ///
+    /// One rule rather than a clear at each of the three places a visit moves, for
+    /// [`Connection::retire_superseded_cards`]'s reason read across: three call sites
+    /// are three chances for a fourth to be forgotten. What must not survive is the
+    /// running turn — a turn belongs to the visit it started in, and a stop still
+    /// aimed at it after the session has moved on would take a durable claim and
+    /// write a frame for an actuation the broker is certain to refuse, leaving a
+    /// ledger row that records something that never happened.
+    ///
+    /// The generation bump is D4's own rule: a generation identifies a VISIT, not a
+    /// thread, so revisiting a thread is a new visit and counts.
+    fn move_visit_to(&mut self, thread: &str) {
+        self.visit.generation += 1;
+        self.visit.thread_id = Some(thread.to_string());
+        self.running_turn = None;
     }
 
     fn apply_switch_candidate(&mut self) -> Option<String> {
@@ -5198,8 +6690,7 @@ impl Connection<'_> {
         if retired == candidate {
             return None;
         }
-        self.visit.generation += 1;
-        self.visit.thread_id = Some(candidate.clone());
+        self.move_visit_to(&candidate);
         // A FRESH switch gets a fresh adoption budget.
         self.unadopted_retries = 0;
         self.fallback_due = false;
@@ -5716,6 +7207,139 @@ mod tests {
         Ingress {
             generation,
             upstream_epoch: epoch,
+        }
+    }
+
+    /// The material a phone's interrupt is claimed with, aimed at the visit
+    /// [`visit`] returns.
+    fn stop(thread: &str, turn: &str, generation: u64) -> crate::store::ClaimedMaterial {
+        crate::store::ClaimedMaterial {
+            thread_id: thread.to_string(),
+            generation,
+            route: crate::store::INTERRUPT_ROUTE.to_string(),
+            target_turn_id: Some(turn.to_string()),
+            claimed_hash: "h".into(),
+        }
+    }
+
+    /// **What refuses an interrupt before a byte is written, asserted one reason at a
+    /// time.**
+    ///
+    /// Each of these is a different thing being wrong, and each earns its own
+    /// sentence, because a person told "nothing was sent" without being told why
+    /// cannot tell an ask worth repeating from one that never will be.
+    ///
+    /// **Mutation:** drop the generation comparison and the retired-visit case below
+    /// starts forwarding — a turn id replayed from a visit the session has left would
+    /// then be written, and the broker would forward it if that id happened to name
+    /// whatever is running now. Drop any field from
+    /// [`RunningTurn::is_named_by`] and the corresponding leg at the end goes red.
+    #[test]
+    fn an_interrupt_is_refused_before_the_write_for_each_reason_separately() {
+        let v = visit(Some("th_A"));
+        let live = RunningTurn {
+            thread_id: "th_A".into(),
+            generation: 3,
+            turn_id: "turn-1".into(),
+        };
+        let running = Some(&live);
+        // The one shape that is admitted: this visit, this thread, a turn named.
+        assert_eq!(
+            interrupt_refusal(&v, running, false, &stop("th_A", "turn-1", 3), 2, false),
+            None
+        );
+
+        // Another thread's turn is not this session's to stop.
+        assert!(
+            interrupt_refusal(&v, running, false, &stop("th_B", "turn-1", 3), 2, false)
+                .is_some_and(|why| why.contains("not on the thread")),
+        );
+        // A turn from a visit this link has left. The thread id agrees; the visit
+        // does not, and the visit is what says which turn the phone was looking at.
+        assert!(
+            interrupt_refusal(&v, running, false, &stop("th_A", "turn-1", 2), 2, false)
+                .is_some_and(|why| why.contains("moved on")),
+        );
+        // **A turn that is not the one running.** Refused here, before a claim — the
+        // broker would refuse it too, but only after a durable row had been written
+        // for an actuation that never happened, which is what a live gate caught.
+        assert!(
+            interrupt_refusal(&v, running, false, &stop("th_A", "turn-9", 3), 2, false)
+                .is_some_and(|why| why.contains("not the one this Codex session is running"))
+        );
+        // And a connection that has watched no turn start refuses every stop, which
+        // is the state a freshly reconnected link is in.
+        assert!(
+            interrupt_refusal(&v, None, false, &stop("th_A", "turn-1", 3), 2, false)
+                .is_some_and(|why| why.contains("not the one this Codex session is running"))
+        );
+        // A switch in flight: the answer is "not yet", and it says so.
+        assert!(
+            interrupt_refusal(&v, running, true, &stop("th_A", "turn-1", 3), 2, false)
+                .is_some_and(|why| why.contains("moving to another thread")),
+        );
+        // A second ask for a turn already waiting on its terminal.
+        assert!(
+            interrupt_refusal(&v, running, false, &stop("th_A", "turn-1", 3), 2, true)
+                .is_some_and(|why| why.contains("already waiting")),
+        );
+        // An ask that names no turn at all, in both spellings.
+        for empty in [None, Some(String::new())] {
+            let mut claimed = stop("th_A", "turn-1", 3);
+            claimed.target_turn_id = empty;
+            assert!(interrupt_refusal(&v, running, false, &claimed, 2, false)
+                .is_some_and(|why| why.contains("names no turn")),);
+        }
+        // A link bound to nothing refuses everything: there is no visit for an ask to
+        // belong to.
+        assert!(interrupt_refusal(
+            &visit(None),
+            running,
+            false,
+            &stop("th_A", "turn-1", 3),
+            2,
+            false
+        )
+        .is_some());
+
+        // **An ask aimed at a connection this link has replaced.** Everything else
+        // about it agrees — same visit, same thread, same running turn — because a
+        // visit survives a reconnect. Only the socket is different, and writing it on
+        // the new one would be answering a question nobody is still asking.
+        assert!(
+            interrupt_refusal(&v, running, false, &stop("th_A", "turn-1", 3), 1, false)
+                .is_some_and(|why| why.contains("reconnected")),
+        );
+
+        // **The running turn carries its own visit, and the comparison is the whole
+        // triple.** These two are what makes the cross-visit property structural
+        // rather than a consequence of every visit move remembering to clear the
+        // field: a running turn left over from another thread or another visit is
+        // refused even when the ask agrees with the live visit in every other way.
+        for stale in [
+            RunningTurn {
+                thread_id: "th_B".into(),
+                generation: 3,
+                turn_id: "turn-1".into(),
+            },
+            RunningTurn {
+                thread_id: "th_A".into(),
+                generation: 2,
+                turn_id: "turn-1".into(),
+            },
+        ] {
+            assert!(
+                interrupt_refusal(
+                    &v,
+                    Some(&stale),
+                    false,
+                    &stop("th_A", "turn-1", 3),
+                    2,
+                    false
+                )
+                .is_some_and(|why| why.contains("not the one this Codex session is running")),
+                "a turn recorded under {stale:?} is not this visit's to stop"
+            );
         }
     }
 
@@ -8471,6 +10095,28 @@ mod tests {
         (daemon, db, push)
     }
 
+    /// **A second daemon on the same database — the next start.**
+    ///
+    /// A restart is the only thing that proves a fact came from the store rather than
+    /// from a map this process happened to still hold, and the whole of a per-session
+    /// fact's value is that it survives one.
+    fn daemon_on_db(db: &TempDb, _session: &SessionKey) -> Arc<Daemon> {
+        let store = Arc::new(crate::store::Store::open(db.path()).unwrap());
+        let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(tail_rx));
+        Daemon::new(
+            protocol::config::Config::default(),
+            store,
+            Arc::new(crate::apns::LoggingPushSender::new()) as Arc<dyn crate::apns::PushSender>,
+            crate::state::Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tail_tx,
+        )
+    }
+
     /// Drive a link against a scripted leg and report what landed.
     ///
     /// Returns `(events recorded, connections accepted, resumes seen, the frames the
@@ -8549,6 +10195,7 @@ mod tests {
             presence.clone(),
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
         ));
         // Sampled rather than slept through: see the note on this function.
         let mut published: Vec<CodexAddressee> = Vec::new();
@@ -8643,6 +10290,7 @@ mod tests {
             LinkPresence::new(),
             carry.clone(),
             crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
         ));
         tokio::time::sleep(settle).await;
         let out = (
@@ -9371,6 +11019,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -9411,6 +11061,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
         assert!(
@@ -10327,6 +11979,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
         // The SAME turn id, owed on two different threads.
@@ -10400,6 +12054,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
         let first: Value = serde_json::from_str(&announce(LIFECYCLE_THREAD)).unwrap();
@@ -11099,6 +12755,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11231,6 +12889,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11329,6 +12989,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11443,6 +13105,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11556,6 +13220,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11715,6 +13381,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -11893,6 +13561,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -12062,6 +13732,8 @@ mod tests {
             adopted_thread: Some(LIFECYCLE_THREAD.to_string()),
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
         let subscribed_to_a = CodexAddressee::Subscribed {
@@ -12165,6 +13837,8 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         };
 
@@ -12486,6 +14160,7 @@ mod tests {
             LinkPresence::new(),
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
         ));
         tokio::time::sleep(Duration::from_secs(3)).await;
         let connections = leg.connections.load(std::sync::atomic::Ordering::SeqCst);
@@ -12655,12 +14330,22 @@ mod tests {
     }
 
     fn approval_turn_terminal(thread: &str, status: &str) -> Value {
+        turn_terminal_frame(thread, APPROVAL_TURN, status)
+    }
+
+    /// The same measured terminal, for a caller that has to name the turn.
+    ///
+    /// [`approval_turn_terminal`] names the captured turn because almost every test
+    /// about a terminal is about that one. A test that stages two turns in a row on
+    /// one connection cannot be, and a terminal that silently named the other turn
+    /// would settle nothing while looking as though it had.
+    fn turn_terminal_frame(thread: &str, turn: &str, status: &str) -> Value {
         json!({
             "method": "turn/completed",
             "params": {
                 "threadId": thread,
                 "turn": {
-                    "id": APPROVAL_TURN,
+                    "id": turn,
                     "items": [],
                     "itemsView": "notLoaded",
                     "status": status,
@@ -12961,6 +14646,7 @@ mod tests {
                 LinkPresence::new(),
                 LinkCarry::new(),
                 asks,
+                crate::codex_link::interrupt_channel().1,
             ));
             AnsweringLink {
                 leg,
@@ -13225,8 +14911,45 @@ mod tests {
             adopted_thread: None,
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            running_turn: None,
             swept_generation: None,
         }
+    }
+
+    /// A connection that has bound to nothing yet: what a reconnect looks like at
+    /// the moment it asks to resume.
+    fn attaching<'a>(
+        daemon: &'a Arc<Daemon>,
+        session: &'a SessionKey,
+        adapter: &'a mut CodexAdapter,
+        amend: &'a mut AmendThrottle,
+    ) -> Connection<'a> {
+        let mut conn = visiting(daemon, session, adapter, amend, LIFECYCLE_THREAD, 1);
+        conn.visit.thread_id = None;
+        conn
+    }
+
+    /// The measured `turn/started` body, for `thread` and `turn`.
+    ///
+    /// The shape the push gate and the stop control both read: a flat `threadId`, a
+    /// turn object naming an id, and the running status. Anything less is a frame
+    /// this build declines to read as a turn beginning.
+    fn turn_started(thread: &str, turn: &str) -> Value {
+        json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": thread,
+                "turn": {"id": turn, "status": "inProgress", "items": [],
+                         "itemsView": "notLoaded", "startedAt": 1787019001}
+            }
+        })
+    }
+
+    /// [`announce`] as a parsed frame, for a caller that hands frames to a
+    /// `Connection` rather than to a socket.
+    fn thread_started(thread: &str) -> Value {
+        serde_json::from_str(&announce(thread)).expect("the announcement is JSON")
     }
 
     /// **One command approval becomes one card the phone can verify.**
@@ -13558,6 +15281,1368 @@ mod tests {
         conn.observe_notification(&resolved(LIFECYCLE_THREAD, 0))
             .await;
         assert_eq!(resolutions(&daemon, &session.uid).len(), 1);
+    }
+
+    /// The committed 0.153.4 capture of a whole driven turn lifecycle, filtered to
+    /// the turn-status vocabulary. Read through `include_str!` so the fixture and the
+    /// rule it grounds cannot drift apart.
+    const INTERRUPT_LIFECYCLE: &str = include_str!("../../../fixtures/codex/interrupt-0.153.jsonl");
+
+    /// The thread that capture was taken on, and the visit it belongs to.
+    const LIFECYCLE_0153_THREAD: &str = "01a073f6-09c8-7c10-8212-4d369b80140b";
+
+    /// Every s2c frame of the capture, in arrival order.
+    fn interrupt_lifecycle_frames() -> Vec<Value> {
+        INTERRUPT_LIFECYCLE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<Value>(line).expect("a committed capture is well-formed")
+            })
+            .map(|v| v["frame"].clone())
+            .collect()
+    }
+
+    /// **The turn boundaries the wire carries are the facts a phone reads, and a
+    /// restart brings every one of them back.**
+    ///
+    /// Two facts, not three, and the name says which. `blocked_on` is a durable card;
+    /// idle is a durably filed turn boundary. **Running is neither** — a client
+    /// derives it from the timeline, by reading whatever follows the last boundary,
+    /// and that derivation lags a terminal until the next substantive item arrives.
+    /// This daemon does not project it and this test does not claim it does. What the
+    /// daemon owes is that the boundaries themselves are correct, complete and
+    /// durable, which is exactly what a derivation needs and all it can be given from
+    /// here.
+    ///
+    /// **`thread/status/changed` is inert, and that is asserted rather than assumed.**
+    /// The capture shows why it can be: the status frame and its partner arrive in the
+    /// same millisecond, so every transition it announces is already carried by a
+    /// frame this build understands, files durably and can replay. A status frame is a
+    /// live notification and is never replayed, so a fact derived from one could not
+    /// survive the bounce each stage ends with. The last leg feeds a status frame that
+    /// contradicts the run's real state and asserts that nothing moves — without it
+    /// this test would stay green while status frames silently became load-bearing.
+    ///
+    /// **Every frame of the capture is driven, and the stages are cut by the
+    /// vocabulary rather than by index.** A capture regenerated on the same build does
+    /// not carry the same number of frames every time, so a count or an index pinned
+    /// here would go stale while the wire had not changed at all.
+    ///
+    /// **Mutation:** drop the `TurnComplete` mapping from the adapter's turn terminal
+    /// and the idle half goes red — a finished run would read as still working, which
+    /// is the fleet's oldest failure mode. Make the adapter act on
+    /// `thread/status/changed` and the last leg goes red.
+    #[tokio::test]
+    async fn the_measured_turn_boundaries_are_the_facts_a_phone_reads_and_a_restart_keeps() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A08".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_0153_THREAD,
+            1,
+        );
+
+        let frames = interrupt_lifecycle_frames();
+        let mut at = 0usize;
+        // Drive every frame up to and including the next one whose method matches,
+        // so a stage is named by the wire's own vocabulary and no index is pinned.
+        let mut through = |needle: &str| {
+            let matches = |frame: &Value| {
+                frame
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .is_some_and(|method| method.ends_with(needle))
+            };
+            let end = frames[at..]
+                .iter()
+                .position(matches)
+                .map(|offset| at + offset + 1)
+                .unwrap_or_else(|| panic!("the capture carries a {needle} after frame {at}"));
+            let slice: Vec<Value> = frames[at..end].to_vec();
+            at = end;
+            slice
+        };
+
+        // ---- a turn begins on a fresh connection -----------------------------
+        for frame in through("turn/started") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 0,
+            boundaries: vec![],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "a running turn is neither waiting on a person nor finished"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- and it asks a person --------------------------------------------
+        for frame in through("/requestApproval") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 1,
+            boundaries: vec![],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "the approval the wire raised is the fleet's blocked-on fact"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- the question is answered, and the turn is still running ---------
+        for frame in through("serverRequest/resolved") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 0,
+            boundaries: vec![],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "the question is gone and the turn has not ended: nobody is waiting, and \
+             nothing has finished"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- the turn is stopped ---------------------------------------------
+        for frame in through("turn/completed") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 0,
+            boundaries: vec!["interrupted".to_string()],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "the boundary says how the turn ended, not merely that it did"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- a SECOND turn begins after that terminal ------------------------
+        for frame in through("turn/started") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 0,
+            boundaries: vec!["interrupted".to_string()],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "a new turn adds no boundary and clears none: the run is working again, \
+             and the last thing that ended is still the last thing that ended"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- and it asks a person too ----------------------------------------
+        for frame in through("/requestApproval") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 1,
+            boundaries: vec!["interrupted".to_string()],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "a second turn raises a second question"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- the second turn is stopped too ----------------------------------
+        for frame in through("turn/completed") {
+            conn.observe_notification(&frame).await;
+        }
+        let expected = Facts {
+            blocked: 0,
+            boundaries: vec!["interrupted".to_string(), "interrupted".to_string()],
+        };
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "the terminal took the second question with it and filed the second \
+             boundary"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- and the tail of the capture changes none of it -------------------
+        //
+        // Whatever the capture ends with — a late `serverRequest/resolved` for a card
+        // the terminal already retired, an announcement of a fresh thread the session
+        // was left on — is driven rather than skipped, because a frame nobody read is
+        // a frame nobody knows the effect of.
+        for frame in &frames[at..] {
+            conn.observe_notification(frame).await;
+        }
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "nothing after the last turn's terminal moves this run's facts"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+
+        // ---- a status frame on its own moves nothing --------------------------
+        //
+        // The one that would matter if it were read: `active` for a run whose turns
+        // have both ended. If a status frame ever became load-bearing this is the
+        // shape that would make a finished run read as working, on evidence a restart
+        // could never reproduce.
+        conn.observe_notification(&json!({
+            "method": "thread/status/changed",
+            "params": {
+                "threadId": LIFECYCLE_0153_THREAD,
+                "status": {"type": "active", "activeFlags": []}
+            }
+        }))
+        .await;
+        assert_eq!(
+            facts(&daemon, &session.uid).await,
+            expected,
+            "a status frame is a live notification this build does not read; a fact \
+             derived from one could not survive a restart, so none is"
+        );
+        assert_restart_agrees(&db, &session, &expected).await;
+    }
+
+    /// **What a phone can read about one run**: how many people are being waited on,
+    /// and how every turn so far ended.
+    ///
+    /// Running is deliberately not in here. It is not a fact this daemon holds — a
+    /// client derives it from what follows the last boundary — so a field for it would
+    /// be this side claiming something it does not know.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Facts {
+        blocked: usize,
+        boundaries: Vec<String>,
+    }
+
+    async fn facts(daemon: &Arc<Daemon>, uid: &str) -> Facts {
+        Facts {
+            blocked: daemon
+                .sessions()
+                .await
+                .expect("the fleet listing")
+                .into_iter()
+                .find(|s| s.session_uid == uid)
+                .expect("this run is in the fleet")
+                .blocked_on
+                .len(),
+            boundaries: daemon
+                .store
+                .events_after(uid, 0, 10_000)
+                .expect("the event log")
+                .into_iter()
+                .filter(|e| e.kind == protocol::event::EventKind::TurnComplete)
+                .map(|e| e.payload["status"].as_str().unwrap_or_default().to_string())
+                .collect(),
+        }
+    }
+
+    /// **A fresh daemon on the same store reproduces the facts from the store alone.**
+    ///
+    /// The half a live connection cannot prove. A card restored into memory is what
+    /// makes `blocked_on` true again, and the event log is what makes a boundary
+    /// readable; anything a process was holding in memory is gone by construction.
+    async fn assert_restart_agrees(db: &TempDb, session: &SessionKey, expected: &Facts) {
+        let restarted = daemon_on_db(db, session);
+        restarted.recover().await;
+        assert_eq!(
+            &facts(&restarted, &session.uid).await,
+            expected,
+            "a restart must reproduce this run's facts from the store"
+        );
+    }
+
+    /// A gate guard for a pending entry that is not going through the daemon.
+    async fn a_gate_guard() -> tokio::sync::OwnedRwLockReadGuard<()> {
+        Arc::new(tokio::sync::RwLock::new(())).read_owned().await
+    }
+
+    /// Put a claim in the ledger the way the link would, so a settle has a row.
+    fn claim_an_interrupt(daemon: &Arc<Daemon>, uid: &str, request_id: &str, turn: &str) {
+        let material = crate::store::ClaimedMaterial {
+            thread_id: LIFECYCLE_THREAD.into(),
+            generation: 1,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some(turn.to_string()),
+            claimed_hash: "h".into(),
+        };
+        assert_eq!(
+            daemon
+                .store
+                .claim_mutation(
+                    crate::store::OPERATION_INTERRUPT,
+                    uid,
+                    request_id,
+                    &material,
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap(),
+            crate::store::MutationClaim::Claimed
+        );
+    }
+
+    /// **The turn's own terminal is what settles an interrupt, and its `status` is
+    /// what decides which way.**
+    ///
+    /// The response to `turn/interrupt` is `result:{}` and says nothing about what it
+    /// did — measured on real codex 0.153.4 — so the terminal is the only evidence
+    /// there is. An `interrupted` turn is this ask taking effect. A turn that ended
+    /// any other way ended for its own reasons while the ask was in flight, and
+    /// crediting the phone with it would be telling somebody they stopped something
+    /// that stopped itself.
+    ///
+    /// **Mutation:** settle every terminal as `aborted` and the second half goes red —
+    /// a turn that completed normally would be reported to the phone as one it
+    /// stopped.
+    #[tokio::test]
+    async fn a_turn_terminal_settles_an_interrupt_and_the_status_decides_which_way() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A07".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // **The turn stops.** The ask took effect, and the phone is told the turn it
+        // named — not "something stopped".
+        claim_an_interrupt(&daemon, &session.uid, "req-stop", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9001,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        assert_eq!(
+            outcome.await.expect("the caller is always told"),
+            InterruptReport::Aborted {
+                turn_id: APPROVAL_TURN.into()
+            }
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-stop")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Settled(
+                crate::store::INTERRUPT_ABORTED.into()
+            ))
+        );
+
+        // **The turn finishes on its own.** Terminal either way — the question cannot
+        // be asked again — but not this ask's doing, and both the record and the
+        // sentence say so.
+        claim_an_interrupt(&daemon, &session.uid, "req-late", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9002,
+            "req-late",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "completed"))
+            .await;
+        let report = outcome.await.expect("the caller is always told");
+        // **Not applied, and KNOWN not applied.** This link watched the terminal
+        // arrive and read `completed` off it, so the outcome has a name; "unknown" is
+        // for an ending nothing that survives can name, and using it here would tell a
+        // phone the daemon has no idea what happened to a turn it watched finish. It
+        // would also disagree with the replay of this very row, which reads it back as
+        // the refusal it is.
+        let InterruptReport::NotApplied(why) = &report else {
+            panic!("a turn that ended on its own was not stopped from here: {report:?}");
+        };
+        assert!(why.contains("ended on its own"), "{why}");
+        assert_eq!(
+            crate::state::Daemon::interrupt_result_for_tests(report.clone()),
+            protocol::ws::InterruptResult::Rejected {
+                reason: why.to_string()
+            },
+            "and the phone is told the same thing a retry of this id would be told"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-late")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Settled(
+                crate::store::INTERRUPT_TURN_ENDED.into()
+            ))
+        );
+
+        // **Another TURN's terminal on this very thread settles nothing.** A
+        // connection can hold an interrupt for one turn while a different turn ends,
+        // and crediting this ask with that ending would tell the phone it stopped a
+        // turn that is still running — and would name the wrong turn while doing it.
+        // The pair is what identifies the turn, and both halves of the pair are
+        // asserted, one here and one below.
+        //
+        // **Two interrupts are open across the terminal, on two turns of one thread**,
+        // and that is what makes the turn half of the pair observable. With only the
+        // other turn's ask open, the terminal matches nothing and returns before it
+        // reaches the entry it must not take — so a rule that selected by thread alone
+        // would look right for the wrong reason. Holding one ask the terminal DOES
+        // name beside it is the shape a real connection is in when two turns are
+        // stoppable at once, and the only one that separates the two halves.
+        claim_an_interrupt(
+            &daemon,
+            &session.uid,
+            "req-another-turn",
+            "a-turn-still-running",
+        );
+        let still_running = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9004,
+            "req-another-turn",
+            LIFECYCLE_THREAD,
+            "a-turn-still-running",
+            a_gate_guard().await,
+        );
+        claim_an_interrupt(&daemon, &session.uid, "req-named-turn", APPROVAL_TURN);
+        let named = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9005,
+            "req-named-turn",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        assert_eq!(
+            named.await.expect("the ask the terminal names is told"),
+            InterruptReport::Aborted {
+                turn_id: APPROVAL_TURN.to_string()
+            },
+            "the terminal settles the ask that names its own turn"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(
+                    crate::store::OPERATION_INTERRUPT,
+                    &session.uid,
+                    "req-another-turn"
+                )
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Applying),
+            "a terminal for another turn is not this interrupt's evidence"
+        );
+
+        // **Another thread's terminal settles nothing.** The turn id could repeat
+        // across threads; the pair is what identifies the turn.
+        claim_an_interrupt(&daemon, &session.uid, "req-other", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9003,
+            "req-other",
+            "th-somewhere-else",
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-other")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Applying),
+            "a terminal for another thread is not this interrupt's evidence"
+        );
+
+        // **And the connection ending settles what is left, terminally.** The write
+        // may have reached the app-server, so the truthful statement is that nothing
+        // here knows — and the consequence is that it is never sent again.
+        settle_open_interrupts(
+            &daemon,
+            &session,
+            &conn.open_interrupts,
+            "the wire went away",
+        )
+        .await;
+        assert!(
+            matches!(
+                still_running.await.expect("this caller is told too"),
+                InterruptReport::Unknown(_)
+            ),
+            "the turn it named never ended on this connection's watch"
+        );
+        let report = outcome.await.expect("the caller is always told");
+        let InterruptReport::Unknown(why) = &report else {
+            panic!("a connection that ends mid-interrupt knows nothing: {report:?}");
+        };
+        assert!(why.contains("will not be sent again"), "{why}");
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-other")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+    }
+
+    /// **The turn's ending is durable before anyone is told the turn was stopped.**
+    ///
+    /// Two records are written from one frame, and they are read by different people:
+    /// the ledger row and the reply say "that turn was stopped" to the phone, and the
+    /// timeline's turn boundary says "that turn ended" to every later connect. A
+    /// process that died between them used to leave the pair that cannot both be
+    /// acted on — a phone told it worked, a retry told `Duplicate`, and a run that
+    /// still looked busy because nothing had ever ended its turn.
+    ///
+    /// **The fault sits at exactly that seam, and it is real rather than injected.**
+    /// A trigger refuses to settle any interrupt claim while this run's timeline has
+    /// no terminal for the turn — which is the ordering stated as a database
+    /// constraint, aborting the enclosing transaction the way a disk error does. In
+    /// the old order the settle came first, the trigger fired, and the phone was told
+    /// the outcome could not be recorded; in this one the boundary is already there
+    /// and the settle passes.
+    ///
+    /// **Mutation:** put `observe_approval` back ahead of `ingest_frame` for a turn
+    /// terminal and this goes red.
+    #[tokio::test]
+    async fn a_turn_boundary_is_durable_before_an_interrupt_is_reported_as_aborted() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A25".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        let boundary =
+            crate::codex_adapter::turn_terminal_source_event_id(LIFECYCLE_THREAD, APPROVAL_TURN);
+        // Spelled as a literal because a trigger body may not carry bound variables,
+        // and asked of the KIND rather than of one id because this run has one turn:
+        // "no turn has ended yet" and "this turn has not ended yet" are the same
+        // statement here, and the simpler one cannot be got wrong.
+        rusqlite::Connection::open(db.path())
+            .expect("a second handle on the test database")
+            .execute_batch(&format!(
+                "CREATE TRIGGER settle_needs_the_boundary
+                   BEFORE UPDATE ON mutation_ledger
+                   WHEN NEW.status = 'done'
+                    AND NOT EXISTS (SELECT 1 FROM events WHERE kind = '{}')
+                 BEGIN SELECT RAISE(ABORT, 'the turn boundary is not durable yet'); END;",
+                protocol::event::EventKind::TurnComplete.as_str()
+            ))
+            .expect("installing the ordering constraint");
+
+        claim_an_interrupt(&daemon, &session.uid, "req-stop", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9301,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+
+        assert!(
+            daemon
+                .db
+                .turn_terminal_filed(session.uid.clone(), boundary)
+                .await
+                .unwrap(),
+            "the timeline holds the turn's ending"
+        );
+        assert_eq!(
+            outcome.await.expect("the caller is always told"),
+            InterruptReport::Aborted {
+                turn_id: APPROVAL_TURN.to_string()
+            },
+            "and only then is anyone told the turn was stopped"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-stop")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Settled(
+                crate::store::INTERRUPT_ABORTED.into()
+            )),
+            "with the record saying the same thing the phone was told"
+        );
+    }
+
+    /// **A boundary that could not be filed is not reported as an abort.**
+    ///
+    /// Ordering the boundary ahead of the settle buys the honest failure only if the
+    /// settle actually depends on it. It did not: the filing's error was logged and
+    /// discarded, and the settle went ahead on its own — so an `events` insert that
+    /// failed under a ledger that worked left durable `aborted` and an `Aborted` reply
+    /// beside a timeline in which that turn never ended. A retry then replayed
+    /// `Duplicate` while the run still looked busy, which is precisely the pair the
+    /// ordering exists to make unreachable.
+    ///
+    /// The fault is at the boundary write itself and nowhere else — the log refuses
+    /// inserts and answers reads, so the ledger, the claim and the settle are all in
+    /// perfect working order and only the one write this seam is about fails.
+    ///
+    /// What the caller hears instead is the honest ending: nothing that survives can
+    /// name what became of the turn, so the claim is terminal-unknown and is never
+    /// sent again.
+    ///
+    /// **Mutation:** settle the interrupt without asking whether the boundary is
+    /// durable and both halves go red — the phone is told the turn was stopped and the
+    /// ledger says `aborted`, with no turn ending anywhere in the log.
+    #[tokio::test]
+    async fn an_interrupt_whose_turn_boundary_was_not_filed_is_not_reported_as_aborted() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A27".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        claim_an_interrupt(&daemon, &session.uid, "req-stop", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9401,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        // The log stops accepting writes between the claim and the terminal, so the
+        // boundary this terminal mints is the write that fails.
+        refuse_event_writes(&db);
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+
+        assert!(
+            !daemon
+                .db
+                .turn_terminal_filed(
+                    session.uid.clone(),
+                    crate::codex_adapter::turn_terminal_source_event_id(
+                        LIFECYCLE_THREAD,
+                        APPROVAL_TURN
+                    )
+                )
+                .await
+                .unwrap(),
+            "the premise: the timeline holds no ending for this turn"
+        );
+        let report = outcome.await.expect("the caller is always told");
+        let InterruptReport::Unknown(why) = &report else {
+            panic!(
+                "nothing may say the turn was stopped while the log holds no record \
+                 that it ended: {report:?}"
+            );
+        };
+        assert!(
+            why.contains("turn boundary"),
+            "and the caller is told which fact is missing: {why}"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-stop")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the record says the same thing the phone was told, and is terminal so \
+             nothing sends this again"
+        );
+    }
+
+    /// **A settlement that did not land is never reported as one that did.**
+    ///
+    /// The turn stopped and this link watched it, but the ledger refused the write.
+    /// The old path logged that and replied `Aborted` anyway, which is the ledger's
+    /// central promise broken in the exact case it exists for: the phone was told the
+    /// turn was stopped and the claim was safe to replay, while the row stayed
+    /// `applying` and the next start would record it as an unprovable ending.
+    ///
+    /// Two failures, and they are different things to be told. A write that FAILED
+    /// says the record holds nothing; a write that LOST says the record holds
+    /// somebody else's terminal, which is the one a retry would be shown, so that is
+    /// the one the caller hears.
+    ///
+    /// The fault is real rather than injected: a trigger on the ledger table aborts
+    /// the enclosing transaction exactly as a disk error does, and it needs no
+    /// test-only branch in the store to stage.
+    ///
+    /// **Mutation:** discard the settlement result and report the ordinary outcome
+    /// regardless, and both halves go red.
+    #[tokio::test]
+    async fn an_interrupt_whose_settlement_did_not_land_is_not_reported_as_aborted() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A24".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // **The write fails.** The claim is in place; the settle that follows is not.
+        claim_an_interrupt(&daemon, &session.uid, "req-stop", APPROVAL_TURN);
+        rusqlite::Connection::open(db.path())
+            .expect("a second handle on the test database")
+            .execute_batch(
+                "CREATE TRIGGER refuse_settlement BEFORE UPDATE ON mutation_ledger
+                 BEGIN SELECT RAISE(ABORT, 'the ledger is refusing writes'); END;",
+            )
+            .expect("installing the refusal");
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9201,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        let report = outcome.await.expect("the caller is always told");
+        let InterruptReport::Unknown(why) = &report else {
+            panic!(
+                "the ledger holds no terminal for this, so nothing may report one: \
+                 {report:?}"
+            );
+        };
+        assert!(why.contains("could not record"), "{why}");
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, &session.uid, "req-stop")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Applying),
+            "the premise: the row really did stay applying, which is what makes the \
+             reply a lie if it says otherwise"
+        );
+
+        // **The write LOSES.** Something else — a restart's recovery, a handover
+        // sweep — made the claim terminal first, and first-terminal-wins means that
+        // one is what a retry under this id would be shown. So it is what this caller
+        // is shown too.
+        rusqlite::Connection::open(db.path())
+            .expect("a second handle")
+            .execute_batch("DROP TRIGGER refuse_settlement;")
+            .expect("the trigger exists until now");
+        claim_an_interrupt(&daemon, &session.uid, "req-lost", APPROVAL_TURN);
+        assert!(daemon
+            .store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                &session.uid,
+                "req-lost",
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap());
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9202,
+            "req-lost",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        let report = outcome.await.expect("the caller is always told");
+        let InterruptReport::Unknown(why) = &report else {
+            panic!("the record says unknown, so the caller hears unknown: {report:?}");
+        };
+        assert!(
+            why.contains("not known") || why.contains("cannot read"),
+            "{why}"
+        );
+    }
+
+    /// **Two taps under one id are one ask, and both are told the same thing.**
+    ///
+    /// A person whose first tap has not answered yet taps again; a client that
+    /// retries on a slow reply does the same thing deliberately. The id is what makes
+    /// that safe — one id is one mutation — but safety was only half of it: the
+    /// second caller used to be refused outright while the first went on to be told
+    /// the turn stopped, so one actuation produced two contradictory sentences about
+    /// itself. The second now waits on the first's own entry and hears the same
+    /// terminal at the same moment, and still nothing extra is written.
+    ///
+    /// **Only for the same material.** A different turn under the same id is two
+    /// mutations, and that falls through to the claim, which refuses it — the leg at
+    /// the end asserts exactly that, so the join cannot be a blanket collapse by id.
+    ///
+    /// **Mutation:** return the ask unchanged from the join and the second caller is
+    /// refused while the first is told the turn stopped.
+    #[tokio::test]
+    async fn a_second_ask_under_one_id_joins_the_first_and_hears_the_same_thing() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A23".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // The first ask is written and waiting on the turn's terminal.
+        claim_an_interrupt(&daemon, &session.uid, "req-stop", APPROVAL_TURN);
+        let first = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9101,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+
+        // The same id again, same turn, while the first is still in flight.
+        let (reply, second) = tokio::sync::oneshot::channel();
+        let retry = InterruptRequest {
+            client_request_id: "req-stop".into(),
+            upstream_epoch: 1,
+            claimed: stop(LIFECYCLE_THREAD, APPROVAL_TURN, 1),
+            reply,
+            gate: a_gate_guard().await,
+        };
+        assert!(
+            conn.join_open_interrupt(retry).is_none(),
+            "a retry of an ask still in flight is that ask, not a second one"
+        );
+        assert_eq!(
+            conn.open_interrupts.lock().expect("open interrupts").len(),
+            1,
+            "and it wrote nothing: one id, one entry, one actuation"
+        );
+
+        // One terminal, and both callers hear it.
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "interrupted"))
+            .await;
+        let expected = InterruptReport::Aborted {
+            turn_id: APPROVAL_TURN.to_string(),
+        };
+        assert_eq!(first.await.expect("the first caller is told"), expected);
+        assert_eq!(second.await.expect("the second caller is told"), expected);
+
+        // **A different turn under the same id does NOT join.** It is two mutations
+        // wearing one key, and the ledger is what has to refuse it.
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        let other = InterruptRequest {
+            client_request_id: "req-stop".into(),
+            upstream_epoch: 1,
+            claimed: stop(LIFECYCLE_THREAD, "another-turn", 1),
+            reply,
+            gate: a_gate_guard().await,
+        };
+        claim_an_interrupt(&daemon, &session.uid, "req-held", APPROVAL_TURN);
+        insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9102,
+            "req-stop",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        assert!(
+            conn.join_open_interrupt(other).is_some(),
+            "the same id naming another turn is a different mutation, and the claim \
+             decides it"
+        );
+    }
+
+    /// **A socket for a test that has to call the write path itself.**
+    ///
+    /// [`Connection::interrupt_turn`] is the production function the link's select arm
+    /// calls, and it takes the socket it is about to write on — so a test that wants
+    /// the real write path, rather than the helpers underneath it, has to hand it a
+    /// real `WebSocketStream`. A duplex pair is one: both halves speak the same
+    /// framing the leg does, and the server half is kept alive by the caller so the
+    /// buffer the frames land in is never closed under the writer.
+    async fn a_socket_pair() -> (
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        let (client_half, server_half) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            tokio_tungstenite::accept_async(server_half)
+                .await
+                .expect("the server half of the pair completes its upgrade")
+        });
+        let (client, _) = tokio_tungstenite::client_async("ws://localhost/", client_half)
+            .await
+            .expect("the client half of the pair completes its upgrade");
+        (client, server.await.expect("the server half's task"))
+    }
+
+    /// **Two taps under one id hear ONE outcome, however the scheduler interleaves
+    /// them — driven through the real request path.**
+    ///
+    /// The daemon reads the ledger before it enqueues, so two asks under one id can
+    /// BOTH be past that read with the row still `applying`. What happens to the
+    /// second then depends on where the first has got to, and there are exactly two
+    /// positions:
+    ///
+    ///   * **The first is still waiting on its terminal.** The second joins it and
+    ///     hears the same terminal at the same moment. That is the first leg.
+    ///   * **The terminal arrived while the second was still in the queue.** The
+    ///     link's select is biased toward the socket, so this is the ordinary
+    ///     scheduling of a busy connection rather than a rare interleaving: the
+    ///     terminal removes the first's pending entry and clears the running turn, and
+    ///     the second then finds nothing to join and no live turn to name. It used to
+    ///     be refused for exactly that — one actuation, and its two callers were told
+    ///     `Aborted` and `Rejected` about it. The ledger is what settles the
+    ///     disagreement: the first's terminal is durable by then, so the second
+    ///     replays it through the same mapper every other replay uses. That is the
+    ///     second leg.
+    ///
+    /// **The asks are built by [`crate::state::Daemon::interrupt`]** — its row read,
+    /// its checksum, its addressee check and its claim construction — and taken off
+    /// the link's own channel, so nothing here stages the material a real tap would
+    /// carry. The connection is then handed each ask through
+    /// [`Connection::interrupt_turn`], which is the arm the select loop calls. Holding
+    /// the receiver is what makes the two orderings stageable at all: an ask can be
+    /// past the daemon and not yet at the connection, and that window is where the
+    /// race lives.
+    ///
+    /// **Mutation:** return the ask unchanged from `join_open_interrupt`, or drop the
+    /// call to it, and the first leg goes red; drop the ledger consult that follows it
+    /// and the second leg goes red.
+    #[tokio::test]
+    async fn two_asks_under_one_id_hear_one_outcome_through_the_real_request_path() {
+        /// A second turn on the same thread, for the leg that needs a turn whose
+        /// terminal has not already been staged by the leg before it.
+        const SECOND_TURN: &str = "01a01282-c951-76c1-84d1-6e33d6fdb21a";
+
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A26".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut asks = daemon
+            .install_codex_interrupts_for_tests(
+                &session.uid,
+                CodexAddressee::Subscribed {
+                    thread_id: LIFECYCLE_THREAD.to_string(),
+                },
+                1,
+            )
+            .await;
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        let (mut ws, _server) = a_socket_pair().await;
+
+        // One tap on one turn, through the daemon, exactly as the phone's frame
+        // reaches it.
+        let tap = |id: &'static str, turn: &'static str| {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .interrupt(
+                        "cc-1",
+                        id,
+                        turn,
+                        &protocol::hash::interrupt_hash("cc-1", turn),
+                    )
+                    .await
+            })
+        };
+        // The ask the daemon just handed the link, or a failure naming the wait.
+        macro_rules! handed_to_the_link {
+            () => {
+                tokio::time::timeout(Duration::from_secs(5), asks.recv())
+                    .await
+                    .expect("the daemon reaches the link within the budget")
+                    .expect("the tap is handed to the link")
+            };
+        }
+
+        // ---- Leg one: the first is still in flight, so the second joins it. ----
+        conn.observe_notification(&turn_started(LIFECYCLE_THREAD, APPROVAL_TURN))
+            .await;
+        let first = tap("req-stop", APPROVAL_TURN);
+        let ask = handed_to_the_link!();
+        conn.interrupt_turn(&mut ws, ask)
+            .await
+            .expect("the write goes out");
+
+        let second = tap("req-stop", APPROVAL_TURN);
+        let ask = handed_to_the_link!();
+        conn.interrupt_turn(&mut ws, ask)
+            .await
+            .expect("the retry is handled");
+        assert_eq!(
+            conn.open_interrupts.lock().expect("open interrupts").len(),
+            1,
+            "one id is one mutation: the retry joined rather than writing a second time"
+        );
+
+        conn.observe_notification(&turn_terminal_frame(
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            "interrupted",
+        ))
+        .await;
+        let aborted = protocol::ws::InterruptResult::Aborted {
+            turn_id: APPROVAL_TURN.to_string(),
+        };
+        assert_eq!(
+            first.await.expect("the first caller's task"),
+            aborted,
+            "the first tap is told the turn it named stopped"
+        );
+        assert_eq!(
+            second.await.expect("the second caller's task"),
+            aborted,
+            "and so is the second, at the same moment and about the same actuation"
+        );
+
+        // ---- Leg two: the terminal lands while the second ask is still queued. ----
+        //
+        // A fresh turn and a fresh id. This time the second ask is taken off the
+        // channel and HELD while the socket's terminal is served first, which is what
+        // the link's biased select does whenever a frame is already readable.
+        conn.observe_notification(&turn_started(LIFECYCLE_THREAD, SECOND_TURN))
+            .await;
+        let first = tap("req-again", SECOND_TURN);
+        let ask = handed_to_the_link!();
+        conn.interrupt_turn(&mut ws, ask)
+            .await
+            .expect("the write goes out");
+
+        // Past the daemon's ledger read while the row is still `applying`, and not
+        // yet at the connection.
+        let second = tap("req-again", SECOND_TURN);
+        let held = handed_to_the_link!();
+
+        // The socket wins. The first is settled and told; the running turn is cleared.
+        conn.observe_notification(&turn_terminal_frame(
+            LIFECYCLE_THREAD,
+            SECOND_TURN,
+            "interrupted",
+        ))
+        .await;
+        assert_eq!(
+            first.await.expect("the first caller's task"),
+            protocol::ws::InterruptResult::Aborted {
+                turn_id: SECOND_TURN.to_string()
+            },
+        );
+        assert!(
+            conn.stoppable_turn().is_none(),
+            "the premise: the turn the held ask names is over, so there is nothing left \
+             for it to join and no live turn for it to name"
+        );
+
+        // Only now does the link get to the ask it had queued.
+        conn.interrupt_turn(&mut ws, held)
+            .await
+            .expect("the queued ask is handled");
+        assert_eq!(
+            second.await.expect("the second caller's task"),
+            protocol::ws::InterruptResult::Duplicate {
+                turn_id: SECOND_TURN.to_string()
+            },
+            "the same id hears the outcome the record holds, rather than a refusal that \
+             contradicts what the first caller was told about the same actuation"
+        );
+    }
+
+    /// **A reconnect that lands mid-turn can still stop the turn it landed in.**
+    ///
+    /// A connection watches no `turn/started` for a turn that began before it
+    /// existed — the app-server broadcasts that frame once and never replays it — so
+    /// a link that comes up during a long turn has nothing that says a turn is
+    /// running. The accepted `thread/resume` answer is the only witness there is, and
+    /// a stop control that ignored it left the operator with a Stop button that
+    /// refused every tap for the whole of the turn they were watching, saying the
+    /// turn "may have finished already" while the same daemon's own log said it was
+    /// still running.
+    ///
+    /// **Exactly one, and only one this daemon has not already watched finish.** An
+    /// answer describing two running turns says nothing about which one the phone is
+    /// looking at, and a stale answer describing a turn whose terminal is already
+    /// filed is a snapshot rather than news — both are covered by their own legs
+    /// below, and both seed nothing rather than guessing.
+    ///
+    /// **Mutation:** drop the seeding and the first leg goes red; drop the
+    /// exactly-one rule and the second does; drop the terminal-filed query and the
+    /// third does.
+    #[tokio::test]
+    async fn a_resume_that_reports_one_turn_still_running_leaves_that_turn_stoppable() {
+        /// A turn id the capture never produces, so nothing has ever filed its
+        /// terminal: the turn that began while this link was down.
+        const NOVEL_TURN: &str = "01a039a2-585f-7040-9771-3b334eea3b36";
+        /// A second one, for the answer that cannot say which turn is meant.
+        const OTHER_TURN: &str = "01a039a2-585f-7040-9771-3b334eea3b37";
+
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A20".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+
+        // **One running turn, and this daemon has filed no terminal for it.** The
+        // reconnect-mid-turn case, and the only one that seeds.
+        {
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = attaching(&daemon, &session, &mut adapter, &mut amend);
+            let answer = lifecycle_answer_novel_turn(1, LIFECYCLE_THREAD, NOVEL_TURN);
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&answer["result"], LIFECYCLE_THREAD)
+                .expect("a readable answer");
+            conn.attach_from_seed(seed, LIFECYCLE_THREAD).await.unwrap();
+            assert_eq!(
+                conn.stoppable_turn(),
+                Some(NOVEL_TURN),
+                "the resume answer is the only witness that this turn is running, so a \
+                 stop naming it must be admitted"
+            );
+        }
+
+        // **Two running turns.** The answer does not say which one the phone was
+        // shown, so it seeds neither rather than picking one.
+        {
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = attaching(&daemon, &session, &mut adapter, &mut amend);
+            let mut answer = lifecycle_answer_novel_turn(2, LIFECYCLE_THREAD, NOVEL_TURN);
+            let running = answer["result"]["thread"]["turns"][0].clone();
+            let mut second = running.clone();
+            second["id"] = json!(OTHER_TURN);
+            answer["result"]["thread"]["turns"] = json!([running, second]);
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&answer["result"], LIFECYCLE_THREAD)
+                .expect("a readable answer");
+            assert_eq!(seed.running_turns(), 2, "the premise of this leg");
+            conn.attach_from_seed(seed, LIFECYCLE_THREAD).await.unwrap();
+            assert_eq!(
+                conn.stoppable_turn(),
+                None,
+                "an answer naming two running turns cannot say which one a stop meant"
+            );
+        }
+
+        // **A stale answer.** Its running turn is one this daemon watched finish, so
+        // the answer is a snapshot taken before that completion rather than news.
+        {
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = attaching(&daemon, &session, &mut adapter, &mut amend);
+            // File the terminal first, exactly as watching the turn end would.
+            let settled = lifecycle_answer(3, LIFECYCLE_THREAD, |_| {});
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&settled["result"], LIFECYCLE_THREAD)
+                .expect("a readable answer");
+            conn.attach_from_seed(seed, LIFECYCLE_THREAD).await.unwrap();
+            assert!(
+                daemon
+                    .db
+                    .turn_terminal_filed(
+                        session.uid.clone(),
+                        crate::codex_adapter::turn_terminal_source_event_id(
+                            LIFECYCLE_THREAD,
+                            LIFECYCLE_TURN,
+                        ),
+                    )
+                    .await
+                    .unwrap(),
+                "the premise of this leg: the terminal is filed"
+            );
+
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = attaching(&daemon, &session, &mut adapter, &mut amend);
+            let stale = lifecycle_answer_in_progress(4, LIFECYCLE_THREAD);
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&stale["result"], LIFECYCLE_THREAD)
+                .expect("a readable answer");
+            conn.attach_from_seed(seed, LIFECYCLE_THREAD).await.unwrap();
+            assert_eq!(
+                conn.stoppable_turn(),
+                None,
+                "this daemon watched that turn finish, so the answer is stale rather \
+                 than a report that it is running"
+            );
+        }
+    }
+
+    /// **A visit the link has left leaves no turn a stop may name.**
+    ///
+    /// A turn belongs to the visit it started in. The three places a visit moves — a
+    /// `/new` announced on this connection, a chased thread given up on, and a held
+    /// candidate applied — all leave the previous visit's turn behind, and a stop
+    /// still aimed at it would take a durable claim and write a frame for an
+    /// actuation the broker is certain to refuse. That is a ledger row recording
+    /// something that never happened, which is the exact thing claiming-before-writing
+    /// exists to avoid.
+    ///
+    /// **Mutation:** drop the clear from any one of the three moves and that leg goes
+    /// red.
+    #[tokio::test]
+    async fn a_visit_that_moves_leaves_no_turn_a_stop_may_name() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A21".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+
+        // A `/new` announced on this connection, which follows the switch outright.
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.note_turn_start(&turn_started(LIFECYCLE_THREAD, APPROVAL_TURN));
+        assert_eq!(conn.stoppable_turn(), Some(APPROVAL_TURN), "the premise");
+        conn.bind_or_follow(&thread_started(SWITCHED_THREAD));
+        assert_eq!(
+            conn.stoppable_turn(),
+            None,
+            "the session moved to another thread; the turn it left is not stoppable"
+        );
+
+        // Giving up on a chased thread is a move too — a NEW visit of the old thread.
+        conn.visit.thread_id = Some(SWITCHED_THREAD.to_string());
+        conn.note_turn_start(&turn_started(SWITCHED_THREAD, APPROVAL_TURN));
+        assert_eq!(conn.stoppable_turn(), Some(APPROVAL_TURN), "the premise");
+        conn.revert_visit_to(LIFECYCLE_THREAD);
+        assert_eq!(
+            conn.stoppable_turn(),
+            None,
+            "the link gave up on that thread; its turn is not stoppable"
+        );
+
+        // And a candidate the loop applies once an outstanding resume has settled.
+        conn.note_turn_start(&turn_started(LIFECYCLE_THREAD, APPROVAL_TURN));
+        assert_eq!(conn.stoppable_turn(), Some(APPROVAL_TURN), "the premise");
+        conn.switch_candidate = Some(SWITCHED_THREAD.to_string());
+        assert_eq!(
+            conn.apply_switch_candidate(),
+            Some(LIFECYCLE_THREAD.to_string())
+        );
+        assert_eq!(
+            conn.stoppable_turn(),
+            None,
+            "the held switch landed; the turn of the visit it left is not stoppable"
+        );
+    }
+
+    /// **A turn that has ended is not one a stop may name.**
+    ///
+    /// The terminal is the moment the turn stops being interruptible, and clearing it
+    /// here is what makes the local gate refuse a late tap before a claim rather than
+    /// after one. Every other test in this file starts a connection at `None`, so
+    /// nothing but this asserts the clear.
+    ///
+    /// **Mutation:** drop the clear in the turn terminal and this goes red.
+    #[tokio::test]
+    async fn a_turn_terminal_leaves_no_turn_a_stop_may_name() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A22".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        conn.note_turn_start(&turn_started(LIFECYCLE_THREAD, APPROVAL_TURN));
+        assert_eq!(conn.stoppable_turn(), Some(APPROVAL_TURN), "the premise");
+        conn.observe_notification(&approval_turn_terminal(LIFECYCLE_THREAD, "completed"))
+            .await;
+        assert_eq!(
+            conn.stoppable_turn(),
+            None,
+            "the turn is over, so nothing may name it as the one to stop"
+        );
     }
 
     /// **An interrupt clears the card, and the resolution that follows is a
@@ -15230,7 +18315,7 @@ mod tests {
         assert!(
             link.daemon
                 .store
-                .unsettled_answer_claims()
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
                 .expect("read the claims")
                 .is_empty(),
             "the claim is terminal, so recovery at the next start has nothing to \

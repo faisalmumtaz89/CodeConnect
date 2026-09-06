@@ -328,6 +328,74 @@ impl Db {
         .await
     }
 
+    /// Take durable ownership of one mutation of any kind, or find out who already
+    /// has.
+    ///
+    /// The general form of [`Db::claim_answer_mutation`]. Kept beside it rather than
+    /// replacing it: the answer path names its own kind in one place and this one
+    /// takes it, which is what lets a second producer share the primitive without
+    /// either being able to claim under the other's key by accident.
+    pub async fn claim_mutation(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        claimed: crate::store::ClaimedMaterial,
+        now: String,
+    ) -> Result<crate::store::MutationClaim> {
+        self.run(move |store| {
+            store.claim_mutation(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                &claimed,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Record a mutation's terminal outcome, so a retry replays it rather than
+    /// actuating again. `false` when the claim was already terminal.
+    pub async fn settle_mutation(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        outcome: &'static str,
+        settled_at: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                outcome,
+                &settled_at,
+            )
+        })
+        .await
+    }
+
+    /// Make one claim terminal without being able to say what it did.
+    pub async fn settle_mutation_indeterminate(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        settled_at: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation_indeterminate(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                &settled_at,
+            )
+        })
+        .await
+    }
+
     /// Record an answer's terminal outcome for a card that is not being retired —
     /// a loss, where something else answered and its own terminal retires the
     /// card. `false` when the claim was already terminal.
@@ -380,19 +448,37 @@ impl Db {
             .await
     }
 
-    /// Every phone answer this daemon left mid-flight, for recovery.
-    pub async fn unsettled_answer_claims(&self) -> Result<Vec<crate::store::AnswerClaimRow>> {
-        self.run(|store| store.unsettled_answer_claims()).await
+    /// Every mutation of one kind this daemon left mid-flight, for recovery.
+    pub async fn unsettled_claims(
+        &self,
+        operation_kind: &'static str,
+    ) -> Result<Vec<crate::store::MutationClaimRow>> {
+        self.run(move |store| store.unsettled_claims(operation_kind))
+            .await
     }
 
-    /// The applying answer claims of one session, for settling its stranded
-    /// claims at a handover rather than the whole store at a restart.
-    pub async fn unsettled_answer_claims_for(
+    /// The applying claims of one kind belonging to one session, for settling its
+    /// stranded claims at a handover rather than the whole store at a restart.
+    pub async fn unsettled_claims_for(
         &self,
+        operation_kind: &'static str,
         session_uid: String,
-    ) -> Result<Vec<crate::store::AnswerClaimRow>> {
-        self.run(move |store| store.unsettled_answer_claims_for(&session_uid))
+    ) -> Result<Vec<crate::store::MutationClaimRow>> {
+        self.run(move |store| store.unsettled_claims_for(operation_kind, &session_uid))
             .await
+    }
+
+    /// Where one claim of any kind stands, durably.
+    pub async fn mutation_status(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+    ) -> Result<Option<crate::store::MutationState>> {
+        self.run(move |store| {
+            store.mutation_status(operation_kind, &session_uid, &client_request_id)
+        })
+        .await
     }
 
     pub async fn claim_text_mutation(

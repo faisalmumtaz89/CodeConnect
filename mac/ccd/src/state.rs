@@ -254,7 +254,7 @@ pub struct Daemon {
     /// re-reads the epoch under the new owner and is handed the replacement's link or
     /// none at all. The outgoing sender is never reachable across the stake.
     ///
-    /// **An `RwLock`, and not a mutex, because answers are not rivals of each
+    /// **An `RwLock`, and not a mutex, because actuations are not rivals of each
     /// other.** A session can have two cards open and answer both at once — the link
     /// is built for it, and its ask channel carries one entry per open card — so
     /// answers take the READ side and stay concurrent exactly as they were. The stake
@@ -262,10 +262,17 @@ pub struct Daemon {
     /// would have bought the same safety by serialising a concurrency the link
     /// deliberately supports, which is a narrowing nothing in this design needs.
     ///
+    /// **It fences every actuating write and not only an answer**, which is why it is
+    /// named for the class rather than for the first member of it. A phone interrupt
+    /// reaches the link the same way — epoch compared under `inner`, sender cloned,
+    /// claim and socket write outside it — so it has the same window and takes the
+    /// same read side. Nothing about the gate changed to admit it; what changed is
+    /// that the name now says what it was always holding.
+    ///
     /// Same shape and same one-way ordering as the two gates above — gate, then
     /// `inner`, never the reverse — and taken INSIDE the registration gate on the
     /// registration path, so the two can never be acquired in opposite orders.
-    answer_gates: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    actuation_gates: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// Held for the duration of a liveness sweep, so two never overlap.
     ///
     /// Taken with `try_lock`, which makes a slow sweep skip the next tick
@@ -283,6 +290,36 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+}
+
+/// **What the Claude-only gate found**, for the callers that must tell two refusals
+/// apart — see [`Daemon::refuse_unless_claude`].
+///
+/// A bare `Option<String>` could not: it had exactly one shape for "no", so an
+/// unknown session had to be either refused with the wrong sentence or admitted, and
+/// it was admitted. That made a gate whose whole contract is to fail closed fail open
+/// on the one input it cannot vouch for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaudeOnly {
+    /// The run is hosted, and it is Claude's. The operation may proceed.
+    Admitted,
+    /// The run is hosted and is not Claude's. The connection is welcome; this
+    /// particular thing is not something the daemon can do for this agent.
+    WrongAgent(String),
+    /// **The reference names no run this daemon can vouch for**, or the row could not
+    /// be read. Not evidence that the run is Claude's, and callers that have a code
+    /// for "no such run" should send that one rather than a refusal about authority.
+    Unknown(String),
+}
+
+impl ClaudeOnly {
+    /// The sentence, for a caller with one refusal to give whichever way it went.
+    pub fn reason(self) -> Option<String> {
+        match self {
+            ClaudeOnly::Admitted => None,
+            ClaudeOnly::WrongAgent(why) | ClaudeOnly::Unknown(why) => Some(why),
+        }
+    }
 }
 
 /// How a `hello` was (or was not) authenticated.
@@ -700,6 +737,7 @@ struct LinkCells {
     presence: crate::codex_link::LinkPresence,
     carry: crate::codex_link::LinkCarry,
     answers: crate::codex_link::LinkAnswers,
+    interrupts: crate::codex_link::LinkInterrupts,
 }
 
 struct CodexLinkHandle {
@@ -730,6 +768,12 @@ struct CodexLinkHandle {
     /// no longer owns. Taking the sender out of the map with the handle is what makes
     /// that unreachable rather than unlikely.
     answers: crate::codex_link::LinkAnswers,
+    /// **How the daemon asks this link to stop the turn it is watching** — see
+    /// [`crate::codex_link::LinkInterrupts`]. On the handle for the same lifetime
+    /// reason as the answer sender beside it, and the same sharp case: an interrupt
+    /// that reached a superseded task would aim a stop at a socket the session no
+    /// longer owns.
+    interrupts: crate::codex_link::LinkInterrupts,
     /// **What the link itself knows** — see [`crate::codex_link::LinkCarry`]. The
     /// other cell, on the handle for the same lifetime reason as the presence one,
     /// and read by exactly one caller: [`Inner::retain_codex_carry`]. **Not when
@@ -748,16 +792,31 @@ const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
 /// *above* the answer's worst case and not merely equal to it.
 const ANSWER_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
 
-/// How long a registration waits for the outgoing link's admitted answers to reach a
-/// terminal before it stops waiting and aborts that link instead.
+/// **The slower of the two waits an actuation can be in**, so the budget below bounds
+/// whichever one the outgoing link happens to be holding.
 ///
-/// **Derived from the answer's real worst case, not restated**. An
-/// admitted answer's whole passage is the durable claim, then
-/// [`crate::codex_link::SEND_BUDGET`] on the socket write, then
-/// [`crate::codex_link::DISPOSITION_BUDGET`] on the broker's account of it. This is
+/// An answer waits for the broker's disposition; an interrupt waits for the turn's own
+/// terminal. They are the same fifteen seconds today, and taking the maximum rather
+/// than naming one is what keeps this true if either is re-measured.
+const SLOWEST_ACTUATION_WAIT: Duration = if crate::codex_link::DISPOSITION_BUDGET.as_millis()
+    >= crate::codex_link::INTERRUPT_BUDGET.as_millis()
+{
+    crate::codex_link::DISPOSITION_BUDGET
+} else {
+    crate::codex_link::INTERRUPT_BUDGET
+};
+
+/// How long a registration waits for the outgoing link's admitted actuations to reach
+/// a terminal before it stops waiting and aborts that link instead.
+///
+/// **Derived from the actuation's real worst case, not restated**. An admitted
+/// actuation's whole passage is the durable claim, then
+/// [`crate::codex_link::SEND_BUDGET`] on the socket write, then the wait for whatever
+/// says what became of it — [`SLOWEST_ACTUATION_WAIT`], which is the broker's
+/// disposition for an answer and the turn's own terminal for an interrupt. This is
 /// that sum plus [`ANSWER_QUIESCE_MARGIN`], computed from those constants so the
-/// invariant "above the answer's worst case" holds by construction in BOTH builds —
-/// the old hand-copied `cfg(test)` literal (5 s) was *below* the test worst case
+/// invariant "above the actuation's worst case" holds by construction in BOTH builds
+/// — the old hand-copied `cfg(test)` literal (5 s) was *below* the test worst case
 /// (`SEND_BUDGET` alone did not shrink under test), which is the inverse of the
 /// invariant it claimed.
 ///
@@ -769,12 +828,13 @@ const ANSWER_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
 /// and from *above* the park — converted a recoverable stall into a permanent,
 /// self-renewing wedge, because the supervisor's backoff loop re-registers forever
 /// and every attempt bailed before reaching the only thing that unwedges a stuck
-/// answer. On any path the wire can produce the wait ends because the answer ended,
-/// well within budget; the clock is the backstop for a link that has stopped bounding
-/// itself, and aborting it is strictly safer than leaving the session wedged.
+/// answer. On any path the wire can produce the wait ends because the actuation
+/// ended, well within budget; the clock is the backstop for a link that has stopped
+/// bounding itself, and aborting it is strictly safer than leaving the session
+/// wedged.
 const ANSWER_QUIESCE_BUDGET: Duration = Duration::from_millis(
     (crate::codex_link::SEND_BUDGET.as_millis()
-        + crate::codex_link::DISPOSITION_BUDGET.as_millis()
+        + SLOWEST_ACTUATION_WAIT.as_millis()
         + ANSWER_QUIESCE_MARGIN.as_millis()) as u64,
 );
 
@@ -1001,6 +1061,7 @@ impl Inner {
                 task,
                 presence: cells.presence,
                 answers: cells.answers,
+                interrupts: cells.interrupts,
                 carry: cells.carry,
             },
         ) {
@@ -1782,7 +1843,7 @@ impl Daemon {
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
             registration_gates: Mutex::new(HashMap::new()),
-            answer_gates: Mutex::new(HashMap::new()),
+            actuation_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
@@ -2116,6 +2177,20 @@ impl Daemon {
                  only one that can retire the cards beside them"
             );
         }
+        // **The other actuating verb, and it is NOT behind that gate.**
+        //
+        // The whole reason the answer recovery waits for the cards is that settling an
+        // answer retires a card, and retiring a card the restore never read files a
+        // resolution against something that is not there. An interrupt has no card:
+        // there is nothing beside the ledger row to retire, and nothing a failed card
+        // read could make this get wrong.
+        //
+        // Standing inside that gate was therefore a hazard for free. A start whose
+        // pending-approval read failed left every in-flight interrupt `applying`, so
+        // the phone that asked for the stop was told the outcome was unknowable at the
+        // next start instead of this one — and in the meantime the id could not be
+        // reused. The failure that kept it there had nothing to do with interrupts.
+        self.recover_codex_interrupts().await;
     }
 
     /// Record a claimed-but-unsettled answer as a terminal unknown.
@@ -2219,14 +2294,15 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
-    /// The gate serializing one session's phone answers against the stake that hands
-    /// the session to a replacement registration. See [`Daemon::answer_gates`] for
-    /// what it is protecting and why an epoch comparison could not.
+    /// The gate serializing one session's actuating writes — a phone answer, a phone
+    /// interrupt — against the stake that hands the session to a replacement
+    /// registration. See [`Daemon::actuation_gates`] for what it is protecting and
+    /// why an epoch comparison could not.
     ///
     /// Same eviction rule as its two siblings: an entry nobody holds is dropped, so
     /// the map is bounded by live sessions rather than by every session ever seen.
-    async fn answer_gate(&self, session_uid: &str) -> Arc<tokio::sync::RwLock<()>> {
-        let mut gates = self.answer_gates.lock().await;
+    async fn actuation_gate(&self, session_uid: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut gates = self.actuation_gates.lock().await;
         gates.retain(|_, gate| Arc::strong_count(gate) > 1);
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
@@ -2314,11 +2390,18 @@ impl Daemon {
                     }
                 }
                 let remaining = parked.len();
-                // The ledger goes with the carry, so it is captured before retention
-                // consumes the parked cell.
-                let to_settle: Vec<crate::codex_link::OpenAnswers> = stopped
+                // **Both ledgers go with the carry**, and both are captured before
+                // retention consumes the parked cell. An interrupt is settled here for
+                // the same reason an answer is — the abort stopped the task before its
+                // own teardown could speak for what it wrote — and the two must be
+                // taken together, because a link holding one of each would otherwise
+                // leave whichever one this loop forgot.
+                let to_settle: Vec<(
+                    crate::codex_link::OpenAnswers,
+                    crate::codex_link::OpenInterrupts,
+                )> = stopped
                     .iter()
-                    .map(|parked| parked.carry.open_answers())
+                    .map(|parked| (parked.carry.open_answers(), parked.carry.open_interrupts()))
                     .collect();
                 for parked in stopped {
                     inner.retain_codex_carry(&session.uid, parked);
@@ -2328,12 +2411,20 @@ impl Daemon {
                 }
                 (remaining, empty, to_settle)
             };
-            for open in &to_settle {
+            for (answers, interrupts) in &to_settle {
                 crate::codex_link::settle_open_answers(
                     self,
                     session,
-                    open,
+                    answers,
                     "the link to this Codex session was aborted while this answer was in flight",
+                )
+                .await;
+                crate::codex_link::settle_open_interrupts(
+                    self,
+                    session,
+                    interrupts,
+                    "the link to this Codex session was aborted while this request to stop \
+                     the turn was in flight",
                 )
                 .await;
             }
@@ -2455,6 +2546,7 @@ impl Daemon {
         inner.seed_codex_presence(&session.uid, &link, &presence);
         let generation = link.generation;
         let (answers, asks) = crate::codex_link::answer_channel();
+        let (interrupts, stops) = crate::codex_link::interrupt_channel();
         let outcome = inner.spawn_codex_link_if_owner(
             &session.uid,
             epoch,
@@ -2463,6 +2555,7 @@ impl Daemon {
                 presence: presence.clone(),
                 carry: carry.clone(),
                 answers,
+                interrupts,
             },
             || {
                 tokio::spawn(crate::codex_link::run(
@@ -2472,6 +2565,7 @@ impl Daemon {
                     presence,
                     carry,
                     asks,
+                    stops,
                 ))
             },
         );
@@ -4607,7 +4701,7 @@ impl Daemon {
         //    write that follow are not, and without this gate a replacement
         //    registration could stake the session inside that gap and the outgoing
         //    link would go on to write a response on a socket the session had left.
-        //    See [`Daemon::answer_gates`]. Ordering: answer gate, then `inner` — the
+        //    See [`Daemon::actuation_gates`]. Ordering: answer gate, then `inner` — the
         //    same one-way rule the other two gates keep, and the registration path
         //    takes this one INSIDE its own gate so the pair can never invert. The
         //    READ side, so two cards answered at once stay concurrent — the stake is
@@ -4620,7 +4714,7 @@ impl Daemon {
         // into [`crate::codex_link::AnswerRequest`]/`PendingAnswer` and is only released
         // at pre-write refusal or terminal teardown, so the registration's write side
         // genuinely waits for the response to finish, not merely for this caller to.
-        let quiesce = self.answer_gate(&session.uid).await;
+        let quiesce = self.actuation_gate(&session.uid).await;
         let admitted = Arc::clone(&quiesce).read_owned().await;
         let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid, &admitted);
         let report = match link {
@@ -4651,6 +4745,306 @@ impl Daemon {
         }
     }
 
+    /// **Stop the turn a Codex session is running, from a phone.**
+    ///
+    /// Idempotent by `(session, request_id)` in the generalized mutation ledger, and
+    /// bound to one turn by `payload_hash` — so a retry can never abort a *different*
+    /// turn the session has since moved on to, which is the whole reason the hash is
+    /// on the wire.
+    ///
+    /// # What this refuses before it claims anything, and why each one is here
+    ///
+    /// The broker refuses an interrupt that does not name this session's running turn,
+    /// and that refusal is real and measured. It is not sufficient, and the three
+    /// checks below are the difference.
+    ///
+    ///   * **The agent.** "Not Claude" is not evidence of Codex, so every kind is
+    ///     named and anything this build does not understand fails closed — the same
+    ///     rule [`Daemon::answer`] states at the same point in its own path.
+    ///   * **The turn.** The phone names a turn it saw. The `payload_hash` beside it
+    ///     is a CHECKSUM and not a binding — it is recomputed here from the very two
+    ///     fields the request carries, so it can only catch a request whose parts were
+    ///     corrupted or reassembled in transit, never one whose turn a caller chose to
+    ///     change. The turn id itself is the authorization, and it is checked against
+    ///     the turn the link is actually watching.
+    ///   * **The link.** An interrupt handed to a connection that is not subscribed
+    ///     to the turn's thread is accepted into silence, and the operator is owed
+    ///     the reason rather than a wait.
+    ///
+    /// The generation is checked too, and it is checked by the LINK rather than here:
+    /// it is the connection's own visit counter, and reading it from any other place
+    /// would be reading a copy.
+    pub async fn interrupt(
+        &self,
+        session_ref: &str,
+        request_id: &str,
+        turn_id: &str,
+        payload_hash: &str,
+    ) -> protocol::ws::InterruptResult {
+        use protocol::ws::InterruptResult;
+
+        let refuse = |reason: String| InterruptResult::Rejected { reason };
+
+        // 1. **The run, and the agent that is running in it — before any lock or
+        //    durable claim.** An unreadable row is a refusal too: unreadable is not
+        //    evidence of Codex any more than "not Claude" is.
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse(format!("unknown session {session_ref}")),
+            Err(err) => return refuse(format!("session lookup failed: {err}")),
+        };
+        match row.agent {
+            protocol::agent::AgentKind::Codex => {}
+            // Claude has no interrupt on this wire. Its stop control is the keyboard
+            // at the Mac, and saying so is more useful than a bare refusal.
+            protocol::agent::AgentKind::Claude => {
+                return refuse(format!(
+                    "{} is a Claude session, which this daemon cannot stop from a phone; \
+                     press Escape at the Mac",
+                    row.session_uid
+                ))
+            }
+            protocol::agent::AgentKind::Unsupported(ref name) => {
+                return refuse(format!(
+                    "{} is a {name} session, which this daemon does not know how to stop; \
+                     nothing was sent",
+                    row.session_uid
+                ))
+            }
+        }
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 2. **The checksum, and it is called that on purpose.** It is recomputed
+        //    here from the same two fields the request carries, so it catches a
+        //    request whose parts were corrupted or reassembled in transit and nothing
+        //    else — a caller that changes the turn and recomputes the hash passes it
+        //    trivially. What actually authorizes the stop is the turn id, checked
+        //    below against the turn the link is watching and again by the broker
+        //    against the turn the session is running.
+        let expected = protocol::hash::interrupt_hash(session_ref, turn_id);
+        if expected != payload_hash {
+            return refuse(
+                "stale payload_hash: the turn you asked to stop is not the one this \
+                 request names; nothing was sent"
+                    .into(),
+            );
+        }
+        if turn_id.is_empty() {
+            return refuse("this request names no turn, so there is nothing to stop".into());
+        }
+
+        // 3. **The durable ledger wins over everything.** A terminal claim outlives
+        //    the turn it named, and a duplicate must replay what the first attempt
+        //    recorded rather than aim a second stop at whatever is running now.
+        //
+        //    **And a duplicate is a second ask carrying the same material, not merely
+        //    the same id.** The ledger's own claim primitive will not call two asks a
+        //    duplicate unless every field agrees, and reading a terminal here without
+        //    applying that same law is how one id reused for the turn running NOW
+        //    comes back as `Duplicate` naming that turn — telling the operator the
+        //    turn in front of them has already been stopped when nothing has touched
+        //    it. So the material comes back with the status and is compared before
+        //    anything is replayed.
+        //
+        //    **Compared on what the CLIENT bound**: the turn it named and the hash
+        //    binding this ask to that turn. The thread and the visit generation are
+        //    this daemon's own bookkeeping — a person who reused an id has done
+        //    nothing wrong about a visit they cannot see — and they stay where they
+        //    can mean something, as the live pre-write checks the link makes.
+        match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                session.uid.clone(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(Some(state)) => {
+                // Compared against the NORMALISED material below, for the reason given
+                // there: the caller's own hash is a checksum over whichever reference
+                // they used, and two spellings of one run must not read as two asks.
+                let bound_to_the_same_turn = state.claimed.target_turn_id.as_deref()
+                    == Some(turn_id)
+                    && state.claimed.claimed_hash
+                        == protocol::hash::interrupt_hash(&row.session_uid, turn_id);
+                if !bound_to_the_same_turn {
+                    return refuse(
+                        "this request id was used to stop a different turn, so nothing \
+                         was sent; ask again under a new one"
+                            .into(),
+                    );
+                }
+                match state.status {
+                    // Replayed through the one mapping both this path and the link's
+                    // own duplicate arm use, so the two can never disagree about what
+                    // a recorded outcome means.
+                    crate::store::AnswerStatus::Settled(outcome) => {
+                        return Daemon::interrupt_result(
+                            crate::codex_link::replayed_interrupt_report(&outcome, turn_id),
+                        )
+                    }
+                    crate::store::AnswerStatus::Indeterminate => {
+                        return InterruptResult::Indeterminate {
+                            reason: "this interrupt was already sent and what became of it \
+                                     is not known; it will not be sent again. Check the Mac."
+                                .into(),
+                        }
+                    }
+                    // `Applying` is an attempt this very daemon has in flight. Left to
+                    // the link's own claim, which is the one that decides.
+                    crate::store::AnswerStatus::Applying => {}
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return refuse(format!(
+                    "could not read this run's interrupt ledger ({err}); nothing was sent"
+                ))
+            }
+        }
+
+        // 4. **The link must be an addressee for this turn's thread.** `Subscribed`
+        //    and not merely `Bound`: a bound connection receives no `turn/*` frame, so
+        //    an interrupt written on it would be accepted into a silence in which the
+        //    terminal that is its only evidence could never arrive.
+        let (addressee, visit) = {
+            let inner = self.inner.lock().await;
+            Daemon::codex_visit_locked(&inner, &session.uid)
+        };
+        let thread_id = match &addressee {
+            crate::codex_link::CodexAddressee::Subscribed { thread_id } => thread_id.clone(),
+            crate::codex_link::CodexAddressee::Bound { .. } => {
+                return refuse(
+                    "this Mac is connected to the Codex session but is not yet watching \
+                     its thread, so a stop cannot be confirmed; nothing was sent"
+                        .into(),
+                )
+            }
+            // **Three states, three sentences, because they call for three
+            // different things from the person reading them.** They shared one, and
+            // that one was written for the worst of the three: it told somebody whose
+            // Mac was connected and mid-resume that the link was lost, which rules out
+            // the thing that will actually work — waiting a moment and asking again.
+            //
+            // The other half of the same untruth is a past tense a link may not have
+            // earned. "Has lost its control link" says there was one; a link that has
+            // adopted nothing has never had a connection to lose, and telling an
+            // operator something broke when it has simply not started yet sends them
+            // looking for a fault that is not there.
+            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
+                return refuse(
+                    "this Mac has lost its control link to the Codex session and is \
+                     reconnecting, so nothing was sent; try again shortly, or stop the \
+                     turn at the Mac"
+                        .into(),
+                )
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: None } => {
+                return refuse(
+                    "this Mac has not yet reached the Codex session, so nothing was \
+                     sent; try again shortly, or stop the turn at the Mac"
+                        .into(),
+                )
+            }
+            crate::codex_link::CodexAddressee::Unbound { .. } => {
+                return refuse(
+                    "this Mac is connected to the Codex session and is still picking up \
+                     its thread, so nothing was sent; try again in a few seconds"
+                        .into(),
+                )
+            }
+            crate::codex_link::CodexAddressee::NoLink => {
+                return refuse(
+                    "there is no live link to this Codex session, so nothing was sent; \
+                     stop the turn at the Mac"
+                        .into(),
+                )
+            }
+        };
+
+        // 5. **The material this interrupt is claimed with.** The whole authorization
+        //    surface, so the same id carrying a different turn, a different thread or
+        //    a different visit is a conflict rather than a replay. `route` is the
+        //    operation kind's own word for which way the actuation went, and for an
+        //    interrupt there is only one way to go.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id,
+            generation: visit.generation,
+            route: crate::store::INTERRUPT_ROUTE.to_string(),
+            target_turn_id: Some(turn_id.to_string()),
+            // **Recomputed over the RUN rather than over the reference the caller
+            // happened to use.** A phone may name one run by its uid on one tap and by
+            // its tmux name on the next — both resolve here to the same row — and
+            // storing the caller's own hash made those two spellings different
+            // material under one id, which the ledger would have called a conflict. It
+            // is a checksum, so nothing is lost by normalising it; what is gained is
+            // that the same ask about the same turn is the same ask however it was
+            // addressed.
+            claimed_hash: protocol::hash::interrupt_hash(&row.session_uid, turn_id),
+        };
+
+        // 6. **The link claims and writes, in that order, and settles the terminal
+        //    itself** — see [`crate::codex_link::InterruptRequest`]. Held across all
+        //    of it, and taken before `inner`, for [`Daemon::actuation_gates`]'s
+        //    reason: the epoch compared on the next line is compared at an instant and
+        //    the write that follows is not.
+        let quiesce = self.actuation_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link =
+            Daemon::codex_interrupts_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(interrupts) => {
+                interrupts
+                    .interrupt(request_id, claimed, visit.upstream_epoch, admitted)
+                    .await
+            }
+            None => crate::codex_link::InterruptReport::NotApplied(
+                "there is no live link to this Codex session, so nothing was sent; stop \
+                 the turn at the Mac"
+                    .into(),
+            ),
+        };
+        Daemon::interrupt_result(report)
+    }
+
+    /// **The one place a link's report becomes the phone's answer.**
+    ///
+    /// A single mapping because the alternative was two, and they disagreed: the
+    /// daemon's own replay of a settled row and the link's duplicate arm are the same
+    /// question asked at two moments, and one of them used to call an exact aborted
+    /// duplicate a refusal. Whichever moment answers, the operator is owed the same
+    /// sentence.
+    /// **Test-only.** The mapping above, reachable from the link's own tests so they
+    /// can assert what the phone is actually told rather than only what the link
+    /// reported.
+    #[cfg(test)]
+    pub(crate) fn interrupt_result_for_tests(
+        report: crate::codex_link::InterruptReport,
+    ) -> protocol::ws::InterruptResult {
+        Daemon::interrupt_result(report)
+    }
+
+    fn interrupt_result(
+        report: crate::codex_link::InterruptReport,
+    ) -> protocol::ws::InterruptResult {
+        use protocol::ws::InterruptResult;
+        match report {
+            crate::codex_link::InterruptReport::Aborted { turn_id } => {
+                InterruptResult::Aborted { turn_id }
+            }
+            crate::codex_link::InterruptReport::Duplicate { turn_id } => {
+                InterruptResult::Duplicate { turn_id }
+            }
+            crate::codex_link::InterruptReport::NotApplied(reason) => {
+                InterruptResult::Rejected { reason }
+            }
+            crate::codex_link::InterruptReport::Unknown(reason) => {
+                InterruptResult::Indeterminate { reason }
+            }
+        }
+    }
+
     /// **Settle every phone answer this daemon was in the middle of when it
     /// stopped.**
     ///
@@ -4671,7 +5065,11 @@ impl Daemon {
     /// so a settle that ran first would find nothing, file no resolution, and leave
     /// a card every future tap refuses.
     async fn recover_codex_answers(&self) {
-        let claims = match self.db.unsettled_answer_claims().await {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_ANSWER)
+            .await
+        {
             Ok(claims) => claims,
             Err(err) => {
                 crate::log_error!("recovery: could not read codex answer claims: {err:#}");
@@ -4691,6 +5089,80 @@ impl Daemon {
         }
     }
 
+    /// **Settle every phone interrupt this daemon was in the middle of when it
+    /// stopped.**
+    ///
+    /// The counterpart of [`Daemon::recover_codex_answers`], and simpler for the
+    /// reason [`crate::codex_link::settle_open_interrupts`] is simpler: an interrupt
+    /// has no card, so there is nothing to retire beside the ledger row.
+    ///
+    /// An `applying` claim under `interrupt` is one whose write may or may not have
+    /// reached the app-server — the claim is taken only once the live connection has
+    /// accepted the ask, and the write follows immediately — and the turn's terminal,
+    /// which is the only evidence there ever was, is a live notification that is never
+    /// replayed. So nothing that survives the restart can say, and terminal `Unknown`
+    /// is both the truth and the point: the turn is not stopped a second time against
+    /// a session that may have moved on.
+    async fn recover_codex_interrupts(&self) {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex interrupt claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex interrupt(s) were in flight; recording them as unknown \
+             rather than sending again",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_interrupt_claim(&claim).await;
+        }
+    }
+
+    /// **Make one stranded interrupt claim terminal, without being able to say what
+    /// it did.**
+    ///
+    /// Shared by the restart recovery and the registration handover, so both close the
+    /// same claim the same way — the mistake the answer path's own history warns
+    /// about, where two closers of one obligation drifted.
+    async fn settle_stranded_interrupt_claim(&self, claim: &crate::store::MutationClaimRow) {
+        match self
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                claim.session_uid.clone(),
+                claim.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => crate::log_warn!(
+                "the interrupt {} for {} (turn {:?}) is recorded as unknown: it was in \
+                 flight when this daemon stopped and will not be sent again",
+                claim.client_request_id,
+                claim.session_uid,
+                claim.claimed.target_turn_id
+            ),
+            // Something already made it terminal. Nothing to do and nothing wrong:
+            // first terminal wins here as it does everywhere else in this ledger.
+            Ok(false) => {}
+            Err(err) => crate::log_error!(
+                "recovery: could not settle the interrupt claim {} for {}: {err:#}",
+                claim.client_request_id,
+                claim.session_uid
+            ),
+        }
+    }
+
     /// **Make one stranded answer claim terminal `Unknown`, card and all.**
     ///
     /// The per-claim half of [`Daemon::recover_codex_answers`], shared with the
@@ -4705,7 +5177,7 @@ impl Daemon {
     /// whether the run is there, and settling the ledger on the strength of it
     /// strands whatever card the run still has, so the claim is left live for the
     /// next attempt.
-    async fn settle_stranded_answer_claim(&self, claim: &crate::store::AnswerClaimRow) {
+    async fn settle_stranded_answer_claim(&self, claim: &crate::store::MutationClaimRow) {
         let now = protocol::time::now_rfc3339();
         let row = match self.db.get_session(claim.session_uid.clone()).await {
             Ok(Some(row)) => Some(row),
@@ -4772,56 +5244,146 @@ impl Daemon {
         }
     }
 
-    /// **Durably settle every applying answer claim of an outgoing session.**
+    /// **Durably settle every applying claim of an outgoing session, of every kind.**
     ///
-    /// The claim row is committed before the answer enters the daemon's in-memory
-    /// `open_answers`, and the write that commits it cannot be cancelled, so a
-    /// handover that aborts the outgoing link and settles that ledger can miss a
-    /// claim caught in the window between the two: committed, but never in the
-    /// ledger the abort walks. This reads the claims from the authoritative record
-    /// — the store — and makes each terminal `Unknown`, card retired, by the same
-    /// path a restart's recovery uses. Run after the link is aborted and before
-    /// the replacement is staked, it leaves no `applying` claim and no open card
-    /// for a session the daemon is handing on.
-    /// Settle any answer claim the outgoing link committed but never reached the
-    /// in-memory ledger to settle by hand.
+    /// Both actuating verbs commit their durable claim BEFORE the mutation enters the
+    /// link's in-memory ledger, and the write that commits it is a `spawn_blocking`
+    /// that a cancellation cannot stop. So an abort has a window it cannot see: the
+    /// row is `applying` in the store and `open_answers`/`open_interrupts` hold
+    /// nothing, and the ledger walk the abort performs finds nothing to do. This reads
+    /// the authoritative record — the claim rows themselves — and makes each terminal
+    /// the way a restart's recovery would: the answer's card retired beside its row,
+    /// the interrupt's row alone.
     ///
-    /// The abort above settles what is in `open_answers`, but a phone answer writes
-    /// its durable claim before it enters that ledger and the write cannot be
-    /// cancelled, so an abort in that window leaves an `applying` claim with an open
-    /// card the abort never saw. This reads the authoritative record — the claim rows
-    /// themselves — and settles each the way a restart's recovery would, so the card
-    /// is retired before the stake rather than lingering until the next start. The one
-    /// tail it cannot cover is a write that commits *strictly after* this read; that
-    /// claim is no worse off than before this sweep existed, and a restart's recovery
-    /// remains its backstop.
-    async fn sweep_stranded_answer_claims(&self, session_uid: &str) {
-        let claims = match self
-            .db
-            .unsettled_answer_claims_for(session_uid.to_string())
-            .await
-        {
-            Ok(claims) => claims,
-            Err(err) => {
-                crate::log_error!(
-                    "handover for {session_uid}: could not read the outgoing session's \
-                     answer claims, so a claim committed but not yet in the ledger may be \
-                     left applying until the next start: {err:#}"
-                );
-                return;
+    /// **Run on every in-process abort path**: the quiesce-timeout handover, the
+    /// registration that parks and joins the incumbent (an exit replay included, which
+    /// takes no quiesce and so passes no other sweep), and a supervisor disconnecting.
+    /// Each of those is a moment after which nothing else will ever speak for what
+    /// that link was holding, so a claim left `applying` there sits until the next
+    /// daemon start with its card open on somebody's phone.
+    ///
+    /// **Over [`crate::store::OPERATION_KINDS`] rather than a call per kind.** The two
+    /// closers differ and the `match` below says so; what must not differ is which
+    /// kinds a given abort path covers, and three call sites naming two kinds each is
+    /// six chances to cover one and forget the other — which is exactly the shape the
+    /// interrupt ledger was in.
+    ///
+    /// The one tail it cannot cover is a write that commits *strictly after* this
+    /// read. That claim is no worse off than before this sweep existed, and a
+    /// restart's recovery remains its backstop.
+    async fn sweep_stranded_claims(&self, session_uid: &str, occasion: &str) {
+        for kind in crate::store::OPERATION_KINDS {
+            let claims = match self
+                .db
+                .unsettled_claims_for(kind, session_uid.to_string())
+                .await
+            {
+                Ok(claims) => claims,
+                Err(err) => {
+                    crate::log_error!(
+                        "{occasion} for {session_uid}: could not read the outgoing \
+                         session's {kind} claims, so one committed but not yet in the \
+                         ledger may be left applying until the next start: {err:#}"
+                    );
+                    continue;
+                }
+            };
+            if claims.is_empty() {
+                continue;
             }
-        };
-        if claims.is_empty() {
-            return;
+            crate::log_warn!(
+                "{occasion} for {session_uid}: {} {kind} claim(s) were still applying on \
+                 the outgoing link; recording them as unknown rather than leaving them \
+                 for the next start",
+                claims.len()
+            );
+            for claim in claims {
+                // **A `&str` match cannot be exhaustive, so the last arm is a loud
+                // failure rather than a silent default.** Closing an unknown kind the
+                // way an interrupt is closed would settle a row whose obligations —
+                // a card, say — nothing had discharged.
+                match kind {
+                    crate::store::OPERATION_ANSWER => {
+                        self.settle_stranded_answer_claim(&claim).await
+                    }
+                    crate::store::OPERATION_INTERRUPT => {
+                        self.settle_stranded_interrupt_claim(&claim).await
+                    }
+                    other => crate::log_error!(
+                        "{occasion} for {session_uid}: the claim {} is of kind {other}, \
+                         which has no closer here; it is left applying for the next \
+                         start rather than closed the wrong way",
+                        claim.client_request_id
+                    ),
+                }
+            }
         }
-        crate::log_warn!(
-            "handover for {session_uid}: {} answer claim(s) were still applying on the \
-             outgoing link; recording them as unknown rather than leaving them for the \
-             next start",
-            claims.len()
-        );
-        for claim in claims {
-            self.settle_stranded_answer_claim(&claim).await;
+    }
+
+    /// **Refuse an operation that only makes sense against Claude, naming the run's
+    /// own agent.**
+    ///
+    /// [`ClaudeOnly::Admitted`] when the operation may proceed, and one of two
+    /// refusals otherwise. Both carry a sentence a phone can show, because every one
+    /// of these is something a person deliberately asked for and is owed an
+    /// explanation rather than a silence — and they are kept apart because "this run
+    /// is not Claude's" and "this Mac has no such run" are different things to be
+    /// told, and a caller with two close codes should be able to send the right one.
+    ///
+    /// # Why a shared gate and not a check per call site
+    ///
+    /// The two operations behind it are Claude-shaped in different ways, and neither
+    /// was refused explicitly before.
+    ///
+    ///   * **The command catalog** runs the Claude CLI and reads its own inventory of
+    ///     slash commands. A Codex session escaped it only because it happens to
+    ///     report no `claude_bin`, which is an accident of the registration frame
+    ///     rather than a decision — and the sentence it produced ("this session did
+    ///     not report its Claude Code binary") described a missing field rather than
+    ///     the truth, which is that this run has no Claude to ask.
+    ///   * **The terminal attachment** hands a real tmux client to the session's pane
+    ///     and types into it. That is an actuation, and it is the one actuation that
+    ///     does not go through the broker at all — so nothing downstream of it is
+    ///     scoped to an agent, and no gate anywhere else can stand in for this one. A
+    ///     Codex pane belongs to the codex TUI, whose keystrokes and prompts this
+    ///     build has measured nothing about.
+    ///
+    /// **`capture` is deliberately NOT behind it**, and the difference is that it
+    /// actuates nothing: it reads the pane's own screen and returns the text. Reading
+    /// what a Codex session has printed is a fair thing for a phone to do and is not
+    /// a keystroke, so refusing it would remove something useful in the name of a rule
+    /// about writes.
+    ///
+    /// **An unreadable row refuses**, for [`Daemon::answer`]'s reason: unreadable is
+    /// not evidence of Claude.
+    pub async fn refuse_unless_claude(&self, session_ref: &str, what: &str) -> ClaudeOnly {
+        match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => match row.agent {
+                protocol::agent::AgentKind::Claude => ClaudeOnly::Admitted,
+                protocol::agent::AgentKind::Codex => ClaudeOnly::WrongAgent(format!(
+                    "{} is a Codex session, and {what} is a Claude feature this daemon \
+                     does not offer for it",
+                    row.session_uid
+                )),
+                protocol::agent::AgentKind::Unsupported(ref name) => {
+                    ClaudeOnly::WrongAgent(format!(
+                        "{} is a {name} session, and {what} is something this daemon \
+                         can only do for Claude",
+                        row.session_uid
+                    ))
+                }
+            },
+            // **A reference that names nothing is refused here too, and the caller
+            // still chooses the words.** It used to be admitted, on the reasoning that
+            // an unknown session is the caller's sentence to write rather than this
+            // gate's — which is true, and is why the two refusals are told apart
+            // instead of being merged. What was not true is that admitting it was
+            // free: this gate's whole contract is to fail closed, and at the terminal
+            // attach it is the last check before the lease, with no later existence
+            // test behind it. A row this daemon could not find is not evidence that
+            // the run is Claude's.
+            Ok(None) => ClaudeOnly::Unknown(format!("{session_ref} is not a run this Mac hosts")),
+            Err(err) => ClaudeOnly::Unknown(format!("session lookup failed: {err}")),
         }
     }
 
@@ -5695,6 +6257,24 @@ impl Daemon {
                 }
             }
         };
+        // **The agent, read explicitly, before the binary is looked for.** A Codex run
+        // used to reach the next block and be turned away by an empty `claude_bin`,
+        // which is a fact about a registration field rather than about the agent — so
+        // a future registration that carried one would have run the Claude CLI against
+        // a session that is not running Claude. See [`Daemon::refuse_unless_claude`].
+        //
+        // **Asked about the row this function already resolved**, not about the
+        // reference again. A tmux name can resolve to a different run between two
+        // reads — a new session registered under the same name is the whole reason
+        // the resolver is bounded and retried — so resolving twice makes the agent
+        // this refuses on a possibly different run from the one it goes on to probe.
+        if let Some(reason) = self
+            .refuse_unless_claude(&row.session_uid, "the slash-command list")
+            .await
+            .reason()
+        {
+            return CommandCatalogResult::Unavailable { reason };
+        }
         let claude_bin = {
             let inner = self.inner.lock().await;
             inner
@@ -6316,7 +6896,7 @@ impl Daemon {
         // walk never sees. The store sweep that follows the join reads the claims
         // from the authoritative record and makes each terminal, so no claim
         // committed but not yet in the ledger is left applying with its card open.
-        let quiesce = self.answer_gate(&uid).await;
+        let quiesce = self.actuation_gate(&uid).await;
         let quiesced = if info.exit_replay {
             None
         } else {
@@ -6335,7 +6915,15 @@ impl Daemon {
                     let outgoing = SessionKey::new(uid.clone(), info.session_id.clone());
                     self.park_current_codex_link(&uid).await;
                     let _ = self.join_parked_codex_links(&outgoing).await;
-                    self.sweep_stranded_answer_claims(&uid).await;
+                    // **Swept here as well as below, and the difference is the stake.**
+                    // The registration goes on to park, join and sweep again a few
+                    // steps down, so the END STATE of this branch does not depend on
+                    // this call — and no test can tell the two apart, which is the
+                    // honest price of the ordering. What this one buys is that the
+                    // claims are terminal and their cards retired BEFORE the stake,
+                    // rather than several awaits after it, so a phone cannot be shown a
+                    // card for a link that is already gone.
+                    self.sweep_stranded_claims(&uid, "handover").await;
                     None
                 }
             }
@@ -6603,6 +7191,25 @@ impl Daemon {
             // re-aborts it and drops the ones that have proven they stopped.
             let park_clear = self.join_parked_codex_links(&session).await;
 
+            // **The claims the abort above could not see.** The join settles what the
+            // outgoing link held in memory; a claim committed in the window before it
+            // reached that ledger is in the store and nowhere else. This is the only
+            // sweep an **exit replay** passes through — a replay takes no quiesce, so
+            // the quiesce-timeout sweep never runs for it — and it is the one that
+            // covers an ordinary supersession too.
+            //
+            // Guarded by `owns` alone, for the reason the forgetting below is: a stale
+            // registration mutates nothing. **Not** by the join: a survivor that
+            // outlived its budget may still settle its own claims afterwards, and
+            // first-terminal-wins means whichever of the two writes first stands while
+            // the other reports honestly that it did not — see
+            // [`crate::codex_link::Settlement`]. Leaving the sweep out on that path
+            // would trade a truthful "unknown" for a row nothing closes at all.
+            if owns {
+                self.sweep_stranded_claims(&session.uid, "registration")
+                    .await;
+            }
+
             // **The agent boundary is settled first, and it is not conditional on
             // anything above.** A Claude registration forgets where the Codex link
             // left the session: the same uid can change agent, and a later Codex
@@ -6693,6 +7300,7 @@ impl Daemon {
                     // reason its sibling above is one.
                     inner.seed_codex_presence(&session.uid, &link, &presence);
                     let (answers, asks) = crate::codex_link::answer_channel();
+                    let (interrupts, stops) = crate::codex_link::interrupt_channel();
                     let outcome = inner.spawn_codex_link_if_owner(
                         &session.uid,
                         epoch,
@@ -6701,6 +7309,7 @@ impl Daemon {
                             presence: presence.clone(),
                             carry: carry.clone(),
                             answers,
+                            interrupts,
                         },
                         || {
                             tokio::spawn(crate::codex_link::run(
@@ -6710,6 +7319,7 @@ impl Daemon {
                                 presence,
                                 carry,
                                 asks,
+                                stops,
                             ))
                         },
                     );
@@ -6895,6 +7505,18 @@ impl Daemon {
             );
             return;
         }
+        // **The claims the abort above could not see**, for the reason the same sweep
+        // runs at a registration: a claim commits before it reaches the link's own
+        // ledger, so the join walks a map that does not contain it. A disconnect is
+        // the last thing that ever speaks for this link — no replacement is coming,
+        // by definition — so a row left `applying` here waits for the next daemon
+        // start with its card open on somebody's phone.
+        //
+        // After the `released` test, and only after it: a stale disconnect is not this
+        // session's to settle, and sweeping on one would make a live registration's
+        // claims terminal underneath it.
+        self.sweep_stranded_claims(&registration.session.uid, "disconnect")
+            .await;
         let pending = PendingEvent::new(
             &registration.session,
             EventKind::LinkState,
@@ -7366,6 +7988,26 @@ impl Daemon {
             .map(|held| held.answers.clone())
     }
 
+    /// **The link's interrupt sender, if the handle in the slot is the one the
+    /// session's current registration owns.**
+    ///
+    /// [`Daemon::codex_answers_locked`]'s twin, taking the same guard by reference for
+    /// the same reason: it makes "clone the sender only under the actuation gate" a
+    /// type fact rather than a rule a caller has to remember, so the reordering that
+    /// would let a superseded link write cannot be spelled.
+    fn codex_interrupts_locked(
+        inner: &Inner,
+        session_uid: &str,
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Option<crate::codex_link::LinkInterrupts> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.interrupts.clone())
+    }
+
     /// **Give a test's own link the daemon's ear.**
     ///
     /// A scripted-leg test drives the real [`crate::codex_link::run`] against a leg
@@ -7403,9 +8045,79 @@ impl Daemon {
                 task: tokio::spawn(std::future::pending()),
                 presence: crate::codex_link::LinkPresence::new(),
                 answers,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
+    }
+
+    /// **The same, for the stop control** — a staked registration, a presence a test
+    /// chooses, and the interrupt channel's receiving half handed back.
+    ///
+    /// [`Daemon::install_codex_answers_for_tests`]'s twin, and it exists for the same
+    /// reason: a test that wants to drive [`Daemon::interrupt`] through the REAL
+    /// request path — the daemon's ledger read, its addressee check, its claim
+    /// construction, and the ask arriving on the link's own channel — needs the
+    /// daemon to have a link it will actually address, and nothing in a scripted test
+    /// stakes a registration.
+    ///
+    /// The receiver is returned rather than kept, so the test is the thing that
+    /// decides when the link picks each ask up. That is the whole of what makes the
+    /// concurrent-identical-ids ordering stageable: two asks can be past the daemon's
+    /// ledger read while neither has reached the connection yet.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_interrupts_for_tests(
+        &self,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::InterruptRequest> {
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests_on(state, generation);
+        let (interrupts, asks) = crate::codex_link::interrupt_channel();
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence,
+                answers: crate::codex_link::answer_channel().0,
+                interrupts,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        asks
+    }
+
+    /// **The addressee AND the visit it belongs to, in one read of one cell.**
+    ///
+    /// Taken together for [`crate::codex_link::LinkPresence::get_with_generation`]'s
+    /// reason: two reads are two instants, and a switch between them pairs one visit's
+    /// thread with another visit's number. Anything that has to act on the pair — an
+    /// interrupt is the only such caller today — takes it here.
+    fn codex_visit_locked(
+        inner: &Inner,
+        session_uid: &str,
+    ) -> (
+        crate::codex_link::CodexAddressee,
+        crate::codex_link::LinkVisit,
+    ) {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.presence.get_with_generation())
+            .unwrap_or((
+                crate::codex_link::CodexAddressee::NoLink,
+                crate::codex_link::LinkVisit::default(),
+            ))
     }
 
     fn codex_addressee_locked(
@@ -13279,6 +13991,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                 },
                 link
             )
@@ -13313,6 +14026,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                 },
                 park()
             )
@@ -13417,6 +14131,7 @@ mod tests {
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -13511,6 +14226,7 @@ mod tests {
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry,
             },
         );
@@ -13534,6 +14250,7 @@ mod tests {
                 task: ordinary,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -13690,6 +14407,7 @@ mod tests {
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -13966,6 +14684,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                 },
                 stale,
             )
@@ -14004,6 +14723,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                 },
                 live,
             )
@@ -14064,6 +14784,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                 },
                 move || {
                     built.store(true, Ordering::SeqCst);
@@ -14099,6 +14820,7 @@ mod tests {
                         presence: crate::codex_link::LinkPresence::new(),
                         carry: crate::codex_link::LinkCarry::new(),
                         answers: crate::codex_link::answer_channel().0,
+                        interrupts: crate::codex_link::interrupt_channel().0,
                     },
                     move || {
                         built_now.store(true, Ordering::SeqCst);
@@ -14428,6 +15150,7 @@ mod tests {
                 task: tokio::spawn(std::future::pending()),
                 presence: presence.clone(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 // Empty: what the link KNOWS is a separate cell from what it
                 // publishes, and a test that needs one reaches through the handle.
                 carry: crate::codex_link::LinkCarry::new(),
@@ -14695,6 +15418,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry,
                 },
             );
@@ -14770,6 +15494,7 @@ mod tests {
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: chasing,
                 },
             );
@@ -14791,6 +15516,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence: mid_chase.clone(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -14826,6 +15552,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence: after_relaunch.clone(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -14987,6 +15714,7 @@ mod tests {
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -15022,6 +15750,7 @@ mod tests {
                     task: tokio::spawn(async {}),
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry,
                 },
             );
@@ -15112,6 +15841,7 @@ mod tests {
                     task: tokio::spawn(async {}),
                     presence: crate::codex_link::LinkPresence::new(),
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry,
                 },
             );
@@ -15350,6 +16080,7 @@ mod tests {
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry,
             },
         );
@@ -15440,6 +16171,7 @@ mod tests {
                 task,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry,
             },
         );
@@ -15544,6 +16276,7 @@ mod tests {
                 task: stubborn,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry,
             },
         );
@@ -15979,6 +16712,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence,
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -16155,6 +16889,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence,
                     answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -16734,6 +17469,7 @@ mod tests {
                 task: live,
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -20012,6 +20748,7 @@ mod tests {
                 task: tokio::spawn(std::future::pending()),
                 presence: held.presence,
                 answers,
+                interrupts: crate::codex_link::interrupt_channel().0,
                 carry: held.carry,
             },
         );
@@ -20277,7 +21014,7 @@ mod tests {
     /// is what says so: both asks are outstanding **at the same time**, before either
     /// is replied to.
     ///
-    /// **Mutation:** make [`Daemon::answer_gates`] a `Mutex` again (and
+    /// **Mutation:** make [`Daemon::actuation_gates`] a `Mutex` again (and
     /// `answer_codex` take it exclusively) and the second ask never arrives — the
     /// gate would have been bought with a concurrency nothing required it to spend.
     #[tokio::test]
@@ -20428,6 +21165,7 @@ mod tests {
                     task: tokio::spawn(std::future::pending()),
                     presence: repl.presence,
                     answers: retained_sender.clone(),
+                    interrupts: crate::codex_link::interrupt_channel().0,
                     carry: repl.carry,
                 },
             );
@@ -20550,7 +21288,7 @@ mod tests {
             "the admitted answer holds an applying claim before the abort"
         );
         {
-            let gate = daemon.answer_gate(uid).await.read_owned().await;
+            let gate = daemon.actuation_gate(uid).await.read_owned().await;
             let open = daemon
                 .inner
                 .lock()
@@ -20661,7 +21399,7 @@ mod tests {
     /// committed but deliberately NOT inserted into `open_answers`, so the ledger
     /// walk cannot see it and the sweep is the only thing that can.
     ///
-    /// **Mutation:** remove the `sweep_stranded_answer_claims` call after the
+    /// **Mutation:** remove the `sweep_stranded_claims` call after the
     /// join in the quiesce-timeout branch and this goes red — the claim stays
     /// `applying` and its card stays open, exactly the leak the sweep closes.
     #[tokio::test]
@@ -20721,6 +21459,36 @@ mod tests {
             "the admitted answer holds an applying claim before the abort"
         );
 
+        // **And the same window for the other actuating verb.** An interrupt's claim
+        // is committed before its `PendingInterrupt` reaches `open_interrupts` too, so
+        // an abort in that window leaves a row no ledger walk can see. It has no card
+        // to retire, which is exactly why nothing else would ever find it: only the
+        // store sweep reads the authoritative row.
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_mutation(
+                        crate::store::OPERATION_INTERRUPT,
+                        uid.to_string(),
+                        "stop-uncharted".to_string(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: crate::store::INTERRUPT_ROUTE.into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: "h".into(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the interrupt holds an applying claim before the abort, and reaches no \
+             in-memory ledger"
+        );
+
         // A real answer on the FIRST card, held and never returned, is what holds the
         // answer gate's read guard so the handover's write side times out. Its ask is
         // intercepted here rather than processed, so nothing about it reaches
@@ -20764,6 +21532,19 @@ mod tests {
             "the session moved despite the wedged answer ({epoch_before} -> {epoch_after})"
         );
 
+        // **The interrupt the ledger walk never saw is terminal too.** Same window,
+        // same authority, same sweep — and it has no card, so if the sweep did not
+        // cover this kind nothing at this handover ever would and the row would sit
+        // `applying` until the next daemon start.
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "stop-uncharted")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the handover sweeps the interrupt claims as well as the answer claims"
+        );
+
         // **The claim the ledger walk never saw is terminal, and its card is gone.**
         // Nothing was in `open_answers` to settle it, so this is the store sweep's
         // work alone: `applying` -> `indeterminate`, card retired.
@@ -20777,7 +21558,10 @@ mod tests {
             "a claim committed but never in the ledger is still made terminal by the sweep"
         );
         assert!(
-            store.unsettled_answer_claims().unwrap().is_empty(),
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
             "no applying claim is left for the outgoing session after the handover"
         );
         assert!(
@@ -20791,6 +21575,224 @@ mod tests {
         // link's teardown so the held answer reaches a terminal rather than hanging.
         drop(ask);
         let _ = tokio::time::timeout(Duration::from_secs(5), answering).await;
+    }
+
+    /// A Codex registration frame for `uid` from a **named incarnation**.
+    ///
+    /// The supervisor's identity is its pid and the moment it started, and an exit
+    /// replay is only adopted when it names the incarnation that holds the session —
+    /// a replay from a stranger is refused before anything is torn down. So a test
+    /// about what a replay DOES has to register and replay under one identity, which
+    /// is what naming `started_at` here is for.
+    async fn register_codex_incarnation(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+        started_at: &str,
+        exit_replay: bool,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-replay-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: started_at.to_string(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **The claim-before-ledger window, committed for this run and reachable only
+    /// from the store.**
+    ///
+    /// Both actuating verbs write their durable claim BEFORE the mutation enters the
+    /// link's in-memory ledger, and the write that commits it is a `spawn_blocking`
+    /// that a cancellation cannot stop. So there is a window in which the row is
+    /// `applying` and `open_answers`/`open_interrupts` hold nothing — the state an
+    /// abort in that window leaves behind, and the state a ledger walk cannot see.
+    /// Staged here by committing the rows and deliberately never inserting the
+    /// in-memory entries.
+    async fn a_claim_of_each_kind_committed_but_never_in_the_ledger(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        answer_id: &str,
+        interrupt_id: &str,
+    ) {
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+            claimed_hash: "h".into(),
+        };
+        for (kind, request_id) in [
+            (crate::store::OPERATION_ANSWER, answer_id),
+            (crate::store::OPERATION_INTERRUPT, interrupt_id),
+        ] {
+            assert!(
+                matches!(
+                    daemon
+                        .db
+                        .claim_mutation(
+                            kind,
+                            uid.to_string(),
+                            request_id.to_string(),
+                            crate::store::ClaimedMaterial {
+                                route: if kind == crate::store::OPERATION_INTERRUPT {
+                                    crate::store::INTERRUPT_ROUTE.into()
+                                } else {
+                                    material.route.clone()
+                                },
+                                ..material.clone()
+                            },
+                            protocol::time::now_rfc3339(),
+                        )
+                        .await
+                        .expect("the claim is written"),
+                    crate::store::MutationClaim::Claimed
+                ),
+                "the premise: a {kind} claim is applying and reaches no in-memory ledger"
+            );
+        }
+    }
+
+    /// The status of one claim of one kind, straight from the store.
+    fn claim_status(
+        store: &Arc<crate::store::Store>,
+        kind: &str,
+        uid: &str,
+        request_id: &str,
+    ) -> Option<crate::store::AnswerStatus> {
+        store
+            .mutation_status(kind, uid, request_id)
+            .unwrap()
+            .map(|state| state.status)
+    }
+
+    /// **A supervisor disconnecting settles what its link committed but never
+    /// reached the ledger with.**
+    ///
+    /// [`Daemon::unregister_supervisor`] aborts the link and joins it, and that join
+    /// is the last thing that can speak for what the link was holding. It settles the
+    /// two in-memory ledgers — and a claim caught in the claim-before-ledger window is
+    /// in neither of them, so for that claim the join walks an empty map and finds
+    /// nothing to do. Only a sweep of the authoritative record can close it, and
+    /// before this there was none on this path: the row sat `applying` until the next
+    /// daemon start, with the answer's card open on somebody's phone for all of it.
+    ///
+    /// **Both kinds, asserted together**, because covering one and forgetting the
+    /// other is the exact shape of the defect this closes.
+    ///
+    /// **Mutation:** drop the sweep from `unregister_supervisor` and both assertions
+    /// go red.
+    #[tokio::test]
+    async fn a_disconnect_sweeps_the_claims_its_link_never_put_in_the_ledger() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let registration = register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("the Codex registration is accepted");
+        a_claim_of_each_kind_committed_but_never_in_the_ledger(
+            &daemon,
+            uid,
+            "rq-uncharted",
+            "stop-uncharted",
+        )
+        .await;
+
+        // The supervisor's connection ends. Nothing else runs on this path — no
+        // quiesce, no timeout, no replacement registration.
+        daemon.unregister_supervisor(&registration).await;
+
+        assert_eq!(
+            claim_status(
+                &store,
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "stop-uncharted"
+            ),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a disconnect leaves no interrupt claim for the next start to reason about"
+        );
+        assert_eq!(
+            claim_status(&store, crate::store::OPERATION_ANSWER, uid, "rq-uncharted"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and none of the other kind either"
+        );
+    }
+
+    /// **An exit replay settles them too, and it is the path that skips the quiesce.**
+    ///
+    /// A corpse recording its own end registers with `exit_replay` set, which
+    /// deliberately skips the answer quiesce — and with it the quiesce-timeout branch
+    /// that was the only store sweep in the registration path. It still parks and
+    /// joins the outgoing link, so it is an in-process abort with exactly the same
+    /// claim-before-ledger window and, until now, nothing to close it.
+    ///
+    /// **Mutation:** drop the sweep that follows the join in `register_supervisor` and
+    /// both assertions go red.
+    #[tokio::test]
+    async fn an_exit_replay_sweeps_the_claims_its_link_never_put_in_the_ledger() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // One incarnation throughout: the replay must be the corpse of the very
+        // supervisor that holds the session, or it is refused before anything is
+        // torn down and this would pass for the wrong reason.
+        let started_at = protocol::time::now_rfc3339();
+        register_codex_incarnation(&daemon, uid, "cc-1", &started_at, false)
+            .await
+            .expect("the Codex registration is accepted");
+        a_claim_of_each_kind_committed_but_never_in_the_ledger(
+            &daemon,
+            uid,
+            "rq-replayed",
+            "stop-replayed",
+        )
+        .await;
+
+        register_codex_incarnation(&daemon, uid, "cc-1", &started_at, true)
+            .await
+            .expect("the exit replay is adopted");
+
+        assert_eq!(
+            claim_status(
+                &store,
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "stop-replayed"
+            ),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "an exit replay leaves no interrupt claim behind, though it takes no quiesce"
+        );
+        assert_eq!(
+            claim_status(&store, crate::store::OPERATION_ANSWER, uid, "rq-replayed"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and none of the other kind either"
+        );
     }
 
     /// **A same-session answer is not blocked by the TAIL of a registration.**
@@ -20838,6 +21840,7 @@ mod tests {
                     }),
                     presence: held.presence,
                     answers: held.answers,
+                    interrupts: held.interrupts,
                     carry: held.carry,
                 },
             );
@@ -20982,7 +21985,7 @@ mod tests {
         let daemon = daemon_on(Arc::clone(&store), Config::default());
         register_codex_session(&daemon, uid, "cc-1").await;
         let (_card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-filter").await;
-        let gate = daemon.answer_gate(uid).await.read_owned().await;
+        let gate = daemon.actuation_gate(uid).await.read_owned().await;
 
         let epoch = daemon
             .inner
@@ -21018,7 +22021,7 @@ mod tests {
     /// registration handover on session B must still complete promptly. Under a global
     /// lock B's write side would block on A's reader and time out.
     ///
-    /// **Mutation:** make [`Daemon::answer_gates`] hand back one shared lock for every
+    /// **Mutation:** make [`Daemon::actuation_gates`] hand back one shared lock for every
     /// uid and this goes red — B's handover waits on A.
     #[tokio::test]
     async fn one_sessions_held_answer_does_not_gate_another_sessions_handover() {
@@ -21115,7 +22118,10 @@ mod tests {
             other => panic!("a decision this card never offered must not be sent: {other:?}"),
         }
         assert!(
-            store.unsettled_answer_claims().unwrap().is_empty(),
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
             "a refusal that happens before the ask leaves no claim to recover"
         );
         assert_eq!(
@@ -21163,7 +22169,10 @@ mod tests {
             other => panic!("an answer to a card nobody is showing must not be sent: {other:?}"),
         }
         assert!(
-            store.unsettled_answer_claims().unwrap().is_empty(),
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
             "the gate is before the claim, so a stale answer leaves nothing behind"
         );
         assert_eq!(open_cards(&daemon, uid).len(), 1);
@@ -21205,7 +22214,10 @@ mod tests {
             other => panic!("with nothing to write on, nothing can be sent: {other:?}"),
         }
         assert!(
-            store.unsettled_answer_claims().unwrap().is_empty(),
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
             "an answer that provably actuated nothing leaves no claim: the operator's \
              next tap is a first attempt and not a duplicate"
         );
@@ -21299,7 +22311,10 @@ mod tests {
             other => panic!("one terminal, and it says nothing is known: {other:?}"),
         }
         assert!(
-            store.unsettled_answer_claims().unwrap().is_empty(),
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
             "and the claim is terminal, so a second restart does not do this again"
         );
     }
@@ -21419,7 +22434,10 @@ mod tests {
         }
         assert_no_ledger_rows(&db, uid);
         assert_no_insert_was_attempted(&db, uid);
-        assert!(store.unsettled_answer_claims().unwrap().is_empty());
+        assert!(store
+            .unsettled_claims(crate::store::OPERATION_ANSWER)
+            .unwrap()
+            .is_empty());
     }
 
     /// **Answering a Codex card writes nothing a rolled-back daemon can reach —
@@ -21725,6 +22743,1059 @@ mod tests {
         assert!(
             reason.contains("lost") || reason.contains("something else answered"),
             "and the operator is told what actually happened to it: {reason}"
+        );
+    }
+
+    // ------------------------------------------------ stopping a turn from a phone
+
+    /// The hash the phone computes and the daemon re-derives. Spelled through the
+    /// production function, so a test cannot pass by agreeing with itself.
+    fn interrupt_hash(session_ref: &str, turn_id: &str) -> String {
+        protocol::hash::interrupt_hash(session_ref, turn_id)
+    }
+
+    /// Put a link in the slot with a presence a test can drive, and give the daemon
+    /// its interrupt sender. Returns the receiver, so a test can see what — if
+    /// anything — reached the link.
+    async fn install_codex_link_for_tests(
+        daemon: &Arc<Daemon>,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::InterruptRequest> {
+        daemon
+            .install_codex_interrupts_for_tests(session_uid, state, generation)
+            .await
+    }
+
+    /// **Every refusal that must happen before a claim, happens before a claim.**
+    ///
+    /// The ledger is the thing being protected. An interrupt that leaves an
+    /// `applying` row behind is one a restart has to make terminal, and one the phone
+    /// can never re-ask under the same id — so a refusal that wrote a row would turn
+    /// "we did not send this" into "we may have sent this" for every case below.
+    ///
+    /// **Mutation:** move the agent branch below the claim, or drop the addressee
+    /// check, and the ledger assertion at the end of each case goes red.
+    #[tokio::test]
+    async fn every_interrupt_refusal_leaves_the_ledger_untouched() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCLA";
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNCDX";
+        let now = protocol::time::now_rfc3339();
+        for (uid, name, agent) in [
+            (claude, "cc-claude", protocol::agent::AgentKind::Claude),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNGEM",
+                "cc-gemini",
+                protocol::agent::AgentKind::Unsupported("gemini".into()),
+            ),
+        ] {
+            store
+                .upsert_session(&SessionRow {
+                    session_uid: uid.into(),
+                    session_id: name.into(),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    agent,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap()
+                .assert_present();
+        }
+        register_codex_session(&daemon, codex, "cc-1").await;
+
+        let ledger_rows = || {
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .len()
+        };
+
+        // **A Claude run.** It has no interrupt on this wire, and the refusal says
+        // what to do instead rather than only that the answer is no.
+        let refused = daemon
+            .interrupt(
+                "cc-claude",
+                "req-1",
+                "turn-1",
+                &interrupt_hash("cc-claude", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a Claude session must be refused: {refused:?}");
+        };
+        assert!(reason.contains("Claude session"), "{reason}");
+        assert!(reason.contains("at the Mac"), "{reason}");
+
+        // **A run some future build wrote.** "Not Claude" is not evidence of Codex.
+        let refused = daemon
+            .interrupt(
+                "cc-gemini",
+                "req-2",
+                "turn-1",
+                &interrupt_hash("cc-gemini", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an unsupported agent must be refused: {refused:?}");
+        };
+        assert!(reason.contains("gemini"), "the refusal names it: {reason}");
+
+        // **A hash that does not bind the turn it names.** The phone saw one turn and
+        // this request names another, which is the substitution the hash exists for.
+        let refused = daemon
+            .interrupt(
+                "cc-1",
+                "req-3",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-OTHER"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a mismatched hash must be refused: {refused:?}");
+        };
+        assert!(reason.contains("stale payload_hash"), "{reason}");
+
+        // **No link at all** — a Codex row whose supervisor never registered, which
+        // is the state the fleet reports as `NoLink` and is a different fact from a
+        // link that exists and is between connections.
+        store
+            .upsert_session(&SessionRow {
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNORP".into(),
+                session_id: "cc-orphan".into(),
+                tmux_session: "cc-orphan".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        let refused = daemon
+            .interrupt(
+                "cc-orphan",
+                "req-4",
+                "turn-1",
+                &interrupt_hash("cc-orphan", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a run with no link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("no live link"), "{reason}");
+
+        // **A link that is connected and not watching the thread.** Bound is not
+        // subscribed: no `turn/*` frame reaches it, so the terminal that is an
+        // interrupt's only evidence could never arrive.
+        let mut asks_0 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-1".into(),
+            },
+            3,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-5", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a bound-but-unsubscribed link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("not yet watching"), "{reason}");
+
+        // **And the wire has gone quiet under a session that is still alive.**
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_1 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-1".into()),
+            },
+            0,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-6", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an offline link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("lost its control link"), "{reason}");
+        assert!(
+            reason.contains("try again shortly"),
+            "a link that is reconnecting is worth asking again: {reason}"
+        );
+
+        // **A link that has never reached the session at all.** The same refusal, and
+        // emphatically not the same sentence: nothing was lost, because nothing was
+        // ever established, and telling somebody a thing broke sends them looking for
+        // a fault that is not there.
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_2 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            0,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-7", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a link that has not connected must be refused: {refused:?}");
+        };
+        assert!(
+            !reason.contains("lost"),
+            "there was never a link to lose: {reason}"
+        );
+        assert!(reason.contains("not yet reached"), "{reason}");
+
+        // **Connected, handshaken, and still picking up its thread.** This one used to
+        // share the offline sentence, which told the operator the link was lost and so
+        // ruled out the one thing that actually works here: waiting a moment.
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_3 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Unbound {
+                adopted: Some("th-1".into()),
+            },
+            3,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-8", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an unbound link must be refused: {refused:?}");
+        };
+        assert!(
+            !reason.contains("lost"),
+            "the link is connected; nothing is lost: {reason}"
+        );
+        assert!(
+            reason.contains("still picking up its thread") && reason.contains("few seconds"),
+            "and the honest advice is to wait, not to walk to the Mac: {reason}"
+        );
+
+        assert_eq!(
+            ledger_rows(),
+            0,
+            "not one of these refusals may leave a claim behind: a durable row is a \
+             record that something was actuated, and nothing was"
+        );
+        // **And nothing reached the link either.** The ledger says no row was written;
+        // this says no ask was even handed over. Binding these receivers and never
+        // reading them left the stronger half of "nothing was sent" unasserted — a
+        // refusal that enqueued an ask and then happened not to claim would have been
+        // green.
+        assert!(
+            asks_0.try_recv().is_err(),
+            "leg 0: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_1.try_recv().is_err(),
+            "leg 1: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_2.try_recv().is_err(),
+            "leg 2: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_3.try_recv().is_err(),
+            "leg 3: a refusal that reached the link is not a refusal before the write"
+        );
+    }
+
+    /// **A duplicate interrupt replays what the first one recorded, and sends
+    /// nothing.**
+    ///
+    /// The ledger's whole job. Each of the three settled outcomes reads back
+    /// differently, because they are three different things to have happened and a
+    /// phone told "already stopped" about a turn that ended on its own has been told
+    /// something false.
+    ///
+    /// **Mutation:** make the `Settled` arm return `Duplicate` for every outcome and
+    /// the `turn_ended`/`refused` cases stop being refusals — an operator would be
+    /// told their tap worked when the record says it did not.
+    #[tokio::test]
+    async fn a_duplicate_interrupt_replays_the_recorded_outcome() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // **Staged as the daemon itself would write it**, which means the checksum is
+        // over the RUN and not over the name the phone used to reach it: a row seeded
+        // with the caller's own spelling would be material this daemon never produces,
+        // and the replay it is here to test would compare against a fiction.
+        let settle = |request_id: &str, outcome: &'static str| {
+            let material = crate::store::ClaimedMaterial {
+                thread_id: "th-1".into(),
+                generation: 2,
+                route: crate::store::INTERRUPT_ROUTE.into(),
+                target_turn_id: Some("turn-1".into()),
+                claimed_hash: interrupt_hash(uid, "turn-1"),
+            };
+            let now = protocol::time::now_rfc3339();
+            assert_eq!(
+                store
+                    .claim_mutation(
+                        crate::store::OPERATION_INTERRUPT,
+                        uid,
+                        request_id,
+                        &material,
+                        &now
+                    )
+                    .unwrap(),
+                crate::store::MutationClaim::Claimed
+            );
+            assert!(store
+                .settle_mutation(
+                    crate::store::OPERATION_INTERRUPT,
+                    uid,
+                    request_id,
+                    outcome,
+                    &now
+                )
+                .unwrap());
+        };
+
+        // The turn stopped. Asking again is a duplicate, not a refusal: the thing the
+        // operator wanted has happened.
+        settle("req-aborted", crate::store::INTERRUPT_ABORTED);
+        assert_eq!(
+            daemon
+                .interrupt(
+                    "cc-1",
+                    "req-aborted",
+                    "turn-1",
+                    &interrupt_hash("cc-1", "turn-1")
+                )
+                .await,
+            InterruptResult::Duplicate {
+                turn_id: "turn-1".into()
+            }
+        );
+
+        // The turn ended on its own. Nothing was stopped, and the sentence says so.
+        settle("req-ended", crate::store::INTERRUPT_TURN_ENDED);
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-ended",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &replayed else {
+            panic!("a turn that ended on its own was not stopped from here: {replayed:?}");
+        };
+        assert!(reason.contains("ended on its own"), "{reason}");
+
+        // The write was refused. Same again: nothing was stopped.
+        settle("req-refused", crate::store::INTERRUPT_REFUSED);
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-refused",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &replayed else {
+            panic!("a refused write is not a stop: {replayed:?}");
+        };
+        assert!(reason.contains("refused"), "{reason}");
+
+        // A claim nobody settled — the shape a daemon killed after the write leaves —
+        // is terminal and never sent again.
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-unknown",
+                &material,
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-unknown",
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-unknown",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Indeterminate { reason } = &replayed else {
+            panic!("an unprovable interrupt is never retried: {replayed:?}");
+        };
+        assert!(reason.contains("not known"), "{reason}");
+    }
+
+    /// **Every kind of claim the ledger has is made terminal at the next start.**
+    ///
+    /// The two kinds are written by different paths and settled by different rules —
+    /// an answer retires a card beside its row, an interrupt has only the row — so
+    /// they are recovered by two functions rather than one loop. What they must not
+    /// differ about is being recovered at all: a claim left `applying` is one no
+    /// phone can ever re-ask under the same id, and the second kind spent a while
+    /// with half a recovery precisely because "which kinds are covered" lived only in
+    /// the reader's head.
+    ///
+    /// Driven off [`crate::store::OPERATION_KINDS`], so a third kind added to that
+    /// list without a recovery behind it fails here rather than quietly stranding
+    /// every claim it takes.
+    ///
+    /// **Mutation:** remove either recovery call from the start path and this goes
+    /// red, naming the kind that was dropped.
+    #[tokio::test]
+    async fn every_kind_of_claim_is_made_terminal_at_the_next_start() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        for kind in crate::store::OPERATION_KINDS {
+            store
+                .claim_mutation(
+                    kind,
+                    uid,
+                    &format!("req-{kind}"),
+                    &crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("turn-1".into()),
+                        claimed_hash: "h".into(),
+                    },
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap();
+        }
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+
+        for kind in crate::store::OPERATION_KINDS {
+            assert_eq!(
+                store
+                    .mutation_status(kind, uid, &format!("req-{kind}"))
+                    .unwrap()
+                    .map(|state| state.status),
+                Some(crate::store::AnswerStatus::Indeterminate),
+                "a {kind} claim left in flight must be terminal after a restart"
+            );
+            assert!(
+                store.unsettled_claims(kind).unwrap().is_empty(),
+                "and no {kind} claim is left for a later start to reason about"
+            );
+        }
+    }
+
+    /// **One run named two ways is one ask, not a conflict.**
+    ///
+    /// A phone may reach the same run by its uid on one tap and by its tmux name on
+    /// the next — both resolve to the same row, and both are ordinary. The
+    /// `payload_hash` it computes is over whichever it used, so storing the caller's
+    /// own hash as the claimed material made the two spellings different material
+    /// under one id: the honest retry that a slow reply invites came back as a
+    /// conflict, telling the operator they had asked for something else.
+    ///
+    /// The checksum is normalised over the RUN instead, which loses nothing — it is a
+    /// checksum, recomputed here from the request's own two fields — and makes the
+    /// same ask about the same turn the same ask however it was addressed.
+    ///
+    /// **Mutation:** build the claim with the caller's `payload_hash` (the
+    /// `claimed_hash` in `Daemon::interrupt`'s `ClaimedMaterial`) and the second tap
+    /// becomes a conflict.
+    #[tokio::test]
+    async fn one_run_named_by_uid_and_by_name_is_one_interrupt() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let mut asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // **The first tap names the run by its tmux name, and the material it is
+        // claimed with is the DAEMON'S, not this test's.**
+        //
+        // Taken off the link's own channel rather than written by hand, because the
+        // thing under test is what `Daemon::interrupt` puts in that material: a
+        // hand-built claim carrying an already-normalised hash would agree with the
+        // replay below whatever the production path had done, and the test would pass
+        // by agreeing with itself.
+        let tapping = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+                    .await
+            })
+        };
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon reaches the link within the budget")
+            .expect("the first tap is handed to the link");
+        assert_eq!(
+            ask.claimed.claimed_hash,
+            interrupt_hash(uid, "turn-1"),
+            "the claim is bound to the RUN, whatever reference the caller used to \
+             address it"
+        );
+
+        // The link's own claim-and-settle, with the daemon's material: the first tap
+        // stopped the turn and the record says so.
+        let now = protocol::time::now_rfc3339();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &ask.claimed,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                crate::store::INTERRUPT_ABORTED,
+                &now
+            )
+            .unwrap());
+        // The first caller is told by dropping the ask, which is what an aborted link
+        // does; what it heard is not this test's subject.
+        drop(ask);
+        let _ = tokio::time::timeout(Duration::from_secs(5), tapping).await;
+
+        // The retry names the same run by its uid. Same run, same turn, same id — and
+        // a `payload_hash` computed over a different reference, because that is what
+        // the phone had in hand.
+        for reference in ["cc-1", uid] {
+            assert_eq!(
+                daemon
+                    .interrupt(
+                        reference,
+                        "req-1",
+                        "turn-1",
+                        &interrupt_hash(reference, "turn-1")
+                    )
+                    .await,
+                InterruptResult::Duplicate {
+                    turn_id: "turn-1".into()
+                },
+                "the same ask about the same turn, addressed as {reference}"
+            );
+        }
+        assert!(
+            asks.try_recv().is_err(),
+            "and neither spelling sent anything: both are replays of a recorded outcome"
+        );
+    }
+
+    /// **One id, two turns: a conflict, and nothing is sent.**
+    ///
+    /// A phone reuses a request id — a retry counter that wrapped, a client that
+    /// mints one per screen rather than per ask — and the second ask names the turn
+    /// that is running NOW. The ledger's own law is that a duplicate replays the
+    /// material the first attempt was claimed with; a reply that reads the outcome
+    /// column alone cannot apply that law, and the answer it gives is the worst one
+    /// available: `Duplicate` naming the running turn, which tells the operator the
+    /// turn in front of them has already been stopped when nothing has touched it.
+    ///
+    /// The comparison is over what the CLIENT bound — the turn it named and the hash
+    /// binding this ask to it. The visit generation is the daemon's own bookkeeping
+    /// and stays a live pre-write check, because a person who reused an id has not
+    /// done anything wrong about a visit they cannot see.
+    ///
+    /// **Mutation:** compare the outcome alone and the second ask becomes a
+    /// `Duplicate` of a turn nobody stopped.
+    #[tokio::test]
+    async fn a_settled_interrupt_id_naming_another_turn_is_a_conflict_not_a_duplicate() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let mut asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // `req-1` stopped turn-1, and that is durably recorded.
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        let now = protocol::time::now_rfc3339();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &material,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                crate::store::INTERRUPT_ABORTED,
+                &now
+            )
+            .unwrap());
+
+        // The same id, aimed at turn-2, with turn-2's own valid hash.
+        let reused = daemon
+            .interrupt("cc-1", "req-1", "turn-2", &interrupt_hash("cc-1", "turn-2"))
+            .await;
+        let InterruptResult::Rejected { reason } = &reused else {
+            panic!(
+                "turn-2 was never stopped, so nothing may report it as already \
+                 stopped: {reused:?}"
+            );
+        };
+        assert!(
+            reason.contains("different turn"),
+            "the operator is told which of the two facts is wrong: {reason}"
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "a conflict is decided from the record, so nothing reaches the link"
+        );
+
+        // And the honest duplicate still replays, so the conflict is not a blanket
+        // refusal of every retry.
+        assert_eq!(
+            daemon
+                .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+                .await,
+            InterruptResult::Duplicate {
+                turn_id: "turn-1".into()
+            }
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "and it too is decided from the record"
+        );
+    }
+
+    /// **An aborted link owes both its verbs a terminal, not just one of them.**
+    ///
+    /// A link is stopped by abort on paths that run none of its own teardown: a
+    /// supervisor disconnecting ([`Daemon::unregister_supervisor`]) and an exit
+    /// replay's registration both reach [`Daemon::join_parked_codex_links`] without
+    /// passing through the quiesce timeout that sweeps the store. So the join is the
+    /// last thing that can speak for what the link was holding — and it spoke for the
+    /// answers only. A written interrupt's claim stayed `applying` for ever, and the
+    /// person who tapped Stop was never told anything at all, because the sender they
+    /// were waiting on died with the task.
+    ///
+    /// The two ledgers are settled the same way for the same reason, so this asserts
+    /// them together: a test that checked only the new one would not notice the old
+    /// one being dropped on the way.
+    ///
+    /// **Mutation:** settle only `open_answers` in the join and the interrupt half
+    /// goes red — the claim stays applying and the caller hears nothing.
+    #[tokio::test]
+    async fn an_aborted_link_settles_its_interrupts_as_well_as_its_answers() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let session = SessionKey::new(uid, "cc-1");
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // One of each verb, claimed and written, waiting on evidence that will now
+        // never arrive.
+        let material = |turn: &str, hash: &str| crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some(turn.to_string()),
+            claimed_hash: hash.to_string(),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-stop",
+                &material("turn-1", "h"),
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                "req-answer",
+                &material("turn-1", "h"),
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+
+        let stopped = {
+            let gate = daemon.actuation_gate(uid).await.read_owned().await;
+            let answer_gate = daemon.actuation_gate(uid).await.read_owned().await;
+            let inner = daemon.inner.lock().await;
+            let carry = &inner.codex_links.get(uid).expect("the outgoing link").carry;
+            crate::codex_link::insert_pending_answer_for_tests(
+                &carry.open_answers(),
+                4242,
+                "req-answer",
+                "th-1",
+                answer_gate,
+            );
+            crate::codex_link::insert_pending_interrupt_for_tests(
+                &carry.open_interrupts(),
+                4243,
+                "req-stop",
+                "th-1",
+                "turn-1",
+                gate,
+            )
+        };
+
+        // The abort, exactly as a disconnect or an exit replay reaches it.
+        daemon.park_current_codex_link(uid).await;
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the park clears, which is the precondition for the settle"
+        );
+
+        let status = |request_id: &str| {
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, request_id)
+                .unwrap()
+                .map(|state| state.status)
+        };
+        assert_eq!(
+            status("req-stop"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a written interrupt the link can no longer hear about is terminal, so no \
+             later start has to reason about it and no phone can send it again"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_ANSWER, uid, "req-answer")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and the answer beside it, which is the half that already worked"
+        );
+
+        // And the person who tapped Stop is told, rather than left holding a sender
+        // that will never fire.
+        let report = tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .expect("the caller is told inside the budget")
+            .expect("and told by a sender that was not simply dropped");
+        let crate::codex_link::InterruptReport::Unknown(why) = &report else {
+            panic!("an aborted link knows nothing about what it wrote: {report:?}");
+        };
+        assert!(why.contains("will not be sent again"), "{why}");
+    }
+
+    /// **A claim this daemon was in the middle of when it stopped becomes terminal at
+    /// the next start, and is never sent again.**
+    ///
+    /// The kill-after-write shape, without a kill: an `applying` row is exactly what a
+    /// process death between the claim and the terminal leaves, and what recovery does
+    /// with it is the whole contract.
+    ///
+    /// **Mutation:** drop the `recover_codex_interrupts` call from the start path and
+    /// the row stays `applying` — a phone could then be told "not applied" for an
+    /// interrupt that may well have stopped the turn.
+    #[tokio::test]
+    async fn an_interrupt_in_flight_across_a_restart_becomes_one_terminal_unknown() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &material,
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // The next daemon start.
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .is_empty(),
+            "recovery must leave no claim for a later start to reason about"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "req-1")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+        let replayed = daemon
+            .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Indeterminate { reason } = &replayed else {
+            panic!("a recovered claim is terminal and never retried: {replayed:?}");
+        };
+        assert!(reason.contains("will not be sent again"), "{reason}");
+    }
+
+    /// **An interrupt is recovered even when the approval cards cannot be read.**
+    ///
+    /// The answer recovery genuinely depends on the cards being back: settling an
+    /// answer retires its card, and retiring one the restore never read files a
+    /// resolution against something that is not there. An interrupt has no card, so
+    /// none of that reasoning is about it — and standing inside the same gate bought
+    /// nothing while costing the phone a whole extra restart before it could be told
+    /// what became of its tap, and before the id could be used again.
+    ///
+    /// The fault is a real one rather than an injected flag: a second connection to
+    /// the same file takes the approvals table away, which is the shape a disk error
+    /// or a half-applied migration has at this boundary.
+    ///
+    /// **Mutation:** put the interrupt recovery back inside `if cards_are_back` and
+    /// this goes red, with the claim still applying.
+    #[tokio::test]
+    async fn an_interrupt_is_recovered_even_when_the_cards_cannot_be_read() {
+        let (store, db_path) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &crate::store::ClaimedMaterial {
+                    thread_id: "th-1".into(),
+                    generation: 2,
+                    route: crate::store::INTERRUPT_ROUTE.into(),
+                    target_turn_id: Some("turn-1".into()),
+                    claimed_hash: interrupt_hash(uid, "turn-1"),
+                },
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+
+        // Take the cards away. The restore this start makes will fail, and the answer
+        // recovery behind it will correctly decline to run.
+        rusqlite::Connection::open(&db_path)
+            .expect("the same file")
+            .execute_batch("DROP TABLE pending_approvals;")
+            .expect("the table exists until now");
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "req-1")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "an interrupt has no card, so a failed card read decides nothing about it"
+        );
+    }
+
+    /// **The two Claude-only operations are refused for a Codex run, by the agent and
+    /// not by an accident.**
+    ///
+    /// The catalog's old refusal was a missing `claude_bin`, which is a fact about a
+    /// registration field; the terminal had no agent check at all. Both now read the
+    /// row and say what they found.
+    ///
+    /// **Mutation:** delete the `refuse_unless_claude` call from `command_catalog` and
+    /// the reason reverts to the binary sentence — which this asserts is gone.
+    #[tokio::test]
+    async fn the_claude_only_operations_are_refused_for_a_codex_run() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let catalog = daemon.command_catalog("cc-1").await;
+        let protocol::ws::CommandCatalogResult::Unavailable { reason } = &catalog else {
+            panic!("a Codex run has no Claude to ask: {catalog:?}");
+        };
+        assert!(
+            reason.contains("Codex session"),
+            "the refusal names the agent, not a missing field: {reason}"
+        );
+        assert!(
+            !reason.contains("Claude Code binary"),
+            "the old accidental refusal described a registration field rather than the \
+             truth: {reason}"
+        );
+
+        // The gate the terminal attach reads, asked directly — the attach path itself
+        // is driven over a real WebSocket in `ws_server`'s own suite.
+        let crate::state::ClaudeOnly::WrongAgent(refused) =
+            daemon.refuse_unless_claude(uid, "the terminal").await
+        else {
+            panic!("a Codex run may not be typed into through a terminal")
+        };
+        assert!(refused.contains("Codex session"), "{refused}");
+        assert!(refused.contains("terminal"), "{refused}");
+
+        // **A reference this daemon cannot vouch for is refused, not admitted.** This
+        // is the gate's whole contract, and the terminal attach is the one call site
+        // with no later existence check behind it — everything after that line takes
+        // the lease and opens a client. A row the store does not have is not evidence
+        // that the run is Claude's.
+        //
+        // **Mutation:** admit `Ok(None)` and this goes red.
+        assert!(
+            matches!(
+                daemon
+                    .refuse_unless_claude("a-run-this-mac-has-never-heard-of", "the terminal")
+                    .await,
+                crate::state::ClaudeOnly::Unknown(_)
+            ),
+            "an unreadable or absent row fails closed"
+        );
+
+        // And a Claude run is untouched by the gate.
+        //
+        // **The uid is a well-formed one, and that is load-bearing here.** `L` is not
+        // in the ULID alphabet, so the id this leg used to carry was never a uid the
+        // resolver would look up: it fell through to a name lookup that matched
+        // nothing, and the gate answered about a row it had not found. That answer
+        // happened to be the one the assertion wanted, so the leg was green while
+        // proving nothing — which is the same fail-open the gate itself had.
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ2";
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: claude.into(),
+                session_id: "cc-claude".into(),
+                tmux_session: "cc-claude".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            daemon.refuse_unless_claude(claude, "the terminal").await,
+            crate::state::ClaudeOnly::Admitted,
+            "the gate is about the agent and nothing else"
         );
     }
 

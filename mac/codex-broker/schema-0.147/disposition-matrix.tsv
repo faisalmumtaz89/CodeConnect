@@ -517,7 +517,7 @@ Ccd	Request	threadSection/update	Refuse(NotAllowlisted)
 Ccd	Notification	threadSection/update	Refuse(NotAllowlisted)
 Tui	Request	turn/interrupt	InterruptActiveTurn
 Tui	Notification	turn/interrupt	Refuse(NotAllowlisted)
-Ccd	Request	turn/interrupt	Refuse(NotAllowlisted)
+Ccd	Request	turn/interrupt	InterruptActiveTurn
 Ccd	Notification	turn/interrupt	Refuse(NotAllowlisted)
 Tui	Request	turn/start	FingerprintThenHeadCheck
 Tui	Notification	turn/start	Refuse(NotAllowlisted)

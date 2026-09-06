@@ -814,6 +814,12 @@ fn classify_request_disposition(
     }
 }
 
+/// The exact top-level parameter key set a `thread/unsubscribe` was MEASURED carrying.
+///
+/// Named rather than spelled inline so the refusal below can count against it without
+/// repeating it, exactly as [`INTERRUPT_PARAMS`] is.
+const UNSUBSCRIBE_PARAMS: [&str; 1] = ["threadId"];
+
 /// **`thread/unsubscribe`'s params are pinned to the capture** (round-1 P10): exactly
 /// `{"threadId": "<string>"}`.
 ///
@@ -830,9 +836,27 @@ fn check_unsubscribe_shape(params: &serde_json::Value) -> Result<(), String> {
     };
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    if keys != ["threadId"] {
+    if keys != UNSUBSCRIBE_PARAMS {
+        // **The SHAPE, never the names** — the same rule, for the same reason, as
+        // [`check_interrupt_binding`]'s. The keys are client-chosen bytes and this
+        // detail lands in the durable `broker.log`, so a key called after a credential,
+        // or one four kilobytes long, must not be able to write itself there. Counts
+        // carry everything an operator needs to tell the cases apart and carry nothing
+        // a client chose.
+        let supplied = keys.len();
+        let missing = UNSUBSCRIBE_PARAMS
+            .iter()
+            .filter(|name| !keys.contains(*name))
+            .count();
+        let unexpected = keys
+            .iter()
+            .filter(|key| !UNSUBSCRIBE_PARAMS.contains(*key))
+            .count();
         return Err(format!(
-            "params key set is {keys:?}; the measured frame carries exactly [\"threadId\"]"
+            "params carries {supplied} keys: {unexpected} unexpected, and {missing} of \
+             the {} the measured frame carries absent. Key names are client-chosen and \
+             are not logged",
+            UNSUBSCRIBE_PARAMS.len()
         ));
     }
     if !obj
@@ -1066,6 +1090,10 @@ fn check_read_binding(env: &Env, method: &str, params: &serde_json::Value) -> Re
     Ok(())
 }
 
+/// The complete measured `turn/interrupt` param key set, sorted — the allowlist
+/// [`check_interrupt_binding`] compares against, and counts a deviation from.
+const INTERRUPT_PARAMS: [&str; 2] = ["threadId", "turnId"];
+
 /// A `turn/interrupt` may only stop THIS session's RUNNING turn.
 ///
 /// The params are pinned to the capture, exactly as `thread/unsubscribe`'s are: MEASURED
@@ -1075,8 +1103,11 @@ fn check_read_binding(env: &Env, method: &str, params: &serde_json::Value) -> Re
 ///
 /// Two bindings, and each closes a different thing:
 ///
-/// * `threadId` must be the session's — an interrupt naming another session's thread is
-///   the same cross-session reach the reads were bound for.
+/// * `threadId` must be the session's ONE ACTIVE thread — not merely a thread it has been
+///   on. An interrupt naming another session's thread is the same cross-session reach the
+///   reads were bound for; an interrupt naming a thread THIS session has retired is a
+///   reach into a visit it has left. The reads are deliberately wider (a retired thread
+///   stays readable); an actuation is not.
 /// * `turnId` must be an **active** turn of it — one this broker admitted, whose
 ///   `turn/start` the server answered with that id, and whose terminal has not arrived.
 ///   Without this an interrupt could name any string and be forwarded; with it, the only
@@ -1094,10 +1125,26 @@ fn check_interrupt_binding(env: &Env, params: &serde_json::Value) -> Result<(), 
     };
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    if keys != ["threadId", "turnId"] {
+    if keys != INTERRUPT_PARAMS {
+        // **The SHAPE, never the names.** The keys are attacker-chosen bytes and this
+        // detail lands in the durable `broker.log`, so a key called after a credential —
+        // or one four kilobytes long — must not be able to write itself there. Counts
+        // carry everything an operator needs to tell the three cases apart (a key too
+        // few, a key too many, the wrong pair entirely) and carry nothing a client chose.
+        let supplied = keys.len();
+        let missing = INTERRUPT_PARAMS
+            .iter()
+            .filter(|name| !keys.contains(*name))
+            .count();
+        let unexpected = keys
+            .iter()
+            .filter(|key| !INTERRUPT_PARAMS.contains(*key))
+            .count();
         return Err(format!(
-            "params key set is {keys:?}; the measured frame carries exactly \
-             [\"threadId\", \"turnId\"]"
+            "params carries {supplied} keys: {unexpected} unexpected, and {missing} of \
+             the {} the measured frame carries absent. Key names are client-chosen and \
+             are not logged",
+            INTERRUPT_PARAMS.len()
         ));
     }
     let (Some(thread), Some(turn)) = (
@@ -1106,9 +1153,19 @@ fn check_interrupt_binding(env: &Env, params: &serde_json::Value) -> Result<(), 
     ) else {
         return Err("params.threadId or params.turnId is not a string".to_string());
     };
-    if !env.threads.is_session_thread(thread) {
+    // **The SOLE session thread, not any thread the session has ever been on.**
+    //
+    // `is_session_thread` is the READ surface's rule — it answers TRUE for every retired
+    // thread, on purpose, so a phone can open a previous thread's timeline. An actuation
+    // needs the narrower question, and asking it here is what makes "an interrupt can
+    // only ever name THIS session's one thread" true by construction: there is exactly
+    // one such id at any instant, and a retired thread is not it. The turn check below
+    // would refuse the same frames today, but only through a comparison it happens to
+    // make; the scoping does not depend on that.
+    if env.threads.sole_session_thread().as_deref() != Some(thread) {
         return Err(format!(
-            "thread {} was not observed as a session thread",
+            "thread {} is not this session's one active thread — a thread this session \
+             has left is readable, never actuable",
             redact::thread_id(thread)
         ));
     }
@@ -3922,16 +3979,377 @@ mod tests {
                 "{params}"
             );
         }
-        // …and the phone may not interrupt at all: that stays Phase 4's.
-        assert_eq!(
-            refused_code(&go_env(
+        // …and the phone reaches the same turn under the same rule. The ccd leg's
+        // own binding is proven from a clean session below; this one line is here so
+        // that a reader of the TUI rule sees the two legs answer alike.
+        assert!(matches!(
+            go_env(
                 Role::Ccd,
                 &threads,
                 &json!({"method":"turn/interrupt","id":"ccd-1",
                         "params":{"threadId":"01a0-head","turnId":"01a0-turn"}})
                 .to_string()
-            )),
+            ),
+            RelayAction::Forward { .. }
+        ));
+    }
+
+    /// **A refused unsubscribe's detail says how MANY keys arrived, never what they
+    /// were called.**
+    ///
+    /// The sibling of the interrupt's own redaction test, and the same contract: this
+    /// method's params are a client surface too, its refusal detail lands in the same
+    /// durable `broker.log`, and a key named after a credential — or one four kilobytes
+    /// long — must not be able to write itself there. The two were found together and
+    /// are asserted separately, because one function being redacted says nothing about
+    /// the other.
+    #[test]
+    fn an_unsubscribes_refusal_detail_carries_the_key_shape_and_no_key_name() {
+        let threads = bound_session("01a0-head");
+        const SENTINEL: &str = "sk-live-SENTINEL-DO-NOT-LOG";
+        let four_kilobyte_name = "n".repeat(4096);
+        let seq = std::cell::Cell::new(0u32);
+
+        for hostile in [SENTINEL, four_kilobyte_name.as_str()] {
+            // Both places a hostile name can sit: alongside the measured key, and
+            // instead of it.
+            for measured_key_present in [true, false] {
+                let mut params = serde_json::Map::new();
+                if measured_key_present {
+                    params.insert("threadId".into(), json!("01a0-head"));
+                }
+                params.insert(hostile.to_string(), json!(1));
+                seq.set(seq.get() + 1);
+                let refused = go_env(
+                    Role::Tui,
+                    &threads,
+                    &json!({"method":"thread/unsubscribe","id":format!("u-{}", seq.get()),
+                            "params":serde_json::Value::Object(params)})
+                    .to_string(),
+                );
+
+                assert_eq!(
+                    refused_code(&refused),
+                    E_POLICY_REFUSED,
+                    "the refusal decision is unchanged: an unmeasured key set is refused"
+                );
+                let note = refused_note(&refused);
+                assert!(
+                    !note.contains(hostile),
+                    "a client-chosen key name reached the durable log: {note}"
+                );
+                assert!(
+                    note.len() <= 240,
+                    "the detail must be bounded by its own vocabulary, not by the \
+                     client's params; it was {} bytes",
+                    note.len()
+                );
+                // Not vacuously green: the detail still tells the operator the shape.
+                assert!(
+                    note.contains(if measured_key_present { "2" } else { "1" }),
+                    "the detail must still report how many keys arrived: {note}"
+                );
+            }
+        }
+    }
+
+    /// **A refused interrupt's detail says how MANY keys arrived, never what they were
+    /// called.**
+    ///
+    /// The key names in a `turn/interrupt` are attacker-chosen bytes and the detail is
+    /// written to the durable `broker.log` an operator reads. A client that names its
+    /// extra key after a credential puts that string in the log verbatim; a client that
+    /// names it with four kilobytes puts four kilobytes there. Neither is information the
+    /// refusal needs — the SHAPE (how many keys, how many of the two required ones are
+    /// missing, how many are unexpected) is what tells an operator what happened.
+    #[test]
+    fn an_interrupts_refusal_detail_carries_the_key_shape_and_no_key_name() {
+        let threads = bound_session("01a0-head");
+        const SENTINEL: &str = "sk-live-SENTINEL-DO-NOT-LOG";
+        let four_kilobyte_name = "n".repeat(4096);
+        let seq = std::cell::Cell::new(0u32);
+
+        for hostile in [SENTINEL, four_kilobyte_name.as_str()] {
+            // Both places a hostile name can sit: alongside the measured pair, and
+            // instead of it.
+            for measured_pair_present in [true, false] {
+                let mut params = serde_json::Map::new();
+                if measured_pair_present {
+                    params.insert("threadId".into(), json!("01a0-head"));
+                    params.insert("turnId".into(), json!("01a0-turn"));
+                }
+                params.insert(hostile.to_string(), json!(1));
+                seq.set(seq.get() + 1);
+                let refused = go_env(
+                    Role::Tui,
+                    &threads,
+                    &json!({"method":"turn/interrupt","id":format!("r-{}", seq.get()),
+                            "params":serde_json::Value::Object(params)})
+                    .to_string(),
+                );
+
+                assert_eq!(
+                    refused_code(&refused),
+                    E_POLICY_REFUSED,
+                    "the refusal decision is unchanged: an unmeasured key set is refused"
+                );
+                let note = refused_note(&refused);
+                assert!(
+                    !note.contains(hostile),
+                    "a client-chosen key name reached the durable log: {note}"
+                );
+                assert!(
+                    note.len() <= 240,
+                    "the detail must be bounded by its own vocabulary, not by the \
+                     client's params; it was {} bytes",
+                    note.len()
+                );
+                // Not vacuously green: the detail still tells the operator the shape.
+                assert!(
+                    note.contains(if measured_pair_present { "3" } else { "1" }),
+                    "the detail must still report how many keys arrived: {note}"
+                );
+            }
+        }
+    }
+
+    /// **An interrupt may name this session's ONE active thread, and no other — including
+    /// a thread this session merely used to be on.**
+    ///
+    /// A retired thread is readable for ever, so "is it a session thread" is the wrong
+    /// question to ask of an actuation: it says yes to every thread the session has ever
+    /// bound. The stop control is scoped to the SOLE session thread instead, so a frame
+    /// pairing a thread the session has left with the id of the turn it is currently
+    /// running is refused on the thread alone — before the turn is even considered.
+    #[test]
+    fn an_interrupt_naming_a_thread_this_session_no_longer_solely_owns_is_refused() {
+        let threads = bound_session("01a0-head");
+        // Switch: the TUI unsubscribes from the head and creates a second thread, so
+        // `01a0-head` retires and `01a0-next` becomes the session's one active thread.
+        for id in [7, 8] {
+            assert!(matches!(
+                go_env(
+                    Role::Tui,
+                    &threads,
+                    &json!({"method":"thread/unsubscribe","id":id,
+                            "params":{"threadId":"01a0-head"}})
+                    .to_string()
+                ),
+                RelayAction::Forward { .. }
+            ));
+        }
+        assert!(matches!(
+            go_env(Role::Tui, &threads, OK_START_SWITCH),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": "s2", "result": {
+                "thread": {"id": "01a0-next"},
+                "cwd": BOUND_CWD,
+                "runtimeWorkspaceRoots": [BOUND_ROOT]
+            }})
+            .to_string(),
+        );
+        // A turn runs on the new head, and the server answers it.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-next")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-next-turn"}}}).to_string(),
+        );
+
+        let seq = std::cell::Cell::new(0u32);
+        let drive = |thread: &str, turn: &str| {
+            seq.set(seq.get() + 1);
+            go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"turn/interrupt","id":format!("x-{}", seq.get()),
+                        "params":{"threadId":thread,"turnId":turn}})
+                .to_string(),
+            )
+        };
+
+        // The retired thread paired with the LIVE turn's id — the pairing that reaches
+        // furthest, because every other half of it is genuine.
+        assert_eq!(
+            refused_code(&drive("01a0-head", "01a0-next-turn")),
+            E_POLICY_REFUSED,
+            "a thread this session has left is readable, never actuable"
+        );
+        // A thread this session never bound at all.
+        assert_eq!(
+            refused_code(&drive("01a0-a-stranger", "01a0-next-turn")),
             E_POLICY_REFUSED
         );
+        // And the one pair that names the session's own running turn still forwards, so
+        // the refusals above are not vacuous.
+        assert!(matches!(
+            drive("01a0-next", "01a0-next-turn"),
+            RelayAction::Forward { .. }
+        ));
+    }
+
+    /// **The phone may stop the turn this session is running, and may reach no other
+    /// turn and no other thread.**
+    ///
+    /// The observing leg holds one actuation, and this is the whole of what it can
+    /// do. Every other shape is answered here, locally, and **zero bytes go
+    /// upstream** — which is not a tidiness claim but the thing that keeps a
+    /// measured hang unreachable: a real app-server answers an interrupt naming a
+    /// turn that has already ended with nothing at all, for ever, so a frame this
+    /// gate lets through is a caller waiting on an answer that is never coming.
+    /// `RelayAction::SyntheticError` is the proof of the zero, because a synthetic
+    /// error is composed in this process and the upstream socket is never written.
+    ///
+    /// **Mutation:** widen the new `ccd_request` arm from `InterruptActiveTurn` to
+    /// `Forward` and every row below turns into a forward — the stale turn, the
+    /// stranger's thread and the retired thread's turn all reach the app-server,
+    /// and the stale one is the frame that never comes back.
+    #[test]
+    fn the_phone_stops_the_running_turn_and_reaches_no_other() {
+        let threads = bound_session("01a0-head");
+        let seq = std::cell::Cell::new(0u32);
+        let from_the_phone = |params: serde_json::Value| {
+            seq.set(seq.get() + 1);
+            go_env(
+                Role::Ccd,
+                &threads,
+                &json!({"method":"turn/interrupt","id":format!("p-{}", seq.get()),
+                        "params":params})
+                .to_string(),
+            )
+        };
+        // Nothing is running yet, so there is nothing for a phone to stop.
+        let idle = from_the_phone(json!({"threadId":"01a0-head","turnId":"01a0-turn"}));
+        assert_eq!(refused_code(&idle), E_POLICY_REFUSED);
+
+        // A turn the TUI started and the server answered: now one is running.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        assert!(
+            matches!(
+                from_the_phone(json!({"threadId":"01a0-head","turnId":"01a0-turn"})),
+                RelayAction::Forward { .. }
+            ),
+            "the phone must be able to stop the turn this session is running"
+        );
+
+        // A turn this session is not running, and a thread that is not this
+        // session's. Both are answered here.
+        for params in [
+            json!({"threadId":"01a0-head","turnId":"01a0-some-other-turn"}),
+            json!({"threadId":"01a0-a-stranger","turnId":"01a0-turn"}),
+        ] {
+            let refused = from_the_phone(params.clone());
+            assert_eq!(refused_code(&refused), E_POLICY_REFUSED, "{params}");
+        }
+
+        // The same closed param shape the TUI leg is held to: exactly two string
+        // keys, and a phone gets no wider frame than the terminal does.
+        for params in [
+            json!({"threadId":"01a0-head"}),
+            json!({"turnId":"01a0-turn"}),
+            json!({"threadId":"01a0-head","turnId":"01a0-turn","force":true}),
+            json!({"threadId":"01a0-head","turnId":{"id":"01a0-turn"}}),
+            json!(["01a0-head", "01a0-turn"]),
+        ] {
+            assert_eq!(
+                refused_code(&from_the_phone(params.clone())),
+                E_POLICY_REFUSED,
+                "{params}"
+            );
+        }
+
+        // **The turn ends, and the id that worked a moment ago stops working.** This
+        // is the replayed-interrupt shape — a phone re-sending an ask whose turn is
+        // already over — and it is the one the app-server never answers.
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"method":"turn/completed",
+                    "params":{"threadId":"01a0-head",
+                              "turn":{"id":"01a0-turn","status":"interrupted"}}})
+            .to_string(),
+        );
+        let stale = from_the_phone(json!({"threadId":"01a0-head","turnId":"01a0-turn"}));
+        assert_eq!(
+            refused_code(&stale),
+            E_POLICY_REFUSED,
+            "an interrupt naming a turn that has ended must be answered here, because              the app-server answers it nowhere"
+        );
+
+        // **And a retired thread's turn, after the head has moved.** The session
+        // switches to a second thread and runs a turn on it; the old thread's turn id
+        // is then a live-looking id belonging to a visit the session has left.
+        for id in [7, 8] {
+            assert!(matches!(
+                go_env(
+                    Role::Tui,
+                    &threads,
+                    &json!({"method":"thread/unsubscribe","id":id,
+                            "params":{"threadId":"01a0-head"}})
+                    .to_string()
+                ),
+                RelayAction::Forward { .. }
+            ));
+        }
+        assert!(matches!(
+            go_env(Role::Tui, &threads, OK_START_SWITCH),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": "s2", "result": {
+                "thread": {"id": "01a0-next"},
+                "cwd": BOUND_CWD,
+                "runtimeWorkspaceRoots": [BOUND_ROOT]
+            }})
+            .to_string(),
+        );
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-next")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-next-turn"}}}).to_string(),
+        );
+        let retired = from_the_phone(json!({"threadId":"01a0-head","turnId":"01a0-turn"}));
+        assert_eq!(
+            refused_code(&retired),
+            E_POLICY_REFUSED,
+            "a turn on the thread this session has LEFT is not the turn it is running"
+        );
+        // The phone follows the session, though: the new head's turn is stoppable.
+        assert!(matches!(
+            from_the_phone(json!({"threadId":"01a0-next","turnId":"01a0-next-turn"})),
+            RelayAction::Forward { .. }
+        ));
+
+        // **Every refusal above was answered in this process.** Restated as one
+        // count rather than left implied by `refused_code`'s panic: a
+        // `SyntheticError` is composed locally and the upstream socket is not
+        // written, so this is the zero-bytes claim in the form a reader can check.
+        for params in [
+            json!({"threadId":"01a0-head","turnId":"01a0-turn"}),
+            json!({"threadId":"01a0-a-stranger","turnId":"01a0-next-turn"}),
+        ] {
+            assert!(
+                matches!(
+                    from_the_phone(params.clone()),
+                    RelayAction::SyntheticError { .. }
+                ),
+                "{params} must be answered locally, never forwarded"
+            );
+        }
     }
 }

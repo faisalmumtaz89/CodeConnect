@@ -505,6 +505,29 @@ async fn wait_until(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// [`wait_until`] for a condition that has to be *asked* — a daemon's own resolver,
+/// say, which takes a lock and reads a cell.
+///
+/// A separate function rather than a generalisation, because the two signatures are
+/// genuinely different and folding them together would make every synchronous caller
+/// write an async block for nothing.
+async fn wait_for_async<F, Fut>(budget: Duration, mut cond: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + budget;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// The ccd-leg lines a broker log has grown since `skip` lines.
 ///
 /// Both spellings the broker uses, because they are different facts and this gate
@@ -1503,6 +1526,54 @@ impl RawCcd {
         }
     }
 
+    /// **The same request, where no answer is an answer.**
+    ///
+    /// [`RawCcd::request`] panics on a timeout, which is right for a probe whose
+    /// premise is that the peer answers. It is exactly wrong for one asking
+    /// *whether* it answers: an app-server that says nothing is a finding, and a
+    /// harness that dies on it destroys the record instead of writing it down.
+    /// Returns `Value::Null` for silence, which every reader here spells out.
+    async fn try_request(&mut self, method: &str, params: Value, budget: Duration) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        let frame = serde_json::json!({"id": id, "method": method, "params": params});
+        println!("CCD->BROKER {frame}");
+        if self
+            .ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .is_err()
+        {
+            return Value::Null;
+        }
+        let deadline = Instant::now() + budget;
+        loop {
+            let Some(remaining) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|r| !r.is_zero())
+            else {
+                return Value::Null;
+            };
+            let Ok(next) = tokio::time::timeout(remaining, self.ws.next()).await else {
+                return Value::Null;
+            };
+            let Some(Ok(msg)) = next else {
+                return Value::Null;
+            };
+            let Message::Text(text) = msg else { continue };
+            println!("BROKER->CCD {}", frame_preview(&text, 4000));
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            if v.get("id").and_then(Value::as_i64) == Some(id)
+                && v.get("method").is_none()
+                && (v.get("result").is_some() ^ v.get("error").is_some())
+            {
+                return v;
+            }
+        }
+    }
+
     async fn initialize(&mut self) -> Value {
         self.request(
             "initialize",
@@ -2032,6 +2103,15 @@ struct GatedCcdLeg {
     /// While false, every byte the broker sends is held in this process instead of
     /// being handed to the link. Never affects the other direction.
     delivering: Arc<std::sync::atomic::AtomicBool>,
+    /// While true, a connection is accepted and dropped at once, so the link finds
+    /// a socket that answers and then goes away. That is what the loss of a control
+    /// link looks like from the daemon's side, and it is staged in the transport so
+    /// no code under test is asked to behave differently.
+    refusing: Arc<std::sync::atomic::AtomicBool>,
+    /// The pipe task of every connection this leg has carried, so an established
+    /// one can be torn down. Refusing new connections alone would leave a link that
+    /// is already connected connected for ever.
+    live: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     accepting: tokio::task::JoinHandle<()>,
 }
 
@@ -2042,18 +2122,40 @@ impl GatedCcdLeg {
             .unwrap_or_else(|e| panic!("bind the gated ccd leg at {}: {e}", path.display()));
         let upstream = sb.ccd_sock();
         let delivering = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let refusing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let live: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let valve = Arc::clone(&delivering);
+        let closed = Arc::clone(&refusing);
+        let carried = Arc::clone(&live);
         let accepting = tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
+                if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Accepted and dropped: the dial succeeds and the connection
+                    // ends, which is the shape a link meets when the host it was
+                    // talking to has gone.
+                    drop(client);
+                    continue;
+                }
                 let Ok(broker) = UnixStream::connect(&upstream).await else {
                     return;
                 };
-                tokio::spawn(GatedCcdLeg::pipe(client, broker, Arc::clone(&valve)));
+                // **Both halves are registered, and that is not bookkeeping.**
+                // `pipe` spawns a task per direction and awaits them; aborting the
+                // task that awaits does not abort the two that hold the sockets, so
+                // a sever that took only the outer handle left the connection
+                // perfectly alive and staged nothing at all.
+                let (up, down) = GatedCcdLeg::pipe(client, broker, Arc::clone(&valve));
+                let mut held = carried.lock().expect("the gated leg's live pipes");
+                held.retain(|task| !task.is_finished());
+                held.push(up);
+                held.push(down);
             }
         });
         GatedCcdLeg {
             path,
             delivering,
+            refusing,
+            live,
             accepting,
         }
     }
@@ -2061,11 +2163,11 @@ impl GatedCcdLeg {
     /// One connection's two halves. Upstream is an unconditional copy; downstream
     /// reads first and only then asks the valve, so a frame that was already in
     /// flight when the valve closed is held rather than raced through.
-    async fn pipe(
+    fn pipe(
         client: UnixStream,
         broker: UnixStream,
         valve: Arc<std::sync::atomic::AtomicBool>,
-    ) {
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (mut from_link, mut to_link) = client.into_split();
         let (mut from_broker, mut to_broker) = broker.into_split();
@@ -2087,8 +2189,10 @@ impl GatedCcdLeg {
                 }
             }
         });
-        let _ = up.await;
-        let _ = down.await;
+        // Returned rather than awaited: the two handles are what a sever needs, and
+        // holding the socket halves inside the tasks is what makes dropping them a
+        // real disconnection.
+        (up, down)
     }
 
     fn path(&self) -> &Path {
@@ -2109,8 +2213,41 @@ impl GatedCcdLeg {
         println!("GATED CCD LEG — the broker's replies flow again");
     }
 
+    /// **Take the control link's transport away, and keep it away.**
+    ///
+    /// Both halves are needed and they do different things: aborting the live pipes
+    /// ends the connection the link is holding right now, and refusing new ones is
+    /// what keeps it down long enough for a reader to see the state rather than a
+    /// blip. The session, the TUI and the app-server are all untouched — this is a
+    /// dead wire, not a dead agent, which is the distinction the measurement is
+    /// about.
+    fn sever(&self) {
+        self.refusing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut held = self.live.lock().expect("the gated leg's live pipes");
+        for task in held.drain(..) {
+            task.abort();
+        }
+        println!("GATED CCD LEG — the control link's transport is gone");
+    }
+
+    /// Let the link dial again. Recovery from here is the link's own business.
+    fn restore(&self) {
+        self.refusing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        println!("GATED CCD LEG — the control link may dial again");
+    }
+
     fn close(self) {
         self.accepting.abort();
+        for task in self
+            .live
+            .lock()
+            .expect("the gated leg's live pipes")
+            .drain(..)
+        {
+            task.abort();
+        }
     }
 }
 
@@ -2264,6 +2401,84 @@ impl PhoneOverTheWire {
             .unwrap_or_else(|| panic!("no answer_result for {request_id} within {budget:?}"));
         serde_json::from_value(reply["result"].clone())
             .expect("the phone must be able to decode the daemon's answer_result")
+    }
+
+    /// **The stop.** Sends the `interrupt` a phone sends and decodes the
+    /// `interrupt_result` a phone decodes.
+    async fn interrupt(
+        &mut self,
+        session_ref: &str,
+        request_id: &str,
+        turn_id: &str,
+        budget: Duration,
+    ) -> protocol::ws::InterruptResult {
+        // The hash is computed the way the phone computes it — over the reference it
+        // used and the turn it saw — so a daemon that derived it differently is caught
+        // here rather than agreeing with a constant this file wrote down.
+        let frame = serde_json::json!({
+            "type": "interrupt",
+            "session_id": session_ref,
+            "request_id": request_id,
+            "turn_id": turn_id,
+            "payload_hash": protocol::hash::interrupt_hash(session_ref, turn_id),
+        });
+        println!("PHONE-> {frame}");
+        self.ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write the interrupt");
+        let reply = self
+            .read_until(budget, |frame| {
+                frame["type"].as_str() == Some("interrupt_result")
+                    && frame["request_id"].as_str() == Some(request_id)
+            })
+            .await
+            .unwrap_or_else(|| panic!("no interrupt_result for {request_id} within {budget:?}"));
+        serde_json::from_value(reply["result"].clone())
+            .expect("the phone must be able to decode the daemon's interrupt_result")
+    }
+
+    /// **The stop, without waiting for the verdict.**
+    ///
+    /// The kill gate has to catch the daemon between the claim and the terminal, and
+    /// the terminal can be seconds away. This writes the frame and leaves; what the
+    /// daemon did with it is read out of its database.
+    /// **The next `interrupt_result` for one id.**
+    ///
+    /// Separate from [`PhoneOverTheWire::interrupt`] because a gate about two taps
+    /// under one id has to read TWO replies to the same `request_id`, which is a thing
+    /// a send-and-wait helper cannot express. Frames are read in order and anything
+    /// else is skipped, so calling this twice returns the two replies in the order the
+    /// daemon wrote them.
+    async fn next_interrupt_result(
+        &mut self,
+        request_id: &str,
+        budget: Duration,
+    ) -> protocol::ws::InterruptResult {
+        let reply = self
+            .read_until(budget, |frame| {
+                frame["type"].as_str() == Some("interrupt_result")
+                    && frame["request_id"].as_str() == Some(request_id)
+            })
+            .await
+            .unwrap_or_else(|| panic!("no interrupt_result for {request_id} within {budget:?}"));
+        serde_json::from_value(reply["result"].clone())
+            .expect("the phone must be able to decode the daemon's interrupt_result")
+    }
+
+    async fn send_interrupt(&mut self, session_ref: &str, request_id: &str, turn_id: &str) {
+        let frame = serde_json::json!({
+            "type": "interrupt",
+            "session_id": session_ref,
+            "request_id": request_id,
+            "turn_id": turn_id,
+            "payload_hash": protocol::hash::interrupt_hash(session_ref, turn_id),
+        });
+        println!("PHONE-> {frame}");
+        self.ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write the interrupt");
     }
 
     /// **The tap, without waiting for the verdict.**
@@ -2547,6 +2762,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         first_presence.clone(),
         crate::codex_link::LinkCarry::new(),
         crate::codex_link::answer_channel().1,
+        crate::codex_link::interrupt_channel().1,
     ));
 
     // The measuring instrument for claim 5, attached HERE rather than later: it has
@@ -3764,6 +3980,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         crate::codex_link::LinkPresence::new(),
         crate::codex_link::LinkCarry::new(),
         crate::codex_link::answer_channel().1,
+        crate::codex_link::interrupt_channel().1,
     ));
     let mut third_log: Vec<String> = Vec::new();
     let reattached = wait_until(Duration::from_secs(60), || {
@@ -6531,6 +6748,27 @@ fn answer_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>
     rows
 }
 
+/// The interrupt ledger of one run, in a database this process does not own.
+fn interrupt_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>)> {
+    let conn = rusqlite::Connection::open(db).expect("open the child's database");
+    let mut stmt = conn
+        .prepare(
+            "SELECT client_request_id, status, outcome FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2
+              ORDER BY started_at ASC",
+        )
+        .expect("prepare the interrupt ledger read");
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::store::OPERATION_INTERRUPT, uid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("read the interrupt ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode the interrupt ledger");
+    rows
+}
+
 /// The open Codex cards one run has in a database this process does not own.
 fn open_cards_at(db: &Path, uid: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(db).expect("open the child's database");
@@ -6802,6 +7040,69 @@ async fn a_daemon_killed_after_the_write_records_unknown_and_never_answers_again
 /// position that does nothing but record. The resume is what makes it one at all:
 /// [`measure_the_approval_wire_on_the_ccd_leg`] measured that an unsubscribed leg is
 /// handed no turn or approval traffic whatsoever.
+/// **Every thread the app-server currently has loaded**, asked of the app-server.
+///
+/// A throwaway connection each time, because the question is "what is loaded now" and
+/// a long-lived one would answer with what was loaded when it opened.
+///
+/// **Order is not headship.** Measured across a `/new`: the list carries the old head
+/// FIRST and the new one after it, so a reader that took the first entry as the
+/// current thread would report that the head never moved while the wire had already
+/// announced the new one. What the order means was never measured, so nothing here
+/// reads it — a caller that wants the new thread asks for the entry it did not
+/// already know about.
+async fn loaded_threads(sb: &LiveSandbox) -> Vec<String> {
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    if !raw.initialize().await["result"].is_object() {
+        return Vec::new();
+    }
+    raw.notify("initialized", serde_json::json!({})).await;
+    let loaded = raw
+        .request(
+            "thread/loaded/list",
+            serde_json::json!({}),
+            Duration::from_secs(20),
+        )
+        .await;
+    loaded["result"]["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **The turn this thread is running, read from a `thread/resume` answer.**
+///
+/// The same answer the link itself learns a running turn from, asked on a throwaway
+/// connection. It is the only way to name the first turn of a freshly switched-to
+/// thread: `turn/started` for it goes to the TUI's own connection, so a subscription
+/// that predates the switch never sees it and one taken afterwards is already too
+/// late.
+async fn running_turn_of(sb: &LiveSandbox, thread_id: &str) -> Option<String> {
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    if !raw.initialize().await["result"].is_object() {
+        return None;
+    }
+    raw.notify("initialized", serde_json::json!({})).await;
+    let answer = raw
+        .try_request(
+            "thread/resume",
+            serde_json::json!({"threadId": thread_id}),
+            Duration::from_secs(20),
+        )
+        .await;
+    answer
+        .pointer("/result/thread/turns")?
+        .as_array()?
+        .iter()
+        .find(|turn| turn["status"].as_str() == Some("inProgress"))
+        .and_then(|turn| turn["id"].as_str().map(str::to_string))
+}
+
 async fn subscribed_tap(sb: &LiveSandbox, label: &'static str) -> (WireTap, String) {
     let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
     assert!(
@@ -10111,4 +10412,2027 @@ async fn measure_what_the_tui_calls_the_amendment_option() {
         }
     }
     teardown(sub, coord, "/tmp/cc-label-probe-unused");
+}
+
+// ======================================================== INTERRUPT MEASUREMENT
+//
+// Grounding for the phone-driven interrupt, NOT a gate. It answers the questions
+// the design cannot be written without, by reading the wire rather than by
+// reasoning about it:
+//
+//   1. What does a `turn/interrupt` sent from the **ccd** leg meet today? The
+//      broker's own tables are the first answer, and a live refusal is the second
+//      — a table can be read, but only a run says what a leg is handed.
+//   2. What does the **app-server** do when a turn is interrupted, with and
+//      without an approval prompt showing, and what exactly does a subscribed ccd
+//      leg read while it happens? That frame set is what an outcome would be
+//      derived from, and it must be measured on the connection that would do the
+//      deriving.
+//   3. What do a stale turn id, a foreign thread and a turn on a retired thread
+//      each meet — from the broker, which has its own binding rule, and from the
+//      app-server, which has another.
+//
+// The instrument is deliberately three connections, because the three questions
+// have three different subjects: the ccd leg (what the phone's path meets), a tui
+// leg (what the broker's interrupt rule says), and the app-server socket itself
+// (what codex does, unmediated).
+
+/// A fresh, well-formed UUIDv4-shaped id that names nothing.
+///
+/// Derived from the clock rather than a constant, so a rerun cannot collide with a
+/// real id this session minted, and shaped like the ids the wire carries so a
+/// refusal is about the binding rather than about the syntax.
+fn an_id_that_names_nothing() -> String {
+    let n = nanos();
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (n & 0xFFFF_FFFF) as u32,
+        ((n >> 32) & 0xFFFF) as u16,
+        ((n >> 48) & 0xFFF) as u16,
+        ((n >> 60) & 0xFFF) as u16,
+        (n >> 8) & 0xFFFF_FFFF_FFFF,
+    )
+}
+
+/// One interrupt asked of one connection, and the answer it was given.
+///
+/// Recorded as a row rather than asserted, because every field of it is a
+/// measurement: which leg asked, what it named, and whether the answer was the
+/// app-server's or a refusal composed before a byte left this machine.
+struct InterruptProbe {
+    leg: &'static str,
+    scenario: &'static str,
+    sent: Value,
+    answer: Value,
+}
+
+impl InterruptProbe {
+    fn row(&self) -> String {
+        let verdict = if self.answer.get("error").is_some() {
+            format!(
+                "error code={} message={}",
+                self.answer["error"]["code"], self.answer["error"]["message"]
+            )
+        } else if self.answer.get("result").is_some() {
+            format!("result={}", self.answer["result"])
+        } else if self.answer.is_null() {
+            "NO ANSWER within 20 s".to_string()
+        } else {
+            format!("<unrecognised answer: {}>", self.answer)
+        };
+        format!(
+            "leg={:<10} scenario={:<28} params={} -> {verdict}",
+            self.leg, self.scenario, self.sent["params"]
+        )
+    }
+}
+
+/// **Raise a fresh, genuinely running turn and hand back the turn it started.**
+///
+/// A long shell command, approved at the keyboard so the prompt is gone and the exec
+/// is the only live thing on the thread. The marker path comes back with the turn id
+/// because "did the command run to completion?" is the only proof that a turn was
+/// interrupted rather than merely finished, and the caller has to check it after.
+///
+/// **One of these per leg being measured.** An interrupt that WORKS ends the turn it
+/// names, so a second leg asked about the same turn is being asked about an ended
+/// one — and the app-server's answer to that is a different measurement wearing the
+/// first one's label.
+async fn a_fresh_long_turn(sb: &LiveSandbox, sub: &WireTap, tag: &str) -> (String, String) {
+    let marker = format!("/tmp/cc-4a-intr-{tag}.{}.txt", nanos());
+    sb.send_keys(&[&format!(
+        "Run the shell command `sleep 45 && touch {marker}` now. Do not explain, \
+         just run it."
+    )]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let asked = wait_until(Duration::from_secs(240), || {
+        sb.capture_pane().contains(COMMAND_PROMPT)
+    })
+    .await;
+    assert!(
+        asked,
+        "the long command never raised its approval, so there is no running turn \
+         to interrupt. pane:\n{}",
+        sb.capture_pane()
+    );
+    sb.send_keys(&["y"]);
+    let cleared = wait_until(Duration::from_secs(30), || {
+        !sb.capture_pane().contains(COMMAND_PROMPT)
+    })
+    .await;
+    assert!(cleared, "the keyboard accept did not dismiss the prompt");
+    // Give the exec a moment to actually be the only thing in flight.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let turn = sub
+        .seen()
+        .into_iter()
+        .rfind(|f| f["method"] == "turn/started")
+        .and_then(|f| f["params"]["turn"]["id"].as_str().map(str::to_string))
+        .expect("a turn/started naming the running turn");
+    println!("RUNNING TURN ({tag}) = {turn}");
+    (turn, marker)
+}
+
+/// **Raise a fresh long turn and STOP at its approval**, so the question is still on
+/// screen when the interrupt lands.
+///
+/// [`a_fresh_long_turn`]'s sibling, and one per leg for the same reason: an interrupt
+/// that works ends the turn, so a second leg asked about the first's turn is asked
+/// about an ended one with a pending approval that is no longer pending.
+async fn a_fresh_turn_with_an_approval_showing(
+    sb: &LiveSandbox,
+    sub: &WireTap,
+    tag: &str,
+) -> (String, String, Value) {
+    let marker = format!("/tmp/cc-4a-intr-{tag}.{}.txt", nanos());
+    sb.send_keys(&[&format!(
+        "Run the shell command `sleep 45 && touch {marker}` now. Do not explain, \
+         just run it."
+    )]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let asked = wait_until(Duration::from_secs(240), || {
+        sb.capture_pane().contains(COMMAND_PROMPT)
+    })
+    .await;
+    assert!(
+        asked,
+        "no approval prompt for the {tag} turn. pane:\n{}",
+        sb.capture_pane()
+    );
+    let turn = sub
+        .seen()
+        .into_iter()
+        .rfind(|f| f["method"] == "turn/started")
+        .and_then(|f| f["params"]["turn"]["id"].as_str().map(str::to_string))
+        .expect("a turn/started naming the turn under the prompt");
+    let request = sub
+        .seen()
+        .into_iter()
+        .rfind(|f| {
+            f["method"]
+                .as_str()
+                .is_some_and(|m| m.ends_with("/requestApproval"))
+        })
+        .expect("the pending approval request");
+    println!(
+        "PENDING TURN ({tag}) = {turn}  request wire id = {}",
+        request["id"]
+    );
+    (turn, marker, request)
+}
+
+/// Whether this probe was FORWARDED — the app-server answered it, rather than
+/// something on this machine composing a refusal before a byte left.
+///
+/// Measured on 0.153.4: a forwarded `turn/interrupt` for a running turn is answered
+/// `result:{}`. A refusal composed here is a JSON-RPC error.
+fn was_forwarded(probe: &InterruptProbe) -> bool {
+    probe.answer.get("error").is_none() && probe.answer.get("result").is_some()
+}
+
+/// Ask one connection to interrupt, and read back the answer to that id.
+///
+/// The frames a connection is handed while it waits are not consumed here — the
+/// subscribed tap is the reader for those, and mixing the two would let a
+/// notification satisfy a question that was asked about a response.
+async fn ask_to_interrupt(
+    raw: &mut RawCcd,
+    leg: &'static str,
+    scenario: &'static str,
+    thread_id: &str,
+    turn_id: &str,
+) -> InterruptProbe {
+    let params = serde_json::json!({"threadId": thread_id, "turnId": turn_id});
+    let answer = raw
+        .try_request("turn/interrupt", params.clone(), Duration::from_secs(20))
+        .await;
+    let probe = InterruptProbe {
+        leg,
+        scenario,
+        sent: serde_json::json!({"method": "turn/interrupt", "params": params}),
+        answer,
+    };
+    println!("INTERRUPT PROBE  {}", probe.row());
+    probe
+}
+
+/// Every frame this tap was handed after `from`, in arrival order.
+fn frames_since(tap: &WireTap, from: usize) -> Vec<Value> {
+    tap.seen().into_iter().skip(from).collect()
+}
+
+/// The one-line-per-frame view a reader needs: what it was, which turn it was
+/// about, and the app-server's own clock reading for it.
+fn frame_lines(frames: &[Value]) -> String {
+    frames
+        .iter()
+        .map(|f| {
+            let method = f["method"].as_str().unwrap_or("<response>");
+            let at = f["emittedAtMs"].as_i64().unwrap_or_default();
+            let detail = match method {
+                "turn/started" | "turn/completed" => format!(
+                    "turn={} status={} items={}",
+                    f["params"]["turn"]["id"],
+                    f["params"]["turn"]["status"],
+                    f["params"]["turn"]["items"]
+                        .as_array()
+                        .map(Vec::len)
+                        .unwrap_or_default()
+                ),
+                "thread/status/changed" => format!("status={}", f["params"]["status"]),
+                "item/started" | "item/completed" => format!(
+                    "item={} type={} status={}",
+                    f["params"]["item"]["id"],
+                    f["params"]["item"]["itemType"]
+                        .as_str()
+                        .or_else(|| f["params"]["item"]["type"].as_str())
+                        .unwrap_or("?"),
+                    f["params"]["item"]["status"]
+                ),
+                "serverRequest/resolved" => format!("requestId={}", f["params"]["requestId"]),
+                _ => String::new(),
+            };
+            format!("  {at:>14}  {method:<38} {detail}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// **What an interrupt is, on 0.153, from each of the three parties that have an
+/// opinion about it.**
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_the_interrupt_wire_from_every_leg_that_has_an_opinion() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("intr");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    // The reader: a subscribed ccd leg, which is the connection whose frames a
+    // daemon would derive an outcome from.
+    let (mut sub, thread_id) = subscribed_tap(&sb, "ccd-subscribed").await;
+
+    // The two instruments. `ccd` is the leg the phone's path would use; `tui` is
+    // the leg the broker's interrupt rule was written for. Both are raw, because
+    // what is being measured is the answer to a request, not a link's behaviour.
+    let mut ccd = RawCcd::connect(&sb.ccd_sock()).await;
+    assert!(ccd.initialize().await["result"].is_object());
+    ccd.notify("initialized", serde_json::json!({})).await;
+    let mut tui = RawCcd::connect(&sb.run_dir.join("tui.sock")).await;
+    assert!(tui.initialize().await["result"].is_object());
+    tui.notify("initialized", serde_json::json!({})).await;
+
+    let mut probes: Vec<InterruptProbe> = Vec::new();
+    let mut sections: Vec<String> = Vec::new();
+    // Everything from here is driven by this probe, so this is where the fixture
+    // starts: a capture that began at the tap's first frame would carry the
+    // warm-up turn's traffic, which is scene-setting rather than evidence.
+    let lifecycle_from = sub.seen().len();
+
+    // ---- the turn that will be interrupted, with NO approval showing ---------
+    //
+    // **One fresh turn per leg.** An interrupt that works ENDS the turn it names, so
+    // both legs asked about one turn measure two different things under one label:
+    // the first is asked about a running turn and the second about an ended one. Each
+    // leg therefore raises its own.
+
+    // 1. The ccd leg, which is the whole question.
+    let (running_turn, marker) = a_fresh_long_turn(&sb, &sub, "ccd").await;
+    let mark = sub.seen().len();
+    probes.push(
+        ask_to_interrupt(
+            &mut ccd,
+            "ccd",
+            "running turn, no approval",
+            &thread_id,
+            &running_turn,
+        )
+        .await,
+    );
+    let ccd_forwarded = was_forwarded(probes.last().expect("just pushed"));
+    let ccd_terminal = wait_until(Duration::from_secs(30), || {
+        frames_since(&sub, mark)
+            .iter()
+            .any(|f| f["method"] == "turn/completed")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let no_approval_frames = frames_since(&sub, mark);
+    sections.push(format!(
+        "===== ccd leg interrupts a running turn (no approval showing) =====\n\
+         forwarded = {ccd_forwarded}   turn terminal reached = {ccd_terminal}\n\
+         frames the subscribed ccd leg read, in arrival order:\n{}",
+        frame_lines(&no_approval_frames)
+    ));
+    assert!(
+        ccd_forwarded,
+        "the ccd leg's interrupt for a genuinely running turn must be forwarded, not \
+         refused here — that admission is the whole of what this measures"
+    );
+    assert!(
+        ccd_terminal,
+        "and the turn it named must actually end, or nothing was interrupted"
+    );
+    // **What this checks, exactly.** The command had not finished by the time the turn
+    // reached its terminal, so the terminal is an interrupt rather than a completion
+    // arriving on cue. It does NOT say the command was killed: measured on 0.153.4, an
+    // interrupted turn ends the TURN and the shell it spawned runs on — the marker
+    // appears about forty-five seconds later, long after this line. The turn's own
+    // status is the evidence that the interrupt took effect; this is the evidence that
+    // there was something left to interrupt.
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command had already completed when the turn ended, so this measured a \
+         completion rather than an interrupt"
+    );
+
+    // 2. The tui leg, which the broker has always admitted — so this is the
+    //    app-server's own behaviour, read on the connection a daemon reads it on.
+    //    Its own fresh turn, for the reason above: the ccd leg's turn is over.
+    let (tui_turn, tui_marker) = a_fresh_long_turn(&sb, &sub, "tui").await;
+    let mark = sub.seen().len();
+    probes.push(
+        ask_to_interrupt(
+            &mut tui,
+            "tui",
+            "running turn, no approval",
+            &thread_id,
+            &tui_turn,
+        )
+        .await,
+    );
+    let tui_forwarded = was_forwarded(probes.last().expect("just pushed"));
+    let terminal = wait_until(Duration::from_secs(30), || {
+        frames_since(&sub, mark)
+            .iter()
+            .any(|f| f["method"] == "turn/completed")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = frames_since(&sub, mark);
+    println!("terminal seen = {terminal}");
+    sections.push(format!(
+        "===== tui leg interrupts a running turn (no approval showing) =====\n\
+         forwarded = {tui_forwarded}   turn terminal reached = {terminal}\n\
+         frames the subscribed ccd leg read, in arrival order:\n{}",
+        frame_lines(&after)
+    ));
+    assert!(
+        tui_forwarded,
+        "the tui leg's interrupt for a genuinely running turn must be forwarded — it \
+         is the row the ccd admission was measured against, and a refusal here would \
+         mean the two legs were never compared on the same footing"
+    );
+    assert!(
+        terminal,
+        "and the turn it named must actually end, or nothing was interrupted"
+    );
+    assert!(
+        !std::path::Path::new(&tui_marker).exists(),
+        "the tui leg's command had already completed when the turn ended, so this \
+         measured a completion rather than an interrupt"
+    );
+
+    // ---- the same, WITH an approval prompt showing --------------------------
+    //
+    // One fresh turn per leg here too, and the reason is sharper than above: the
+    // first leg's interrupt takes the question off the screen with the turn, so a
+    // second leg asked about it would be measuring an ended turn whose approval is no
+    // longer pending, under a label that says the opposite.
+
+    // 3. The ccd leg, with a question outstanding.
+    let (pending_turn, marker2, _pending_request) =
+        a_fresh_turn_with_an_approval_showing(&sb, &sub, "ccd-pending").await;
+    let mark = sub.seen().len();
+    probes.push(
+        ask_to_interrupt(
+            &mut ccd,
+            "ccd",
+            "running turn, approval pending",
+            &thread_id,
+            &pending_turn,
+        )
+        .await,
+    );
+    let ccd_pending_forwarded = was_forwarded(probes.last().expect("just pushed"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    sections.push(format!(
+        "===== ccd leg interrupts a turn with an approval pending =====\n\
+         forwarded = {ccd_pending_forwarded}\n\
+         approval still painted = {}\n\
+         frames the subscribed ccd leg read in the 3 s that followed:\n{}",
+        sb.capture_pane().contains(COMMAND_PROMPT),
+        frame_lines(&frames_since(&sub, mark))
+    ));
+    assert!(
+        ccd_pending_forwarded,
+        "a turn with an approval outstanding is still a running turn, and the ccd \
+         leg's interrupt for it must be forwarded"
+    );
+    // Whatever the first interrupt left on the screen goes, so the next turn's
+    // prompt is unambiguously its own.
+    sb.send_keys(&["Escape"]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 4. The tui leg, with a question outstanding — the ordering half of the
+    //    keystroke measurements re-asked for a WIRE interrupt. Its own turn.
+    let (tui_pending_turn, marker3, _tui_pending_request) =
+        a_fresh_turn_with_an_approval_showing(&sb, &sub, "tui-pending").await;
+    let mark = sub.seen().len();
+    probes.push(
+        ask_to_interrupt(
+            &mut tui,
+            "tui",
+            "running turn, approval pending",
+            &thread_id,
+            &tui_pending_turn,
+        )
+        .await,
+    );
+    let terminal = wait_until(Duration::from_secs(30), || {
+        frames_since(&sub, mark)
+            .iter()
+            .any(|f| f["method"] == "turn/completed")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let with_approval_frames = frames_since(&sub, mark);
+    sections.push(format!(
+        "===== tui leg interrupts a turn WITH an approval pending =====\n\
+         turn terminal reached = {terminal}\n\
+         approval still painted after = {}\n\
+         frames the subscribed ccd leg read, in arrival order:\n{}",
+        sb.capture_pane().contains(COMMAND_PROMPT),
+        frame_lines(&with_approval_frames)
+    ));
+    // Leave nothing on the screen for the refusal probes below.
+    sb.send_keys(&["Escape"]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // **This probe's own litter, removed by this probe.** Every marker is a path the
+    // interrupted command was supposed never to reach; leaving them behind on the
+    // runs where one slipped through would seed the next run's assertion with the
+    // last one's failure.
+    for marker in [&marker, &tui_marker, &marker2, &marker3] {
+        let _ = std::fs::remove_file(marker);
+    }
+
+    // ---- what a WRONG id meets, from each party ------------------------------
+    let stale = running_turn.clone();
+    let nowhere_turn = an_id_that_names_nothing();
+    let nowhere_thread = an_id_that_names_nothing();
+    for (leg, raw) in [("ccd", &mut ccd), ("tui", &mut tui)] {
+        probes
+            .push(ask_to_interrupt(raw, leg, "turn that already ended", &thread_id, &stale).await);
+        probes.push(
+            ask_to_interrupt(
+                raw,
+                leg,
+                "turn id that names nothing",
+                &thread_id,
+                &nowhere_turn,
+            )
+            .await,
+        );
+        probes.push(
+            ask_to_interrupt(
+                raw,
+                leg,
+                "thread that names nothing",
+                &nowhere_thread,
+                &stale,
+            )
+            .await,
+        );
+    }
+
+    // ---- a turn on a RETIRED thread: the generation question -----------------
+    //
+    // `/new` moves the head. The turn ids above then belong to a thread this
+    // session has left, which is exactly the shape a replayed phone interrupt
+    // would carry after a switch.
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    // **The head has to have actually moved, and a count of `thread/started`
+    // frames does not say that** — the tap subscribed to a thread that already
+    // existed, so it never saw the first one and a "more than one" test is off by
+    // exactly that. The question is whether a thread OTHER than the one the turn
+    // ids belong to has been born, which is what makes those ids a retired
+    // thread's.
+    let switched = wait_until(Duration::from_secs(90), || {
+        sub.seen().iter().any(|f| {
+            f["method"] == "thread/started"
+                && f["params"]["thread"]["id"]
+                    .as_str()
+                    .is_some_and(|id| id != thread_id)
+        })
+    })
+    .await;
+    // The broker learns the new head from the same broadcast, but it learns it on
+    // its own schedule; an interrupt asked before it has is a question about the
+    // OLD head and measures nothing about a retired one.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("switched to a new thread = {switched}");
+    assert!(
+        switched,
+        "the head never moved, so the ids below are not a retired thread's and the \
+         retired-thread row would be a second reading of the ended-turn row"
+    );
+    for (leg, raw) in [("ccd", &mut ccd), ("tui", &mut tui)] {
+        probes
+            .push(ask_to_interrupt(raw, leg, "turn on a retired thread", &thread_id, &stale).await);
+    }
+
+    // ---- the record ---------------------------------------------------------
+    assert!(
+        sub.barrier(Duration::from_secs(20)).await,
+        "the tap must still be answering, or its silences are facts about a corpse"
+    );
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let interrupt_lines: Vec<&str> = broker_log
+        .lines()
+        .filter(|line| line.contains("turn/interrupt"))
+        .collect();
+
+    let mut record = String::new();
+    record.push_str(
+        "codex 0.153.4 — what a turn/interrupt meets, per leg\n\
+         ====================================================\n\n",
+    );
+    for probe in &probes {
+        record.push_str(&probe.row());
+        record.push('\n');
+    }
+    record.push_str("\n\nthe broker's own verdicts (broker.log lines naming turn/interrupt)\n");
+    for line in &interrupt_lines {
+        record.push_str("  ");
+        record.push_str(line);
+        record.push('\n');
+    }
+    record.push_str("\n\n");
+    for section in &sections {
+        record.push_str(section);
+        record.push_str("\n\n");
+    }
+    println!("=============== INTERRUPT MEASUREMENT ===============\n{record}");
+
+    let evidence = std::env::var("CC_CODEX_4A_EVID")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| sb.run_dir.clone());
+    let _ = std::fs::create_dir_all(&evidence);
+    let _ = std::fs::write(evidence.join("interrupt-measurement.txt"), &record);
+
+    // The frames themselves, in the `{conn,dir,frame}` shape the committed captures
+    // use, so a Rust replay can read the turn-status vocabulary and the interrupt
+    // terminals rather than trust a sentence about them.
+    //
+    // **The whole driven lifecycle, not just the terminals.** What a daemon has to
+    // project running / idle / blocked from is the SEQUENCE — which frame says the
+    // agent went back to work, which says it is waiting on a person, and which of
+    // the two frames that arrive in the same millisecond leads. A capture of the
+    // endings alone cannot witness any of that.
+    //
+    // Observation noise is excluded exactly as the other 0.153 captures exclude it:
+    // token usage, rate limits and streamed deltas carry no turn-status fact.
+    const TURN_STATUS_VOCABULARY: [&str; 5] = [
+        "turn/started",
+        "turn/completed",
+        "thread/status/changed",
+        "thread/started",
+        "serverRequest/resolved",
+    ];
+    let mut lines = String::new();
+    for frame in frames_since(&sub, lifecycle_from) {
+        let keep = frame["method"].as_str().is_some_and(|m| {
+            TURN_STATUS_VOCABULARY.contains(&m) || m.ends_with("/requestApproval")
+        });
+        if !keep {
+            continue;
+        }
+        lines.push_str(
+            &serde_json::json!({"conn": "ccd-subscribed", "dir": "s2c", "frame": frame})
+                .to_string(),
+        );
+        lines.push('\n');
+    }
+    let _ = std::fs::write(evidence.join("interrupt-0.153.jsonl"), &lines);
+    println!(
+        "the two interrupt terminals this run measured: {} then {} frame(s)",
+        no_approval_frames.len(),
+        with_approval_frames.len()
+    );
+    println!("EVIDENCE WRITTEN under {}", evidence.display());
+
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&marker2);
+    teardown(sub, coord, "/tmp/cc-4a-unused");
+}
+
+/// **What the daemon knows when the control link's wire goes away, and how fast.**
+///
+/// A refusal that says "there is no link" is only as good as the fact behind it, so
+/// the fact is measured rather than assumed: a real registration, a real link, a
+/// real subscribed connection to a real app-server — and then the transport is taken
+/// away underneath it while the TUI keeps running. What is recorded is the addressee
+/// the daemon reports over time, which is the value every phone-facing refusal on
+/// this path would be derived from, and how long each transition took.
+///
+/// The session is deliberately left alive. A dead agent and a dead wire are
+/// different facts and a phone must not be told one when the other is true, so the
+/// probe stages only the wire.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_the_daemon_knows_when_the_control_link_goes_down() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("linkdown");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let _registration = register_the_run_on(&daemon, &session, gate.path()).await;
+
+    // What the daemon reports, right now, in the words a refusal would use.
+    let addressee = || {
+        let daemon = Arc::clone(&daemon);
+        let name = session.name.clone();
+        async move {
+            daemon
+                .resolve_codex_inbound(&name)
+                .await
+                .expect("resolving this run must not fail")
+                .map(|(_, addressee)| addressee)
+                .expect("the run exists")
+        }
+    };
+
+    let mut timeline: Vec<String> = Vec::new();
+    let start = Instant::now();
+    let mut note = |what: &str, at: Duration, state: &crate::codex_link::CodexAddressee| {
+        let line = format!("  {:>8.3}s  {what:<34} {state:?}", at.as_secs_f64());
+        println!("LINK-DOWN {line}");
+        timeline.push(line);
+    };
+
+    // 1. The link comes up and subscribes. Everything below is measured against
+    //    this, so a probe that never got here would be measuring nothing.
+    let subscribed = {
+        let mut ok = false;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while Instant::now() < deadline {
+            if addressee().await.is_subscribed() {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        ok
+    };
+    let up_at = start.elapsed();
+    let state = addressee().await;
+    note("link subscribed", up_at, &state);
+    assert!(
+        subscribed,
+        "the link never subscribed, so nothing measured below is about losing one. \
+         last state: {state:?}"
+    );
+
+    // 2. Take the wire away. The pane keeps running; only the transport dies.
+    let severed_at = Instant::now();
+    gate.sever();
+    let mut left_subscribed = None;
+    let mut settled = None;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let state = addressee().await;
+        if left_subscribed.is_none() && !state.is_subscribed() {
+            left_subscribed = Some((severed_at.elapsed(), state.clone()));
+            note("stopped being an addressee", start.elapsed(), &state);
+        }
+        if matches!(state, crate::codex_link::CodexAddressee::Offline { .. }) {
+            settled = Some((severed_at.elapsed(), state.clone()));
+            note("settled after the wire died", start.elapsed(), &state);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // **Held down long enough to be a state rather than a blip.** The link dials
+    // again the moment it is dropped, so a probe that restored the wire the instant
+    // it saw the first transition would be measuring the detection and nothing
+    // about what a session looks like while its control link is genuinely gone.
+    while severed_at.elapsed() < Duration::from_secs(20) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut down_states: Vec<String> = Vec::new();
+    for _ in 0..10 {
+        let seen = format!("{:?}", addressee().await);
+        if down_states.last() != Some(&seen) {
+            down_states.push(seen);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    println!("LINK-DOWN states seen while the wire was gone: {down_states:?}");
+    let after_sever = addressee().await;
+    note(
+        "at the end of the down window",
+        start.elapsed(),
+        &after_sever,
+    );
+    assert!(
+        sb.tui_running(),
+        "the TUI must still be running, or this measured a dead session rather than \
+         a dead wire"
+    );
+
+    // 3. Let it dial again, and see what recovery restores and when.
+    let restored_at = Instant::now();
+    gate.restore();
+    let mut back = None;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let state = addressee().await;
+        if state.is_subscribed() {
+            back = Some((restored_at.elapsed(), state.clone()));
+            note("subscribed again", start.elapsed(), &state);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let final_state = addressee().await;
+    note("final", start.elapsed(), &final_state);
+
+    let mut record = String::new();
+    record.push_str(
+        "codex 0.153.4 — what the daemon knows when the control link's wire dies\n\
+         =====================================================================\n\n",
+    );
+    record.push_str(&format!(
+        "left Subscribed after      : {}\n\
+         settled at Offline after   : {}\n\
+         state when the wire came back: {after_sever:?}\n\
+         subscribed again after     : {}\n\
+         TUI still running          : {}\n\n\
+         states while the wire was gone: {down_states:?}\n\n\
+         timeline\n{}\n",
+        left_subscribed
+            .as_ref()
+            .map(|(at, state)| format!("{:.3}s -> {state:?}", at.as_secs_f64()))
+            .unwrap_or_else(|| "<never left Subscribed>".into()),
+        settled
+            .as_ref()
+            .map(|(at, state)| format!("{:.3}s -> {state:?}", at.as_secs_f64()))
+            .unwrap_or_else(|| "<never reached Offline>".into()),
+        back.as_ref()
+            .map(|(at, _)| format!("{:.3}s", at.as_secs_f64()))
+            .unwrap_or_else(|| "<never came back>".into()),
+        sb.tui_running(),
+        timeline.join("\n"),
+    ));
+    println!("=============== CONTROL-LINK-DOWN MEASUREMENT ===============\n{record}");
+
+    let evidence = std::env::var("CC_CODEX_4A_EVID")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| sb.run_dir.clone());
+    let _ = std::fs::create_dir_all(&evidence);
+    let _ = std::fs::write(evidence.join("control-link-down.txt"), &record);
+
+    gate.close();
+    let mut coord = coord;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// **What codex itself says about an interrupt, with no broker in between.**
+///
+/// The leg probes above measure a policy: the broker answers most of them before a
+/// byte leaves this machine, so they say what CodeConnect permits and nothing about
+/// what the app-server would have done. That difference is the whole question for a
+/// build that is deciding how much of the binding it must enforce itself — a server
+/// that refuses a stale turn id is a second lock; a server that accepts one silently
+/// means the daemon's own check is the only one there is.
+///
+/// So this dials the app-server's own socket in the run directory, which the host
+/// created and this sandbox owns, and asks it directly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_what_codex_itself_says_about_an_interrupt() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("asintr");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let (sub, thread_id) = subscribed_tap(&sb, "ccd-subscribed").await;
+
+    // The app-server's own socket. Same handshake the broker performs for each of
+    // its upstreams, so this is an ordinary client and not a privileged one.
+    let mut server = RawCcd::connect(&sb.run_dir.join("as.sock")).await;
+    assert!(
+        server.initialize().await["result"].is_object(),
+        "the app-server must answer this connection's initialize, or every answer \
+         below is about an unopened socket"
+    );
+    server.notify("initialized", serde_json::json!({})).await;
+
+    let mut probes: Vec<InterruptProbe> = Vec::new();
+
+    // A running turn to aim at, approved at the keyboard so no prompt is showing.
+    let marker = format!("/tmp/cc-4a-as.{}.txt", nanos());
+    sb.send_keys(&[&format!(
+        "Run the shell command `sleep 45 && touch {marker}` now. Do not explain, \
+         just run it."
+    )]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    assert!(
+        wait_until(Duration::from_secs(240), || sb
+            .capture_pane()
+            .contains(COMMAND_PROMPT))
+        .await,
+        "no approval prompt, so no long turn to interrupt"
+    );
+    sb.send_keys(&["y"]);
+    assert!(
+        wait_until(Duration::from_secs(30), || !sb
+            .capture_pane()
+            .contains(COMMAND_PROMPT))
+        .await,
+        "the keyboard accept did not dismiss the prompt"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let running_turn = sub
+        .seen()
+        .into_iter()
+        .rfind(|f| f["method"] == "turn/started")
+        .and_then(|f| f["params"]["turn"]["id"].as_str().map(str::to_string))
+        .expect("a turn/started naming the running turn");
+
+    // The wrong ids first, while the turn is genuinely running — so a refusal is
+    // about the id and not about there being nothing to interrupt.
+    let nowhere_turn = an_id_that_names_nothing();
+    let nowhere_thread = an_id_that_names_nothing();
+    probes.push(
+        ask_to_interrupt(
+            &mut server,
+            "app-server",
+            "turn id that names nothing",
+            &thread_id,
+            &nowhere_turn,
+        )
+        .await,
+    );
+    probes.push(
+        ask_to_interrupt(
+            &mut server,
+            "app-server",
+            "thread that names nothing",
+            &nowhere_thread,
+            &running_turn,
+        )
+        .await,
+    );
+    // Still running? If a bogus id aborted the turn, that is the finding.
+    let aborted_by_a_bogus_id = sub
+        .seen()
+        .iter()
+        .any(|f| f["method"] == "turn/completed" && f["params"]["turn"]["id"] == *running_turn);
+    println!("a bogus id ended the running turn = {aborted_by_a_bogus_id}");
+
+    // And the real one.
+    let mark = sub.seen().len();
+    probes.push(
+        ask_to_interrupt(
+            &mut server,
+            "app-server",
+            "the running turn",
+            &thread_id,
+            &running_turn,
+        )
+        .await,
+    );
+    let terminal = wait_until(Duration::from_secs(30), || {
+        frames_since(&sub, mark)
+            .iter()
+            .any(|f| f["method"] == "turn/completed")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after = frames_since(&sub, mark);
+
+    // Now the same turn id, after it is over: a replayed interrupt's shape.
+    probes.push(
+        ask_to_interrupt(
+            &mut server,
+            "app-server",
+            "turn that already ended",
+            &thread_id,
+            &running_turn,
+        )
+        .await,
+    );
+
+    let mut record = String::new();
+    record.push_str(
+        "codex 0.153.4 — what the app-server itself says about turn/interrupt\n\
+         ==================================================================\n\n",
+    );
+    for probe in &probes {
+        record.push_str(&probe.row());
+        record.push('\n');
+    }
+    record.push_str(&format!(
+        "\na bogus id ended the running turn = {aborted_by_a_bogus_id}\n\
+         the real interrupt reached a turn terminal = {terminal}\n\n\
+         frames the subscribed ccd leg read after the real interrupt:\n{}\n",
+        frame_lines(&after)
+    ));
+    println!("=============== APP-SERVER INTERRUPT MEASUREMENT ===============\n{record}");
+
+    let evidence = std::env::var("CC_CODEX_4A_EVID")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| sb.run_dir.clone());
+    let _ = std::fs::create_dir_all(&evidence);
+    let _ = std::fs::write(evidence.join("interrupt-app-server.txt"), &record);
+
+    let _ = std::fs::remove_file(&marker);
+    teardown(sub, coord, "/tmp/cc-4a-unused");
+}
+
+// ============================================================= INTERRUPT GATES
+//
+// The phone-driven stop, end to end on a real codex: a real registration, a real
+// link, a real WebSocket through production `ws_server`, and a real turn that is
+// really running when the frame arrives.
+
+/// Drive a turn that will still be running when an interrupt reaches it, and return
+/// its id.
+///
+/// The command is approved at the keyboard first, so the only live thing on the
+/// thread is the exec: an interrupt landing on a turn that is also showing a prompt
+/// is a different scenario, measured separately.
+/// **A long turn that calls no tool**, and the turn id it started.
+///
+/// The reconnect gates need this and cannot use [`a_turn_that_is_still_running`], and
+/// the reason is a measured refusal rather than a preference. A `thread/resume` answer
+/// that describes a `commandExecution` or a `fileChange` is refused outright by
+/// [`CodexAdapter::plan_resume_seed`] — no such answer has ever been captured, and
+/// reading one would mean inventing the shape of a tool outcome — so a link that drops
+/// while a shell command is running cannot resubscribe at all until that turn is over,
+/// and never reaches the point where a running turn could be seeded. That refusal is
+/// deliberate and is not this chunk's to relax; what it means for the stop control is
+/// recorded rather than worked around.
+///
+/// So the turn here is pure generation: no approval, no tool item, and long enough to
+/// outlive a sever-and-restore.
+async fn a_long_tool_free_turn(sb: &LiveSandbox, sub: &WireTap) -> String {
+    let before = sub
+        .seen()
+        .iter()
+        .filter(|f| f["method"] == "turn/started")
+        .count();
+    assert!(
+        sb.submit_until(
+            "Write out the integers from 1 to 900, one per line, in order, with no \
+             commentary and no code. Do not use any tool.",
+            Duration::from_secs(240),
+            || sub
+                .seen()
+                .iter()
+                .filter(|f| f["method"] == "turn/started")
+                .count()
+                > before,
+        )
+        .await,
+        "the long generation never started a turn. pane:\n{}",
+        sb.capture_pane()
+    );
+    let turn = sub
+        .seen()
+        .into_iter()
+        .rfind(|f| f["method"] == "turn/started")
+        .and_then(|f| f["params"]["turn"]["id"].as_str().map(str::to_string))
+        .expect("a turn/started naming the running turn");
+    println!("LONG TOOL-FREE TURN = {turn}");
+    turn
+}
+
+/// Whether the observer has seen this turn reach a terminal.
+fn turn_has_ended(sub: &WireTap, turn_id: &str) -> bool {
+    sub.seen().iter().any(|f| {
+        f["method"] == "turn/completed" && f["params"]["turn"]["id"].as_str() == Some(turn_id)
+    })
+}
+
+async fn a_turn_that_is_still_running(sb: &LiveSandbox, sub: &WireTap, marker: &str) -> String {
+    let before = sub
+        .seen()
+        .iter()
+        .filter(|f| f["method"] == "turn/started")
+        .count();
+    // **Driven to the outcome, not to a fixed sleep.** A TUI that has painted its
+    // composer is not yet one that acts on a keypress: the first Enter after a fresh
+    // paint is swallowed, the line sits in the composer, and the turn never starts.
+    // One run of the kill gate died exactly there, with the pane still showing the
+    // warm-up turn's answer and the prompt unsent. `submit_until` keeps pressing until
+    // the thing it was typed for has happened, which is the difference between a gate
+    // and a coin flip.
+    assert!(
+        sb.submit_until(
+            &format!(
+                "Run the shell command `sleep 45 && touch {marker}` now. Do not \
+                 explain, just run it."
+            ),
+            Duration::from_secs(240),
+            || sb.capture_pane().contains(COMMAND_PROMPT),
+        )
+        .await,
+        "the long command never raised its approval, so there is no running turn to \
+         stop. pane:\n{}",
+        sb.capture_pane()
+    );
+    sb.send_keys(&["y"]);
+    assert!(
+        wait_until(Duration::from_secs(30), || !sb
+            .capture_pane()
+            .contains(COMMAND_PROMPT))
+        .await,
+        "the keyboard accept did not dismiss the prompt"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            sub.seen()
+                .iter()
+                .filter(|f| f["method"] == "turn/started")
+                .count()
+                > before
+                || before > 0
+        })
+        .await,
+        "no turn/started to name the running turn"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    sub.seen()
+        .into_iter()
+        .rfind(|f| f["method"] == "turn/started")
+        .and_then(|f| f["params"]["turn"]["id"].as_str().map(str::to_string))
+        .expect("a turn/started naming the running turn")
+}
+
+/// Every settled interrupt row this run has, as `(client_request_id, outcome)`.
+/// **Wait until the link this daemon built is an addressee for its thread.**
+///
+/// Every stop gate needs it before it asks anything, or its refusals are about a link
+/// that never came up rather than about the rule under test. Named once because three
+/// gates ask it, and because `Subscribed` — not merely `Bound` — is the condition an
+/// interrupt is admitted against.
+async fn wait_for_a_subscribed_link(daemon: &Arc<crate::state::Daemon>) -> bool {
+    wait_for_async(Duration::from_secs(120), || async {
+        daemon
+            .resolve_codex_inbound("cc-1")
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|(_, addressee)| addressee.is_subscribed())
+    })
+    .await
+}
+
+fn interrupt_ledger(daemon: &Arc<crate::state::Daemon>, uid: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for id in [
+        "stop-1",
+        "stop-1-again",
+        "stop-stale",
+        "stop-down",
+        "stop-killed",
+        "stop-after-reconnect",
+        "stop-first-after-new",
+        "stop-both",
+        "stop-unreg",
+    ] {
+        if let Ok(Some(state)) =
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, id)
+        {
+            out.push((
+                id.to_string(),
+                match state.status {
+                    crate::store::AnswerStatus::Applying => "applying".into(),
+                    crate::store::AnswerStatus::Settled(outcome) => outcome,
+                    crate::store::AnswerStatus::Indeterminate => "indeterminate".into(),
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// **A turn that began while the link was down is stoppable the moment the link is
+/// back.**
+///
+/// The reconnect-mid-turn case, end to end on a real app-server. A connection watches
+/// no `turn/started` for a turn that began before it existed — the frame is broadcast
+/// once and never replayed — so a link that came up during a long turn had nothing
+/// saying a turn was running, and refused every stop for the whole of the turn the
+/// operator was watching. The refusal even said the turn "may have finished already"
+/// while the same daemon's log said it was still going.
+///
+/// The accepted `thread/resume` answer is the only witness there is, and this is the
+/// gate that proves it is used: the wire is severed, a long turn is started at the
+/// keyboard, the wire is restored, and the phone stops the turn it could not see
+/// begin. The `Subscribed` assertion alone would pass without any of that working.
+///
+/// **The refusal while the wire is down is asserted on the way**, because the two
+/// halves are one promise: nothing is queued across the outage, and everything works
+/// again once it is over.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_turn_that_began_while_the_link_was_down_is_stoppable_once_it_is_back() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("midturn");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let _registration = register_the_run_on(&daemon, &session, gate.path()).await;
+
+    let subscribed = |daemon: &Arc<crate::state::Daemon>| {
+        let daemon = Arc::clone(daemon);
+        async move {
+            daemon
+                .resolve_codex_inbound("cc-1")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|(_, a)| a.is_subscribed())
+        }
+    };
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never subscribed"
+    );
+
+    // An observer of the thread that is NOT the daemon's link, so the turn id below is
+    // read from the wire rather than from the thing under test.
+    let (sub, _thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    // ---- a long turn, and then the wire goes ---------------------------------
+    //
+    // **The turn is started before the sever rather than during it**, and the reason is
+    // the outage's length rather than its order: the link has to come back while this
+    // turn is still going, and a turn started behind a dead wire spends its first
+    // minutes being typed and approved. Started first, the whole outage is a sever, a
+    // refusal and a restore. What is being measured is unchanged either way — the
+    // connection that reads this turn's terminal is a NEW one, which watched no
+    // `turn/started` for it, because the running turn dies with the connection that
+    // learned it.
+    let turn_id = a_long_tool_free_turn(&sb, &sub).await;
+    gate.sever();
+    assert!(
+        wait_for_async(Duration::from_secs(30), || {
+            let daemon = Arc::clone(&daemon);
+            async move {
+                !daemon
+                    .resolve_codex_inbound("cc-1")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, a)| a.is_subscribed())
+            }
+        })
+        .await,
+        "the daemon went on reporting an addressee it had lost"
+    );
+
+    // Refused while the wire is down, and nothing is queued behind the refusal.
+    let refused = phone
+        .interrupt("cc-1", "stop-down", &turn_id, Duration::from_secs(30))
+        .await;
+    println!("INTERRUPT WITH THE WIRE DOWN -> {refused:?}");
+    assert!(
+        matches!(refused, protocol::ws::InterruptResult::Rejected { .. }),
+        "a stop with no wire must be refused: {refused:?}"
+    );
+
+    // ---- the wire returns, and the turn the new connection never saw begin ----
+    gate.restore();
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never came back after the wire returned"
+    );
+    // The resume the reconnect performs is what carries the running turn; give the
+    // link the moment it needs to have had its answer accepted.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !turn_has_ended(&sub, &turn_id),
+        "the turn finished before the link was back, so there was nothing left to \
+         stop and this measured nothing"
+    );
+
+    let stopped = phone
+        .interrupt(
+            "cc-1",
+            "stop-after-reconnect",
+            &turn_id,
+            Duration::from_secs(60),
+        )
+        .await;
+    println!("INTERRUPT AFTER THE RECONNECT -> {stopped:?}");
+    assert_eq!(
+        stopped,
+        protocol::ws::InterruptResult::Aborted {
+            turn_id: turn_id.clone()
+        },
+        "a turn this link learned about from its resume answer must be stoppable — \
+         the Subscribed state alone is not the stop control"
+    );
+    assert_eq!(
+        interrupt_ledger(&daemon, &session.uid)
+            .into_iter()
+            .filter(|(id, _)| id == "stop-after-reconnect")
+            .collect::<Vec<_>>(),
+        vec![("stop-after-reconnect".to_string(), "aborted".to_string())],
+        "and the record says exactly what the phone was told"
+    );
+    println!("GATE PASS — a turn a reconnected link never watched begin is stoppable");
+
+    gate.close();
+    teardown(sub, coord, "/tmp/cc-4a-midturn-unused");
+}
+
+/// **The first turn after `/new` is stoppable, though its `turn/started` never
+/// reaches this link.**
+///
+/// Measured on a real app-server: a resume-subscribed connection is handed the
+/// `thread/started` announcing the switch and then **nothing else** about the new
+/// thread — the `turn/started` for its first turn goes to the TUI's own connection.
+/// So the frame the stop control was built on does not exist for this turn, and the
+/// phone's Stop button was dead for the whole of the first thing a person does after
+/// pressing `/new`.
+///
+/// What makes it stoppable is the link following the switch and resuming the new
+/// thread: either that resume's answer reports the turn `inProgress` and seeds the
+/// stop control, or it completes early enough that the turn's own `turn/started`
+/// reaches this link after all. **This gate asserts the property and not the
+/// mechanism** — which of the two supplies it is a fact about the app-server's
+/// timing, and a gate that pinned one would go red on a rearrangement that left the
+/// operator's experience identical.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn the_first_turn_after_a_new_thread_is_stoppable() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("firstnew");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let _registration = register_the_run_on(&daemon, &session, gate.path()).await;
+
+    let subscribed = |daemon: &Arc<crate::state::Daemon>| {
+        let daemon = Arc::clone(daemon);
+        async move {
+            daemon
+                .resolve_codex_inbound("cc-1")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|(_, a)| a.is_subscribed())
+        }
+    };
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never subscribed"
+    );
+
+    // The threads before the switch, read off the app-server rather than assumed, so
+    // "a thread that is new" below is a comparison and not a hope.
+    let before: Vec<String> = loaded_threads(&sb).await;
+    println!("THREADS BEFORE /new = {before:?}");
+
+    // ---- the operator presses `/new` -----------------------------------------
+    sb.send_keys(&["/new"]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let mut new_thread = String::new();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if let Some(fresh) = loaded_threads(&sb)
+            .await
+            .into_iter()
+            .find(|id| !before.contains(id))
+        {
+            new_thread = fresh;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        !new_thread.is_empty(),
+        "no new thread was loaded, so the turn below is not the first turn of one"
+    );
+    println!("NEW THREAD AFTER /new = {new_thread}");
+    // **Not subscribed yet, and that is correct.** A thread has no rollout until its
+    // first turn creates one, so a `thread/resume` for it is answered with the
+    // not-ready error and the link sits `Bound`. Waiting for `Subscribed` here would
+    // be waiting for something the app-server cannot yet give — the wait belongs after
+    // the turn below, which is what creates the rollout.
+    wait_for_a_composer(&sb).await;
+
+    // ---- and runs the new thread's first turn --------------------------------
+    //
+    // Named from a `thread/resume` answer rather than from a subscription, because no
+    // subscription can see it: the `turn/started` for the first turn of a switched-to
+    // thread goes to the TUI's own connection, which is the whole reason this gate
+    // exists.
+    sb.send_keys(&[
+        "Write out the integers from 1 to 900, one per line, in order, with no \
+         commentary and no code. Do not use any tool.",
+    ]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    sb.send_keys(&["Enter"]);
+    let mut turn_id = String::new();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < deadline {
+        if let Some(id) = running_turn_of(&sb, &new_thread).await {
+            turn_id = id;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(
+        !turn_id.is_empty(),
+        "the new thread never reported a running turn. pane:\n{}",
+        sb.capture_pane()
+    );
+    println!("FIRST TURN AFTER /new = {turn_id}");
+    // NOW the thread has a rollout, so the link's resume can be accepted — and that
+    // answer is what carries the running turn to it.
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never subscribed to the new thread once it had a rollout"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+    let stopped = phone
+        .interrupt(
+            "cc-1",
+            "stop-first-after-new",
+            &turn_id,
+            Duration::from_secs(60),
+        )
+        .await;
+    println!("INTERRUPT OF THE FIRST TURN AFTER /new -> {stopped:?}");
+    assert_eq!(
+        stopped,
+        protocol::ws::InterruptResult::Aborted {
+            turn_id: turn_id.clone()
+        },
+        "the first turn after a switch must be stoppable, though no turn/started for \
+         it ever reached this link"
+    );
+    println!("GATE PASS — the first turn after /new is stoppable");
+
+    gate.close();
+    let mut coord = coord;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// **A phone stops a real turn: the turn aborts, the record says so once, and a
+/// second tap sends nothing.**
+///
+/// The whole of the phone's interrupt on the wire it was measured against. The interrupt goes through
+/// production `ws_server` from a real WebSocket client, reaches the link that is
+/// actually subscribed to the thread, is claimed in the generalized ledger before a
+/// byte is written, and is settled by the turn's own terminal — which is the only
+/// evidence there is, because the app-server's response to `turn/interrupt` is
+/// `result:{}` and says nothing about what it did.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_stops_a_real_turn_and_the_record_says_so_exactly_once() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("stop");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let _registration = register_the_run(&daemon, &session, &sb).await;
+    // The link must be an addressee before anything is asked of it, or every
+    // refusal below is about a link that never came up.
+    assert!(
+        wait_for_a_subscribed_link(&daemon).await,
+        "the link never subscribed"
+    );
+
+    let (sub, _tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    // ---- a stale turn id is refused, and leaves no claim ---------------------
+    //
+    // **Refused by this daemon, before a byte and before a claim.** An earlier run of
+    // this gate is why that is asserted rather than assumed: the ask reached the
+    // broker, was refused there, and left a durable row recording an actuation that
+    // never happened. The link now tracks the turn it watched start, so the refusal is
+    // local — and the ledger count at the end of this gate is what proves it.
+    let stale = phone
+        .interrupt(
+            "cc-1",
+            "stop-stale",
+            "01a0-not-a-turn",
+            Duration::from_secs(30),
+        )
+        .await;
+    println!("STALE INTERRUPT -> {stale:?}");
+    let protocol::ws::InterruptResult::Rejected { reason } = &stale else {
+        panic!("a turn this session is not running must be refused: {stale:?}");
+    };
+    assert!(
+        reason.contains("not the one this Codex session is running"),
+        "the refusal must be this daemon's own, taken before the write: {reason}"
+    );
+
+    // ---- the real one --------------------------------------------------------
+    let marker = format!("/tmp/cc-4a-gate.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
+    println!("RUNNING TURN = {turn_id}");
+
+    let stopped = phone
+        .interrupt("cc-1", "stop-1", &turn_id, Duration::from_secs(60))
+        .await;
+    println!("INTERRUPT -> {stopped:?}");
+    assert_eq!(
+        stopped,
+        protocol::ws::InterruptResult::Aborted {
+            turn_id: turn_id.clone()
+        },
+        "a phone that stops a running turn is told the turn it stopped"
+    );
+    // **And the turn really stopped**, which is the fact behind the sentence: the
+    // command had 45 seconds to run and never finished it.
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the interrupted command ran to completion, so this measured a turn that \
+         finished rather than one that was stopped"
+    );
+    assert!(
+        sub.seen().iter().any(|f| {
+            f["method"] == "turn/completed"
+                && f["params"]["turn"]["id"].as_str() == Some(turn_id.as_str())
+                && f["params"]["turn"]["status"].as_str() == Some("interrupted")
+        }),
+        "the wire must show the turn ending interrupted, or the daemon's word for it \
+         is unbacked. methods: {:?}",
+        sub.methods()
+    );
+
+    // ---- and a second tap sends nothing --------------------------------------
+    let again = phone
+        .interrupt("cc-1", "stop-1", &turn_id, Duration::from_secs(30))
+        .await;
+    println!("DUPLICATE INTERRUPT -> {again:?}");
+    assert_eq!(
+        again,
+        protocol::ws::InterruptResult::Duplicate {
+            turn_id: turn_id.clone()
+        },
+        "a duplicate replays the recorded outcome rather than aiming a second stop"
+    );
+
+    let ledger = interrupt_ledger(&daemon, &session.uid);
+    println!("INTERRUPT LEDGER {ledger:?}");
+    assert_eq!(
+        ledger,
+        vec![(
+            "stop-1".to_string(),
+            crate::store::INTERRUPT_ABORTED.to_string()
+        )],
+        "exactly one settled row, and the refused stale ask left none"
+    );
+
+    // ---- and the Claude-only operations are refused for this same real run ----
+    //
+    // The live half of the daemon-side refusal. This is a registered, running Codex
+    // session with a live link — the strongest form of the question — and the catalog
+    // is refused by reading its agent, not by an accident of a missing field.
+    let catalog = daemon.command_catalog("cc-1").await;
+    println!("CATALOG FOR A CODEX RUN -> {catalog:?}");
+    let protocol::ws::CommandCatalogResult::Unavailable { reason } = &catalog else {
+        panic!("a Codex run has no Claude to ask for a slash-command list: {catalog:?}");
+    };
+    assert!(
+        reason.contains("Codex session"),
+        "the refusal names the agent: {reason}"
+    );
+    assert!(
+        !reason.contains("Claude Code binary"),
+        "and not a registration field it happens to lack: {reason}"
+    );
+    // The gate the terminal attach reads, on the same live run. The attach frame
+    // itself needs a paired device over a private transport, which this harness has no
+    // way to mint — so the attach is driven in `ws_server`'s own suite and what is
+    // proven live is the decision it makes.
+    let crate::state::ClaudeOnly::WrongAgent(terminal) = daemon
+        .refuse_unless_claude(&session.uid, "the terminal")
+        .await
+    else {
+        panic!("a live Codex run may not be typed into through a terminal")
+    };
+    println!("TERMINAL GATE FOR A CODEX RUN -> {terminal}");
+    assert!(terminal.contains("Codex session"), "{terminal}");
+
+    println!(
+        "GATE PASS — a phone stopped a real turn, the wire shows it interrupted, and \
+         the second tap sent nothing"
+    );
+    let _ = std::fs::remove_file(&marker);
+    teardown(sub, coord, "/tmp/cc-4a-gate-unused");
+}
+
+/// **Two taps under ONE id on a real running turn hear one outcome.**
+///
+/// The scheduling this covers is the ordinary one, not a rare interleaving: the daemon
+/// reads the ledger before it enqueues, so a second tap arriving while the first is
+/// `applying` gets past that read; the link's select is biased toward the socket, so a
+/// turn terminal already on the wire is served before the queued ask. The second tap
+/// then finds no entry to join and no live turn to name. It used to be refused for
+/// exactly that, so one actuation told its two callers `Aborted` and `Rejected`.
+///
+/// Both frames are written before either reply is read, which is what makes them
+/// concurrent rather than sequential — a sequential retry is already covered by
+/// [`a_phone_stops_a_real_turn_and_the_record_says_so_exactly_once`], and it is a
+/// different question because the daemon's own pre-claim replay answers it.
+///
+/// What is asserted is the property, not one of the two positions: **neither caller may
+/// be refused**, both must name the turn that stopped, and the ledger must hold exactly
+/// one settled row. Which of `Aborted`/`Duplicate` each hears depends on where the
+/// terminal landed, and both are honest statements that this id stopped this turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn two_taps_under_one_id_on_a_real_turn_hear_one_outcome() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("twotaps");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let _registration = register_the_run(&daemon, &session, &sb).await;
+    assert!(
+        wait_for_a_subscribed_link(&daemon).await,
+        "the link never subscribed"
+    );
+
+    let (sub, _tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    let marker = format!("/tmp/cc-4a-twotaps.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
+    println!("RUNNING TURN = {turn_id}");
+
+    // **Both written before either is read.** The second is the retry a slow reply
+    // invites, and it is in flight while the first is still `applying`.
+    phone.send_interrupt("cc-1", "stop-both", &turn_id).await;
+    phone.send_interrupt("cc-1", "stop-both", &turn_id).await;
+
+    let first = phone
+        .next_interrupt_result("stop-both", Duration::from_secs(60))
+        .await;
+    let second = phone
+        .next_interrupt_result("stop-both", Duration::from_secs(60))
+        .await;
+    println!("TWO TAPS UNDER ONE ID -> {first:?} / {second:?}");
+
+    for outcome in [&first, &second] {
+        match outcome {
+            protocol::ws::InterruptResult::Aborted { turn_id: named }
+            | protocol::ws::InterruptResult::Duplicate { turn_id: named } => {
+                assert_eq!(named, &turn_id, "each caller names the turn that stopped")
+            }
+            other => panic!(
+                "one id is one actuation, and neither of its callers may be told \
+                 something that contradicts the other: {other:?}"
+            ),
+        }
+    }
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the interrupted command ran to completion, so this measured a turn that \
+         finished rather than one that was stopped"
+    );
+    assert!(
+        sub.seen().iter().any(|f| {
+            f["method"] == "turn/completed"
+                && f["params"]["turn"]["id"].as_str() == Some(turn_id.as_str())
+                && f["params"]["turn"]["status"].as_str() == Some("interrupted")
+        }),
+        "the wire must show the turn ending interrupted. methods: {:?}",
+        sub.methods()
+    );
+    assert_eq!(
+        interrupt_ledger(&daemon, &session.uid),
+        vec![(
+            "stop-both".to_string(),
+            crate::store::INTERRUPT_ABORTED.to_string()
+        )],
+        "one id, one row, one settled outcome — the second tap wrote nothing"
+    );
+
+    println!("GATE PASS — two concurrent taps under one id heard one outcome");
+    let _ = std::fs::remove_file(&marker);
+    teardown(sub, coord, "/tmp/cc-4a-gate-unused");
+}
+
+/// **A supervisor disconnecting leaves no interrupt claim applying.**
+///
+/// The in-process abort path with no replacement behind it: `unregister_supervisor`
+/// aborts the link and joins it, and that join is the last thing that will ever speak
+/// for what the link was holding. A claim caught in the window between its commit and
+/// its entry in `open_interrupts` is in the store and in no in-memory ledger, so the
+/// join walks a map that does not contain it — and until the store sweep ran on this
+/// path, that row stayed `applying` until the next daemon start.
+///
+/// Driven against the real wire because the window is a real one: the ask is written
+/// and the disconnect follows without waiting for the verdict, so whichever side of the
+/// window the claim lands on is the machine's choice rather than this test's. **Both
+/// sides are asserted the same way**, which is the point: the row is terminal, and the
+/// person who tapped Stop was told something rather than left holding a sender that
+/// died with the task.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn an_interrupt_in_flight_is_settled_when_the_supervisor_disconnects() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("unreg");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    assert!(
+        wait_for_a_subscribed_link(&daemon).await,
+        "the link never subscribed"
+    );
+
+    let (sub, _tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    let marker = format!("/tmp/cc-4a-unreg.{}.txt", nanos());
+    let _ = std::fs::remove_file(&marker);
+    let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
+    println!("RUNNING TURN = {turn_id}");
+
+    // Written and left. What the daemon did with it is read out of its own ledger.
+    phone.send_interrupt("cc-1", "stop-unreg", &turn_id).await;
+    // The claim's own write is what this is about, so the disconnect waits for the row
+    // to exist and for nothing else — not for the entry to reach `open_interrupts`,
+    // which is the window itself.
+    let claimed = wait_until(Duration::from_secs(30), || {
+        !interrupt_ledger(&daemon, &session.uid).is_empty()
+    })
+    .await;
+    assert!(claimed, "the interrupt never took its durable claim");
+
+    daemon.unregister_supervisor(&registration).await;
+
+    let rows = interrupt_ledger(&daemon, &session.uid);
+    println!("INTERRUPT LEDGER AFTER THE DISCONNECT -> {rows:?}");
+    let (_, outcome) = rows
+        .iter()
+        .find(|(id, _)| id == "stop-unreg")
+        .expect("the claim this gate is about");
+    assert_ne!(
+        outcome, "applying",
+        "a disconnect is the last thing that speaks for this link, so it may leave no \
+         claim for the next start to reason about"
+    );
+    assert!(
+        daemon
+            .store
+            .unsettled_claims_for(crate::store::OPERATION_INTERRUPT, &session.uid)
+            .unwrap()
+            .is_empty(),
+        "and none of the run's other claims either"
+    );
+
+    // And the person who tapped Stop hears something rather than nothing.
+    let told = phone
+        .next_interrupt_result("stop-unreg", Duration::from_secs(60))
+        .await;
+    println!("THE CALLER WAS TOLD -> {told:?}");
+
+    println!("GATE PASS — a disconnect left no interrupt claim applying");
+    let _ = std::fs::remove_file(&marker);
+    teardown(sub, coord, "/tmp/cc-4a-gate-unused");
+}
+
+/// **With the control link's wire gone, a stop is refused with the reason — and the
+/// link's own recovery restores it.**
+///
+/// The refusal has to be about the wire and not about the session: the TUI keeps
+/// running throughout, so a phone told "this run is gone" would be told something
+/// false. Measured alongside: the daemon leaves `Subscribed` about a tenth of a
+/// second after the transport dies, and is subscribed again about five seconds after
+/// it returns.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_stop_is_refused_while_the_control_link_is_down_and_works_again_after() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("stopdown");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let _registration = register_the_run_on(&daemon, &session, gate.path()).await;
+
+    let subscribed = |daemon: &Arc<crate::state::Daemon>| {
+        let daemon = Arc::clone(daemon);
+        async move {
+            daemon
+                .resolve_codex_inbound("cc-1")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|(_, a)| a.is_subscribed())
+        }
+    };
+    let mut up = false;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if subscribed(&daemon).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(up, "the link never subscribed");
+
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    // The wire goes; the session does not.
+    gate.sever();
+    let mut down = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if !subscribed(&daemon).await {
+            down = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        down,
+        "the daemon went on reporting an addressee it had lost"
+    );
+    assert!(
+        sb.tui_running(),
+        "the TUI must still be running, or the refusal below is about a dead session \
+         rather than a dead wire"
+    );
+
+    let refused = phone
+        .interrupt(
+            "cc-1",
+            "stop-down",
+            "01a0-anything",
+            Duration::from_secs(30),
+        )
+        .await;
+    println!("INTERRUPT WITH THE WIRE DOWN -> {refused:?}");
+    let protocol::ws::InterruptResult::Rejected { reason } = &refused else {
+        panic!("a stop with no wire must be refused: {refused:?}");
+    };
+    assert!(
+        reason.contains("control link") || reason.contains("no live link"),
+        "the refusal must name the wire, not the run: {reason}"
+    );
+    assert!(
+        !reason.contains("is gone"),
+        "the session is alive and the phone must not be told otherwise: {reason}"
+    );
+    assert!(
+        interrupt_ledger(&daemon, &session.uid).is_empty(),
+        "a refusal before the claim leaves no durable row"
+    );
+
+    // And the link's own recovery restores it.
+    gate.restore();
+    let mut back = false;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if subscribed(&daemon).await {
+            back = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(back, "the link never came back after the wire returned");
+    println!("GATE PASS — a stop is refused while the wire is down, and the link recovers");
+
+    gate.close();
+    let mut coord = coord;
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// **A daemon killed after it wrote an interrupt records the fate it can prove —
+/// none — and never sends it again.**
+///
+/// The one fault this path has that no refusal covers. The claim is taken at the
+/// moment the connection has accepted the ask and the write follows immediately, so a
+/// process that dies in between leaves a durable row and nothing that can say which
+/// side of the write it died on: the response says nothing about what it did, and the
+/// turn's terminal is a live notification that is never replayed. Terminal `Unknown`
+/// is both the truth and the point — the turn is not stopped a second time against a
+/// session that has since moved on.
+///
+/// **The staging holds the transport and nothing else.** The link→broker direction is
+/// never held, so the interrupt really leaves the daemon and really actuates; only
+/// what comes back is held, which stages exactly one thing — no terminal arrived. See
+/// [`GatedCcdLeg`].
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_daemon_killed_after_writing_an_interrupt_records_unknown_and_never_sends_again() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("killint");
+    let mut coord = sb.spawn_coordinator(&codex);
+    let marker = sb
+        .base
+        .join(format!("cc-4a-killint.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+
+    let mut ccd = CcdChild::start();
+    println!(
+        "SPAWNED a real ccd on {} (pid {}), loopback :{}",
+        ccd.home.display(),
+        ccd.child.id(),
+        ccd.port
+    );
+    let supervisor = ccd.register(&session, gate.path()).await;
+    let db = ccd.db();
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    // A turn that will still be running when the kill lands. Approved at the keyboard,
+    // so the only live thing on the thread is the exec.
+    let (sub, _thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
+    println!("RUNNING TURN = {turn_id}");
+
+    // ---- a phone stops it, and nothing will ever tell the phone what happened ----
+    gate.hold();
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    phone.send_interrupt(&uid, "stop-killed", &turn_id).await;
+
+    // The claim proves the child accepted the ask and wrote the frame — read out of
+    // its own database, because there is no in-process handle to ask.
+    let claimed = wait_until(Duration::from_secs(20), || {
+        interrupt_ledger_at(&db, &uid)
+            .first()
+            .map(|(_, status, _)| status == "applying")
+            .unwrap_or(false)
+    })
+    .await;
+    println!(
+        "MEASURED claim before the kill = {:?}",
+        interrupt_ledger_at(&db, &uid)
+    );
+    assert!(
+        claimed,
+        "the child never took a durable claim, so there is no in-flight interrupt for \
+         a kill to catch. child stderr:\n{}",
+        read_file(&ccd.home.join("ccd.stderr.log"))
+    );
+
+    // ---- THE KILL ------------------------------------------------------------
+    ccd.kill();
+    println!("KILLED — the process that wrote the interrupt is gone, mid-flight");
+    drop(supervisor);
+    phone.close();
+
+    // ---- and the write really had landed -------------------------------------
+    gate.release();
+    let aborted = wait_until(Duration::from_secs(60), || {
+        sub.seen().iter().any(|f| {
+            f["method"] == "turn/completed"
+                && f["params"]["turn"]["id"].as_str() == Some(turn_id.as_str())
+                && f["params"]["turn"]["status"].as_str() == Some("interrupted")
+        })
+    })
+    .await;
+    println!("MEASURED the turn really aborted = {aborted}");
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran to completion, so the interrupt this gate is about never \
+         actuated"
+    );
+
+    // ---- a NEW process, on the database the kill left behind ------------------
+    ccd.restart();
+    println!("RESTARTED — a process that has only ever seen this database from disk");
+    let recovered = wait_until(Duration::from_secs(30), || {
+        interrupt_ledger_at(&db, &uid)
+            .first()
+            .map(|(_, status, _)| status == "indeterminate")
+            .unwrap_or(false)
+    })
+    .await;
+    let ledger = interrupt_ledger_at(&db, &uid);
+    println!("MEASURED ledger after the restart = {ledger:?}");
+    assert!(
+        recovered,
+        "a claim the kill left behind must be made terminal at the next start: {ledger:?}"
+    );
+
+    // A fresh link on the same thread, which is what a restarted daemon really does —
+    // and the one thing that could send a second interrupt.
+    let supervisor = ccd.register(&session, gate.path()).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    let second_tap = phone
+        .interrupt(&uid, "stop-killed", &turn_id, Duration::from_secs(30))
+        .await;
+    println!("MEASURED a second tap after the restart = {second_tap:?}");
+    let protocol::ws::InterruptResult::Indeterminate { reason } = &second_tap else {
+        panic!("a recovered claim is terminal and is never sent again: {second_tap:?}");
+    };
+    assert!(reason.contains("not known"), "{reason}");
+    assert_eq!(
+        interrupt_ledger_at(&db, &uid),
+        ledger,
+        "the second tap must have changed nothing"
+    );
+
+    println!(
+        "GATE PASS — a kill after the write leaves one terminal unknown, and the turn \
+         is never stopped twice"
+    );
+    drop(supervisor);
+    gate.close();
+    sub.handle.abort();
+    let _ = std::fs::remove_file(&marker);
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
 }

@@ -335,6 +335,33 @@ fn ccd_request(method: &str) -> Disposition {
         "thread/resume" => FingerprintAssert,
         "thread/start" | "thread/fork" | "turn/start" => Refuse(RoleNotPermitted),
 
+        // **The session's one stop control, and the one actuation this leg has.**
+        // The same disposition and the same gate the TUI leg gets: an interrupt is
+        // forwarded only when it names this session's bound thread and the turn
+        // that is actually running. See [`Disposition::InterruptActiveTurn`], and
+        // the note there on why an interrupt is not a vector actuation.
+        //
+        // A phone is a second pair of hands on the same session, and the thing a
+        // person most needs from one is the ability to stop work they can see going
+        // wrong while they are away from the machine. Refusing it here left them
+        // with nothing but killing the session, which is the same reasoning that
+        // admitted it on the TUI leg — read from the other end of the wire.
+        //
+        // **The gate is load-bearing rather than tidy.** Measured on a real
+        // app-server: an interrupt naming a turn that has already ended is answered
+        // with nothing at all, indefinitely — no result and no error. This predicate
+        // is what stops that frame being written, so a caller is not left waiting on
+        // an answer that is not coming.
+        //
+        // **Point-in-time, and the wording is deliberate.** The predicate reads the
+        // session's active turn at classification, and a turn can end between that
+        // read and the hand-off upstream — so what it removes is the ordinary case,
+        // not every case. Saying it keeps the frame from EVER being written would be
+        // claiming an atomicity this leg does not have. The daemon's own local gate
+        // is the half that matters for the record: it is what keeps a durable row
+        // from being taken for a write this one was always going to refuse.
+        "turn/interrupt" => InterruptActiveTurn,
+
         "initialize" => Forward,
         "thread/read" | "thread/turns/list" | "thread/items/list" => ReadSessionThread,
         "thread/loaded/list" => Forward,
@@ -442,12 +469,20 @@ mod tests {
     }
 
     #[test]
-    fn ccd_leg_is_attach_only() {
-        // ccd may resume (attach), but may not create threads or start turns, and does
-        // not do the TUI's account/bootstrap reads.
+    fn ccd_leg_attaches_and_may_stop_a_turn_and_does_nothing_else() {
+        // ccd may resume (attach) and may stop the turn this session is running. It
+        // may not create threads, start turns, steer one, or do the TUI's
+        // account/bootstrap reads.
         assert_eq!(
             disposition(Role::Ccd, Request, "thread/resume"),
             Disposition::FingerprintAssert
+        );
+        // **The one actuation, and it is the gated one.** The disposition is what
+        // carries the binding — naming it here is what stops a later edit from
+        // widening this leg to a `Forward` that reaches any turn.
+        assert_eq!(
+            disposition(Role::Ccd, Request, "turn/interrupt"),
+            Disposition::InterruptActiveTurn
         );
         for m in ["thread/start", "thread/fork", "turn/start"] {
             assert_eq!(
@@ -456,6 +491,14 @@ mod tests {
                 "{m}"
             );
         }
+        // Steering INJECTS content into a running turn, which is the actuation the
+        // vector barrier exists for. Admitting the stop control is not a licence to
+        // admit it, and the two are kept apart here so a reader can see that the
+        // pair was considered rather than that one was forgotten.
+        assert_eq!(
+            disposition(Role::Ccd, Request, "turn/steer"),
+            Disposition::Refuse(RefuseReason::NotAllowlisted)
+        );
         assert_eq!(
             disposition(Role::Ccd, Request, "account/read"),
             Disposition::Refuse(RefuseReason::NotAllowlisted)

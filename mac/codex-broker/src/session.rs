@@ -3470,6 +3470,106 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // The interrupt predicate: which (thread, turn) pair names a turn that is
+    // actually running. Both conjuncts are load-bearing, and each has its own test
+    // because each closes a different reach.
+    //
+    // The predicate is reachable two ways — as an inherent method and through
+    // [`ThreadBinding`], which is the path the classifier's `env.threads` takes —
+    // so both tests assert on both, and neither surface can drift alone.
+    // ---------------------------------------------------------------------------
+
+    /// **A turn belongs to ONE thread, and naming a different one does not reach it.**
+    ///
+    /// A retired thread stays a session thread: it is readable, and `is_session_thread`
+    /// answers TRUE for it for ever. So the thread half of an interrupt's binding is
+    /// satisfied by a thread this session has LEFT. What stops the pairing is this
+    /// predicate's own thread conjunct — the turn must belong to the thread named.
+    ///
+    /// Without it a client could pair a retired thread's id with the live turn's id and
+    /// be authorized to stop a turn on a thread it did not name.
+    #[test]
+    fn a_retired_thread_paired_with_the_live_turn_names_no_running_turn() {
+        let s = store();
+        assert!(open(&s, A, &req("a")));
+        s.observe_server_frame(A, &creation_response("a", "01a0"));
+        // The switch: 01a0 retires, 01a1 becomes the head.
+        assert!(open(&s, A, &req("b")));
+        s.observe_server_frame(A, &creation_response("b", "01a1"));
+        // A turn runs on the NEW head, and the server answers it.
+        assert!(
+            s.try_admit_turn(A, &req("t1"), "01a1", Some(&cwd()), Some(&roots()))
+                == TurnAdmission::Admitted
+        );
+        s.observe_server_frame(A, &turn_started_response("t1", "turn-1"));
+
+        // The retired thread still passes the thread half of the interrupt binding —
+        // which is exactly why this predicate may not lean on that half.
+        assert!(
+            s.is_session_thread("01a0"),
+            "a retired thread stays readable, so it stays a session thread"
+        );
+
+        assert!(
+            !s.is_active_turn("01a0", "turn-1"),
+            "the live turn belongs to the head, not to the thread this session left"
+        );
+        assert!(
+            !ThreadBinding::is_active_turn(&s, "01a0", "turn-1"),
+            "and the classifier reaches the predicate through the trait, so that surface \
+             must answer alike"
+        );
+        assert!(
+            s.is_active_turn("01a1", "turn-1"),
+            "the pair that DOES name the running turn is admitted, so the refusals above \
+             are not vacuous"
+        );
+        assert!(ThreadBinding::is_active_turn(&s, "01a1", "turn-1"));
+    }
+
+    /// **A `turn/start` that has gone out but has NOT been answered names no turn yet.**
+    ///
+    /// Between the forward and the response the server has said nothing: this request may
+    /// have become a turn, joined one, or done nothing at all, and no id it might carry is
+    /// known. An entry in that state must therefore match NO turn id — otherwise the mere
+    /// existence of an in-flight `turn/start` would authorize an interrupt naming any
+    /// string the client invented.
+    ///
+    /// The correlated answer is what supplies the id, and only then does that one id match.
+    #[test]
+    fn an_unanswered_turn_start_names_no_turn_an_interrupt_can_reach() {
+        let s = store();
+        assert!(open(&s, A, &req("start")));
+        s.observe_server_frame(A, &creation_response("start", "01a0"));
+        // SENT and admitted — the bytes are upstream, the answer is not back.
+        assert!(
+            s.try_admit_turn(A, &req("t0"), "01a0", Some(&cwd()), Some(&roots()))
+                == TurnAdmission::Admitted
+        );
+
+        for invented in ["turn-0", "any-string-a-client-likes", ""] {
+            assert!(
+                !s.is_active_turn("01a0", invented),
+                "an unanswered turn/start must match no turn id, not even {invented:?}"
+            );
+            assert!(!ThreadBinding::is_active_turn(&s, "01a0", invented));
+        }
+
+        // The correlated answer supplies the one id there is.
+        s.observe_server_frame(A, &turn_started_response("t0", "turn-0"));
+        assert!(
+            s.is_active_turn("01a0", "turn-0"),
+            "once answered, the id the server gave names the running turn — so the \
+             refusals above are not vacuous"
+        );
+        assert!(ThreadBinding::is_active_turn(&s, "01a0", "turn-0"));
+        assert!(
+            !s.is_active_turn("01a0", "any-string-a-client-likes"),
+            "and still only that one id"
+        );
+    }
+
     /// **ROUND-3 P1 — an id with a LIVE turn entry is not reusable for a turn.**
     ///
     /// The defect: a `turn/start` response DRAINS its outstanding-ledger entry, so the id
