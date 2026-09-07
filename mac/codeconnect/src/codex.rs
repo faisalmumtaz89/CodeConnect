@@ -200,6 +200,9 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // in a refusal. What decides whether this build may be hosted is the guarded-surface
     // gate below — see [`ensure_guarded_surface`] for why a version string was the wrong
     // question to ask.
+    // **The freeze a previous launch could not give back is cleared HERE, before this
+    // one takes a freeze of its own.** See `clear_freezes_left_standing`.
+    clear_freezes_left_standing();
     // ONE freeze, five probes: version, root command surface, both schema bundles, and
     // the effective value of the one feature this launch pins off.
     // See `probe_codex` for why they share a freeze rather than taking one each.
@@ -235,6 +238,121 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     ))?;
 
     launch(&resolved, passthrough)
+}
+
+/// Retry, before this launch freezes anything of its own, the clears that were left
+/// owed on a codex binary — and say what came of each.
+///
+/// **This is one of the two production callers the recovery pass did not have**, and
+/// without one the pass was machinery that ran when somebody ran it. The counterexample
+/// it closes needs no attacker and no failure: a launch that set the `UF_IMMUTABLE`
+/// pin is `SIGKILL`ed inside the hash→exec window; a concurrent launch had adopted the
+/// same bit and an adopter never clears; the first launch's custodian stops waiting,
+/// keeps the claim standing and exits (which is right — a custodian that kept polling
+/// would be one idle process per leaked flag). The flag is then on a real binary with
+/// no live holder and no actor. `codex` still RUNS, but it cannot be updated, and the
+/// operator's way out was to work out for themselves that `chflags nouchg` was needed.
+/// Now the next launch takes it off.
+///
+/// **Why the launcher, when the daemon sweeps too.** The daemon's tick is slow on
+/// purpose and a Mac may have no daemon running at all. The launcher is the actor with
+/// the motive: it is about to hash and freeze the very file a leaked claim names, and
+/// an update refused because of a flag nobody owns is refused at exactly this moment.
+///
+/// **Why BEFORE the probe.** `probe_codex` holds the executable's own freeze lock for
+/// its whole run, and this pass needs that same lock to prove that no live holder
+/// stands behind the vnode. Run afterwards it would meet the launch's own lock, defer,
+/// and clear nothing; run inside it, it would be reasoning about a bit this process
+/// had just set. Before is the only position from which the answer is about anybody
+/// else.
+///
+/// **What it costs a launch that has nothing to repair, which is every healthy one.**
+/// A record with no freeze claim costs a read. A record whose claim names a holder that
+/// is NOT proven dead — the live launch case, and the only one a busy machine has —
+/// costs a liveness question and no lock at all: the holder is judged before the
+/// executable's lock is reached, so a concurrent launch's pin is never something this
+/// waits on. Only a claim whose holder is already proven dead reaches the lock. That
+/// one is bounded by the lock's own budget and the withdrawal's, and the PASS is
+/// bounded by [`crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET`] over all of them —
+/// per-step bounds multiply, and a launcher that inherited the product of them would
+/// be a human at a terminal waiting on other launches' wreckage with nothing said.
+///
+/// **What it does before the launch is admitted.** This runs ahead of the argv
+/// grammar and the daemon preflight, so a launch that goes on to refuse may already
+/// have taken a flag off a binary and withdrawn another launch's claim. That is not
+/// this launch acting early: it is repair of somebody else's wreckage, owed whatever
+/// this launch turns out to be, and it mints no uid, takes no tmux name and writes no
+/// record of its own — which is what the rollback arm's "a refusal creates nothing"
+/// is about. It cannot go later: the probe is what it must precede, and the probe is
+/// itself ahead of both gates.
+///
+/// **It cannot end a launch, and it cannot take one's pin off.** Every warrant is
+/// [`crate::codex_launch::resolve_standing_freeze`]'s — a holder proven dead by
+/// identity, the executable's lock held across the scan and the clear, no other record
+/// naming the vnode with a holder that is not proven dead, and an adopted claim
+/// licensing nothing but its own withdrawal. Anything short of all four leaves the
+/// flag exactly where it was. So the worst this can do is spend its bounded wait and
+/// say what it was waiting for, which is why nothing here is fallible to the caller.
+fn clear_freezes_left_standing() {
+    let deadline = std::time::Instant::now() + crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET;
+    crate::codex_launch::sweep_standing_freezes_each(deadline, &mut |action| {
+        if let Some(line) = launcher_line(&action) {
+            eprintln!("codeconnect: {line}");
+        }
+    });
+}
+
+/// What a launch says at the terminal about one thing the pass did, or `None` for
+/// the ones it says nothing about.
+///
+/// Split from the loop so the choice is a value a test can read: the whole subject
+/// here is which outcomes reach a human and which do not, and `eprintln!` from inside
+/// a function that shells out to a real codex is not something a test can see.
+fn launcher_line(action: &crate::codex_launch::SweepAction) -> Option<String> {
+    use crate::codex_launch::SweepAction;
+    match action {
+        // A flag coming off a real binary is worth reading, and this is the one
+        // place a human is present to read it.
+        SweepAction::FreezeClaimSettled { uid, what } => Some(format!("{uid}: {what}")),
+        // **The ordinary case is NOT printed here, and that is a decision about whose
+        // output this is.** A claim left standing is almost always a live launch
+        // running on those bytes, so on a machine with sessions on it this would be
+        // said on every launch, for ever, naming other sessions' uids at a terminal
+        // where somebody is waiting for a TUI. The distinction between a pass that
+        // said nothing and one that found nothing is owed by the daemon's pass, which
+        // has a log to put it in.
+        SweepAction::FreezeClaimStanding { .. } => None,
+        // **A record nobody could look at IS said, and it is not the same case.** One
+        // `launch.json` that will not parse makes every clear on the machine defer,
+        // for ever — so the flag stays on the binary, codex cannot be updated, and
+        // the launcher used to be silent about both halves of that. It is rare by
+        // construction (records are published by rename), so saying it does not
+        // reintroduce the per-launch noise the arm above avoids.
+        SweepAction::Skipped { uid, why } => Some(format!(
+            "{uid}'s launch record could not be examined: {why}"
+        )),
+        SweepAction::ScanFailed { what, why } => {
+            Some(format!("{what} could not be looked at: {why}"))
+        }
+        // Said, because this one explains an absence: a flag that is still on the
+        // binary and a pass that stopped before it got there.
+        SweepAction::RanOutOfTime { unreached } => Some(format!(
+            "gave up clearing leftover codex freezes after {:?} with {unreached} launch \
+             record(s) unexamined; if codex cannot be updated, the daemon's own pass will \
+             come back for it",
+            crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET
+        )),
+        // Unreachable by construction: `sweep_standing_freezes` repairs no record's
+        // lifecycle and takes no launch lock to be contended for. Stated as an arm
+        // rather than a `_`, because a wildcard here would silently absorb the day
+        // somebody widened that scope and put the launcher back in the business of
+        // filing other launches as failed on the path where a human is waiting for a
+        // TUI.
+        other => Some(format!(
+            "the pre-launch freeze pass returned {other:?}, which it has no authority to \
+             act on; it is reported and ignored"
+        )),
+    }
 }
 
 /// Refuse the launch when the daemon that is running cannot host Codex.
@@ -1493,18 +1611,17 @@ fn read_generated(path: &Path) -> Result<Vec<u8>> {
 /// Everything the launch gate asks the installed codex about itself, read under a
 /// **single** held freeze.
 ///
-/// # One freeze, five execs — stronger and faster than one freeze each
+/// # One freeze, every exec — stronger and faster than one freeze each
 ///
-/// The launcher asks the binary five questions before it will host it: its version, its
-/// root command surface (`completion bash`), its two app-server schema bundles, and the
-/// effective value of the one feature this launch pins off. Each of the first four used
-/// to take its own freeze-and-verify; the fifth is affordable only because it rides this
-/// one.
+/// The launcher asks the binary several questions before it will host it: its version,
+/// its root command surface (`completion bash`), one per app-server schema bundle, and
+/// the effective value of the one feature this launch pins off. Each used to take its
+/// own freeze-and-verify; the last is affordable only because it rides this one.
 ///
 /// **Stronger:** separate freezes leave gaps between them. A version read under freeze A
 /// and a schema read under freeze D are two statements about two moments, and nothing
 /// said the bytes were the same in between — which is exactly the reasoning
-/// [`verify_codex_identity`] exists to refuse. One freeze held across all five makes them
+/// [`verify_codex_identity`] exists to refuse. One freeze held across them all makes them
 /// one statement about one set of bytes, which is what the gate's conclusion actually
 /// claims.
 ///
@@ -1535,7 +1652,7 @@ fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
         // this site cannot write.** There is no uid yet, so nothing a custodian scans
         // will ever name this freeze — and a custodian's scan-and-clear takes this same
         // lock, so while it is held the clear cannot happen at all. Released at the
-        // empty record, the interval that follows (the 210 MB hash plus the five execs
+        // empty record, the interval that follows (the 210 MB hash plus each exec
         // below) was a freeze every custodian on the machine was free to undo, and a
         // peer's stale record was enough to make one do it.
         protocol::hash::LockHold::UntilReleased,
@@ -3071,6 +3188,85 @@ mod tests {
         assert!(
             with[..at].iter().any(|a| a == "--hooks-enabled"),
             "the launcher's own dimensions must all precede the boundary: {with:?}"
+        );
+    }
+
+    /// **A launch that could not look at a record has to say so, and a launch that
+    /// found a live one must not.**
+    ///
+    /// One `launch.json` that is not valid JSON at all makes `other_freeze_claim_on`
+    /// answer `Standing` for EVERY vnode on the machine, so no freeze anywhere is ever
+    /// cleared again — and the launcher swallowed both halves of that: the unreadable
+    /// record (`Skipped`) and the veto it caused (`FreezeClaimStanding`). The user got
+    /// a codex that could not be updated and not one word about why. A record that
+    /// could not be read is rare by construction, so saying it does not put the
+    /// per-launch noise back; a claim left standing is the ordinary live-launch case
+    /// on every busy machine, and stays the daemon's to log.
+    #[test]
+    fn a_launch_says_what_it_could_not_look_at_and_stays_quiet_about_what_it_is_waiting_for() {
+        use crate::codex_launch::SweepAction;
+        for unreadable in [
+            SweepAction::Skipped {
+                uid: "u".into(),
+                why: "corrupt or truncated".into(),
+            },
+            SweepAction::ScanFailed {
+                what: "u".into(),
+                why: "the record could not be stat'ed".into(),
+            },
+        ] {
+            let said = launcher_line(&unreadable).unwrap_or_else(|| {
+                panic!(
+                    "a record nobody could look at must be said: \
+                                           {unreadable:?}"
+                )
+            });
+            assert!(said.contains("u"), "and it must name the record: {said}");
+        }
+        assert!(
+            launcher_line(&SweepAction::FreezeClaimStanding {
+                uid: "u".into(),
+                why: "a live launch is behind the vnode".into(),
+            })
+            .is_none(),
+            "a claim left standing is the ordinary case and belongs in the daemon's log, \
+             not at a terminal on every launch"
+        );
+    }
+
+    /// **H2.1: the launch clears freezes left standing BEFORE it takes one, and the
+    /// order is the whole of the fix.**
+    ///
+    /// `probe_codex` holds the executable's own freeze lock for its entire run, and
+    /// the pass needs that same lock to prove no live holder stands behind the vnode.
+    /// Run after the probe it would meet this launch's own lock, defer, and clear
+    /// nothing; run inside it, it would be reasoning about a bit this process had just
+    /// set. Before is the only position from which its answer is about anybody else.
+    ///
+    /// A source read for the same reason its neighbours are: `start` resolves a real
+    /// codex, shells out for each of its questions and preflights the daemon, so a unit
+    /// test cannot
+    /// reach the ordering inside it — and an ordering that regressed here would fail
+    /// silently, as a pass that runs on every launch and can never clear anything.
+    #[test]
+    fn the_launch_clears_freezes_left_standing_before_its_probe_takes_one() {
+        let source = include_str!("codex.rs");
+        let at = source
+            .find("pub fn start(passthrough: &[String]) -> Result<()> {")
+            .expect("start must exist");
+        let rest = &source[at..];
+        let start = &rest[..rest.find("\n}\n").expect("a closed function body")];
+
+        let sweep = start
+            .find("clear_freezes_left_standing()")
+            .expect("a launch must run the pass that clears a freeze left standing");
+        let probe = start
+            .find("probe_codex(")
+            .expect("a launch must probe the binary it is about to host");
+        assert!(
+            sweep < probe,
+            "the pass must run before the probe takes the lock it needs, or it can \
+             only ever defer to this launch's own freeze"
         );
     }
 

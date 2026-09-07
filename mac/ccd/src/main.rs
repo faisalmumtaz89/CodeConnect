@@ -317,6 +317,30 @@ async fn main() -> Result<()> {
         })
     };
 
+    // **The recovery pass for codex launches, which until now had no production
+    // caller at all.** A launch that took the `UF_IMMUTABLE` pin on the codex binary
+    // and did not survive to give it back leaves a flag with no live owner; codex still
+    // runs and can no longer be updated, and the only thing entitled to take the flag
+    // off is a later pass over the launch records. Nothing ran one, so "a later pass"
+    // meant an operator eventually working out that `chflags nouchg` was the answer.
+    // The launcher runs the freeze half of it before every launch; this is the half
+    // that does not need somebody to be launching anything.
+    //
+    // Its own task, one pass immediately and a slow tick behind it — the liveness
+    // sweep's shape, for the liveness sweep's reasons. The launcher is resolved by the
+    // task on every tick rather than once here, so a daemon that starts before its
+    // launcher is in place picks it up instead of parking for its whole life.
+    // Said once here rather than per tick: an override that names nothing is a fact
+    // about the environment this process was started in, and the resolution below
+    // silently falls through to a working candidate, so nothing else would ever
+    // mention it.
+    state::warn_about_an_ignored_launcher_override();
+    let codex_sweep = tokio::spawn(state::run_codex_sweeps(
+        state::codex_launcher,
+        protocol::TMUX_SOCKET_NAME.to_string(),
+        state::CODEX_SWEEP_PERIOD,
+    ));
+
     // launchd holds the log files open, so nothing outside this process can
     // rotate them without leaving launchd appending to an unlinked inode.
     let rotate = {
@@ -345,6 +369,7 @@ async fn main() -> Result<()> {
         result = local_watch => Stop::Task(format!("local resolver exited: {result:?}")),
         result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
         result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
+        result = codex_sweep => Stop::Task(format!("codex recovery sweeper exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
         // The one arm that is a deliberate exit rather than a failure: a
         // tailnet address turned up after this daemon had already fallen back

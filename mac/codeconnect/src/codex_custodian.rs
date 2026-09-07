@@ -922,20 +922,37 @@ impl RealDeps {
         FreezeVerdict::Abandoned(why)
     }
 
-    /// Take the claim back and settle. The record is a statement about a freeze this
-    /// launch is holding, and after a pass that dealt with it — cleared it, or found
-    /// the vnode gone — it is holding none.
+    /// Take back the claim **this custodian judged**, and settle.
+    ///
+    /// The record is a statement about a freeze this launch is holding, and after a
+    /// pass that dealt with it — cleared it, or found the vnode gone — it is holding
+    /// none. But only that one: `held` is passed in and
+    /// [`codex_launch::withdraw_exact_freeze_claim`] refuses unless the record still
+    /// names it, because the executable's lock is released between the clear and this
+    /// write and a replacement host for the same uid can record a fresh freeze in the
+    /// gap. Blanking the field then erased a LIVE holder's own record, which is the
+    /// only thing standing between its bytes and the next janitor past them. The
+    /// recovery pass reaches the same helper, so the two cannot come to different
+    /// conclusions about the same record.
     ///
     /// A failure to withdraw is said out loud and settles anyway: the flag is already
     /// dealt with, and holding the record short of `Complete` over a bookkeeping write
     /// would wedge the launch for a claim whose own checks (holder dead, vnode
-    /// matching, bit set) will simply decline next time.
-    fn withdraw_freeze_claim(&self) -> FreezeVerdict {
-        let Ok(lock) = LaunchLock::acquire_bounded(&self.cfg.uid, LOCK_BUDGET) else {
-            return FreezeVerdict::Settled;
-        };
-        if let Err(err) = codex_launch::note_exec_freeze_released(&lock, &self.cfg.uid) {
-            eprintln!("codex-custodian: the freeze was dealt with but the record still says it is held: {err:#}");
+    /// matching, bit set) will simply decline next time. A claim that is no longer ours
+    /// settles for the same reason and leaves the record alone — and the record layer
+    /// still refuses `Complete` while any claim stands, so nothing is lost by it.
+    fn withdraw_freeze_claim(&self, held: &protocol::hash::HeldFreeze) -> FreezeVerdict {
+        match codex_launch::withdraw_exact_freeze_claim(&self.cfg.uid, held, LOCK_BUDGET) {
+            codex_launch::FreezeWithdrawal::Withdrawn => {}
+            codex_launch::FreezeWithdrawal::NotOurs(why) => {
+                eprintln!("codex-custodian: {why}");
+            }
+            codex_launch::FreezeWithdrawal::Failed(why) => {
+                eprintln!(
+                    "codex-custodian: the freeze was dealt with but the record still says it \
+                     is held: {why}"
+                );
+            }
         }
         FreezeVerdict::Settled
     }
@@ -1327,7 +1344,13 @@ impl CustodianDeps for RealDeps {
         // sweep performs exactly the same act and two copies of four warrants is two
         // copies that drift. What is this custodian's alone is the POLICY below: a
         // budget to wait out, and a claim to withdraw.
-        match crate::codex_launch::resolve_standing_freeze(&self.cfg.uid, held) {
+        // This custodian's own budget, and not the pass's: it is armed for one launch
+        // and the only wait here is the executable's lock.
+        match crate::codex_launch::resolve_standing_freeze(
+            &self.cfg.uid,
+            held,
+            std::time::Instant::now() + LOCK_BUDGET,
+        ) {
             crate::codex_launch::StandingFreeze::Waiting(why) => self.defer_freeze(held, why),
             // Not a deferral: no evidence that could ever arrive would make an adopted
             // flag this record's to remove, so there is nothing to come back for. The
@@ -1341,7 +1364,7 @@ impl CustodianDeps for RealDeps {
                      longer stands behind the vnode for anyone",
                     self.cfg.uid, held.path
                 );
-                self.withdraw_freeze_claim()
+                self.withdraw_freeze_claim(held)
             }
             crate::codex_launch::StandingFreeze::Attempted(outcome) => {
                 // Said out loud in every arm. The flag is invisible until an update
@@ -1365,7 +1388,7 @@ impl CustodianDeps for RealDeps {
                 // holding, and after this pass it is holding none — leaving it set
                 // would send every later reader back to a file this custodian has
                 // already finished with.
-                self.withdraw_freeze_claim()
+                self.withdraw_freeze_claim(held)
             }
         }
     }
@@ -1610,8 +1633,13 @@ pub fn spawn_custodian_through_gate(
 /// Run one bounded recovery sweep and rearm a replacement custodian for every
 /// `failed{cleanup:pending}` record whose custodian died (D7: "both killed ⇒
 /// next sweep rearms"; total-guardian-loss recovered from durable state). The
-/// record transitions themselves are done inside [`codex_launch::recovery_sweep`];
+/// record transitions themselves are done inside [`codex_launch::recovery_sweep_each`];
 /// this adds the process re-spawn the sweep cannot do on its own.
+///
+/// **Every line is written at the moment the pass takes the action it describes.** The
+/// caller is a daemon that kills this child at its own budget, and the clear plus the
+/// withdrawal leave nothing behind that says either happened — so an account written
+/// at the end is an account the run that most needed it never produces.
 pub fn run_sweep_once(socket: &str) -> Result<()> {
     let gate_program = std::env::current_exe()?;
     // Attempt every replacement, but do NOT discard a rearm failure:
@@ -1620,15 +1648,55 @@ pub fn run_sweep_once(socket: &str) -> Result<()> {
     // We try all actions first (one bad record must not starve the others), then
     // report the first failure so the caller/next sweep knows to retry.
     let mut first_err: Option<anyhow::Error> = None;
-    for action in codex_launch::recovery_sweep() {
+    let mut rearm: Vec<String> = Vec::new();
+    codex_launch::recovery_sweep_each(&mut |action| {
         // A record we could not examine leaves the sweep INCONCLUSIVE, not clean.
         // Reporting it as an error is what makes a single sweep's exit status
         // mean "everything owed was done" instead of "nothing went wrong while I
         // did possibly nothing" — the caller's cue to run another pass.
         if let codex_launch::SweepAction::Skipped { uid, why } = &action {
+            eprintln!("codex-sweep: {uid} could not be examined: {why}");
             first_err
                 .get_or_insert_with(|| anyhow::anyhow!("could not examine {uid} this pass: {why}"));
-            continue;
+            return;
+        }
+        // The same debt one step earlier: a record the SCAN could not reach was never
+        // examined either, and a pass that reported zero for it would be one that
+        // examined fewer records than the machine has and said so to nobody.
+        if let codex_launch::SweepAction::ScanFailed { what, why } = &action {
+            eprintln!("codex-sweep: {what} could not be looked at: {why}");
+            first_err.get_or_insert_with(|| anyhow::anyhow!("could not look at {what}: {why}"));
+            return;
+        }
+        // **And a record whose lock never came free is the same debt again.** It was
+        // briefly its own clean case, on the reasoning that a held launch lock means
+        // somebody else owns whatever is owed there — true, and beside the point: this
+        // pass did not OPEN the record, so "everything owed was done" is a statement it
+        // has no evidence for. A caller that retries until zero then stops retrying
+        // over a record nobody looked at. The pass now waits the holder out
+        // (`SWEEP_LAUNCH_LOCK_BUDGET`), which is what keeps this from being the
+        // ordinary case on a busy machine; reaching it means something is genuinely
+        // stuck, and the next pass is what is owed.
+        if let codex_launch::SweepAction::Busy { uid, why } = &action {
+            eprintln!("codex-sweep: {uid} was not examined: {why}");
+            first_err
+                .get_or_insert_with(|| anyhow::anyhow!("could not open {uid} this pass: {why}"));
+            return;
+        }
+        // The pass stopped itself with records still unexamined. Something may well be
+        // owed on them and nothing looked, so this IS the pass's debt — and saying so
+        // is what brings the next one back for it.
+        if let codex_launch::SweepAction::RanOutOfTime { unreached } = &action {
+            eprintln!(
+                "codex-sweep: the pass reached its deadline with {unreached} record(s) it \
+                 never looked at"
+            );
+            first_err.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "the pass reached its deadline with {unreached} record(s) unexamined"
+                )
+            });
+            return;
         }
         // **A flag coming off a real binary is worth reading, and so is one that did
         // not.** The sweep is the actor of last resort for a freeze claim — the
@@ -1636,36 +1704,56 @@ pub fn run_sweep_once(socket: &str) -> Result<()> {
         // it says nothing, nobody does.
         if let codex_launch::SweepAction::FreezeClaimSettled { uid, what } = &action {
             eprintln!("codex-sweep: {uid}: {what}");
-            continue;
+            return;
         }
         if let codex_launch::SweepAction::FreezeClaimStanding { uid, why } = &action {
             eprintln!("codex-sweep: {uid} still claims a vnode freeze — {why}; asking again on the next pass");
-            continue;
+            return;
         }
+        // A repair this pass actually made, and the only trace of it outside the record
+        // itself. Said here rather than left to the durable state, because ccd's log is
+        // where an operator looks to find out why a launch they had open became a
+        // failed one.
+        if let codex_launch::SweepAction::FailedStalePending { uid } = &action {
+            eprintln!(
+                "codex-sweep: {uid} was left pending with no guardian left alive, so it is \
+                 recorded as failed and its cleanup is owed"
+            );
+            return;
+        }
+        // **Noted now, spawned after the pass**, and the order is not a preference.
+        // This runs INSIDE the sweep, which is holding that record's launch lock while
+        // it says so — and arming a custodian takes the same lock to fsync its spawn
+        // intent. Done here it waits out its own budget against a lock the frame below
+        // it holds, every pass, so the rearm never happens and the pass never completes.
         if let codex_launch::SweepAction::NeedsReplacementCustodian { uid } = action {
-            // Re-read the record for the coordinator identity to monitor; if it
-            // has vanished or is unreadable, record it and move on — a later sweep
-            // retries.
-            let record = match codex_launch::load(&uid) {
-                Ok(record) => record,
-                Err(err) => {
-                    first_err.get_or_insert_with(|| {
-                        err.context(format!("re-reading {uid} to rearm its custodian"))
-                    });
-                    continue;
-                }
-            };
-            if let Err(err) = spawn_custodian_through_gate(
-                &uid,
-                socket,
-                record.coordinator,
-                gate_program.clone(),
-                &codex_launch::mint_nonce(),
-            ) {
+            eprintln!("codex-sweep: {uid} has no live custodian; arming a replacement");
+            rearm.push(uid);
+        }
+    });
+    // Past here the sweep holds no lock.
+    for uid in rearm {
+        // Re-read the record for the coordinator identity to monitor; if it has
+        // vanished or is unreadable, record it and move on — a later sweep retries.
+        let record = match codex_launch::load(&uid) {
+            Ok(record) => record,
+            Err(err) => {
                 first_err.get_or_insert_with(|| {
-                    err.context(format!("rearming a replacement custodian for {uid}"))
+                    err.context(format!("re-reading {uid} to rearm its custodian"))
                 });
+                continue;
             }
+        };
+        if let Err(err) = spawn_custodian_through_gate(
+            &uid,
+            socket,
+            record.coordinator,
+            gate_program.clone(),
+            &codex_launch::mint_nonce(),
+        ) {
+            first_err.get_or_insert_with(|| {
+                err.context(format!("rearming a replacement custodian for {uid}"))
+            });
         }
     }
     match first_err {
@@ -2649,7 +2737,10 @@ pub(crate) mod tests {
                 | SweepAction::NeedsReplacementCustodian { uid: u }
                 | SweepAction::FreezeClaimSettled { uid: u, .. }
                 | SweepAction::FreezeClaimStanding { uid: u, .. }
-                | SweepAction::Skipped { uid: u, .. } => u == uid,
+                | SweepAction::Skipped { uid: u, .. }
+                | SweepAction::Busy { uid: u, .. } => u == uid,
+                // Name no record, so they are never this test's.
+                SweepAction::RanOutOfTime { .. } | SweepAction::ScanFailed { .. } => false,
             })
             .collect();
         assert!(
@@ -3066,6 +3157,26 @@ pub(crate) mod tests {
         let held = guard.held(&bin).expect("this guard set the flag");
         std::mem::forget(guard);
         (bin, held)
+    }
+
+    /// A deadline far enough out that a test never meets it. The pass's budget is
+    /// its own invariant and has its own test; every other test would only be made
+    /// flaky by inheriting it.
+    fn a_generous_deadline() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(300)
+    }
+
+    /// Thaws and removes its fixture whatever happens — **including the path where an
+    /// assertion fails**, which is the path that matters here. A trailing
+    /// `thaw_and_remove` runs only when the test passes, so a failing freeze test used
+    /// to leave a `UF_IMMUTABLE` file in `/tmp` that the operator could not delete
+    /// without `chflags nouchg`: the exact wound this whole item exists to heal, left
+    /// behind by the tests that prove it healed.
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            thaw_and_remove(&self.0);
+        }
     }
 
     fn flags_of(path: &std::path::Path) -> u32 {
@@ -3699,7 +3810,673 @@ pub(crate) mod tests {
             "and the claim must be withdrawn, or the next pass goes back to a file \
              that has already been dealt with"
         );
+    }
+
+    /// **H2.1, the launcher's half: the next launch takes the flag off.**
+    ///
+    /// The pass that clears a standing claim had no production caller, so the
+    /// counterexample the retry was written for — a dead setter, a custodian that
+    /// stopped waiting, no live holder left — ended with the flag on a real binary and
+    /// nothing entitled to look at it again. `chflags nouchg` was the operator's
+    /// one-liner and there was no other. This is the launcher running that pass before
+    /// it takes a freeze of its own, which is the moment somebody is present to care
+    /// that codex cannot be updated.
+    #[test]
+    fn a_standing_claim_whose_holder_is_dead_is_cleared_by_the_pass_a_launch_runs() {
+        let (bin, mut held) = a_leaked_freeze("launch-pass-clears");
+        let _fixture = Fixture(bin.clone());
+        let (mut child, holder) = a_real_holder();
+        kill_and_reap(&mut child, &holder);
+        held.holder = Some(holder);
+        let uid = "freeze-launch-pass";
+        a_record_holding(uid, held);
+        assert_ne!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "the fixture must start immutable, or this proves nothing"
+        );
+
+        let actions = codex_launch::sweep_standing_freezes(a_generous_deadline());
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::FreezeClaimSettled { uid: u, .. } if u == uid
+            )),
+            "the launcher's pass must clear it and say what it did: {actions:?}"
+        );
+        assert_eq!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "the flag must come off without anybody typing chflags"
+        );
+        assert!(
+            codex_launch::load(uid).unwrap().exec_freeze.is_none(),
+            "and the claim must be withdrawn, or the next launch goes back to a file \
+             this one has already dealt with"
+        );
         thaw_and_remove(&bin);
+    }
+
+    /// **The same pass, in front of a live holder, must leave everything alone.**
+    ///
+    /// This is the direction that costs a running session its pin: the launcher runs
+    /// this on every launch, so a pass that read a dead SETTER as sufficient warrant
+    /// would take the flag off bytes an adopter is executing against — which is the
+    /// whole reason the warrants include the other records and not just this one's
+    /// holder.
+    #[test]
+    fn a_standing_claim_with_a_live_holder_is_left_by_the_pass_a_launch_runs() {
+        let (bin, mut a_held) = a_leaked_freeze("launch-pass-defers");
+        let _fixture = Fixture(bin.clone());
+        let (mut a_child, a_holder) = a_real_holder();
+        kill_and_reap(&mut a_child, &a_holder);
+        a_held.holder = Some(a_holder);
+        let uid_a = "freeze-launch-defer-a";
+        a_record_holding(uid_a, a_held);
+
+        // B adopts the stranded bit and is alive for the whole of what follows.
+        let (_digest, b_guard) = freeze_only(&bin).unwrap();
+        let b_held = b_guard.held(&bin).expect("an adopter records itself");
+        a_record_holding("freeze-launch-defer-b", b_held);
+
+        let actions = codex_launch::sweep_standing_freezes(a_generous_deadline());
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::FreezeClaimStanding { uid: u, .. } if u == uid_a
+            )),
+            "a live launch behind the vnode is a wait, and the pass must say so: {actions:?}"
+        );
+        assert_ne!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "B is still running on these bytes"
+        );
+        assert!(
+            codex_launch::load(uid_a).unwrap().exec_freeze.is_some(),
+            "and A's claim must stand, or nobody comes back for the flag once B is gone"
+        );
+        drop(b_guard);
+    }
+
+    /// **A record the pass could not take the lock on has NOT been examined, and a
+    /// pass that exits zero over it is lying.**
+    ///
+    /// The lock's holders are brief by construction — a host taking its admission
+    /// lease, a custodian writing one transition — so a pass that gave up on the first
+    /// non-blocking try was declining to examine a record for the length of one file
+    /// write. Wired to a daemon and a launcher, contention is the ordinary state of a
+    /// busy machine, and `Busy` was made a clean pass so it would not cry failure on
+    /// one; but then a caller that retries until zero — the lifecycle test, and in
+    /// spirit the daemon's latch — was told everything was done about a record nobody
+    /// had opened. Both halves are wrong together: wait out a brief holder, and when
+    /// the wait does not win, say the record was not examined.
+    #[test]
+    fn a_briefly_held_launch_lock_is_waited_out_rather_than_declined() {
+        let uid = "sweep-brief-lock";
+        let lock = codex_launch::LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            codex_launch::NewLaunch {
+                launch_nonce: format!("{uid}-nonce"),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: protocol::proc_identity::current_identity().unwrap(),
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                // Already past, so there IS something for the pass to do here: a
+                // record it opens and finds stale is the difference between "examined"
+                // and "declined", and an assertion on a healthy record could not tell
+                // them apart.
+                deadline_monotonic_nanos: 1,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+
+        // A holder of the ordinary kind: it has the lock when the pass starts and
+        // gives it back well inside the pass's wait.
+        let root = codex_launch::this_thread_sessions_root();
+        let holder = std::thread::spawn(move || {
+            codex_launch::adopt_test_sessions_root(root);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(lock);
+        });
+
+        let actions = codex_launch::recovery_sweep();
+        holder.join().unwrap();
+
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::Busy { uid: u, .. } if u == uid
+            )),
+            "a holder that lets go inside the wait must not end as an unexamined \
+             record: {actions:?}"
+        );
+        assert!(
+            actions.contains(&codex_launch::SweepAction::FailedStalePending { uid: uid.into() }),
+            "and the record must actually be examined and repaired: {actions:?}"
+        );
+    }
+
+    /// **A launch lock held for the whole pass is a record that was not examined, and
+    /// the exit status has to say so.**
+    ///
+    /// This is the other half of the same rule. `Busy` was counted as a clean pass, so
+    /// `run_sweep_once` exited zero having opened nothing — and a caller that retries
+    /// until zero stopped retrying. Before H2.1 that case was `Skipped`, exit 1, and
+    /// the caller knew to come back.
+    #[test]
+    fn a_pass_that_never_got_the_lock_does_not_report_a_clean_one() {
+        let uid = "sweep-held-lock";
+        let far = protocol::proc_identity::monotonic_now_nanos().unwrap() + 60_000_000_000;
+        let lock = codex_launch::LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            codex_launch::NewLaunch {
+                launch_nonce: format!("{uid}-nonce"),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: protocol::proc_identity::current_identity().unwrap(),
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: far,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let outcome = run_sweep_once("cc-heldlock");
+        drop(lock);
+
+        let err = outcome.expect_err("a record nobody could open owes another pass");
+        assert!(
+            format!("{err:#}").contains(uid),
+            "and the complaint must name it: {err:#}"
+        );
+    }
+
+    /// **A pass is heard as it works, not when it is over.**
+    ///
+    /// The whole reason the daemon reads the pass's stderr line by line is the machine
+    /// that is slow enough to be killed at the budget — which is the machine with the
+    /// leaked flags on it. A pass that materialises its whole account and only then
+    /// says any of it hands that machine an empty account: killed at 150 ms with five
+    /// flags already off and five claims already withdrawn, it had said nothing, and
+    /// the withdrawal is what makes those five unreconstructable.
+    ///
+    /// Proven by what is still true at the moment the first line is said: the OTHER
+    /// record's binary is still frozen. An account collected first and replayed
+    /// afterwards cannot show that, because by then both are done.
+    #[test]
+    fn a_pass_is_heard_as_it_settles_each_claim_not_when_it_is_over() {
+        let mut frozen = Vec::new();
+        for tag in ["stream-a", "stream-b"] {
+            let (bin, mut held) = a_leaked_freeze(tag);
+            let (mut child, holder) = a_real_holder();
+            kill_and_reap(&mut child, &holder);
+            held.holder = Some(holder);
+            a_record_holding(&format!("freeze-{tag}"), held);
+            frozen.push((format!("freeze-{tag}"), Fixture(bin)));
+        }
+
+        // What was true at the moment the first claim was settled.
+        let mut first: Option<(String, Vec<u32>)> = None;
+        codex_launch::sweep_standing_freezes_each(a_generous_deadline(), &mut |action| {
+            if first.is_some() {
+                return;
+            }
+            if let codex_launch::SweepAction::FreezeClaimSettled { uid, .. } = &action {
+                first = Some((
+                    uid.clone(),
+                    frozen.iter().map(|(_, f)| flags_of(&f.0)).collect(),
+                ));
+            }
+        });
+
+        let (said, flags) = first.expect("two settled claims have a first");
+        let other = frozen
+            .iter()
+            .position(|(uid, _)| uid != &said)
+            .expect("the other record");
+        assert_ne!(
+            flags[other] & libc::UF_IMMUTABLE,
+            0,
+            "when the pass said it had settled {said}, {} had to be untouched still — \
+             an account handed over only at the end is the account a killed pass loses",
+            frozen[other].0
+        );
+    }
+
+    /// **The pass's budget has to bound the pass, not each of the waits inside it.**
+    ///
+    /// The deadline was checked only BETWEEN records, and within one record two
+    /// independent two-second waits were reachable — the executable's own lock and the
+    /// withdrawal's launch lock. So a launcher's "two second" pass could start a record
+    /// at 1.999 s and return at six, and the human at the terminal waits it out with
+    /// nothing said. The budget is a promise about the pass; each wait inside it may
+    /// only have what is left.
+    #[test]
+    fn one_contended_record_cannot_outlast_the_whole_pass_s_budget() {
+        let (bin, mut held) = a_leaked_freeze("deadline-clamp");
+        let _fixture = Fixture(bin.clone());
+        let (mut child, holder) = a_real_holder();
+        kill_and_reap(&mut child, &holder);
+        held.holder = Some(holder);
+        a_record_holding("freeze-deadline-clamp", held);
+
+        // Another participant holds the executable's own lock for longer than this
+        // pass is allowed to exist. Taken on its own open file description, which is
+        // what makes `flock` contend even from the same process.
+        let contender = protocol::hash::FreezeLock::acquire(&bin).expect("the fixture's lock");
+
+        let budget = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let actions = codex_launch::sweep_standing_freezes(started + budget);
+        let took = started.elapsed();
+        drop(contender);
+
+        assert!(
+            took < budget * 3,
+            "a pass given {budget:?} took {took:?}; its own budget has to clamp the \
+             wait inside a record, or the bound is per-step and the pass has none: \
+             {actions:?}"
+        );
+    }
+
+    /// **A pass that could not look must not exit as though it had.**
+    ///
+    /// `run_sweep_once`'s exit status is the whole contract with the daemon: zero
+    /// means everything owed was done, and it is what stops ccd latching a warning and
+    /// asking again. A scan failure is the one shape that could report zero having
+    /// examined fewer records than the machine has — so a session directory this
+    /// process is refused would leave a freeze claim inside it unlooked-at for ever,
+    /// under a pass that said it had finished.
+    #[test]
+    fn a_pass_that_could_not_scan_does_not_report_a_clean_one() {
+        let blind = codex_launch::this_thread_sessions_root().join("sweeponce-blind");
+        std::fs::create_dir_all(&blind).unwrap();
+        std::fs::write(blind.join("launch.json"), b"{}").unwrap();
+        std::fs::set_permissions(&blind, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+
+        let outcome = run_sweep_once("cc-scanfail");
+
+        std::fs::set_permissions(&blind, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let err = outcome.expect_err("a pass that could not scan owes another pass");
+        assert!(
+            format!("{err:#}").contains("sweeponce-blind"),
+            "and it must name what it could not look at: {err:#}"
+        );
+    }
+
+    /// **A custodian never erases a claim it did not judge.**
+    ///
+    /// The clear and the withdrawal are two moments with the executable's lock
+    /// released in between, so a replacement host for the same uid can take a fresh
+    /// freeze and record it in the gap — and the withdrawal, which simply blanked the
+    /// field, then erased a LIVE holder's own record. That record is the only thing
+    /// standing between those bytes and the next janitor to come past, so erasing it
+    /// hands the running launch's binary to the first stale setter that asks.
+    ///
+    /// Driven through the `Adopted` branch, which is where the gap is widest: it
+    /// returns before [`crate::codex_launch::resolve_standing_freeze`]'s own re-read
+    /// is ever reached, so its withdrawal had no exact-claim check anywhere on the
+    /// path. Staged as the state the race leaves — the record names the replacement's
+    /// claim, and the custodian is judging the one it read earlier.
+    #[test]
+    fn a_custodian_never_withdraws_a_claim_that_is_no_longer_the_one_it_judged() {
+        let (bin, mut adopted) = a_leaked_freeze("custodian-stale-withdraw");
+        let _fixture = Fixture(bin.clone());
+        let (mut dead_child, dead) = a_real_holder();
+        kill_and_reap(&mut dead_child, &dead);
+        adopted.holder = Some(dead);
+        // Adopted: the bit was never this launch's, so the clear is skipped entirely
+        // and the withdrawal is all that is left to get wrong.
+        adopted.ownership = protocol::hash::FreezeOwnership::Adopted;
+
+        // The replacement host: alive, and its claim is what the record says now.
+        let (_live_child, live) = a_real_holder();
+        let mut current = adopted.clone();
+        current.holder = Some(live);
+        current.ownership = protocol::hash::FreezeOwnership::Set;
+        let uid = "custodian-stale-withdraw";
+        a_record_holding(uid, current.clone());
+
+        // The custodian judges the claim it read before the replacement landed.
+        let mut stale_record = codex_launch::load(uid).unwrap();
+        stale_record.exec_freeze = Some(adopted);
+        let verdict = real_deps(uid).clear_exec_freeze(&stale_record);
+
+        assert_eq!(
+            codex_launch::load(uid).unwrap().exec_freeze,
+            Some(current),
+            "the replacement's claim must survive a custodian settling an older one; \
+             erasing it leaves a live launch's bytes with nothing standing behind them \
+             ({verdict:?})"
+        );
+        assert_ne!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "and an adopted claim never licensed touching the flag in the first place"
+        );
+    }
+
+    /// **A claim the record took AFTER this pass read it is not one the old claim's
+    /// warrants may clear.**
+    ///
+    /// The pass reads a record without the launch lock, judges the claim it found, and
+    /// only then takes the executable's own lock. `other_freeze_claim_on` deliberately
+    /// excludes the record being settled — every other record is the evidence, this one
+    /// is the question — so a SECOND claim recorded on the same uid inside that window
+    /// is invisible to it: the sweep proves the OLD holder dead, finds no other record
+    /// behind the vnode, and takes the flag off under the NEW holder. The withdrawal's
+    /// exact-claim check catches it one step too late; by then the pin is gone.
+    ///
+    /// Staged as the state the race leaves rather than as the race: the record names a
+    /// live claim, and the pass is handed the stale snapshot it read a moment earlier.
+    /// That is precisely what the losing interleaving hands `resolve_standing_freeze`,
+    /// and it is deterministic.
+    #[test]
+    fn a_claim_replaced_since_the_pass_read_it_is_not_cleared_under_the_old_one() {
+        let (bin, mut stale) = a_leaked_freeze("claim-replaced");
+        let _fixture = Fixture(bin.clone());
+        let (mut dead_child, dead) = a_real_holder();
+        kill_and_reap(&mut dead_child, &dead);
+        stale.holder = Some(dead);
+
+        // The replacement host: alive for the whole of what follows, and its claim is
+        // what the record says right now.
+        let (_live_child, live) = a_real_holder();
+        let mut current = stale.clone();
+        current.holder = Some(live);
+        let uid = "freeze-claim-replaced";
+        a_record_holding(uid, current);
+
+        let verdict = codex_launch::resolve_standing_freeze(uid, &stale, a_generous_deadline());
+
+        assert!(
+            matches!(verdict, codex_launch::StandingFreeze::Waiting(_)),
+            "a record whose claim is no longer the one this pass read licenses \
+             nothing: {verdict:?}"
+        );
+        assert_ne!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "the replacement holder is alive on these bytes and its pin must survive"
+        );
+    }
+
+    /// **The launcher's pass reads no record's lifecycle and writes none, and the type
+    /// cannot say that, so a test does.**
+    ///
+    /// Every transition the full sweep makes is half of an act: a stale `pending` CAS'd
+    /// to `failed{cleanup:pending}` then needs a replacement custodian, and spawning
+    /// one is the caller's job. A launcher that took the durable half and left the
+    /// process half undone would file another launch as failed and flag it as
+    /// guardianless with nobody flagged to act — on the path where a human is waiting
+    /// for a TUI. Pinned here because `sweep_standing_freezes` and `recovery_sweep`
+    /// share one body, so the day the scope stops being honoured is the day somebody
+    /// edits that body for the other caller.
+    #[test]
+    fn the_pass_a_launch_runs_repairs_no_record_s_lifecycle() {
+        use crate::codex_launch::{LaunchLock, LaunchState, NewLaunch};
+        let uid = "freeze-launch-scope";
+        let lock = LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            NewLaunch {
+                launch_nonce: format!("{uid}-nonce"),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: protocol::proc_identity::current_identity().unwrap(),
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                // Already past: this is exactly the record the full sweep files as
+                // failed, so a pass that touched lifecycles would touch this one.
+                deadline_monotonic_nanos: 1,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+        drop(lock);
+
+        let actions = codex_launch::sweep_standing_freezes(a_generous_deadline());
+
+        for action in &actions {
+            assert!(
+                !matches!(
+                    action,
+                    codex_launch::SweepAction::FailedStalePending { .. }
+                        | codex_launch::SweepAction::NeedsReplacementCustodian { .. }
+                ),
+                "the launcher's pass may only settle freeze claims: {actions:?}"
+            );
+        }
+        assert!(
+            matches!(codex_launch::load(uid).unwrap().state, LaunchState::Pending),
+            "and it must leave the record exactly as it found it"
+        );
+
+        // The full pass, on the same record, does file it — so the assertion above is
+        // about the scope and not about a record nothing would have touched anyway.
+        let actions = codex_launch::recovery_sweep();
+        assert!(
+            actions.contains(&codex_launch::SweepAction::FailedStalePending { uid: uid.into() }),
+            "the full sweep must still repair what the launcher's pass declines to: \
+             {actions:?}"
+        );
+    }
+
+    /// **H2.1, the daemon's half: the pass the daemon spawns clears the same claim.**
+    ///
+    /// `ccd` cannot link any of this — the launcher is a binary crate with no library —
+    /// so the daemon spawns `codeconnect` and names
+    /// [`protocol::CODEX_SWEEP_SUBCOMMAND`]. This is the body that name reaches, driven
+    /// directly, so the daemon's end is proven against the same function the
+    /// subcommand runs rather than against a rehearsal of it. The seam itself cannot
+    /// drift: the daemon and the dispatcher spell the subcommand from one constant.
+    #[test]
+    fn the_pass_the_daemon_spawns_clears_a_standing_claim_whose_holder_is_dead() {
+        let (bin, mut held) = a_leaked_freeze("daemon-pass-clears");
+        let _fixture = Fixture(bin.clone());
+        let (mut child, holder) = a_real_holder();
+        kill_and_reap(&mut child, &holder);
+        held.holder = Some(holder);
+        let uid = "freeze-daemon-pass";
+        a_record_holding(uid, held);
+
+        // **The premise is asserted, not assumed.** The record's coordinator is this
+        // live test process and its deadline is far off, so nothing in the pass wants a
+        // replacement custodian and none is spawned — `run_sweep_once` would spawn one
+        // through the gate using `current_exe()`, which here is the test binary. Left
+        // implicit, a later change to `a_record_holding` would silently start forking
+        // test binaries out of this test.
+        let staged = codex_launch::load(uid).unwrap();
+        assert!(
+            matches!(staged.state, crate::codex_launch::LaunchState::Pending)
+                && liveness(&staged.coordinator) == Liveness::Alive
+                && matches!(
+                    crate::codex_launch::deadline_expiry(&staged),
+                    crate::codex_launch::Expiry::Live
+                ),
+            "this test must stage a record no replacement custodian is wanted for"
+        );
+
+        run_sweep_once(protocol::TMUX_SOCKET_NAME).expect("the pass must complete");
+
+        assert_eq!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "the pass the daemon runs must take the flag off"
+        );
+        assert!(
+            codex_launch::load(uid).unwrap().exec_freeze.is_none(),
+            "and withdraw the claim it has finished with"
+        );
+    }
+
+    /// **A pass has to be able to stop, and it has to stop between whole acts.**
+    ///
+    /// Each standing claim can cost the executable's lock budget and the withdrawal's,
+    /// so per-step bounds multiply: a machine with a batch of leaked claims could hold
+    /// the launcher's pass for as long as there were claims, in front of a human at a
+    /// terminal with nothing said. A deadline already past means the pass does nothing
+    /// at all and says how much it did not reach — which is the shape that matters,
+    /// because the alternative to stopping between records is stopping inside one.
+    #[test]
+    fn a_pass_that_is_out_of_time_stops_between_records_and_says_what_it_did_not_reach() {
+        let (bin, mut held) = a_leaked_freeze("out-of-time");
+        let _fixture = Fixture(bin.clone());
+        let (mut child, holder) = a_real_holder();
+        kill_and_reap(&mut child, &holder);
+        held.holder = Some(holder);
+        let uid = "freeze-out-of-time";
+        a_record_holding(uid, held);
+
+        let actions = codex_launch::sweep_standing_freezes(std::time::Instant::now());
+
+        assert_eq!(
+            actions,
+            vec![codex_launch::SweepAction::RanOutOfTime { unreached: 1 }],
+            "a pass with no time left must do nothing and account for what it skipped"
+        );
+        assert_ne!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "and it must not have half-done the one record it did not examine"
+        );
+        assert!(
+            codex_launch::load(uid).unwrap().exec_freeze.is_some(),
+            "the claim stands, so the next pass comes back for it"
+        );
+    }
+
+    /// **A record the pass could not open and one it could not read are told apart,
+    /// and both are the pass's debt.**
+    ///
+    /// They are reported separately because they say different things about WHO owes
+    /// the work: a locked record has an actor on it by definition, an unreadable one
+    /// has nobody. But the exit status cannot tell them apart, because in the one way
+    /// that decides it they are identical — nothing was examined. `Busy` was briefly a
+    /// clean pass on the "somebody else owns it" reading, and a caller that retries
+    /// until zero then stopped retrying over a record nobody had opened. The bounded
+    /// wait is what keeps this rare; see
+    /// [`a_briefly_held_launch_lock_is_waited_out_rather_than_declined`].
+    #[test]
+    fn a_record_the_pass_could_not_open_and_one_it_could_not_read_are_told_apart() {
+        use crate::codex_launch::{LaunchLock, NewLaunch};
+        let uid = "sweep-busy";
+        let lock = LaunchLock::acquire(uid).unwrap();
+        codex_launch::create_pending(
+            &lock,
+            NewLaunch {
+                launch_nonce: format!("{uid}-nonce"),
+                uid: uid.into(),
+                session_name: "cc-1".into(),
+                coordinator: protocol::proc_identity::current_identity().unwrap(),
+                boot: protocol::proc_identity::boot_identity().unwrap(),
+                deadline_monotonic_nanos: 1,
+                created_ms: 1,
+            },
+        )
+        .unwrap();
+
+        // The lock is still held — by this test, standing in for the live actor.
+        let actions = codex_launch::recovery_sweep();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::Busy { uid: u, .. } if u == uid
+            )),
+            "the pass must account for a record it did not examine: {actions:?}"
+        );
+        assert!(
+            run_sweep_once(protocol::TMUX_SOCKET_NAME).is_err(),
+            "and a record that was never opened is the pass's debt, whoever is holding \
+             it: a pass that reported otherwise would be telling a retrying caller to \
+             stop"
+        );
+
+        // An unreadable record IS the pass's debt, and the two must not be conflated.
+        drop(lock);
+        std::fs::write(
+            crate::codex_launch::this_thread_sessions_root()
+                .join(uid)
+                .join("launch.json"),
+            b"{\"schema\":999}",
+        )
+        .unwrap();
+        let actions = codex_launch::recovery_sweep();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::Skipped { uid: u, .. } if u == uid
+            )),
+            "a record that cannot be read is Skipped, not Busy: {actions:?}"
+        );
+        assert!(
+            run_sweep_once(protocol::TMUX_SOCKET_NAME).is_err(),
+            "and that one IS the pass's debt, so the pass says so"
+        );
+    }
+
+    /// **The launcher's pass takes no launch lock at all**, and that is a cost as much
+    /// as a discipline.
+    ///
+    /// `try_acquire` CREATES the session directory and the lock file, so a launcher
+    /// taking one per record per launch would write into every other launch's
+    /// directory on the way to deciding it had nothing to do there — and would decline
+    /// to examine a claim in exactly the moment some other actor was busy. Nothing it
+    /// goes on to do needs the lock: every warrant is re-proved under the executable's
+    /// own lock, and the withdrawal re-reads under a lock taken for that write alone.
+    #[test]
+    fn the_pass_a_launch_runs_examines_a_record_whose_lock_is_held() {
+        use crate::codex_launch::LaunchLock;
+        let (bin, mut held) = a_leaked_freeze("locked-record");
+        let _fixture = Fixture(bin.clone());
+        let (mut child, holder) = a_real_holder();
+        kill_and_reap(&mut child, &holder);
+        held.holder = Some(holder);
+        let uid = "freeze-locked-record";
+        a_record_holding(uid, held);
+
+        // Somebody else is holding this record's launch lock for the whole pass.
+        let held_by_another = LaunchLock::acquire(uid).unwrap();
+        let actions = codex_launch::sweep_standing_freezes(a_generous_deadline());
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::FreezeClaimStanding { uid: u, .. } if u == uid
+            )),
+            "the claim must be EXAMINED — the clear then waits on the withdrawal lock, \
+             which is a retry rather than a record nobody looked at: {actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, codex_launch::SweepAction::Busy { .. })),
+            "and the launcher's pass has no launch lock to be contended for: {actions:?}"
+        );
+        assert_eq!(
+            flags_of(&bin) & libc::UF_IMMUTABLE,
+            0,
+            "the flag comes off under the executable's own lock, which is the only one \
+             the clear ever needed"
+        );
+
+        // With the record free again, the withdrawal it could not make lands.
+        drop(held_by_another);
+        let actions = codex_launch::sweep_standing_freezes(a_generous_deadline());
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                codex_launch::SweepAction::FreezeClaimSettled { uid: u, .. } if u == uid
+            )),
+            "{actions:?}"
+        );
+        assert!(codex_launch::load(uid).unwrap().exec_freeze.is_none());
     }
 
     /// **A custodian that has stopped waiting must STOP, and the reason is that the

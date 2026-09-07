@@ -551,13 +551,25 @@ pub const ACK_PROBE_STDERR: &str = "gate-ack-probe: this line is the test's evid
 /// diagnostics have nowhere to go would trade the cleanup this launch depends on for
 /// the account of it.
 ///
-/// **But the fallback is said out loud, on THIS process's stderr**, which is the
-/// launcher's and which somebody is looking at. It used to be silent, and a silent
-/// fall back to `/dev/null` is the same state this whole fix was about: a janitor
-/// whose entire product is an explanation, explaining into nothing, with nobody able
-/// to tell that from a janitor with nothing to say. One line here means the operator
-/// who later finds an unexplained frozen binary can at least see why there is no log
-/// to read.
+/// **But the fallback is said out loud, on the OWNER process's stderr.** It used to be
+/// silent, and a silent fall back to `/dev/null` is the same state this whole fix was
+/// about: a janitor whose entire product is an explanation, explaining into nothing,
+/// with nobody able to tell that from a janitor with nothing to say. One line here
+/// means the operator who later finds an unexplained frozen binary can at least see
+/// why there is no log to read.
+///
+/// **WHOSE stderr that is, stated exactly, because it was previously stated wrongly.**
+/// This used to claim the line lands on "the launcher's, which somebody is looking at",
+/// and neither half was true of the custodian — the one child this sentence exists
+/// for. The custodian's owner is never the launcher: it is the COORDINATOR
+/// ([`crate::codex_coordinator`]), which the launcher spawns detached with both its
+/// streams redirected into `logs/coordinator-<session>-<uid>.out`, so the line reaches
+/// a file rather than a terminal and nobody is watching it live. Its other owner is
+/// the recovery pass, whose stderr is whatever ran it — `ccd`'s own log, now that the
+/// daemon runs one. Both are durable and both are readable afterwards, which is what
+/// the line is for; what neither is, is a human's terminal during a launch. The claim
+/// is worth keeping narrow: an operator told to look at their terminal for this would
+/// look in the one place it never appears.
 fn gate_stderr(path: Option<&std::path::Path>) -> Stdio {
     let Some(path) = path else {
         return Stdio::null();
@@ -800,6 +812,96 @@ mod tests {
         let exe = std::env::current_exe().ok()?;
         let candidate = exe.parent()?.parent()?.join("codeconnect");
         candidate.is_file().then_some(candidate)
+    }
+
+    /// **A diagnostics file that cannot be opened says so, on the owner's own stderr —
+    /// and this is what that claim actually looks like.**
+    ///
+    /// The claim was previously written as "on the launcher's stderr, which somebody is
+    /// looking at", and it was wrong twice over: the custodian's owner is the
+    /// coordinator, whose streams the launcher redirected into a log file before it
+    /// ever existed, and the recovery pass's owner is whatever ran the pass. So what is
+    /// provable — and all that is — is that the sentence reaches file descriptor 2 of
+    /// the process that took the fallback, naming the path that could not be opened.
+    /// That is what this reads.
+    ///
+    /// **Why a child process.** `codex_custodian` records this sentence as unobservable
+    /// in-process, and it is right: `eprintln!` goes through the harness's output
+    /// capture, which a spawned thread INHERITS (measured — the first version of this
+    /// test used one and read an empty file while the line sat in the harness's
+    /// buffer). What does not inherit it is another process. So this test re-runs
+    /// itself with `--nocapture`, where the harness installs no capture at all and the
+    /// line reaches the descriptor the parent piped. The child takes the inner branch
+    /// on the env var and asserts nothing; the parent does all the reading.
+    #[test]
+    fn a_diagnostics_file_that_cannot_be_opened_says_so_on_the_owner_s_own_stderr() {
+        const INNER: &str = "CC_GATE_FALLBACK_INNER";
+        const NAME: &str =
+            "exec_gate::tests::a_diagnostics_file_that_cannot_be_opened_says_so_on_the_owner_s_own_stderr";
+
+        // The child half: take the fallback and say nothing else.
+        if let Ok(path) = std::env::var(INNER) {
+            drop(gate_stderr(Some(std::path::Path::new(&path))));
+            return;
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cc-gate-fallback-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Removed whatever happens, including the path where an assertion panics: a
+        // trailing `remove_dir_all` runs only when the test passes, so a failing run
+        // used to leak its tree.
+        struct Tree(std::path::PathBuf);
+        impl Drop for Tree {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _tree = Tree(dir.clone());
+        // A parent that is a FILE. `open_owner_only_append` proves the directory
+        // private before it opens anything, and nothing can make a regular file into a
+        // private directory — so this is an open that cannot succeed, for a reason that
+        // needs no permissions a test would have to be root to stage.
+        let not_a_dir = dir.join("not-a-directory");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let unopenable = not_a_dir.join("codex-custodian-nobody.log");
+        assert!(
+            open_owner_only_append(&unopenable).is_none(),
+            "the fixture must be unopenable, or this test proves nothing"
+        );
+
+        let out = Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(INNER, &unopenable)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("re-run this test as a child");
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+
+        assert!(
+            out.status.success(),
+            "the fallback must not fail the child: {said}"
+        );
+        assert!(
+            said.contains(&unopenable.display().to_string()),
+            "the line must name the file that could not be opened, or an operator \
+             cannot act on it: {said:?}"
+        );
+        assert!(
+            said.contains("goes to /dev/null"),
+            "and it must say where the child's diagnostics went instead: {said:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "the child must have run this test and no other: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 
     /// **A gated child's diagnostics reach the file the owner named, owner-only.**

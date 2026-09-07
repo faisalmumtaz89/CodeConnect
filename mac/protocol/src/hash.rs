@@ -600,7 +600,8 @@ pub enum LockHold {
     /// while this is held the clear cannot happen at all.
     ///
     /// The launcher's probe is the site that needs it: it freezes before a uid exists,
-    /// then hashes 210 MB and runs five execs against the frozen bytes. With the lock
+    /// then hashes 210 MB and runs each of its execs against the frozen bytes. With the
+    /// lock
     /// dropped at the (empty) record, a peer's custodian found no claim naming the
     /// vnode and cleared the flag out from under those execs.
     ///
@@ -609,12 +610,15 @@ pub enum LockHold {
     UntilReleased,
 }
 
-/// Take `flock(LOCK_EX)` on an open descriptor, waiting at most
-/// [`FREEZE_LOCK_BUDGET`].
+/// Take `flock(LOCK_EX)` on an open descriptor, waiting at most `budget`.
+///
+/// The budget is a parameter rather than [`FREEZE_LOCK_BUDGET`] because a caller
+/// that is itself inside a bounded pass has less than the whole of it left: a wait
+/// that ignored that would make the pass's own deadline a floor instead of a bound.
 ///
 /// `LOCK_NB` in a loop rather than a blocking `LOCK_EX`, because the blocking form
 /// has no timeout and both callers have somewhere else to be.
-fn lock_exclusive_bounded(file: &std::fs::File) -> Result<(), String> {
+fn lock_exclusive_bounded(file: &std::fs::File, budget: std::time::Duration) -> Result<(), String> {
     let started = std::time::Instant::now();
     loop {
         // SAFETY: a valid fd for the borrow; `flock` takes an advisory lock and
@@ -628,13 +632,12 @@ fn lock_exclusive_bounded(file: &std::fs::File) -> Result<(), String> {
             Some(libc::EINTR) => continue,
             _ => return Err(format!("the freeze lock could not be taken ({err})")),
         }
-        if started.elapsed() >= FREEZE_LOCK_BUDGET {
+        if started.elapsed() >= budget {
             return Err(format!(
-                "the freeze lock was held by another process for longer than \
-                 {FREEZE_LOCK_BUDGET:?}"
+                "the freeze lock was held by another process for longer than {budget:?}"
             ));
         }
-        std::thread::sleep(FREEZE_LOCK_POLL);
+        std::thread::sleep(FREEZE_LOCK_POLL.min(budget));
     }
 }
 
@@ -758,6 +761,19 @@ impl FreezeLock {
     /// failure that a later pass would have succeeded at into a leak nobody would
     /// look at again.
     pub fn acquire(path: &std::path::Path) -> Result<FreezeLock, FreezeLockFailure> {
+        Self::acquire_within(path, FREEZE_LOCK_BUDGET)
+    }
+
+    /// [`FreezeLock::acquire`] for a caller that has less than the whole budget left.
+    ///
+    /// A pass with a deadline of its own must not inherit this lock's budget on top of
+    /// it — per-step bounds add up, and a pass bounded by the sum of its steps is a
+    /// pass with no bound a caller can state. `budget` is what the caller has
+    /// remaining; everything else about the acquire is unchanged.
+    pub fn acquire_within(
+        path: &std::path::Path,
+        budget: std::time::Duration,
+    ) -> Result<FreezeLock, FreezeLockFailure> {
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(err) => {
@@ -776,7 +792,7 @@ impl FreezeLock {
                 );
             }
         };
-        if let Err(why) = lock_exclusive_bounded(&file) {
+        if let Err(why) = lock_exclusive_bounded(&file, budget) {
             return Err(FreezeLockFailure::Unavailable(format!(
                 "{}: {why}",
                 path.display()
@@ -1148,7 +1164,7 @@ where
     F: FnOnce(&FrozenExecutable) -> Result<(), String>,
 {
     let file = std::fs::File::open(path)?;
-    let locked = lock_exclusive_bounded(&file).is_ok();
+    let locked = lock_exclusive_bounded(&file, FREEZE_LOCK_BUDGET).is_ok();
     let own = if locked { arm_then_freeze(&file) } else { None };
     let mut frozen = FrozenExecutable { file, own };
     if let Err(why) = on_frozen(&frozen) {
@@ -2715,7 +2731,7 @@ mod tests {
     /// recording site reaches that moment at its record. The launcher's probe never
     /// reaches it at all: it freezes before a uid exists, so there is nothing for any
     /// scan to find, and releasing at the empty record left the whole interval that
-    /// follows — a 210 MB hash and five execs against the frozen bytes — as a freeze
+    /// follows — a 210 MB hash and every exec against the frozen bytes — as a freeze
     /// no custodian could see and any custodian could undo. A peer's stale record was
     /// the whole of what it took.
     ///

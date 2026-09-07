@@ -446,20 +446,42 @@ impl Sandbox {
     }
 
     /// Run the ACTUAL gated `internal-codex-sweep` subcommand and return its exit
-    /// status (finding 5: the sweep no longer always exits 0 — a rearm failure is
-    /// surfaced as a non-zero exit, so callers can assert on it).
+    /// status (finding 5: the sweep no longer always exits 0 — a record it could not
+    /// examine is surfaced as a non-zero exit, so callers can assert on it).
+    ///
+    /// **Its stderr is kept**, in the file the failure diagnostic reads. The pass says
+    /// one line per thing it did and one per thing it could not, and a test that waits
+    /// out its whole budget for a repair that never came is exactly the reader that
+    /// needs them — discarding them left a failure whose only evidence was the record
+    /// it failed to change.
     fn run_sweep(&self) -> std::process::ExitStatus {
         let bin = env!("CARGO_BIN_EXE_codeconnect");
-        Command::new(bin)
+        let out = Command::new(bin)
             .arg("internal-codex-sweep")
             .args(["--socket", self.sock.to_str().unwrap()])
             .env("CODECONNECT_HOME", &self.home)
             .env("CODECONNECT_TMUX", &self.tmux)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("run sweep")
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run sweep");
+        if !out.stderr.is_empty() {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.sweep_log())
+            {
+                f.write_all(&out.stderr).ok();
+            }
+        }
+        out.status
+    }
+
+    /// Where every pass's own account is kept, for the diagnostic to read back.
+    fn sweep_log(&self) -> PathBuf {
+        self.home.join("sweep-stderr.log")
     }
 
     /// Tear everything down. Called from [`Drop`], so it runs on the failure path
@@ -687,7 +709,14 @@ fn diagnose(sb: &Sandbox, uid: &str) -> String {
         })
         .unwrap_or_else(|e| format!("<{e}>"));
     let procs = processes_referencing(sb.expected_run_dir(uid).to_str().unwrap());
-    format!("\n  custodian={cust:?} alive={cust_alive:?}\n  tmux: {sessions}\n  procs: {procs:?}")
+    // What every pass actually said. "Nothing happened" has a reason, and the pass
+    // wrote it down at the moment it happened; this is where it is read back.
+    let swept = std::fs::read_to_string(sb.sweep_log()).unwrap_or_default();
+    let swept: Vec<&str> = swept.lines().rev().take(20).collect();
+    format!(
+        "\n  custodian={cust:?} alive={cust_alive:?}\n  tmux: {sessions}\n  procs: \
+         {procs:?}\n  sweeps said (newest first): {swept:#?}"
+    )
 }
 
 /// Poll `f` until it is true or `within` elapses.
@@ -1103,13 +1132,13 @@ fn both_guardians_killed_then_the_sweep_rearms_a_custodian_that_cleans_up() {
     // custodian, which then destroys the disposable session and completes.
     //
     // Swept in a LOOP, because that is what production does and because a single
-    // pass is genuinely allowed to do nothing: `recovery_sweep` skips a record
-    // whose launch lock is held, and the pane's host holds it for a moment while
-    // it takes its admission lease. A one-shot sweep that happened to land in that
-    // window used to exit 0 having examined nothing, and the test then waited out
-    // its whole budget for a rearm that was never going to come — which is exactly
-    // the "did everything" / "did nothing" confusion the sweep now reports as a
-    // non-zero exit. Loop until a pass exits 0, and assert that one arrives.
+    // pass is genuinely allowed to do nothing: the pane's host takes the record's
+    // launch lock at several points, and a pass that lands on one of those windows
+    // and cannot wait it out reports the record UNEXAMINED and exits non-zero. That
+    // exit status is the whole contract — a pass that exited 0 having opened nothing
+    // told this loop to stop looping, and the test then waited out its whole budget
+    // for a rearm that was never going to come. Loop until a pass exits 0, and
+    // assert that one arrives.
     let swept = wait_until(Duration::from_secs(20), || sb.run_sweep().success());
     assert!(
         swept,

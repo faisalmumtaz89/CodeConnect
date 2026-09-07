@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         "internal-codex-custodian" => codex_custodian::run_custodian(rest),
         // Hidden: one bounded D7 recovery sweep (stale pendings → failed;
         // failed+incomplete+dead-custodian → replacement custodian). Machinery.
-        "internal-codex-sweep" => codex_custodian::run_sweep(rest),
+        c if c == protocol::CODEX_SWEEP_SUBCOMMAND => codex_custodian::run_sweep(rest),
         // Hidden: the D7 late-host preflight gate — validate the launch record +
         // take a lease, or cleanup-only refuse. Machinery.
         "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
