@@ -291,6 +291,65 @@ pub enum Link {
     Stale,
 }
 
+/// **Where this run's Codex control link stands — the one fact that says whether
+/// a Stop or a Compose aimed at THIS session can land right now.**
+///
+/// Not to be confused with [`Link`], which is about how fresh CodeConnect's
+/// *observation* of a session is. This is about the daemon's connection to the
+/// Codex app-server that is running the session, and the two move independently:
+/// a session can be `Link::Attached` and `CodexLink::Offline` at the same moment.
+///
+/// **Why it exists.** [`crate::ws::Capabilities::codex_interrupt`] and
+/// [`crate::ws::Capabilities::codex_compose`] are build facts about the whole
+/// daemon; they are true on a connection whose only Codex session's link is
+/// offline. And [`SessionSummary::codex_thread_id`] reads the same whether the
+/// link is subscribed, bound or merely reconnecting, because it is resolved from
+/// the addressee's *binding*. So until this field a client could not compute, from
+/// the fleet, whether one particular session could be stopped — it had to offer
+/// the button and let a refusal be the answer, which is the "offered and silently
+/// broken" affordance this app's rule forbids.
+///
+/// **Only [`CodexLink::Subscribed`] is actuatable.** The other three are the
+/// daemon's honest reasons why not, and a client greys the control and says which
+/// one rather than hiding it: a link that is offline now is subscribed a moment
+/// later, and four of the daemon's own refusal sentences end with "try again
+/// shortly", so a permanently hidden control would contradict the daemon.
+///
+/// **A refusal still arrives after the fact and still wins.** This is a snapshot
+/// of the fleet at the moment it was assembled; the link can move between the
+/// summary and the tap. A client renders the daemon's refusal sentence verbatim
+/// when that happens rather than treating this field as a promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexLink {
+    /// **Connected and subscribed to this session's thread.** Frames flow, and this
+    /// is the one state in which a stop or a compose reaches the model.
+    Subscribed,
+    /// **Connected and bound to a thread, but not subscribed to it.** The daemon
+    /// knows which thread this session is on and receives none of its frames — the
+    /// state a link sits in for the whole of a thread's life before its first turn.
+    /// An ask handed to it would be accepted into silence, so it is refused.
+    Bound,
+    /// **A link exists and is not an addressee, and holds no binding on the
+    /// connection it has.** Dialling, backing off, mid-handshake, or connected with
+    /// its `thread/resume` not yet accepted.
+    ///
+    /// **The daemon's `Unbound` — connected, bound to nothing — folds in here, and
+    /// deliberately.** The alternative was to call it `Bound`, which would name a
+    /// binding that does not exist. What separates the two on the daemon's side is
+    /// *why* there is no addressee (no socket, versus a socket without an accepted
+    /// resume), and a client has the same answer for both: not now, and it is
+    /// coming back. A word for a distinction nothing renders would be a word a
+    /// client had to learn and could not use.
+    Offline,
+    /// **No Codex control link belongs to this run at all.** Every Claude session,
+    /// every run whose supervisor has disconnected, and any summary from a daemon
+    /// predating this field. The default, so an older daemon's fleet decodes as
+    /// what it is: nothing here can be stopped over a Codex link.
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSummary {
     /// The run's identity. Subscribe, answer and send_text all accept it, and a
@@ -345,6 +404,25 @@ pub struct SessionSummary {
     /// carried for correlation and rendering, never parsed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_thread_id: Option<String>,
+    /// **Whether a Stop or a Compose aimed at THIS run can land right now.**
+    ///
+    /// Resolved from the very same addressee `codex_thread_id` above is resolved
+    /// from — one read, two fields — so the thread and the state of the link
+    /// carrying it can never disagree within one summary.
+    ///
+    /// Always sent, never skipped: [`CodexLink::None`] is a fact about this run
+    /// (there is no Codex link on it), not an absence of news. Absent — from any
+    /// daemon predating this field — decodes as `None`, which is what such a
+    /// daemon's fleet is to a client that cannot address any of it.
+    ///
+    /// **It is not a lifecycle claim, and a client must read `lifecycle` too.** The
+    /// link is retired when the run's supervisor disconnects, not when the run is
+    /// marked [`Lifecycle::Exited`] — so a run the liveness sweep has ended while its
+    /// supervisor is still connected goes on reporting whatever its link is doing.
+    /// The two fields answer different questions: this one whether an ask could be
+    /// delivered, `lifecycle` whether there is still a run to deliver it to.
+    #[serde(default)]
+    pub codex_link: CodexLink,
 }
 
 #[cfg(test)]
@@ -459,6 +537,7 @@ mod tests {
             blocked_on: Vec::new(),
             agent: crate::agent::AgentKind::Claude,
             codex_thread_id: None,
+            codex_link: CodexLink::None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);
@@ -515,6 +594,56 @@ mod tests {
         let s = serde_json::to_string(&codex).unwrap();
         assert!(s.contains("\"agent\":\"codex\""), "{s}");
         assert_eq!(codex, serde_json::from_str::<SessionSummary>(&s).unwrap());
+    }
+
+    /// **The four words the phone matches on, and the one an older daemon means.**
+    ///
+    /// `codex_link` is what a client scopes Stop and Compose by, so each of the
+    /// four is spelled by hand here rather than trusted to `rename_all`: renaming a
+    /// variant would compile, pass, ship, and leave a phone greying a control on a
+    /// session that could have been stopped. The default matters just as much —
+    /// every summary from every daemon below this minor arrives without the field,
+    /// and reading that as anything but `none` would offer an action against a link
+    /// the daemon cannot even name.
+    #[test]
+    fn the_codex_link_states_are_exactly_the_four_words_the_phone_matches_on() {
+        for (state, word) in [
+            (CodexLink::Subscribed, "subscribed"),
+            (CodexLink::Bound, "bound"),
+            (CodexLink::Offline, "offline"),
+            (CodexLink::None, "none"),
+        ] {
+            let encoded = serde_json::to_string(&state).unwrap();
+            assert_eq!(encoded, format!("\"{word}\""));
+            assert_eq!(serde_json::from_str::<CodexLink>(&encoded).unwrap(), state);
+        }
+        assert_eq!(CodexLink::default(), CodexLink::None);
+
+        // A summary from a daemon below this minor: no field at all.
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "tmux_session": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "t",
+            "updated_at": "t",
+            "agent": "codex"
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(
+            decoded.codex_link,
+            CodexLink::None,
+            "a Codex run from a daemon that cannot say where its link stands is not \
+             one a client may aim a Stop at"
+        );
+
+        // And a summary from this daemon always says, including when the answer is
+        // `none` — the field is never skipped, because "no link" is news.
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(encoded.contains("\"codex_link\":\"none\""), "{encoded}");
     }
 
     #[test]

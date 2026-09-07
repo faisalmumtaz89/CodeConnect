@@ -3795,9 +3795,30 @@ impl Daemon {
             );
             return false;
         }
+        // **The turn this card belongs to, on the envelope, because a Stop has to
+        // name one.**
+        //
+        // `ClientMessage::Interrupt` requires a `turn_id`. Without this the phone's
+        // only source for one was the envelope of some *earlier* event — the
+        // `tool_call` an `item/started` files — and "the approval always follows its
+        // item's start" is an ordering, not a contract: a link that rebound
+        // mid-turn cards a command it never saw start. So the card's own request
+        // says which turn it is about, on the same envelope field every other Codex
+        // event already carries it on.
+        //
+        // Read from the approval, never from the link's `RunningTurn`. The
+        // `*/requestApproval` frame declares `turnId` required in both measured
+        // releases and `codex_approval::Approval::read` refuses a frame without one
+        // (`Refusal::Malformed`), so the turn a card is about is a fact the card was
+        // built from; the link's belief about what is running is an inference, and
+        // it is empty on exactly the rebind case above. `None` is therefore
+        // unreachable from the one production caller — it is here because an empty
+        // string is not a turn any interrupt could name, and a `Some("")` on the
+        // wire would hand the phone a Stop button that cannot work.
         let pending =
             PendingEvent::new(session, EventKind::ApprovalRequest, payload, Source::Daemon)
-                .with_source_event_id(format!("perm:{request_id}"));
+                .with_source_event_id(format!("perm:{request_id}"))
+                .with_turn_id((!turn_id.is_empty()).then(|| turn_id.to_string()));
 
         let encoded = match serde_json::to_string(&card) {
             Ok(encoded) => encoded,
@@ -4086,10 +4107,28 @@ impl Daemon {
         let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
             return Retirement::AlreadyGone;
         };
+        // **The payload names the card it retires.**
+        //
+        // The resolution on its own is a terminal with no subject: `{"status":
+        // "cleared","cause":"item_completed"}` says what happened and not what it
+        // happened to. The only correlation used to be the `source_event_id` beneath
+        // this line — a client stripping `"resolved:"` off an `Option<String>` — and
+        // a prefix parse fails silently, leaving an answered card standing on a
+        // phone for ever. Claude's `AnswerOutcome` has carried `request_id` inside
+        // its payload since minor 0; this is the same field in the same place, so a
+        // client correlates the two agents with one rule.
+        //
+        // Flattened, so every `status` arm is byte-identical to what it was and
+        // this daemon's own readers — which decode the payload as a bare
+        // `CodexResolution` — keep working.
+        let resolved = protocol::ws::CodexResolutionPayload {
+            request_id: request_id.to_string(),
+            resolution,
+        };
         let pending = PendingEvent::new(
             session,
             EventKind::ApprovalResolved,
-            serde_json::to_value(&resolution).unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Null),
             Source::Daemon,
         )
         .with_source_event_id(format!("resolved:{request_id}"));
@@ -4131,8 +4170,9 @@ impl Daemon {
             .last_seen_ms
             .insert(session.uid.clone(), protocol::time::now_unix_ms());
         crate::log_info!(
-            "codex approval {request_id} in {} retired: {resolution:?}",
-            session.name
+            "codex approval {request_id} in {} retired: {:?}",
+            session.name,
+            resolved.resolution
         );
         Retirement::Retired
     }
@@ -8687,7 +8727,9 @@ impl Daemon {
     /// yet — approval answering is Phase 3, steer and interrupt are Phase 4 — so
     /// there is deliberately no `send` beside this. What consumes it today is
     /// [`Daemon::sessions`], which reports the thread the link has actually adopted
-    /// in preference to the one the registration claimed; the verbs arrive against
+    /// in preference to the one the registration claimed, and — since minor 19 —
+    /// which of the addressee's states that link is in, as
+    /// [`protocol::event::SessionSummary::codex_link`]; the verbs arrive against
     /// an addressing layer that already exists and is already tested.
     ///
     /// **Test-visible only until then**, and on the same footing
@@ -8868,6 +8910,13 @@ impl Daemon {
                 .filter(|p| p.session.uid == row.session_uid)
                 .map(|p| p.card.request_id.clone())
                 .collect();
+            // **One read, two fields.** The thread this run is on and the state of
+            // the link carrying it are both answers about the same addressee, and
+            // resolving it twice would let one summary disagree with itself: the
+            // link can move between two reads, and a row naming a thread beside a
+            // `none` that says there is no link to have named it is a row nothing
+            // can act on. So it is resolved here and both fields are read off it.
+            let addressee = Self::codex_addressee_locked(inner, &row.session_uid);
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
@@ -8906,10 +8955,21 @@ impl Daemon {
                 // is a description of where things are, not of what may be sent.
                 // With no link the claim is all there is, and it is better than
                 // nothing.
-                codex_thread_id: Self::codex_addressee_locked(inner, &row.session_uid)
+                codex_thread_id: addressee
                     .thread_id()
                     .map(str::to_string)
                     .or(row.codex_thread_id),
+                // **Whether an ask aimed at THIS run can land right now** — the fact
+                // `codex_thread_id` above cannot carry, because it is resolved from
+                // the binding and reads the same whether that link is subscribed,
+                // bound or reconnecting. A client that wanted to know whether one
+                // session could be stopped had to offer the button and let the
+                // refusal answer, which is the affordance this app's rule forbids.
+                //
+                // Deliberately NOT the row's `agent`: a Claude run resolves to
+                // `NoLink` and reports `none` on its own, so the two fields are
+                // independently true rather than one derived from the other.
+                codex_link: addressee.wire_link(),
             });
         }
         out
@@ -22103,6 +22163,13 @@ mod tests {
     /// A real command approval, read by the production parser so the option table
     /// on the card is the one the wire and `Family::labels` actually produce.
     fn codex_command_card(request_id: &str) -> protocol::ws::ApprovalCard {
+        codex_command_approval().card(request_id.to_string(), 1)
+    }
+
+    /// The same approval, before it is carded — for a caller that needs the
+    /// **derived** request id, which is a function of the item rather than
+    /// something a test may name.
+    fn codex_command_approval() -> crate::codex_approval::Approval {
         let params = json!({
             "kind": "command",
             "threadId": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
@@ -22121,7 +22188,6 @@ mod tests {
         });
         crate::codex_approval::Approval::read(crate::codex_approval::Family::Command, &params, None)
             .expect("the production parser reads a measured command approval")
-            .card(request_id.to_string(), 1)
     }
 
     /// Put a card on the store the way the observer does, and hand the daemon a
@@ -25820,6 +25886,437 @@ mod tests {
             "a Claude-shaped keyboard timeout is not a terminal any Codex frame produced"
         );
         assert_no_ledger_rows(&db, uid);
+    }
+
+    /// **A Codex approval's two events carry what the phone needs to act on the
+    /// card: which turn it belongs to, and which card the terminal ends.**
+    ///
+    /// Neither fact was on the wire, and each hole had a different bad answer.
+    ///
+    ///   * **The turn.** `ClientMessage::Interrupt` requires a `turn_id` and the
+    ///     card event carried none, so a Stop offered from a card had to name a turn
+    ///     read off some *earlier* event's envelope. "The approval always follows its
+    ///     item's `tool_call`" is an ordering the phone would have been relying on,
+    ///     not a contract — and it is false for a link that rebound mid-turn, which
+    ///     cards a command whose `item/started` it never saw.
+    ///   * **The card.** The resolution payload named nothing, so the only
+    ///     correlation was stripping `"resolved:"` off `source_event_id`. A prefix
+    ///     parse that misses is silent, and its symptom is an answered card standing
+    ///     on somebody's phone for ever.
+    ///
+    /// Driven through the production path — the observer's own `raise_codex_approval`
+    /// and the terminal's own `retire_codex_approval` — so what is asserted is what a
+    /// subscriber is sent, not what a struct can be built to look like.
+    ///
+    /// **Mutation:** drop the `with_turn_id` in `raise_codex_approval` and the first
+    /// half goes red; serialize the bare `CodexResolution` again in
+    /// `retire_codex_answered` and the second does.
+    #[tokio::test]
+    async fn a_codex_approval_names_its_turn_and_its_terminal_names_its_card() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        let raised = approval_events(&daemon, uid, EventKind::ApprovalRequest);
+        assert_eq!(raised.len(), 1, "one card, one request event");
+        assert_eq!(
+            raised[0].turn_id.as_deref(),
+            Some("tu-1"),
+            "the turn the approval's own request named, on the envelope field every \
+             other Codex event carries it on — this is what a Stop from the card names"
+        );
+
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Cleared {
+                        cause: protocol::ws::ClearCause::ItemCompleted,
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+        let resolved = approval_events(&daemon, uid, EventKind::ApprovalResolved);
+        assert_eq!(resolved.len(), 1, "one terminal, one resolution event");
+        assert_eq!(
+            resolved[0].payload["request_id"].as_str(),
+            Some("derived-1"),
+            "the payload names the card, where Claude's `AnswerOutcome` has named \
+             one since minor 0"
+        );
+        assert_eq!(
+            resolved[0].payload["request_id"].as_str(),
+            raised[0].payload["card"]["request_id"].as_str(),
+            "and it is the SAME id the card was raised under — the whole point of \
+             the field is that a phone joins the two without parsing a string"
+        );
+
+        // **Additive, proven on the daemon's own output.** The payload still decodes
+        // as a bare `CodexResolution` — which is what every reader in this crate, and
+        // any phone written against minor 18, does with it.
+        assert_eq!(
+            serde_json::from_value::<protocol::ws::CodexResolution>(resolved[0].payload.clone())
+                .expect("a minor-18 decoder still reads this payload"),
+            protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::ItemCompleted,
+            }
+        );
+        // The prefix parse the field replaces is still there, and still agrees. It is
+        // asserted rather than removed: a client that already ships it must not be
+        // broken by the addition.
+        assert_eq!(
+            resolved[0].source_event_id.as_deref(),
+            Some("resolved:derived-1")
+        );
+    }
+
+    /// **The fleet says where each Codex session's control link stands, so a client
+    /// can tell whether THIS session can be stopped without tapping to find out.**
+    ///
+    /// The limit `ws::Capabilities::codex_interrupt`'s doc named: the capability is
+    /// build-shaped and connection-global, and `codex_thread_id` is resolved from the
+    /// binding, so it reads identically for a subscribed link and a link that is
+    /// merely bound. Both of those sessions are one row apart in the fleet and only
+    /// one of them can be stopped.
+    ///
+    /// All five addressee states are driven, because the fold is the part that can
+    /// silently go wrong: `Unbound` and `Offline` are one word, and `NoLink` is the
+    /// word every Claude row reports.
+    ///
+    /// **Mutation:** report `Bound` as `Subscribed` — the collapse `CodexAddressee`
+    /// exists to prevent — and the second assertion goes red.
+    #[tokio::test]
+    async fn the_fleet_says_where_each_codex_sessions_control_link_stands() {
+        use crate::codex_link::CodexAddressee;
+        use protocol::event::CodexLink;
+
+        let daemon = test_daemon();
+        let (subscribed, _s) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Subscribed {
+                thread_id: "th-subscribed".into(),
+            },
+        )
+        .await;
+        let (bound, _b) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Bound {
+                thread_id: "th-bound".into(),
+            },
+        )
+        .await;
+        let (offline, _o) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Offline {
+                thread_id: Some("th-offline".into()),
+            },
+        )
+        .await;
+        let (unbound, _u) =
+            codex_run_with_link(&daemon, None, CodexAddressee::Unbound { adopted: None }).await;
+        let claude = register(&daemon, "cc-claude", None)
+            .await
+            .session
+            .uid
+            .clone();
+
+        let fleet: HashMap<String, SessionSummary> = daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.session_uid.clone(), s))
+            .collect();
+
+        assert_eq!(
+            fleet[&subscribed].codex_link,
+            CodexLink::Subscribed,
+            "the one state an ask actually reaches the model in"
+        );
+        assert_eq!(
+            fleet[&bound].codex_link,
+            CodexLink::Bound,
+            "bound is not subscribed: this link knows the thread and receives none \
+             of its frames, so an ask handed to it is accepted into silence"
+        );
+        assert_eq!(fleet[&offline].codex_link, CodexLink::Offline);
+        assert_eq!(
+            fleet[&unbound].codex_link,
+            CodexLink::Offline,
+            "connected and bound to nothing is not a binding, and the client's \
+             answer for it is the one it gives an offline link"
+        );
+        assert_eq!(
+            fleet[&claude].codex_link,
+            CodexLink::None,
+            "a Claude run has no Codex control link to be in any state"
+        );
+
+        // **The thread and the link state agree, because they are one read.** The
+        // bound row is the case that made the field necessary: it names a thread and
+        // cannot be stopped, and before `codex_link` those two rows were identical.
+        assert_eq!(
+            fleet[&bound].codex_thread_id.as_deref(),
+            Some("th-bound"),
+            "the premise: this row names a thread exactly as the subscribed one does"
+        );
+        assert_eq!(
+            fleet[&subscribed].codex_thread_id.as_deref(),
+            Some("th-subscribed")
+        );
+        assert_eq!(
+            fleet[&claude].agent,
+            protocol::agent::AgentKind::Claude,
+            "`agent` was already on the wire and is unchanged — the client needs \
+             both fields, and this is the one it already had"
+        );
+        assert_eq!(fleet[&subscribed].agent, protocol::agent::AgentKind::Codex);
+    }
+
+    /// **The three fields minor 19 adds, as one real session produces them.**
+    ///
+    /// `fixtures/codex/minor-19-wire.json` is what the daemon actually emits — the
+    /// `approval_request` event with the turn on its envelope, the
+    /// `approval_resolved` event with the request id in its payload, and a two-row
+    /// fleet whose Codex row is `subscribed` and whose Claude row is `none` — for one
+    /// drive of the production path: the observer's `raise_codex_approval`, the
+    /// terminal's `retire_codex_approval`, and `Daemon::sessions`.
+    ///
+    /// It exists for `ios/`, which this repository cannot compile: the phone is being
+    /// built against these bytes right now, and a fixture nobody re-derives goes stale
+    /// silently. So the test asserts the phone's decode against the **committed** file
+    /// and then re-derives the file from this build and requires the two to be
+    /// byte-identical — a change to any of the three shapes must change the file, in
+    /// the diff, where a reviewer sees it.
+    ///
+    /// **The only thing normalised is time.** Three keys — the events' `ts` and the
+    /// summaries' `created_at`/`updated_at` — are clock reads, and nothing else in the
+    /// file is: the uids are pinned, the request id is *derived* from the item (so it
+    /// is the same composite id the card fixture carries), and the seqs are the
+    /// daemon's own numbering. The normalisation is asserted below rather than
+    /// trusted, so a field that starts carrying a clock cannot slip in under it.
+    ///
+    /// **Mutation:** any of the three production changes reverted, and the byte
+    /// comparison fails naming the file and the command that regenerates it.
+    #[tokio::test]
+    async fn the_minor_19_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/minor-19-wire.json");
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+
+        // Gate one: what the phone decodes, asserted on the committed bytes.
+        let request = &committed["approval_request"];
+        let resolved = &committed["approval_resolved"];
+        assert_eq!(
+            request["turn_id"].as_str(),
+            Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee"),
+            "the turn a Stop pressed from this card names, on the event envelope"
+        );
+        assert_eq!(
+            resolved["payload"]["request_id"], request["payload"]["card"]["request_id"],
+            "the resolution names the card it retires — the join the phone makes \
+             without parsing `source_event_id`"
+        );
+        assert_eq!(resolved["payload"]["status"], json!("answered"));
+        // Both events decode as the daemon's own type, and the resolution payload
+        // decodes BOTH ways: as the new payload and as the bare resolution a
+        // minor-18 client reads.
+        let decoded_request: Event =
+            serde_json::from_value(request.clone()).expect("an Event the phone decodes");
+        assert_eq!(
+            decoded_request.turn_id.as_deref(),
+            Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee")
+        );
+        let _: Event = serde_json::from_value(resolved.clone()).expect("an Event");
+        let payload: protocol::ws::CodexResolutionPayload =
+            serde_json::from_value(resolved["payload"].clone()).expect("the new payload");
+        assert_eq!(
+            payload.resolution,
+            protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+            }
+        );
+        let _: protocol::ws::CodexResolution = serde_json::from_value(resolved["payload"].clone())
+            .expect("a minor-18 decoder still reads it");
+
+        let sessions = committed["sessions"]
+            .as_array()
+            .expect("the fleet is a list");
+        assert_eq!(sessions.len(), 2);
+        let mut seen = Vec::new();
+        for row in sessions {
+            let summary: SessionSummary =
+                serde_json::from_value(row.clone()).expect("a SessionSummary the phone decodes");
+            seen.push((summary.agent, summary.codex_link));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    protocol::agent::AgentKind::Codex,
+                    protocol::event::CodexLink::Subscribed
+                ),
+                (
+                    protocol::agent::AgentKind::Claude,
+                    protocol::event::CodexLink::None
+                ),
+            ],
+            "the row a Stop may be offered on, and the row it may not"
+        );
+        assert_eq!(
+            sessions[0]["blocked_on"],
+            json!([request["payload"]["card"]["request_id"]]),
+            "the fleet row names the very card above — the two rides of one fact"
+        );
+
+        // Gate two: the file is what this build produces.
+        let derived = phase5_wire_rows().await;
+        assert_eq!(
+            derived, committed,
+            "the committed minor-19 wire contract no longer matches what this build \
+             emits. Regenerate it: cargo test -p ccd --bin ccd -- --ignored --nocapture \
+             regenerate_the_minor_19_wire_fixture > fixtures/codex/minor-19-wire.json"
+        );
+    }
+
+    /// Regenerate `fixtures/codex/minor-19-wire.json`. Run with
+    /// `cargo test -p ccd --bin ccd -- --ignored --nocapture regenerate_the_minor_19`.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_19_wire_fixture() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&phase5_wire_rows().await).unwrap()
+        );
+    }
+
+    /// One drive of the production path, with the clock reads replaced.
+    ///
+    /// Both uids are pinned, because a fixture whose identities move cannot be
+    /// byte-compared — and because pinning them lets the two events and the fleet row
+    /// be *the same run*, which is the shape the phone joins them in.
+    async fn phase5_wire_rows() -> serde_json::Value {
+        const CODEX_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        const CLAUDE_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        const AT: &str = "2026-09-07T00:00:00.000Z";
+
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, CODEX_UID, "cc-1").await;
+        register(&daemon, "cc-2", Some(CLAUDE_UID)).await;
+
+        // **A subscribed link, staged rather than dialled.** The registration above
+        // installs a real link, and its socket is a path nothing listens on — so it
+        // would publish `Offline` and the fixture would show the one state that says
+        // least. Its task is stopped and its own presence cell is published into, so
+        // what the summary reads is the cell production reads.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let held = inner
+                .codex_links
+                .remove(CODEX_UID)
+                .expect("the registration installed a link");
+            held.task.abort();
+            held.presence
+                .publish_for_tests(crate::codex_link::CodexAddressee::Subscribed {
+                    thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                });
+            inner.codex_links.insert(CODEX_UID.to_string(), held);
+        }
+
+        // A real 0.153 `commandExecution` approval, read by the production parser and
+        // carded under the id **derived** from its item — the same composite-id codec
+        // `fixtures/codex/approval-card-0.153.json` is built with, over this capture's
+        // own thread and item rather than that one's.
+        let approval = codex_command_approval();
+        let request_id = approval
+            .request_id(CODEX_UID, 1)
+            .expect("the item derives an id");
+        let session = SessionKey::new(CODEX_UID, "cc-1");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    approval.card(request_id.clone(), 1),
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a real card, filed the way the observer files one"
+        );
+
+        // The fleet as the phone sees it while the card is open: the Codex row is
+        // subscribed AND blocked on this very request.
+        let mut sessions = daemon.sessions().await.expect("the fleet reads");
+        sessions.sort_by(|a, b| a.session_uid.cmp(&b.session_uid));
+
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &session,
+                    &request_id,
+                    protocol::ws::CodexResolution::Answered {
+                        by: protocol::ws::ResolutionActor::Phone,
+                        decision: Some(protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into()
+                        }),
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+
+        let one = |kind: EventKind| {
+            let mut events = approval_events(&daemon, CODEX_UID, kind.clone());
+            assert_eq!(events.len(), 1, "one {kind:?} event for one card");
+            events.remove(0)
+        };
+        let mut out = json!({
+            "approval_request": one(EventKind::ApprovalRequest),
+            "approval_resolved": one(EventKind::ApprovalResolved),
+            "sessions": sessions,
+        });
+
+        // **Only the clock reads are replaced, and that is checked rather than
+        // assumed**: each key must have been an RFC3339 stamp before it is
+        // overwritten, so a field that starts carrying a clock cannot pass through
+        // here unnoticed, and one that stops carrying one fails loudly.
+        fn normalise(value: &mut serde_json::Value, at: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "created_at" | "updated_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be an RFC3339 clock read, and is {slot}"
+                            );
+                            *slot = json!(at);
+                        } else {
+                            normalise(slot, at);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(|item| normalise(item, at))
+                }
+                _ => {}
+            }
+        }
+        normalise(&mut out, AT);
+        out
     }
 
     fn approval_events(daemon: &Daemon, uid: &str, kind: EventKind) -> Vec<Event> {

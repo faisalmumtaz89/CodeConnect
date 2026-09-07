@@ -1313,6 +1313,40 @@ impl CodexAddressee {
         }
     }
 
+    /// **The same five states, in the four words the fleet says them in.**
+    ///
+    /// [`protocol::event::SessionSummary::codex_link`] is what a client scopes Stop
+    /// and Compose by, and it answers one question: can an ask aimed at this session
+    /// land right now. [`CodexAddressee::Subscribed`] is the only yes; the other
+    /// three words are the honest reasons for no, and a client greys the control and
+    /// says which rather than hiding it.
+    ///
+    /// **`Unbound` folds into `Offline`, and that is a decision rather than an
+    /// oversight.** The two are structurally the same fact — a link that is not an
+    /// addressee and holds no binding on the connection it has — and they differ
+    /// only in *why*: no established connection, versus one whose `thread/resume`
+    /// has not been accepted. Calling `Unbound` `"bound"` would name a binding that
+    /// does not exist, which is the exact confusion [`CodexAddressee`] was written
+    /// to make unmakeable. A fifth word would be one a client had to learn and could
+    /// not use: the answer it renders for both is the same sentence, and both are
+    /// states the link is on its way out of.
+    ///
+    /// **`NoLink` is `"none"`, and it is what every Claude row reports** — the
+    /// resolver answers `NoLink` for a session that has no Codex link, which is the
+    /// whole Claude fleet. That is also what a summary from a daemon below minor 19
+    /// decodes as, and the two mean the same thing to a reader: nothing here can be
+    /// stopped over a Codex link.
+    pub fn wire_link(&self) -> protocol::event::CodexLink {
+        match self {
+            CodexAddressee::Subscribed { .. } => protocol::event::CodexLink::Subscribed,
+            CodexAddressee::Bound { .. } => protocol::event::CodexLink::Bound,
+            CodexAddressee::Offline { .. } | CodexAddressee::Unbound { .. } => {
+                protocol::event::CodexLink::Offline
+            }
+            CodexAddressee::NoLink => protocol::event::CodexLink::None,
+        }
+    }
+
     /// Whether frames for this session's thread actually reach the daemon right now.
     ///
     /// The distinction Phase 3 and Phase 4 will act on — an answer or a steer sent

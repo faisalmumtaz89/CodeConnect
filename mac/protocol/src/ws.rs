@@ -847,16 +847,22 @@ pub struct Capabilities {
     /// session the reader had in mind, which is the one thing this flag never was.
     ///
     /// **Per-session actuatability is `summary.agent` plus the session's link
-    /// state.** The agent is on every [`crate::event::SessionSummary`]; the link state
-    /// is not — the summary carries `codex_thread_id`, which the daemon resolves from
-    /// the addressee and which reads the same whether that link is subscribed,
-    /// bound or reconnecting. So a client that wants to know whether THIS session can
-    /// be stopped right now cannot compute it from the fleet today, and the field that
-    /// would let it is Phase 5's, not this flag's.
+    /// state, and BOTH are now on the summary.** The agent always was;
+    /// `codex_thread_id` never answered the second half, because it is resolved from
+    /// the addressee's *binding* and reads the same whether that link is subscribed,
+    /// bound or reconnecting. [`crate::event::SessionSummary::codex_link`] closes it:
+    /// it is resolved from the same addressee, in the same read, and says which of
+    /// the four states that addressee is in. A client that wants to know whether THIS
+    /// session can be stopped right now computes it from the fleet — this flag AND
+    /// `agent == codex` AND `codex_link == subscribed`.
     ///
-    /// Until then the honest client rule is: offer the button on a Codex session
-    /// hosted by a daemon that advertises this, and let the refusal — which always
-    /// names which of the conditions failed — be what the operator reads.
+    /// The honest client rule from a daemon that does not send that field (below its
+    /// minor, where it decodes as [`crate::event::CodexLink::None`]) is unchanged and
+    /// is still the fallback: offer the button on a Codex session hosted by a daemon
+    /// that advertises this, and let the refusal — which always names which of the
+    /// conditions failed — be what the operator reads. A refusal is still the last
+    /// word even with the field, since a link can move between the summary and the
+    /// tap.
     #[serde(default)]
     pub codex_interrupt: bool,
     /// **This daemon honours a compose for a Codex session whose control link is
@@ -870,8 +876,11 @@ pub struct Capabilities {
     /// **Connection-global and build-shaped**, with the same caveat spelled out on its
     /// sibling: it says what this daemon honours and nothing about one session. Compose
     /// exists only for Codex, so a client scopes the affordance by the session's
-    /// [`crate::event::SessionSummary::agent`] as well, and lets the refusal — which
-    /// always names which condition failed — be what the operator reads.
+    /// [`crate::event::SessionSummary::agent`] and its
+    /// [`crate::event::SessionSummary::codex_link`] as well — the per-session half its
+    /// sibling's doc describes — and lets the refusal, which always names which
+    /// condition failed, be what the operator reads when the link moves between the
+    /// summary and the send.
     #[serde(default)]
     pub codex_compose: bool,
     /// The agents this daemon can actually host, named honestly. A client scopes
@@ -1089,6 +1098,43 @@ pub enum CodexResolution {
         /// Human-readable cause of the uncertainty, for the log and the card.
         cause: String,
     },
+}
+
+/// **The `approval_resolved` payload for a Codex card: the terminal, plus the
+/// request it is the terminal *of*.**
+///
+/// A *payload*, deliberately not an "envelope": the envelope is the [`crate::event::Event`]
+/// this rides, and what it carries — `turn_id`, `item_id`, `source_event_id` — is a
+/// different set of facts from these.
+///
+/// [`CodexResolution`] says what became of an approval and nothing about which
+/// approval. Until this existed, the only correlation back to the card was the
+/// event's `source_event_id` — the literal `"resolved:"` followed by the request
+/// id — so a client had to strip a prefix off a field that is `Option<String>` on
+/// the wire and is not typed as an identity at all. The failure mode of a prefix
+/// parse is silence: one release renames the prefix, every parse misses, and the
+/// card the operator already answered goes on standing on their phone for ever.
+///
+/// Claude's [`AnswerOutcome`] has carried `request_id` inside the payload since
+/// minor 0. This is the same field, in the same place, for the other agent — so a
+/// client correlates a resolution the one way for both agents, and never parses an
+/// id out of a string.
+///
+/// **Flattened, so this is the resolution's own shape with one key added.** The
+/// status tag and its arms are byte-identical to what they were; a client already
+/// matching on `status` and reading `by` / `cause` / `write_stage` off the payload
+/// is unaffected. And a decoder for a bare [`CodexResolution`] still decodes one of
+/// these — serde's internally-tagged enums ignore keys they do not know — which is
+/// what makes the change additive for the daemon's own persisted events as well as
+/// for the phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexResolutionPayload {
+    /// The card this resolves, spelled exactly as [`ApprovalCard::request_id`]
+    /// spelled it — the opaque composite id, never the app-server's per-connection
+    /// integer.
+    pub request_id: String,
+    #[serde(flatten)]
+    pub resolution: CodexResolution,
 }
 
 /// What the daemon knows about the installed Claude Code's slash commands.
@@ -1551,10 +1597,17 @@ mod tests {
              statuses that say which happened, and the `codex_compose` capability that \
              says the daemon understands the message at all — is minor 18"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 19,
+            "the three facts a phone needs to drive a Codex session from the fleet — \
+             `request_id` inside the `approval_resolved` payload, `turn_id` on the \
+             approval card's event envelope, and `SessionSummary.codex_link` — are \
+             minor 19"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 18);
+        assert_eq!(crate::PROTOCOL_MINOR, 19);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2194,6 +2247,74 @@ mod tests {
             })
             .unwrap()
         );
+    }
+
+    /// **The correlation the phone actually uses, pinned as a wire string.**
+    ///
+    /// Before this field the only route from a resolution back to its card was the
+    /// event's `source_event_id`, `"resolved:<request_id>"` — a prefix parse whose
+    /// failure is silent and whose symptom is an answered card standing on a phone
+    /// for ever. `request_id` now rides the payload, where Claude's has ridden since
+    /// minor 0, so one rule correlates both agents.
+    ///
+    /// **Mutation:** drop the `flatten`, or rename the field, and the first
+    /// assertion fails naming the exact JSON the phone decodes.
+    #[test]
+    fn a_codex_resolution_payload_names_the_request_it_resolves() {
+        let payload = CodexResolutionPayload {
+            request_id: "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1g".into(),
+            resolution: CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"request_id":"AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1g","status":"answered","by":"phone","decision":{"type":"option_id","option_id":"accept"}}"#,
+            "this is the object the phone decodes; `request_id` sits beside `status`, \
+             exactly where `AnswerOutcome` puts Claude's"
+        );
+        assert_eq!(
+            serde_json::from_str::<CodexResolutionPayload>(
+                &serde_json::to_string(&payload).unwrap()
+            )
+            .unwrap(),
+            payload
+        );
+
+        // **Additive, proven rather than asserted**: every terminal still decodes as
+        // a bare `CodexResolution` with the new key present, which is what keeps the
+        // daemon's own readers — and any client written against minor 18 — working.
+        for resolution in [
+            CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted,
+            },
+            CodexResolution::Timeout,
+            CodexResolution::Unknown {
+                attempted_by: ResolutionActor::Phone,
+                attempted_decision: None,
+                write_stage: WriteStage::ClaimedNotEnqueued,
+                cause: "the daemon was killed mid-write".into(),
+            },
+        ] {
+            let with_id = CodexResolutionPayload {
+                request_id: "rq-1".into(),
+                resolution: resolution.clone(),
+            };
+            let encoded = serde_json::to_string(&with_id).unwrap();
+            assert!(encoded.contains(r#""request_id":"rq-1""#), "{encoded}");
+            assert_eq!(
+                serde_json::from_str::<CodexResolution>(&encoded).unwrap(),
+                resolution,
+                "a minor-18 decoder must still read this payload: {encoded}"
+            );
+        }
     }
 
     #[test]

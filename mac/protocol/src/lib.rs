@@ -396,7 +396,42 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     Nothing existing changed shape. `send_text` is untouched and stays Claude's: it
 ///     types at the Mac's TTY and shares no ledger, result type or failure vocabulary
 ///     with this.
-pub const PROTOCOL_MINOR: u32 = 18;
+///   * `19` — **a phone can drive a Codex session from the fleet without inferring
+///     anything.** Three additive fields, each closing a hole a client would
+///     otherwise have had to guess across, and a client written against minor 18
+///     needs all three:
+///       - [`ws::CodexResolutionPayload::request_id`] — the `approval_resolved`
+///         payload for a Codex card now names the card. It carried no id at all, so
+///         the only correlation was a `"resolved:"` prefix parse on the event's
+///         `source_event_id`: a string parse on an `Option<String>` whose failure is
+///         silent and whose symptom is an answered card standing on somebody's phone
+///         for ever. Claude's `AnswerOutcome` has carried `request_id` in the payload
+///         since minor 0; this is the same field in the same place, so one rule
+///         correlates both agents. Flattened onto the resolution, so every `status`
+///         arm is byte-identical and a minor-18 decoder still reads the payload.
+///       - **`turn_id` on the approval card's event envelope.** `interrupt` requires
+///         a turn id and the card gave the phone none, so a Stop offered from a card
+///         had to name a turn inferred from the last `tool_call` — an ordering the
+///         phone would have been relying on rather than a contract. The
+///         `*/requestApproval` frame carries `turnId` as a required field (a frame
+///         without it is refused, not carded), so the envelope now carries the turn
+///         the card's own request named. Same envelope field every other Codex event
+///         already uses.
+///       - [`event::SessionSummary::codex_link`] — `"subscribed" | "bound" |
+///         "offline" | "none"`, resolved from the same addressee `codex_thread_id` is
+///         resolved from. This is the limit `ws::Capabilities::codex_interrupt`'s doc
+///         named: the capability is build-shaped and connection-global, and
+///         `codex_thread_id` reads the same whether the link is subscribed, bound or
+///         reconnecting, so per-session actuatability was not computable from the
+///         fleet. It is now: `agent == codex` and `codex_link == subscribed`. Absent
+///         decodes `none`, which is exactly what an older daemon's fleet is to a
+///         client that cannot address any of it. A refusal is still the last word —
+///         a link can move between the summary and the tap.
+///
+///     Nothing existing changed shape, and no message was added. `CodexResolution`'s
+///     arms, `ApprovalCard`, and every other summary field are byte-identical to
+///     minor 18.
+pub const PROTOCOL_MINOR: u32 = 19;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

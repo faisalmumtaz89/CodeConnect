@@ -628,6 +628,12 @@ impl Run {
             project_label: script::project_label(&self.cwd).to_string(),
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
+            // The demo fleet is Claude to the last row, and a Claude run has no
+            // Codex control link to be in any state — the same `none` the real
+            // daemon reports for one. Nothing here may be stopped or composed to
+            // over a Codex link, and the phone reads that off this field rather
+            // than off the demo's silence.
+            codex_link: protocol::event::CodexLink::None,
         }
     }
 
@@ -902,6 +908,41 @@ mod tests {
                 summary.session_id
             );
             assert_eq!(summary.last_seq, *seqs.last().unwrap());
+        }
+    }
+
+    /// **Every demo row says it hosts Claude and has no Codex link.**
+    ///
+    /// The demo fleet is what the App Store reviewer and every screenshot sees, and
+    /// `codex_link` is what a phone scopes Stop and Compose by. A row that said
+    /// anything but `none` here would offer the reviewer a control that cannot
+    /// work — there is no Codex app-server behind this server at all — which is the
+    /// "offered and silently broken" affordance the product rule forbids.
+    ///
+    /// Asserted on the wire rather than on the struct: the field is `#[serde(default)]`
+    /// and a client reads what is sent, so the encoded row is the thing that has to
+    /// say it.
+    #[test]
+    fn every_demo_row_hosts_claude_and_advertises_no_codex_link() {
+        let (fleet, _) = blocked_fleet();
+        let sessions = fleet.sessions();
+        assert!(
+            !sessions.is_empty(),
+            "the premise: there is a fleet to check"
+        );
+        for summary in sessions {
+            assert_eq!(summary.agent, protocol::agent::AgentKind::Claude);
+            assert_eq!(
+                summary.codex_link,
+                protocol::event::CodexLink::None,
+                "{} claims a Codex control link this server does not have",
+                summary.session_id
+            );
+            let encoded = serde_json::to_string(&summary).unwrap();
+            assert!(
+                encoded.contains(r#""codex_link":"none""#),
+                "the field is never skipped — no link is news a client acts on: {encoded}"
+            );
         }
     }
 
