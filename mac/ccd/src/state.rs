@@ -738,6 +738,7 @@ struct LinkCells {
     carry: crate::codex_link::LinkCarry,
     answers: crate::codex_link::LinkAnswers,
     interrupts: crate::codex_link::LinkInterrupts,
+    composes: crate::codex_link::LinkComposes,
 }
 
 struct CodexLinkHandle {
@@ -774,6 +775,11 @@ struct CodexLinkHandle {
     /// that reached a superseded task would aim a stop at a socket the session no
     /// longer owns.
     interrupts: crate::codex_link::LinkInterrupts,
+    /// **How the daemon asks this link to say something** — see
+    /// [`crate::codex_link::LinkComposes`]. On the handle for the same lifetime reason as
+    /// its two siblings, with the sharpest case of the three: words handed to a superseded
+    /// task would be put into a session's mouth on a socket it no longer owns.
+    composes: crate::codex_link::LinkComposes,
     /// **What the link itself knows** — see [`crate::codex_link::LinkCarry`]. The
     /// other cell, on the handle for the same lifetime reason as the presence one,
     /// and read by exactly one caller: [`Inner::retain_codex_carry`]. **Not when
@@ -786,24 +792,47 @@ struct CodexLinkHandle {
 /// not die must not hold a registration open, and the link's own awaits are short.
 const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
 
-/// The margin the quiesce budget adds above an answer's own two budgets: room for
-/// the durable claim that precedes the socket write (a blocking-pool SQLite upsert,
-/// fast but not itself a `Duration` constant) plus slack, so the sum is genuinely
-/// *above* the answer's worst case and not merely equal to it.
-const ANSWER_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
+/// The margin the quiesce budget adds above an actuation's own budgets: room for the
+/// durable claim that precedes the socket write (a blocking-pool SQLite upsert, fast but
+/// not itself a `Duration` constant) plus slack, so the sum is genuinely *above* the
+/// worst case and not merely equal to it.
+const ACTUATION_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
 
-/// **The slower of the two waits an actuation can be in**, so the budget below bounds
-/// whichever one the outgoing link happens to be holding.
+/// **The slowest wait any actuation can be in**, so the budget below bounds whichever one
+/// the outgoing link happens to be holding.
 ///
 /// An answer waits for the broker's disposition; an interrupt waits for the turn's own
-/// terminal. They are the same fifteen seconds today, and taking the maximum rather
-/// than naming one is what keeps this true if either is re-measured.
-const SLOWEST_ACTUATION_WAIT: Duration = if crate::codex_link::DISPOSITION_BUDGET.as_millis()
-    >= crate::codex_link::INTERRUPT_BUDGET.as_millis()
-{
-    crate::codex_link::DISPOSITION_BUDGET
-} else {
-    crate::codex_link::INTERRUPT_BUDGET
+/// terminal; a compose waits for its own JSON-RPC response. All three are the same fifteen
+/// seconds today, and taking the maximum rather than naming one is what keeps this true if
+/// any is re-measured.
+///
+/// **Compose was missing from this maximum**, which was not wrong today and was already a
+/// stale derivation: a `COMPOSE_BUDGET` re-measured upward without touching this constant
+/// would let a registration handover abort a link and record its compose indeterminate
+/// before the compose's own advertised wait had expired — the daemon contradicting a
+/// budget it published.
+const SLOWEST_ACTUATION_WAIT: Duration = {
+    let a = crate::codex_link::DISPOSITION_BUDGET.as_millis();
+    let b = crate::codex_link::INTERRUPT_BUDGET.as_millis();
+    let c = crate::codex_link::COMPOSE_BUDGET.as_millis();
+    if a >= b && a >= c {
+        crate::codex_link::DISPOSITION_BUDGET
+    } else if b >= c {
+        crate::codex_link::INTERRUPT_BUDGET
+    } else {
+        crate::codex_link::COMPOSE_BUDGET
+    }
+};
+
+/// Every actuation budget is inside the wait the handover derives from them. A const
+/// assertion rather than a test, because a build in which it is false is a build whose
+/// quiesce can abort an actuation before its own deadline.
+const _: () = {
+    assert!(
+        SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::DISPOSITION_BUDGET.as_millis()
+    );
+    assert!(SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::INTERRUPT_BUDGET.as_millis());
+    assert!(SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::COMPOSE_BUDGET.as_millis());
 };
 
 /// How long a registration waits for the outgoing link's admitted actuations to reach
@@ -813,8 +842,9 @@ const SLOWEST_ACTUATION_WAIT: Duration = if crate::codex_link::DISPOSITION_BUDGE
 /// actuation's whole passage is the durable claim, then
 /// [`crate::codex_link::SEND_BUDGET`] on the socket write, then the wait for whatever
 /// says what became of it — [`SLOWEST_ACTUATION_WAIT`], which is the broker's
-/// disposition for an answer and the turn's own terminal for an interrupt. This is
-/// that sum plus [`ANSWER_QUIESCE_MARGIN`], computed from those constants so the
+/// disposition for an answer, the turn's own terminal for an interrupt, and its own
+/// response for a compose. This is
+/// that sum plus [`ACTUATION_QUIESCE_MARGIN`], computed from those constants so the
 /// invariant "above the actuation's worst case" holds by construction in BOTH builds
 /// — the old hand-copied `cfg(test)` literal (5 s) was *below* the test worst case
 /// (`SEND_BUDGET` alone did not shrink under test), which is the inverse of the
@@ -835,7 +865,7 @@ const SLOWEST_ACTUATION_WAIT: Duration = if crate::codex_link::DISPOSITION_BUDGE
 const ANSWER_QUIESCE_BUDGET: Duration = Duration::from_millis(
     (crate::codex_link::SEND_BUDGET.as_millis()
         + SLOWEST_ACTUATION_WAIT.as_millis()
-        + ANSWER_QUIESCE_MARGIN.as_millis()) as u64,
+        + ACTUATION_QUIESCE_MARGIN.as_millis()) as u64,
 );
 
 /// How many times [`Daemon::resolve_codex_inbound`] may re-resolve a reference whose
@@ -1062,6 +1092,7 @@ impl Inner {
                 presence: cells.presence,
                 answers: cells.answers,
                 interrupts: cells.interrupts,
+                composes: cells.composes,
                 carry: cells.carry,
             },
         ) {
@@ -2191,6 +2222,9 @@ impl Daemon {
         // next start instead of this one — and in the meantime the id could not be
         // reused. The failure that kept it there had nothing to do with interrupts.
         self.recover_codex_interrupts().await;
+        // The third kind, and it needs nothing of the card ordering above for the same
+        // reason the interrupt does not: there is no card beside the row.
+        self.recover_codex_composes().await;
     }
 
     /// Record a claimed-but-unsettled answer as a terminal unknown.
@@ -2399,9 +2433,16 @@ impl Daemon {
                 let to_settle: Vec<(
                     crate::codex_link::OpenAnswers,
                     crate::codex_link::OpenInterrupts,
+                    crate::codex_link::OpenComposes,
                 )> = stopped
                     .iter()
-                    .map(|parked| (parked.carry.open_answers(), parked.carry.open_interrupts()))
+                    .map(|parked| {
+                        (
+                            parked.carry.open_answers(),
+                            parked.carry.open_interrupts(),
+                            parked.carry.open_composes(),
+                        )
+                    })
                     .collect();
                 for parked in stopped {
                     inner.retain_codex_carry(&session.uid, parked);
@@ -2411,7 +2452,7 @@ impl Daemon {
                 }
                 (remaining, empty, to_settle)
             };
-            for (answers, interrupts) in &to_settle {
+            for (answers, interrupts, composes) in &to_settle {
                 crate::codex_link::settle_open_answers(
                     self,
                     session,
@@ -2425,6 +2466,19 @@ impl Daemon {
                     interrupts,
                     "the link to this Codex session was aborted while this request to stop \
                      the turn was in flight",
+                )
+                .await;
+                // **The third kind, and the abort path is the one that most needs it.** A
+                // link stopped by an abort never runs its own teardown, so this is the only
+                // place that can promise a written compose a terminal — and a claim left
+                // `applying` is an id no phone can ever re-ask under while the person who
+                // asked is told nothing at all.
+                crate::codex_link::settle_open_composes(
+                    self,
+                    session,
+                    composes,
+                    "the link to this Codex session was aborted while this message was in \
+                     flight",
                 )
                 .await;
             }
@@ -2547,6 +2601,7 @@ impl Daemon {
         let generation = link.generation;
         let (answers, asks) = crate::codex_link::answer_channel();
         let (interrupts, stops) = crate::codex_link::interrupt_channel();
+        let (composes, words) = crate::codex_link::compose_channel();
         let outcome = inner.spawn_codex_link_if_owner(
             &session.uid,
             epoch,
@@ -2556,6 +2611,7 @@ impl Daemon {
                 carry: carry.clone(),
                 answers,
                 interrupts,
+                composes,
             },
             || {
                 tokio::spawn(crate::codex_link::run(
@@ -2566,6 +2622,7 @@ impl Daemon {
                     carry,
                     asks,
                     stops,
+                    words,
                 ))
             },
         );
@@ -5080,6 +5137,316 @@ impl Daemon {
         Daemon::interrupt_result(report)
     }
 
+    /// **Say something to a Codex session, from a phone.**
+    ///
+    /// [`Daemon::interrupt`]'s shape, and every check is here for the reason its twin
+    /// gives. What differs is what the phone is authorized to name, and that difference is
+    /// the whole security argument: an interrupt names a TURN and is bound to it, while a
+    /// compose names nothing but WORDS. There is no turn to check the ask against, because
+    /// the phone does not choose one — the daemon does, at the moment of the write, from
+    /// the state its link is actually in.
+    ///
+    /// So what stands between a phone and the model's mouth is: the agent, the words'
+    /// checksum, the ledger, the link being *subscribed* to a thread, and then — inside
+    /// the link, atomically with the claim — the visit, the route and the broker's own two
+    /// gates behind that.
+    ///
+    /// # The route is not decided here, and that is deliberate
+    ///
+    /// Only the connection knows whether a turn is running, and knowing it a moment
+    /// earlier than the write is not knowing it. See
+    /// [`crate::codex_link::ComposeRequest`].
+    pub async fn compose(
+        &self,
+        session_ref: &str,
+        request_id: &str,
+        text: String,
+        payload_hash: &str,
+    ) -> protocol::ws::ComposeResult {
+        use protocol::ws::ComposeResult;
+
+        let refuse = |reason: String| ComposeResult::Rejected { reason };
+
+        // 1. **The run, and the agent that is running in it — before any lock or durable
+        //    claim.** An unreadable row is a refusal too: unreadable is not evidence of
+        //    Codex any more than "not Claude" is.
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse(format!("unknown session {session_ref}")),
+            Err(err) => return refuse(format!("session lookup failed: {err}")),
+        };
+        match row.agent {
+            protocol::agent::AgentKind::Codex => {}
+            // **The mirror of `send_text`'s refusal, and it names the thing that works.**
+            // Claude's free-text takeover is [`Daemon::send_text`], which types at the
+            // Mac's TTY and refuses a Codex run by name; this refuses a Claude run by
+            // name. Neither silently does the other's job.
+            protocol::agent::AgentKind::Claude => {
+                return refuse(format!(
+                    "{} is a Claude session, and this message is the Codex compose; \
+                     send text to a Claude session with send_text instead",
+                    row.session_uid
+                ))
+            }
+            protocol::agent::AgentKind::Unsupported(ref name) => {
+                return refuse(format!(
+                    "{} is a {name} session, which this daemon does not know how to speak \
+                     to; nothing was sent",
+                    row.session_uid
+                ))
+            }
+        }
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 2. **The words themselves.** Bounded for `send_text`'s reason read across: a
+        //    megabyte put into a model's mouth is not a message. Empty is refused because
+        //    there is nothing to say and the app-server's own refusal for it is a shape
+        //    this daemon would then have to explain.
+        if text.is_empty() {
+            return refuse("this message is empty, so there is nothing to say".into());
+        }
+        if text.len() > protocol::ws::MAX_COMPOSE_BYTES {
+            return refuse(format!(
+                "this message is {} bytes; the ceiling is {}",
+                text.len(),
+                protocol::ws::MAX_COMPOSE_BYTES
+            ));
+        }
+
+        // 3. **The checksum, and it is called that on purpose** — [`Daemon::interrupt`]'s
+        //    note applies verbatim. It catches a request whose parts were corrupted in
+        //    transit and nothing else. What authorizes the words is that the phone is
+        //    paired and the run is this Mac's.
+        if protocol::hash::compose_hash(session_ref, &text) != payload_hash {
+            return refuse(
+                "stale payload_hash: the message you asked to send is not the one this \
+                 request names; nothing was sent"
+                    .into(),
+            );
+        }
+        // **Normalised over the RUN, not over the reference the caller used.** A phone may
+        // name one run by its uid on one tap and by its tmux name on the next; storing the
+        // caller's own hash would make those two spellings different material under one
+        // id, which the ledger would call a conflict.
+        let claimed_hash = protocol::hash::compose_hash(&row.session_uid, &text);
+
+        // **There is no pre-claim ledger read here, and that is the point.**
+        //
+        // There used to be: this step asked `mutation_status` and reproduced the whole
+        // settled / indeterminate / different-hash case analysis, and
+        // [`crate::codex_link::Connection::recorded_compose_outcome`] asked the same row
+        // again a moment later and reproduced it a second time — with a DIFFERENT sentence
+        // for the conflict case. Two answers to one question, which is exactly the failure
+        // [`Daemon::interrupt_result`]'s own comment says it collapsed one mapping to
+        // avoid, reintroduced one layer up.
+        //
+        // The link's is the one that decides, because it is the one that then claims: it
+        // reads the row and takes the claim without an await between them, so its answer
+        // cannot be stale by the time it acts on it. This one always could be. What the
+        // daemon keeps is everything the link cannot see — the agent, the words' bound and
+        // checksum, and whether there is an addressee at all — each of which refuses
+        // before anything durable exists.
+        //
+        // 5. **The link must be an addressee for a thread.** `Subscribed` and not merely
+        //    `Bound`, for [`Daemon::interrupt`]'s reason: a bound connection receives no
+        //    `turn/*` frame, so a compose written on it would be answered into a silence
+        //    where nothing could say which turn heard it.
+        //
+        //    The four states that are not an addressee say what a phone can act on, and
+        //    each is a fact about NOW. Which is why none of them is the last word — see
+        //    [`Daemon::settled_compose`] below.
+        let (addressee, visit) = {
+            let inner = self.inner.lock().await;
+            Daemon::codex_visit_locked(&inner, &session.uid)
+        };
+        let addressed = match &addressee {
+            crate::codex_link::CodexAddressee::Subscribed { thread_id } => Ok(thread_id.clone()),
+            crate::codex_link::CodexAddressee::Bound { .. } => Err(
+                "this Mac is connected to the Codex session but is not yet watching its \
+                 thread, so a message cannot be confirmed; nothing was sent",
+            ),
+            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => Err(
+                "this Mac has lost its control link to the Codex session and is \
+                 reconnecting, so nothing was sent; try again shortly, or say it at the \
+                 Mac",
+            ),
+            crate::codex_link::CodexAddressee::Offline { thread_id: None } => Err(
+                "this Mac has not yet reached the Codex session, so nothing was sent; try \
+                 again shortly, or say it at the Mac",
+            ),
+            crate::codex_link::CodexAddressee::Unbound { .. } => Err(
+                "this Mac is connected to the Codex session and is still picking up its \
+                 thread, so nothing was sent; try again in a few seconds",
+            ),
+            crate::codex_link::CodexAddressee::NoLink => Err(
+                "there is no live link to this Codex session, so nothing was sent; say it \
+                 at the Mac",
+            ),
+        };
+        // **A finished mutation outranks the state of the link, and this is the only place
+        // that can say so.**
+        //
+        // Without this, "your words started turn T" — a fact this Mac wrote down and can
+        // still read — was withheld and replaced by "the link is reconnecting" for as long
+        // as the reconnect lasted, purely because the answer travels through the link on
+        // the live path. The phone retrying an id it never got an answer for is exactly the
+        // caller this record exists for, and the reconnect is exactly when it retries.
+        //
+        // It is NOT the duplicate this step used to carry. That one ran on every compose,
+        // ahead of a link that was about to ask the same question and then claim on the
+        // answer, and reproduced its whole case analysis a moment less accurately. This one
+        // runs only when there is no link to ask, and only reads rows that are already
+        // terminal: nothing here decides an `applying` claim, which stays where it can be
+        // decided atomically with the write.
+        let thread_id = match addressed {
+            Ok(thread_id) => thread_id,
+            Err(no_addressee) => {
+                return match self
+                    .settled_compose(&row.session_uid, request_id, &claimed_hash)
+                    .await
+                {
+                    Some(recorded) => recorded,
+                    None => refuse(no_addressee.into()),
+                }
+            }
+        };
+
+        // 6. **The link claims and writes, in that order, and settles the answer itself.**
+        //    The gate is held across all of it and taken before `inner`, for
+        //    [`Daemon::actuation_gates`]'s reason: the epoch compared on the next line is
+        //    compared at an instant and the write that follows is not.
+        let quiesce = self.actuation_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link =
+            Daemon::codex_composes_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(composes) => {
+                composes
+                    .compose(
+                        request_id,
+                        thread_id,
+                        visit.generation,
+                        text,
+                        claimed_hash,
+                        visit.upstream_epoch,
+                        admitted,
+                    )
+                    .await
+            }
+            None => crate::codex_link::ComposeReport::NotApplied(
+                "there is no live link to this Codex session, so nothing was sent; say it \
+                 at the Mac"
+                    .into(),
+            ),
+        };
+        Daemon::compose_result(report)
+    }
+
+    /// **The one place a link's compose report becomes the phone's answer.**
+    ///
+    /// One mapping for [`Daemon::interrupt_result`]'s reason: the daemon's own replay of a
+    /// settled row and the link's duplicate arm are the same question asked at two
+    /// moments, and the operator is owed the same sentence whichever answers.
+    /// **What the ledger already knows about this exact ask, if it is finished.**
+    ///
+    /// Read ONLY when there is no addressee, and only terminal rows are answered from —
+    /// the two restrictions that keep this from becoming the duplicate
+    /// [`Daemon::compose`] deleted. `None` means "the record has nothing final to say", and
+    /// every caller's fallback is the sentence about the link it already had.
+    ///
+    /// # Why `applying` is not answered here
+    ///
+    /// It is a claim some attempt still owns. Deciding it needs the claim itself, which is
+    /// taken in the same critical section as the write and therefore lives in the link. A
+    /// reader here could only guess, and the guess would be about a write that may be
+    /// landing as it guesses.
+    ///
+    /// # Why the material is compared before anything is replayed
+    ///
+    /// [`Daemon::interrupt`]'s reason, in the form a compose takes it: a duplicate is a
+    /// second ask carrying the SAME words. An id reused for different words is two
+    /// mutations under one key, and replaying the first one's turn id at the second would
+    /// tell somebody their new message reached the model when it never left this machine.
+    /// Compared on the checksum alone — the thread, the route and the visit generation in
+    /// the row are this daemon's own bookkeeping, and a person who reused an id did nothing
+    /// wrong about state they cannot see.
+    ///
+    /// # Why an unreadable ledger is `None` rather than a refusal
+    ///
+    /// The caller's fallback already refuses, with a sentence about the link that is true.
+    /// The store's own error is logged here, on the machine entitled to it, and never
+    /// interpolated into what the phone reads — F3's rule, which a new reader of this table
+    /// has to obey too.
+    async fn settled_compose(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        claimed_hash: &str,
+    ) -> Option<protocol::ws::ComposeResult> {
+        let state = match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_COMPOSE,
+                session_uid.to_string(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(state) => state?,
+            Err(err) => {
+                crate::log_error!(
+                    "codex compose for {session_uid}: could not read the compose ledger \
+                     for {request_id}: {err:#}"
+                );
+                return None;
+            }
+        };
+        if matches!(state.status, crate::store::AnswerStatus::Applying) {
+            return None;
+        }
+        if state.claimed.claimed_hash != claimed_hash {
+            return Some(protocol::ws::ComposeResult::Rejected {
+                reason: crate::codex_link::COMPOSE_ID_REUSED.into(),
+            });
+        }
+        Some(match state.status {
+            // Through the one mapping the link's own duplicate arm uses, so the two can
+            // never disagree about what a recorded outcome means.
+            crate::store::AnswerStatus::Settled(outcome) => {
+                Daemon::compose_result(crate::codex_link::replayed_compose_report(&outcome))
+            }
+            crate::store::AnswerStatus::Indeterminate => {
+                Daemon::compose_result(crate::codex_link::ComposeReport::Unknown(
+                    crate::codex_link::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                ))
+            }
+            // Returned above. Restated rather than folded into a wildcard so a fourth
+            // status has to be decided here instead of inheriting a replay.
+            crate::store::AnswerStatus::Applying => return None,
+        })
+    }
+
+    fn compose_result(report: crate::codex_link::ComposeReport) -> protocol::ws::ComposeResult {
+        use protocol::ws::ComposeResult;
+        match report {
+            crate::codex_link::ComposeReport::Started { turn_id } => {
+                ComposeResult::Started { turn_id }
+            }
+            crate::codex_link::ComposeReport::Steered { turn_id } => {
+                ComposeResult::Steered { turn_id }
+            }
+            crate::codex_link::ComposeReport::Duplicate { turn_id, started } => {
+                ComposeResult::Duplicate { turn_id, started }
+            }
+            crate::codex_link::ComposeReport::NotApplied(reason) => {
+                ComposeResult::Rejected { reason }
+            }
+            crate::codex_link::ComposeReport::Unknown(reason) => {
+                ComposeResult::Indeterminate { reason }
+            }
+        }
+    }
+
     fn interrupt_result(
         report: crate::codex_link::InterruptReport,
     ) -> protocol::ws::InterruptResult {
@@ -5212,6 +5579,75 @@ impl Daemon {
             Ok(false) => {}
             Err(err) => crate::log_error!(
                 "recovery: could not settle the interrupt claim {} for {}: {err:#}",
+                claim.client_request_id,
+                claim.session_uid
+            ),
+        }
+    }
+
+    /// **Settle every phone compose this daemon was in the middle of when it stopped.**
+    ///
+    /// [`Daemon::recover_codex_interrupts`]'s counterpart, and the stake is the higher of
+    /// the two: an interrupt sent twice stops a turn that is already stopped, and a
+    /// compose sent twice puts the same words in the model's mouth again. The claim is
+    /// taken only once the live connection has accepted the ask and the write follows
+    /// immediately, so an `applying` row is one whose frame may or may not have reached
+    /// the app-server — and the answer that would have said which is a response to a
+    /// connection that no longer exists. Terminal `Unknown` is both the truth and the
+    /// point.
+    async fn recover_codex_composes(&self) {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_COMPOSE)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex compose claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex compose(s) were in flight; recording them as unknown \
+             rather than saying them again",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_compose_claim(&claim).await;
+        }
+    }
+
+    /// **Make one stranded compose claim terminal, without being able to say what it
+    /// did.**
+    ///
+    /// Shared by the restart recovery and the registration handover, so both close the
+    /// same claim the same way — the mistake the answer path's own history warns about.
+    async fn settle_stranded_compose_claim(&self, claim: &crate::store::MutationClaimRow) {
+        match self
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_COMPOSE,
+                claim.session_uid.clone(),
+                claim.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => crate::log_warn!(
+                "the compose {} for {} (route {}) is recorded as unknown: it was in flight \
+                 when this daemon stopped and will not be sent again",
+                claim.client_request_id,
+                claim.session_uid,
+                claim.claimed.route
+            ),
+            // Something already made it terminal. First terminal wins here as everywhere
+            // else in this ledger.
+            Ok(false) => {}
+            Err(err) => crate::log_error!(
+                "recovery: could not settle the compose claim {} for {}: {err:#}",
                 claim.client_request_id,
                 claim.session_uid
             ),
@@ -5363,6 +5799,9 @@ impl Daemon {
                     }
                     crate::store::OPERATION_INTERRUPT => {
                         self.settle_stranded_interrupt_claim(&claim).await
+                    }
+                    crate::store::OPERATION_COMPOSE => {
+                        self.settle_stranded_compose_claim(&claim).await
                     }
                     other => crate::log_error!(
                         "{occasion} for {session_uid}: the claim {} is of kind {other}, \
@@ -7379,6 +7818,7 @@ impl Daemon {
                     inner.seed_codex_presence(&session.uid, &link, &presence);
                     let (answers, asks) = crate::codex_link::answer_channel();
                     let (interrupts, stops) = crate::codex_link::interrupt_channel();
+                    let (composes, words) = crate::codex_link::compose_channel();
                     let outcome = inner.spawn_codex_link_if_owner(
                         &session.uid,
                         epoch,
@@ -7388,6 +7828,7 @@ impl Daemon {
                             carry: carry.clone(),
                             answers,
                             interrupts,
+                            composes,
                         },
                         || {
                             tokio::spawn(crate::codex_link::run(
@@ -7398,6 +7839,7 @@ impl Daemon {
                                 carry,
                                 asks,
                                 stops,
+                                words,
                             ))
                         },
                     );
@@ -8073,6 +8515,22 @@ impl Daemon {
     /// the same reason: it makes "clone the sender only under the actuation gate" a
     /// type fact rather than a rule a caller has to remember, so the reordering that
     /// would let a superseded link write cannot be spelled.
+    /// **The link's compose sender**, under the same ownership filter its two siblings
+    /// use: the handle in the slot must be the one the session's current registration
+    /// owns, so a superseded link cannot write.
+    fn codex_composes_locked(
+        inner: &Inner,
+        session_uid: &str,
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Option<crate::codex_link::LinkComposes> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.composes.clone())
+    }
+
     fn codex_interrupts_locked(
         inner: &Inner,
         session_uid: &str,
@@ -8124,6 +8582,7 @@ impl Daemon {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -8167,6 +8626,7 @@ impl Daemon {
                 presence,
                 answers: crate::codex_link::answer_channel().0,
                 interrupts,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -14936,6 +15396,7 @@ mod tests {
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                 },
                 link
             )
@@ -14971,6 +15432,7 @@ mod tests {
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                 },
                 park()
             )
@@ -15076,6 +15538,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -15171,6 +15634,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry,
             },
         );
@@ -15195,6 +15659,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -15352,6 +15817,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -15629,6 +16095,7 @@ mod tests {
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                 },
                 stale,
             )
@@ -15668,6 +16135,7 @@ mod tests {
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                 },
                 live,
             )
@@ -15729,6 +16197,7 @@ mod tests {
                     carry: crate::codex_link::LinkCarry::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                 },
                 move || {
                     built.store(true, Ordering::SeqCst);
@@ -15765,6 +16234,7 @@ mod tests {
                         carry: crate::codex_link::LinkCarry::new(),
                         answers: crate::codex_link::answer_channel().0,
                         interrupts: crate::codex_link::interrupt_channel().0,
+                        composes: crate::codex_link::compose_channel().0,
                     },
                     move || {
                         built_now.store(true, Ordering::SeqCst);
@@ -16095,6 +16565,7 @@ mod tests {
                 presence: presence.clone(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 // Empty: what the link KNOWS is a separate cell from what it
                 // publishes, and a test that needs one reaches through the handle.
                 carry: crate::codex_link::LinkCarry::new(),
@@ -16363,6 +16834,7 @@ mod tests {
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry,
                 },
             );
@@ -16439,6 +16911,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: chasing,
                 },
             );
@@ -16461,6 +16934,7 @@ mod tests {
                     presence: mid_chase.clone(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -16497,6 +16971,7 @@ mod tests {
                     presence: after_relaunch.clone(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -16659,6 +17134,7 @@ mod tests {
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -16695,6 +17171,7 @@ mod tests {
                     presence: presence.clone(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry,
                 },
             );
@@ -16786,6 +17263,7 @@ mod tests {
                     presence: crate::codex_link::LinkPresence::new(),
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry,
                 },
             );
@@ -17025,6 +17503,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry,
             },
         );
@@ -17116,6 +17595,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry,
             },
         );
@@ -17221,6 +17701,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry,
             },
         );
@@ -17657,6 +18138,7 @@ mod tests {
                     presence,
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -17834,6 +18316,7 @@ mod tests {
                     presence,
                     answers: crate::codex_link::answer_channel().0,
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: crate::codex_link::LinkCarry::new(),
                 },
             );
@@ -18414,6 +18897,7 @@ mod tests {
                 presence: crate::codex_link::LinkPresence::new(),
                 answers: crate::codex_link::answer_channel().0,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -21693,6 +22177,7 @@ mod tests {
                 presence: held.presence,
                 answers,
                 interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
                 carry: held.carry,
             },
         );
@@ -22110,6 +22595,7 @@ mod tests {
                     presence: repl.presence,
                     answers: retained_sender.clone(),
                     interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
                     carry: repl.carry,
                 },
             );
@@ -22785,6 +23271,7 @@ mod tests {
                     presence: held.presence,
                     answers: held.answers,
                     interrupts: held.interrupts,
+                    composes: held.composes,
                     carry: held.carry,
                 },
             );
@@ -24740,6 +25227,296 @@ mod tests {
             daemon.refuse_unless_claude(claude, "the terminal").await,
             crate::state::ClaudeOnly::Admitted,
             "the gate is about the agent and nothing else"
+        );
+    }
+
+    /// **G8: the two free-text takeovers refuse each other's agent, by name.**
+    ///
+    /// `send_text` types at the Mac's TTY and is Claude's; `compose` speaks the
+    /// app-server's own `turn/start`/`turn/steer` and is Codex's. Neither silently does
+    /// the other's job, and each refusal names the one that works — which is the
+    /// difference between an operator who knows what to press next and one who does not.
+    ///
+    /// Every refusal here is taken BEFORE any durable claim, so a refused ask leaves the
+    /// ledger empty. That is asserted rather than assumed: the whole reason the interrupt
+    /// gained a local gate in 4a was a live run that left a row recording an actuation
+    /// that never happened.
+    ///
+    /// **Mutation:** delete the `AgentKind::Claude` arm from `Daemon::compose` and the
+    /// first half goes red — a Claude run would fall through to the link lookup and be
+    /// refused for having no Codex link, which is a true sentence about the wrong thing.
+    #[tokio::test]
+    async fn compose_is_codexs_and_send_text_is_claudes_and_each_refuses_the_other() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let codex = TEST_UID;
+        register_codex_session(&daemon, codex, "cc-1").await;
+
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ3";
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: claude.into(),
+                session_id: "cc-claude".into(),
+                tmux_session: "cc-claude".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+
+        // A Claude session refuses the Codex compose, and says where its text goes.
+        let text = "please stop and summarise".to_string();
+        let refused = daemon
+            .compose(
+                claude,
+                "c-1",
+                text.clone(),
+                &protocol::hash::compose_hash(claude, &text),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a Claude session has no Codex thread to speak to: {refused:?}")
+        };
+        assert!(reason.contains("Claude session"), "{reason}");
+        assert!(
+            reason.contains("send_text"),
+            "the refusal names the operation that works: {reason}"
+        );
+
+        // And the Codex session refuses the Claude takeover, which is the same statement
+        // read from the other end.
+        let typed = daemon
+            .send_text(codex, "hello".into(), None, None, true, false)
+            .await;
+        let protocol::ws::SendTextResult::Refused { reason } = &typed else {
+            panic!("a Codex session is not typed into: {typed:?}")
+        };
+        assert!(
+            reason.contains("only types into Claude sessions"),
+            "{reason}"
+        );
+
+        // **A refused compose leaves the ledger empty.** Both of these are taken before
+        // any claim: the agent branch above, and the link lookup below for a Codex run
+        // with no live link.
+        let none = daemon
+            .compose(
+                codex,
+                "c-2",
+                text.clone(),
+                &protocol::hash::compose_hash(codex, &text),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &none else {
+            panic!("a Codex run whose link is not watching cannot be spoken to: {none:?}")
+        };
+        // The refusal names the WIRE rather than the run: the session is fine, the link
+        // has not reached it yet, and "try again shortly" is the true instruction.
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+        for (uid, id) in [(claude, "c-1"), (codex, "c-2")] {
+            assert_eq!(
+                store
+                    .mutation_status(crate::store::OPERATION_COMPOSE, uid, id)
+                    .unwrap(),
+                None,
+                "a refusal taken before the claim leaves no row: {uid}/{id}"
+            );
+        }
+
+        // The checksum, and the ceiling. Both are refusals about the request rather than
+        // about the session, and both are taken before the link is even consulted.
+        let bad_hash = daemon
+            .compose(codex, "c-3", text.clone(), "not-the-hash")
+            .await;
+        assert!(matches!(
+            bad_hash,
+            protocol::ws::ComposeResult::Rejected { .. }
+        ));
+        let huge = "x".repeat(protocol::ws::MAX_COMPOSE_BYTES + 1);
+        let too_long = daemon
+            .compose(
+                codex,
+                "c-4",
+                huge.clone(),
+                &protocol::hash::compose_hash(codex, &huge),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &too_long else {
+            panic!("a message over the ceiling is refused: {too_long:?}")
+        };
+        assert!(reason.contains("ceiling"), "{reason}");
+        // An empty message says nothing and is refused as such.
+        let empty = daemon
+            .compose(
+                codex,
+                "c-5",
+                String::new(),
+                &protocol::hash::compose_hash(codex, ""),
+            )
+            .await;
+        assert!(matches!(
+            empty,
+            protocol::ws::ComposeResult::Rejected { .. }
+        ));
+    }
+
+    /// **A finished compose is replayed while the link is gone, and the link's absence is
+    /// not the answer.**
+    ///
+    /// The phone that retries an id is, almost always, the phone that never heard the first
+    /// answer — and the reason it never heard it is usually that the link went down. So the
+    /// state this test puts the daemon in is not a corner: it is the ordinary one in which
+    /// a retry happens. What the Mac wrote down about a mutation that already ran outranks
+    /// what its socket is doing right now.
+    ///
+    /// Four rows, four different answers, all with the same dead link:
+    ///
+    ///   * a settled row with the same words replays the turn that heard them;
+    ///   * a settled row reached with DIFFERENT words is the conflict, named plainly,
+    ///     because replaying the first turn's id would tell somebody their new message
+    ///     reached the model when it never left this machine;
+    ///   * an unsettled `applying` claim is left alone — deciding it needs the claim, which
+    ///     is taken atomically with the write and so lives in the link;
+    ///   * and no row at all is the sentence about the link, unchanged.
+    ///
+    /// **Mutation:** drop the [`Daemon::settled_compose`] call and every one of these
+    /// becomes "this Mac has not yet reached the Codex session" — safe, and false.
+    #[tokio::test]
+    async fn a_finished_compose_is_replayed_even_when_the_link_is_gone() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let said = "say the word amber".to_string();
+        let hash = protocol::hash::compose_hash(uid, &said);
+        let now = protocol::time::now_rfc3339();
+        let claim = |request_id: &str, claimed_hash: &str| {
+            store
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    uid,
+                    request_id,
+                    &crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: crate::store::COMPOSE_ROUTE_START.into(),
+                        target_turn_id: None,
+                        claimed_hash: claimed_hash.to_string(),
+                    },
+                    &now,
+                )
+                .unwrap()
+        };
+
+        // The baseline the fix has to preserve: nothing recorded, so the link is all there
+        // is to say.
+        let cold = daemon.compose(uid, "say-0", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &cold else {
+            panic!("an unrecorded ask with no link is refused: {cold:?}")
+        };
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+
+        // A compose that landed: claimed, then settled with the turn that heard it.
+        claim("say-1", &hash);
+        store
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                uid,
+                "say-1",
+                &crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_START, "turn-1"),
+                &now,
+            )
+            .unwrap();
+        assert_eq!(
+            daemon.compose(uid, "say-1", said.clone(), &hash).await,
+            protocol::ws::ComposeResult::Duplicate {
+                turn_id: "turn-1".into(),
+                started: true,
+            },
+            "the record names the turn these words began, and the dead link does not \
+             change that"
+        );
+
+        // The same id, different words. Not a duplicate — two mutations under one key.
+        let other = "say the word umber instead".to_string();
+        let conflict = daemon
+            .compose(
+                uid,
+                "say-1",
+                other.clone(),
+                &protocol::hash::compose_hash(uid, &other),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &conflict else {
+            panic!("an id reused for other words is refused, not replayed: {conflict:?}")
+        };
+        assert_eq!(reason, crate::codex_link::COMPOSE_ID_REUSED);
+
+        // Written, and what became of it never learned.
+        claim("say-2", &hash);
+        store
+            .settle_mutation_indeterminate(crate::store::OPERATION_COMPOSE, uid, "say-2", &now)
+            .unwrap();
+        let unknown = daemon.compose(uid, "say-2", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Indeterminate { reason } = &unknown else {
+            panic!("an unprovable compose is never re-sent: {unknown:?}")
+        };
+        assert_eq!(reason, crate::codex_link::COMPOSE_ALREADY_SENT_UNKNOWN);
+
+        // An `applying` claim is somebody's live attempt. It is NOT answered here — the
+        // claim decides, and the claim lives where the write does.
+        claim("say-3", &hash);
+        let in_flight = daemon.compose(uid, "say-3", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &in_flight else {
+            panic!("an unsettled claim is left to the link: {in_flight:?}")
+        };
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+    }
+
+    /// **One ceiling, stated twice, asserted equal here.**
+    ///
+    /// The phone's words are bounded in two places by two crates that cannot see each
+    /// other: [`Daemon::compose`] refuses text over `protocol::ws::MAX_COMPOSE_BYTES`
+    /// before it hashes anything, and the broker refuses a `turn/start` whose single
+    /// text item exceeds `codex_broker::refusal::MAX_PHONE_TEXT_BYTES` before it
+    /// forwards a byte. `protocol` does not depend on the broker and the broker does
+    /// not depend on `protocol`, so neither can name the other's constant; ccd is the
+    /// only crate that sees both, which is why the equality is stated from here.
+    ///
+    /// Why it has to be an equality rather than an ordering. A broker ceiling BELOW
+    /// this one would refuse text the daemon had already accepted, hashed and claimed
+    /// in the ledger — the phone would get a policy refusal it could not have predicted
+    /// from the only bound it was ever told, and the claim would have to be settled as
+    /// a refusal after the fact. A broker ceiling ABOVE it would make the daemon's edge
+    /// the only real bound, so any `turn/start` authored by something other than
+    /// [`Daemon::compose`] would carry unbounded text past the guard that exists to
+    /// stop exactly that.
+    #[test]
+    fn the_brokers_phone_text_bound_is_the_protocols() {
+        assert_eq!(
+            codex_broker::refusal::MAX_PHONE_TEXT_BYTES,
+            protocol::ws::MAX_COMPOSE_BYTES,
+            "the ceiling the phone is told and the ceiling the broker enforces are one \
+             number; moving either alone changes what a paired phone may say"
         );
     }
 

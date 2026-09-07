@@ -717,6 +717,42 @@ pub trait ThreadBinding: Send + Sync {
         }
     }
 
+    /// [`ThreadBinding::try_admit_turn`] as the phone's leg asks it: same critical
+    /// section, same preconditions, and one relaxation — the frame may omit
+    /// `runtimeWorkspaceRoots` entirely.
+    ///
+    /// **The idle rule is no longer what separates the two entry points.** It was, and the
+    /// difference was wrong: a turn admitted on either leg marks the thread busy, so a
+    /// keyboard start admitted just after a phone start could win the upstream write and
+    /// take the phone's frame with it as an implicit steer. Idle is now required of every
+    /// `turn/start`, whichever leg asks — which refuses nothing the measured TUI does,
+    /// because it sends `turn/steer` and never a second `turn/start` while a turn runs.
+    /// See [`TurnAdmission::ThreadAlreadyBusy`] for what the server does with one.
+    ///
+    /// What is left is the roots relaxation, and it is measured rather than tidy: codex
+    /// 0.153.4 refuses `turn/start.runtimeWorkspaceRoots` outright from a client that did
+    /// not declare `experimentalApi`, and this leg deliberately declares nothing but
+    /// `clientInfo`. A phone therefore cannot name a workspace at all, and the thread's
+    /// own proven roots are what its turn runs under.
+    ///
+    /// Still a separate entry point rather than a flag, because that difference is worth
+    /// naming at the call site.
+    ///
+    /// The default refuses everything, so a binding that does not implement it authorizes
+    /// no turns.
+    fn try_admit_idle_turn(
+        &self,
+        _conn: ConnId,
+        _id: &RequestId,
+        _thread_id: &str,
+        _cwd: Option<&Value>,
+        _roots: Option<&Value>,
+    ) -> TurnAdmission {
+        TurnAdmission::NotTheHead {
+            detail: "this binding authorizes no turns".to_string(),
+        }
+    }
+
     /// A turn provably did not start (its `turn/start` was answered with an error), or a
     /// terminal was observed for its thread. Releases the busy mark.
     fn release_turn(&self, _conn: ConnId, _id: &RequestId) {}
@@ -1259,6 +1295,20 @@ impl TurnActivity {
     }
 }
 
+/// **Which leg authored a turn**, and therefore which rules it is held to.
+///
+/// One name for the difference rather than a flag per rule, because the two ways the
+/// phone's admission differs from the keyboard's are one decision about one caller — and
+/// a third rule for the same caller then has one place to go, where a leg cannot pick up
+/// one of them and miss the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnLeg {
+    /// The person at the machine, looking at the pane.
+    OperatorKeyboard,
+    /// A phone, which cannot see the pane and cannot otherwise read the workspace.
+    Phone,
+}
+
 /// The verdict of the ATOMIC turn admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnAdmission {
@@ -1277,6 +1327,23 @@ pub enum TurnAdmission {
     SwitchReserved,
     /// Too many turns are admitted and unterminated on this session.
     TooManyActiveTurns,
+    /// **A turn is already running on this thread, and the caller may not start one
+    /// while that is true.**
+    ///
+    /// Required of every `turn/start`, on either leg. MEASURED on codex 0.153.4 against
+    /// the app-server's own socket: a `turn/start` sent while a turn is running is neither
+    /// queued nor refused — it is accepted and answered with the RUNNING turn's id, so it
+    /// is an implicit steer carrying no `expectedTurnId` and therefore no staleness guard.
+    /// A start is refused here rather than becoming that; `turn/steer`, which carries the
+    /// guard natively, is the method for the busy case.
+    ///
+    /// It was the phone's rule alone at first, and that left a race between the legs: the
+    /// phone's start marks the thread busy, a keyboard start admitted in the same instant
+    /// still forwarded, and whichever reached the socket second became an implicit steer
+    /// into the other's turn — while the phone had already been told `Started` and named a
+    /// turn id. Holding both legs to it closes that, and costs the operator nothing: the
+    /// measured TUI never sends a `turn/start` on a busy thread.
+    ThreadAlreadyBusy,
     /// **This CONNECTION unsubscribed itself from the thread and never re-subscribed.**
     /// Its `thread/unsubscribe` prefix forwarded and the switch behind it
     /// then failed at the server, so the head was restored but this connection is no longer
@@ -2237,127 +2304,18 @@ impl ThreadBinding for SessionThreads {
         cwd: Option<&Value>,
         roots: Option<&Value>,
     ) -> TurnAdmission {
-        let mut guard = self.enter();
-        let g = &mut *guard;
+        self.admit_turn(conn, id, thread_id, cwd, roots, TurnLeg::OperatorKeyboard)
+    }
 
-        // 1. The head-check, against the ACTIVE head only.
-        //
-        //    A `turn/start` may name only a thread whose creation THIS broker admitted and
-        //    whose creation RESPONSE it correlated and verified — a thread it merely
-        //    *heard announced* was never a valid head. A retired thread is readable and
-        //    unturnable; a `Pending` switch leaves no head at all, so a turn arriving
-        //    mid-switch refuses here, which is the other half of the linearization.
-        //
-        //    This is also the ONLY thing that discharges the measured `sandboxPolicy: null`
-        //    deferral (see `crate::fingerprint`): the named thread's policy was
-        //    fingerprint-proven at ITS creation, and `thread/settings/update` cannot move
-        //    it afterwards.
-        //
-        //    The ids are grammar-checked before they are logged (`redact::thread_id`):
-        //    `params.threadId` is client-chosen and this detail lands in a durable
-        //    `broker.log`, so echoing it raw would be a log-injection channel.
-        let Creation::Bound(active) = &g.creation else {
-            return TurnAdmission::NotTheHead {
-                detail: format!(
-                    "turn/start names thread {} but this session has no verified bound                      thread (no creation this broker admitted has been answered by a                      correlated, fully verified creation response; a switch in flight also                      leaves no head)",
-                    crate::redact::thread_id(thread_id)
-                ),
-            };
-        };
-        if active.id != thread_id {
-            return TurnAdmission::NotTheHead {
-                detail: format!(
-                    "turn/start names thread {} but this session's bound thread is {}",
-                    crate::redact::thread_id(thread_id),
-                    crate::redact::thread_id(&active.id)
-                ),
-            };
-        }
-        // 2. The workspace bound at that head's creation, by exact `Value` equality.
-        //
-        //    RESPONSE, not request: the measured `thread/start` sends `"cwd": null` while
-        //    the turn sends a concrete path, so binding the request's cwd would refuse
-        //    every real turn. The creation RESPONSE carries the server-resolved values, and
-        //    `crate::session` only installs them after proving that response's `cwd` equals
-        //    the coordinator-owned launch cwd — so this equality transitively anchors the
-        //    turn to the launch workspace.
-        //
-        //    EXACT equality, not normalization: a path canonicalizer is speculative until
-        //    a real client is observed varying its representation, and it could only ever
-        //    make the check accept MORE. The one canonicalization in the system happens at
-        //    the coordinator. There is deliberately no scope-SUBSET reasoning either — a
-        //    turn under a narrower root is still a different workspace than the one the
-        //    policy was proven over.
-        //
-        //    Refusal details name the FIELD, never the value: these land in a durable log
-        //    read by operators and gates, and both sides are attacker-supplied or
-        //    filesystem layout.
-        if cwd != Some(&active.cwd) {
-            return TurnAdmission::WrongWorkspace {
-                detail: format!(
-                    "turn/start: params.cwd does not equal the cwd bound at this thread's                      creation (turn: {}; bound: {}) — values withheld from the audit log",
-                    crate::redact::value_shape(cwd),
-                    crate::redact::value_shape(Some(&active.cwd))
-                ),
-            };
-        }
-        if roots != Some(&active.roots) {
-            return TurnAdmission::WrongWorkspace {
-                detail: format!(
-                    "turn/start: params.runtimeWorkspaceRoots does not equal the roots                      bound at this thread's creation (turn: {}; bound: {}) — values                      withheld from the audit log",
-                    crate::redact::value_shape(roots),
-                    crate::redact::value_shape(Some(&active.roots))
-                ),
-            };
-        }
-        // 2b. **This connection unsubscribed itself and never came back.**
-        //     Its prefix forwarded and the switch behind it failed, so it is no longer
-        //     receiving this thread's stream. Authorizing its turns would run turns nobody
-        //     on that connection can see. Cleared by a real `thread/resume` (see
-        //     `note_resubscribe`), which is the client's own recovery path.
-        expire_reservation(g);
-        if let Some(w) = g.unsubscribed.get(&conn) {
-            if w.thread == thread_id {
-                return TurnAdmission::ConnectionUnsubscribed {
-                    thread: w.thread.clone(),
-                };
-            }
-        }
-        // 2c. **A switch is reserved**: its prefix has already had a wire
-        //     effect and its `thread/start` is expected next, so a turn admitted now would
-        //     be authorized against a head that is about to move.
-        expire_reservation(g);
-        if g.switch_reservation.is_some() {
-            return TurnAdmission::SwitchReserved;
-        }
-        // 2d. **This id still holds a live turn entry.** A `turn/start`
-        //     response drains the OUTSTANDING ledger, so the id becomes reusable there —
-        //     but the turn it started may still be running, and admitting a second turn
-        //     under the same id would overwrite that turn's only mark. Its error response
-        //     would then release a mark belonging to a live turn. Same discipline as the
-        //     in-flight-reuse rule, extended across the answered-to-terminated window;
-        //     counted as the protocol-hostile event it is.
-        //
-        //     Checked BEFORE the cardinality cap (closing S11): a reused id is a
-        //     protocol-hostile event whose accounting must be universal, and at the cap it
-        //     would otherwise be reported as "too many turns" and never counted.
-        if g.active_turns.holds(conn, id) {
-            g.counts.reused_in_flight += 1;
-            return TurnAdmission::Ledger(IdAdmission::ReusedInFlight);
-        }
-        // 2e. Cardinality.
-        if g.active_turns.len() >= MAX_ACTIVE_TURNS {
-            return TurnAdmission::TooManyActiveTurns;
-        }
-        // 3. The id ledger, in the SAME section.
-        match admit_id(g, conn, id, TURN_METHOD) {
-            IdAdmission::Admitted => {}
-            other => return TurnAdmission::Ledger(other),
-        }
-        // 4. Busy-mark, still in the same section. Nothing between here and the relay's
-        //    write can admit a switch.
-        g.active_turns.admit(conn, id.clone(), thread_id);
-        TurnAdmission::Admitted
+    fn try_admit_idle_turn(
+        &self,
+        conn: ConnId,
+        id: &RequestId,
+        thread_id: &str,
+        cwd: Option<&Value>,
+        roots: Option<&Value>,
+    ) -> TurnAdmission {
+        self.admit_turn(conn, id, thread_id, cwd, roots, TurnLeg::Phone)
     }
 
     fn release_turn(&self, conn: ConnId, id: &RequestId) {
@@ -2595,6 +2553,221 @@ impl SessionThreads {
     /// Did this session's creation declare the admitted `dynamicTools` bundle?
     pub fn admitted_tool_bundle(&self) -> bool {
         self.enter().tool_bundle_admitted
+    }
+
+    /// **Head-check, workspace-check, idle-check, id-ledger and busy-mark, as ONE atomic
+    /// decision.**
+    ///
+    /// The one body behind both [`ThreadBinding::try_admit_turn`] and
+    /// [`ThreadBinding::try_admit_idle_turn`], so the two legs cannot drift into two
+    /// different definitions of what a turn must prove. Every step but one is asked of
+    /// both, the idle-check included; the exception is whether `runtimeWorkspaceRoots` may
+    /// be absent, which is what [`TurnLeg`] decides.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_turn(
+        &self,
+        conn: ConnId,
+        id: &RequestId,
+        thread_id: &str,
+        cwd: Option<&Value>,
+        roots: Option<&Value>,
+        leg: TurnLeg,
+    ) -> TurnAdmission {
+        let mut guard = self.enter();
+        let g = &mut *guard;
+
+        // 1. The head-check, against the ACTIVE head only.
+        //
+        //    A `turn/start` may name only a thread whose creation THIS broker admitted and
+        //    whose creation RESPONSE it correlated and verified — a thread it merely
+        //    *heard announced* was never a valid head. A retired thread is readable and
+        //    unturnable; a `Pending` switch leaves no head at all, so a turn arriving
+        //    mid-switch refuses here, which is the other half of the linearization.
+        //
+        //    This is also the ONLY thing that discharges the measured `sandboxPolicy: null`
+        //    deferral (see `crate::fingerprint`): the named thread's policy was
+        //    fingerprint-proven at ITS creation, and `thread/settings/update` cannot move
+        //    it afterwards.
+        //
+        //    The ids are grammar-checked before they are logged (`redact::thread_id`):
+        //    `params.threadId` is client-chosen and this detail lands in a durable
+        //    `broker.log`, so echoing it raw would be a log-injection channel.
+        let Creation::Bound(active) = &g.creation else {
+            return TurnAdmission::NotTheHead {
+                detail: format!(
+                    "turn/start names thread {} but this session has no verified bound                      thread (no creation this broker admitted has been answered by a                      correlated, fully verified creation response; a switch in flight also                      leaves no head)",
+                    crate::redact::thread_id(thread_id)
+                ),
+            };
+        };
+        if active.id != thread_id {
+            return TurnAdmission::NotTheHead {
+                detail: format!(
+                    "turn/start names thread {} but this session's bound thread is {}",
+                    crate::redact::thread_id(thread_id),
+                    crate::redact::thread_id(&active.id)
+                ),
+            };
+        }
+        // 2. The workspace bound at that head's creation, by exact `Value` equality.
+        //
+        //    RESPONSE, not request: the measured `thread/start` sends `"cwd": null` while
+        //    the turn sends a concrete path, so binding the request's cwd would refuse
+        //    every real turn. The creation RESPONSE carries the server-resolved values, and
+        //    `crate::session` only installs them after proving that response's `cwd` equals
+        //    the coordinator-owned launch cwd — so this equality transitively anchors the
+        //    turn to the launch workspace.
+        //
+        //    EXACT equality, not normalization: a path canonicalizer is speculative until
+        //    a real client is observed varying its representation, and it could only ever
+        //    make the check accept MORE. The one canonicalization in the system happens at
+        //    the coordinator. There is deliberately no scope-SUBSET reasoning either — a
+        //    turn under a narrower root is still a different workspace than the one the
+        //    policy was proven over.
+        //
+        //    Refusal details name the FIELD, never the value: these land in a durable log
+        //    read by operators and gates, and both sides are attacker-supplied or
+        //    filesystem layout.
+        if cwd != Some(&active.cwd) {
+            return TurnAdmission::WrongWorkspace {
+                detail: format!(
+                    "turn/start: params.cwd does not equal the cwd bound at this thread's                      creation (turn: {}; bound: {}) — values withheld from the audit log",
+                    crate::redact::value_shape(cwd),
+                    crate::redact::value_shape(Some(&active.cwd))
+                ),
+            };
+        }
+        // **An ABSENT `runtimeWorkspaceRoots` is admitted on the phone's leg, and it is
+        //    the same deferral the sandbox already makes.**
+        //
+        //    MEASURED on codex 0.153.4 against the app-server's own socket: the key is
+        //    refused outright — `-32600 "turn/start.runtimeWorkspaceRoots requires
+        //    experimentalApi capability"` — for any client that did not declare
+        //    `experimentalApi` at `initialize`. The TUI declares it; the ccd control link
+        //    declares `clientInfo` and nothing else. The same frame WITHOUT the key, `cwd`
+        //    still present, is accepted (`fixtures/codex/compose-refusals-0.153.4.txt`).
+        //
+        //    So the phone cannot send the value, and the alternative — declaring that
+        //    capability on its leg — would buy one field by handing that leg the
+        //    experimental parameter surface of the whole API. Absence loses nothing
+        //    instead: the head-check two steps above has already proven this turn names
+        //    the session's ONE verified thread, and `crate::session` installed that
+        //    thread's roots only after proving them exactly `[launch cwd]`. A turn that
+        //    omits the field runs under those. It is the argument that discharges
+        //    `sandboxPolicy: null`, made about the second field that can defer, and it
+        //    leaves the phone unable to NAME a workspace at all — which is narrower than
+        //    the operator's frame, not wider.
+        //
+        //    **And "absent means the thread's own" is the schema's word, not an
+        //    inference.** The 0.153 bundle describes the field as "Replace the thread's
+        //    runtime workspace roots" (quoted in [`crate::fingerprint`]'s header, where it
+        //    is the reason `thread/resume` refuses the key outright). A field that
+        //    REPLACES replaces nothing when it is not there.
+        //
+        //    The keyboard's leg keeps exact equality: it sends the field on every turn,
+        //    so admitting an absence there would relax a rule nothing needs relaxed.
+        // **The phone's turn carries NO roots at all**, and the rule that says so lives in
+        //    `crate::refusal`'s phone projection, not here.
+        //
+        //    There used to be a branch here refusing a present value on this leg. It became
+        //    unreachable the moment the projection pinned the phone's key set: the key is
+        //    not one of the fourteen its producer writes, so a frame carrying it is refused
+        //    before this function is ever called. Two statements of one rule in the same
+        //    critical section is not defence in depth — that argument belongs to the
+        //    daemon's gate and the broker's, which are two processes and can disagree —
+        //    it is a duplicate, and the mutation harness said so by leaving a mutant of
+        //    the inner one alive with every test green.
+        //
+        //    What remains here is the half that is still load-bearing: the ABSENCE is
+        //    admitted, which the keyboard's leg is not allowed.
+        let roots_may_defer = leg == TurnLeg::Phone;
+        if !roots_may_defer && roots != Some(&active.roots) {
+            return TurnAdmission::WrongWorkspace {
+                detail: format!(
+                    "turn/start: params.runtimeWorkspaceRoots does not equal the roots                      bound at this thread's creation (turn: {}; bound: {}) — values                      withheld from the audit log",
+                    crate::redact::value_shape(roots),
+                    crate::redact::value_shape(Some(&active.roots))
+                ),
+            };
+        }
+        // 2b. **This connection unsubscribed itself and never came back.**
+        //     Its prefix forwarded and the switch behind it failed, so it is no longer
+        //     receiving this thread's stream. Authorizing its turns would run turns nobody
+        //     on that connection can see. Cleared by a real `thread/resume` (see
+        //     `note_resubscribe`), which is the client's own recovery path.
+        expire_reservation(g);
+        if let Some(w) = g.unsubscribed.get(&conn) {
+            if w.thread == thread_id {
+                return TurnAdmission::ConnectionUnsubscribed {
+                    thread: w.thread.clone(),
+                };
+            }
+        }
+        // 2c. **A switch is reserved**: its prefix has already had a wire
+        //     effect and its `thread/start` is expected next, so a turn admitted now would
+        //     be authorized against a head that is about to move.
+        expire_reservation(g);
+        if g.switch_reservation.is_some() {
+            return TurnAdmission::SwitchReserved;
+        }
+        // 2d. **This id still holds a live turn entry.** A `turn/start`
+        //     response drains the OUTSTANDING ledger, so the id becomes reusable there —
+        //     but the turn it started may still be running, and admitting a second turn
+        //     under the same id would overwrite that turn's only mark. Its error response
+        //     would then release a mark belonging to a live turn. Same discipline as the
+        //     in-flight-reuse rule, extended across the answered-to-terminated window;
+        //     counted as the protocol-hostile event it is.
+        //
+        //     Checked BEFORE the cardinality cap (closing S11): a reused id is a
+        //     protocol-hostile event whose accounting must be universal, and at the cap it
+        //     would otherwise be reported as "too many turns" and never counted.
+        if g.active_turns.holds(conn, id) {
+            g.counts.reused_in_flight += 1;
+            return TurnAdmission::Ledger(IdAdmission::ReusedInFlight);
+        }
+        // 2d-bis. **The thread is already running a turn, and NOBODY may start a second
+        //     one.** Placed after the head, workspace and switch rules so each keeps its
+        //     own, more specific refusal — a caller naming a foreign thread while a turn
+        //     runs is told about the thread, which is the thing it got wrong.
+        //
+        //     **This was the phone's rule alone, and that left a cross-leg race.** A phone
+        //     start installs the mark below; a keyboard start was admitted anyway; the two
+        //     legs are two upstream pumps, so classification order under this mutex does
+        //     not order the writes. If the keyboard's landed first the phone's frame
+        //     arrived second, and the app-server takes a `turn/start` on a busy thread as
+        //     an implicit steer — so the phone's words joined the OPERATOR's turn while its
+        //     durable row said `turn_start T` and its caller was told `Started{T}`. The
+        //     mark is a fact about the THREAD, not about who set it, and reading it as one
+        //     is what closes that.
+        //
+        //     It refuses nothing a real client does: MEASURED (M2, 0.153.4) the TUI sends
+        //     `turn/steer` while a turn is running and never a second `turn/start`. What it
+        //     removes is the implicit steer, for everyone.
+        //
+        //     Read in THIS section rather than before it: the mark it consults is set two
+        //     steps below, so a separate read would leave exactly the window the section
+        //     exists to close.
+        //
+        //     Placed AFTER 2d for the reason 2d itself gives about the cardinality cap
+        //     (S11): a reused in-flight id is a protocol-hostile event whose accounting
+        //     must be universal, and a check that preempted it would stop counting one
+        //     the moment a turn happened to be running.
+        if g.active_turns.is_busy() {
+            return TurnAdmission::ThreadAlreadyBusy;
+        }
+        // 2e. Cardinality.
+        if g.active_turns.len() >= MAX_ACTIVE_TURNS {
+            return TurnAdmission::TooManyActiveTurns;
+        }
+        // 3. The id ledger, in the SAME section.
+        match admit_id(g, conn, id, TURN_METHOD) {
+            IdAdmission::Admitted => {}
+            other => return TurnAdmission::Ledger(other),
+        }
+        // 4. Busy-mark, still in the same section. Nothing between here and the relay's
+        //    write can admit a switch.
+        g.active_turns.admit(conn, id.clone(), thread_id);
+        TurnAdmission::Admitted
     }
 
     /// Is `turn` an **active** turn of `thread` — one this broker admitted, whose
@@ -3411,24 +3584,25 @@ mod tests {
         assert!(open(&s, A, &req("start")));
         s.observe_server_frame(A, &creation_response("start", "01a0"));
 
-        // T0: admitted and ANSWERED.
-        assert!(
-            s.try_admit_turn(A, &req("t0"), "01a0", Some(&cwd()), Some(&roots()))
-                == TurnAdmission::Admitted
-        );
-        s.observe_server_frame(A, &turn_started_response("t0", "turn-0"));
-        // S: admitted, NOT yet answered — its bytes have not even gone out.
+        // **S: admitted, NOT yet answered — its bytes have not even gone out.**
+        //
+        // One entry, because the idle rule (F2) allows one: the two-entry sequence this
+        // test used to build (an answered T0 beside an unanswered S) is no longer
+        // reachable through the admission. The rule it proves does not depend on there
+        // being two — it is that `terminal()` clears ANSWERED entries and only those — so
+        // the terminal below names a turn this broker never admitted, which is exactly the
+        // duplicate/foreign shape the retain predicate exists for.
         assert!(
             s.try_admit_turn(A, &req("s"), "01a0", Some(&cwd()), Some(&roots()))
                 == TurnAdmission::Admitted
         );
 
-        // T0's terminal arrives first.
+        // A terminal on this thread arrives while S is still unanswered.
         s.observe_server_frame(A, &terminal("01a0", "turn-0", "completed"));
 
         assert!(
             !open(&s, A, &req("switch")),
-            "T0's terminal must NOT release the unanswered S: S may still start a turn, \
+            "a terminal must NOT release the unanswered S: S may still start a turn, \
              and a switch admitted now would move the head out from under it"
         );
         // S is released the moment the server says it never started...
@@ -3439,11 +3613,23 @@ mod tests {
         );
     }
 
-    /// A steer's PHANTOM turn id (D12) must not wedge the session. The entry is answered,
-    /// so the thread's next terminal clears it even though the recorded id never
+    /// **An answered entry is cleared by its thread's terminal even when the id it
+    /// recorded is not the id that terminalized.**
+    ///
+    /// The terminal rule deliberately does not require the recorded turn id to MATCH, and
+    /// this is what that buys. It was written for D12 — the implicit steer, where a
+    /// `turn/start` sent on a BUSY thread is answered with a phantom id that never
     /// terminalizes on its own.
+    ///
+    /// **That producer is gone: F2 refuses a `turn/start` on a busy thread on both legs,
+    /// so this broker no longer forwards the frame that mints a phantom.** The rule stays
+    /// because the property it protects does not depend on that one producer — an answer
+    /// this broker could not correlate to the id the terminal later names has the same
+    /// shape, and requiring a match would leave the mark set and wedge switching for ever.
+    /// So the case is built the way it remains reachable: one entry, answered with an id,
+    /// cleared by a terminal naming another.
     #[test]
-    fn an_answered_steer_with_a_phantom_turn_id_is_cleared_by_the_threads_terminal() {
+    fn an_answered_turn_is_cleared_by_a_terminal_that_names_another_id() {
         let s = store();
         assert!(open(&s, A, &req("start")));
         s.observe_server_frame(A, &creation_response("start", "01a0"));
@@ -3451,19 +3637,14 @@ mod tests {
             s.try_admit_turn(A, &req("t0"), "01a0", Some(&cwd()), Some(&roots()))
                 == TurnAdmission::Admitted
         );
-        s.observe_server_frame(A, &turn_started_response("t0", "turn-0"));
-        // The steer: admitted and answered with an id that will never terminalize.
-        assert!(
-            s.try_admit_turn(A, &req("steer"), "01a0", Some(&cwd()), Some(&roots()))
-                == TurnAdmission::Admitted
-        );
-        s.observe_server_frame(A, &turn_started_response("steer", "phantom-never-exists"));
-        // ONE terminal, naming the real turn, ends both.
+        s.observe_server_frame(A, &turn_started_response("t0", "phantom-never-exists"));
+        assert!(!open(&s, A, &req("blocked")), "the mark fences the head");
+        // A terminal on this thread, naming a DIFFERENT turn.
         s.observe_server_frame(A, &terminal("01a0", "turn-0", "completed"));
         assert!(
             open(&s, A, &req("switch")),
-            "requiring the recorded turn id to MATCH would leave every steer's phantom \
-             entry uncleared and wedge switching for ever"
+            "requiring the recorded turn id to MATCH would leave the entry uncleared and \
+             wedge switching for ever"
         );
     }
 
@@ -3807,16 +3988,17 @@ mod tests {
         let s = store();
         assert!(open(&s, A, &req("start")));
         s.observe_server_frame(A, &creation_response("start", "01a0"));
-        // One ANSWERED turn and one UNANSWERED, both on A.
+        // **One entry, because one is all the admission can now hold.** Requiring an idle
+        // thread for every `turn/start` (F2) means a second is refused `ThreadAlreadyBusy`,
+        // so the two-live-entries state this test used to build is unreachable through the
+        // door a client comes in by. The rule it proves is unchanged and is proven on each
+        // case in turn: an ANSWERED entry survives the close here, and an UNANSWERED one is
+        // released by it in `a_disconnect_releases_an_unanswered_turn` below.
         assert!(
             s.try_admit_turn(A, &req("answered"), "01a0", Some(&cwd()), Some(&roots()))
                 == TurnAdmission::Admitted
         );
         s.observe_server_frame(A, &turn_started_response("answered", "turn-0"));
-        assert!(
-            s.try_admit_turn(A, &req("unanswered"), "01a0", Some(&cwd()), Some(&roots()))
-                == TurnAdmission::Admitted
-        );
 
         s.close_connection(A);
         assert!(
@@ -3831,35 +4013,61 @@ mod tests {
         );
     }
 
-    /// The concurrent-turn cardinality bound, refused legibly.
+    /// **The other half of the same rule: an UNANSWERED turn's mark IS released by the
+    /// close.**
+    ///
+    /// The server never said that request became anything and, with the connection gone,
+    /// no answer ever will — so keeping the mark would fence the head against a turn that
+    /// does not exist. Split from its sibling because the idle rule (F2) makes one live
+    /// entry the most the admission can hold, so the two cases can no longer be built in
+    /// one session.
     #[test]
-    fn the_active_turn_set_is_bounded() {
+    fn a_disconnect_releases_an_unanswered_turn() {
         let s = store();
         assert!(open(&s, A, &req("start")));
         s.observe_server_frame(A, &creation_response("start", "01a0"));
-        for i in 0..MAX_ACTIVE_TURNS {
+        assert!(
+            s.try_admit_turn(A, &req("unanswered"), "01a0", Some(&cwd()), Some(&roots()))
+                == TurnAdmission::Admitted
+        );
+        assert!(!open(&s, B, &req("blocked")), "the mark fences the head");
+        s.close_connection(A);
+        assert!(
+            open(&s, B, &req("switch")),
+            "an unanswered turn's mark goes with the connection that owned it"
+        );
+    }
+
+    /// **The concurrent-turn set is bounded at ONE, and [`MAX_ACTIVE_TURNS`] is no longer
+    /// the thing that bounds it.**
+    ///
+    /// This test used to admit eight turns and assert the ninth was refused. Requiring an
+    /// idle thread for every `turn/start` (F2) makes the SECOND refuse, so the cap is
+    /// unreachable through the admission — `TurnAdmission::TooManyActiveTurns` cannot be
+    /// produced by any sequence a client can send today.
+    ///
+    /// The constant and its arm are kept rather than deleted, and that is a decision worth
+    /// stating: they are the backstop if the idle rule is ever relaxed for a leg, and
+    /// deleting them would take the cardinality reasoning out of the file at the same
+    /// moment the rule that made it redundant arrived. What is NOT kept is a test claiming
+    /// to exercise a bound it cannot reach.
+    #[test]
+    fn the_active_turn_set_is_bounded_at_one() {
+        let s = store();
+        assert!(open(&s, A, &req("start")));
+        s.observe_server_frame(A, &creation_response("start", "01a0"));
+        assert_eq!(
+            s.try_admit_turn(A, &req("t0"), "01a0", Some(&cwd()), Some(&roots())),
+            TurnAdmission::Admitted
+        );
+        // The second, from either connection, and long before the cap.
+        for conn in [A, B] {
             assert_eq!(
-                s.try_admit_turn(
-                    A,
-                    &req(&format!("t{i}")),
-                    "01a0",
-                    Some(&cwd()),
-                    Some(&roots())
-                ),
-                TurnAdmission::Admitted,
-                "turn {i}"
+                s.try_admit_turn(conn, &req("t1"), "01a0", Some(&cwd()), Some(&roots())),
+                TurnAdmission::ThreadAlreadyBusy,
+                "one turn at a time, whoever asks"
             );
         }
-        assert_eq!(
-            s.try_admit_turn(
-                A,
-                &req("one-too-many"),
-                "01a0",
-                Some(&cwd()),
-                Some(&roots())
-            ),
-            TurnAdmission::TooManyActiveTurns
-        );
     }
 
     /// The id byte cap applies to the TURN path too, which called `admit_id`
@@ -3938,16 +4146,21 @@ mod tests {
             s.try_admit_turn(A, &req("ta"), "01a0", Some(&cwd()), Some(&roots()))
                 == TurnAdmission::Admitted
         );
-        assert!(
-            s.try_admit_turn(B, &req("tb"), "01a0", Some(&cwd()), Some(&roots()))
-                == TurnAdmission::Admitted
+        // **B cannot take a second mark now** — the idle rule is a fact about the THREAD,
+        // not about who is asking, which is the whole of F2. So the question this test
+        // asks becomes the sharper one: does closing the connection that owns NO mark
+        // leave A's alone?
+        assert_eq!(
+            s.try_admit_turn(B, &req("tb"), "01a0", Some(&cwd()), Some(&roots())),
+            TurnAdmission::ThreadAlreadyBusy,
+            "a second connection may not start a turn on a busy thread either"
         );
         s.close_connection(B);
         assert!(!open(&s, A, &req("switch")), "A's turn is still live");
         s.close_connection(A);
         assert!(
             open(&s, ConnId(9), &req("switch")),
-            "with every turn-owning connection gone the session may switch again"
+            "with the turn-owning connection gone the session may switch again"
         );
     }
 
@@ -4402,6 +4615,10 @@ mod tests {
             s.try_admit_turn(B, &req("t"), "01a0", Some(&cwd()), Some(&roots())),
             TurnAdmission::Admitted
         );
+        // ...and B's turn is then released, so the rows below are asked of an IDLE thread
+        // and answer the wedge question rather than the idle one (F2: a turn/start needs an
+        // idle thread whichever leg asks, so a live mark would mask every verdict after it).
+        s.observe_server_frame(B, &error_response("t"));
         // **Only a CORRELATED, ACCEPTED resume lifts the wedge.**
         //
         // A resume of some other thread is not a re-subscription to this one.

@@ -228,6 +228,22 @@ mod tests {
                 include_str!("../../../fixtures/codex/composite_ids.json"),
                 false,
             ),
+            // **The 4b captures, and the steer one is the reason they are here.** The
+            // notes `check_steer_binding` writes echo an `expectedTurnId` through
+            // [`thread_id`], which is sound only if a real TURN id conforms to the same
+            // grammar a thread id does. Nothing asserted that until this row: every file
+            // above carries thread ids, and none of them carries a turn id in a position
+            // this sweep reads.
+            (
+                "steer-0.153.4.jsonl",
+                include_str!("../../../fixtures/codex/steer-0.153.4.jsonl"),
+                true,
+            ),
+            (
+                "compose-0.153.4.jsonl",
+                include_str!("../../../fixtures/codex/compose-0.153.4.jsonl"),
+                true,
+            ),
         ];
         let mut total = 0usize;
         for (name, bundle, carries) in FIXTURES {
@@ -242,7 +258,7 @@ mod tests {
                 let v: Value = serde_json::from_str(doc).unwrap_or_else(|e| {
                     panic!("captured frame in {name} parses: {e}");
                 });
-                collect_thread_ids(&v, &mut |id| {
+                collect_wire_ids(&v, &mut |id| {
                     seen += 1;
                     assert!(
                         is_wire_thread_id(id),
@@ -260,15 +276,26 @@ mod tests {
         assert!(total > 0, "the capture must actually carry thread ids");
     }
 
-    /// Every place a thread id can appear in a captured frame:
+    /// **Every wire id position this crate renders through [`thread_id`]**: thread ids and
+    /// turn ids alike.
     ///
-    /// * a `threadId` member (the `turn/start` request and every `thread/*` notification);
-    /// * a `thread` member holding a `Thread` (`thread/started`, `thread/resume`'s result);
+    /// It used to collect thread positions only, which made the two 4b fixture rows pass on
+    /// their `threadId` alone — they were added *because* `check_steer_binding` renders an
+    /// `expectedTurnId` through the same grammar, and that was the one position the sweep
+    /// did not look at. Changing only a capture's `expectedTurnId` to a newline-bearing
+    /// string left this green.
+    ///
+    /// The places, then:
+    ///
+    /// * a `threadId`, `turnId` or `expectedTurnId` member (the `turn/start`, `turn/steer`
+    ///   and `turn/interrupt` requests and every `thread/*` notification);
+    /// * a `thread` or `turn` member holding an object with an `id` (`thread/started`,
+    ///   `thread/resume`'s result, `turn/started`, `turn/completed`);
     /// * a **bare `Thread` object nested under any other key or none** — e.g. an element of a
     ///   `thread/list` result array. A `Thread` is recognized structurally, by carrying both
     ///   a string `id` and a string `sessionId`, so a Thread that is not under a `thread` key
     ///   is still swept.
-    fn collect_thread_ids(v: &Value, f: &mut impl FnMut(&str)) {
+    fn collect_wire_ids(v: &Value, f: &mut impl FnMut(&str)) {
         match v {
             Value::Object(map) => {
                 // A bare `Thread` — recognized by shape, not by the key it hangs off.
@@ -279,21 +306,56 @@ mod tests {
                     f(id);
                 }
                 for (k, val) in map {
-                    if k == "threadId" {
+                    // The id-bearing keys, thread and turn alike. `turn`/`thread` are the
+                    // object forms; the rest name an id directly.
+                    if matches!(k.as_str(), "threadId" | "turnId" | "expectedTurnId") {
                         if let Some(s) = val.as_str() {
                             f(s);
                         }
                     }
-                    if k == "thread" {
+                    if matches!(k.as_str(), "thread" | "turn") {
                         if let Some(s) = val.get("id").and_then(|i| i.as_str()) {
                             f(s);
                         }
                     }
-                    collect_thread_ids(val, f);
+                    collect_wire_ids(val, f);
                 }
             }
-            Value::Array(items) => items.iter().for_each(|i| collect_thread_ids(i, f)),
+            Value::Array(items) => items.iter().for_each(|i| collect_wire_ids(i, f)),
             _ => {}
+        }
+    }
+
+    /// **The sweep looks at TURN id positions, not only thread ones.**
+    ///
+    /// Its sibling walks the committed captures and asserts every id conforms; this walks
+    /// a corrupted COPY and asserts the walk would have caught it. Without that, "the
+    /// fixture proves the turn ids conform" rests on the collector visiting a position it
+    /// did not visit — which is what the two 4b rows were added for and did not get.
+    ///
+    /// **Mutation:** drop `expectedTurnId`/`turnId`/`turn` from `collect_wire_ids` and
+    /// this goes red while every committed capture stays green.
+    #[test]
+    fn the_sweep_would_catch_a_non_conforming_turn_id() {
+        let hostile = "01a0-not\na uuid";
+        for doc in [
+            serde_json::json!({"params": {"threadId": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86",
+                                          "expectedTurnId": hostile}}),
+            serde_json::json!({"params": {"threadId": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86",
+                                          "turnId": hostile}}),
+            serde_json::json!({"params": {"threadId": "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86",
+                                          "turn": {"id": hostile}}}),
+        ] {
+            let mut seen: Vec<String> = Vec::new();
+            collect_wire_ids(&doc, &mut |id| seen.push(id.to_string()));
+            assert!(
+                seen.iter().any(|id| id == hostile),
+                "the collector must visit this position: {doc}"
+            );
+            assert!(
+                seen.iter().any(|id| !is_wire_thread_id(id)),
+                "and the sweep's own predicate must then refuse it: {seen:?}"
+            );
         }
     }
 

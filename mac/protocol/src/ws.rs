@@ -23,6 +23,14 @@ pub const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
 /// close to this.
 pub const MAX_SEND_TEXT_BYTES: usize = 8 * 1024;
 
+/// Ceiling on one `compose`'s text.
+///
+/// The same number as [`MAX_SEND_TEXT_BYTES`] and for the same reason stated the other
+/// way round: a megabyte typed into a TTY is not a takeover, and a megabyte put into a
+/// model's mouth is not a message. It is a bound on what one tap can inject, chosen to
+/// match the sibling operation so a phone has one answer to "how long may this be".
+pub const MAX_COMPOSE_BYTES: usize = 8 * 1024;
+
 // ------------------------------------------------------------------ terminal
 //
 // The Terminal tab attaches to the exact live tmux session over this same
@@ -449,6 +457,53 @@ pub enum ClientMessage {
         /// [`crate::hash::interrupt_hash`] over `session_id`, `turn_id`.
         payload_hash: String,
     },
+    /// **Say something to a Codex session from a phone.**
+    ///
+    /// The phone composes words; it does not decide what becomes of them. If the
+    /// session's thread is idle the daemon starts a turn with them; if a turn is
+    /// running it steers that turn with them. Which one happened comes back in the
+    /// [`ComposeResult`], and the phone renders what it is told rather than
+    /// predicting it — the session can move between the tap and the write, and a
+    /// client that guessed would show the wrong thing exactly when it mattered.
+    ///
+    /// **This is not [`ClientMessage::SendText`], and the two must not be
+    /// confused.** `send_text` types at the Mac's TTY and is refused for a Codex
+    /// session by name; this speaks the app-server's own `turn/start` /
+    /// `turn/steer` through the broker and is refused for a Claude session by
+    /// name. They share no ledger, no result type and no failure vocabulary: one
+    /// can report that a composer disappeared, and the other can report which turn
+    /// it joined.
+    ///
+    /// **The compatibility contract is the CLIENT's, and it is a transmission gate rather
+    /// than a UI one.** This is a new message, so a daemon below minor 18 cannot decode it:
+    /// it answers `ServerMessage::Error{code:"bad_request"}` — legible, but not a
+    /// `ComposeResult`, so a client waiting for one waits for something that is not coming.
+    /// A client must therefore not SEND this unless [`Capabilities::codex_compose`] is
+    /// true; hiding the affordance is not the same thing, and Phase 5 owes a test that
+    /// proves the transmission is gated and not merely the button.
+    ///
+    /// A mutating operation, so it carries a ledger identity like every other.
+    /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
+    /// exact text, so a replay can never say something else. **The route is
+    /// snapshotted at the claim, not recomputed on the retry**: a compose that was
+    /// issued as a `turn/start` is re-issued as a `turn/start`, never converted
+    /// into a steer because the session has since become busy — that conversion
+    /// would put the words into a turn nobody composed them for.
+    ///
+    /// Two gates stand between this message and the model, exactly as they do for
+    /// [`ClientMessage::Interrupt`]. The daemon's binds the ask to the thread its
+    /// control link is *subscribed* to and to that link's visit generation, before
+    /// anything durable is claimed. The broker's binds it again to the session's
+    /// own head thread — and, for a steer, to the turn the session is actually
+    /// running — and refuses one that does not name it.
+    Compose {
+        session_id: String,
+        request_id: String,
+        /// What to say. Bounded by [`MAX_COMPOSE_BYTES`].
+        text: String,
+        /// [`crate::hash::compose_hash`] over `session_id`, `text`.
+        payload_hash: String,
+    },
 
     Ping,
 }
@@ -601,6 +656,13 @@ pub enum ServerMessage {
         request_id: String,
         result: InterruptResult,
     },
+    /// The outcome of a [`ClientMessage::Compose`]. Typed like every other mutation
+    /// result so a retry replays a recorded outcome rather than speaking twice.
+    ComposeResult {
+        session_id: String,
+        request_id: String,
+        result: ComposeResult,
+    },
 
     Pong,
 }
@@ -628,6 +690,47 @@ pub enum InterruptResult {
     Rejected { reason: String },
     /// Issued, outcome unknown — the daemon was killed between claiming the
     /// interrupt and observing the turn terminate. Never retried automatically.
+    Indeterminate { reason: String },
+}
+
+/// What became of a [`ClientMessage::Compose`].
+///
+/// **Five statuses, and the first two are the ones a client must not collapse.** Which
+/// of them arrives is the answer to "what did my words do" — they began a turn, or they
+/// joined one already running — and it is decided by what the session was doing at the
+/// instant the daemon wrote, not by anything the phone could know when it tapped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ComposeResult {
+    /// The thread was idle and these words began a turn. `turn_id` is that turn, as the
+    /// app-server named it in `turn/started`.
+    Started { turn_id: String },
+    /// A turn was running and these words joined it. `turn_id` is that turn — the SAME
+    /// turn, not a new one: a steer produces no `turn/started` and the only terminal is
+    /// the original turn's.
+    Steered { turn_id: String },
+    /// This exact compose already ran; nothing was said a second time. It replays the
+    /// recorded outcome, including which of `started`/`steered` it was — the route is
+    /// snapshotted at the claim, so a retry after the session moved reports what actually
+    /// happened rather than what would happen now.
+    Duplicate {
+        turn_id: String,
+        /// Whether the original was a start or a steer, so a client can render the
+        /// replay with the same words it rendered the first time.
+        started: bool,
+    },
+    /// Refused, with a reason: **nothing was said by this ask, and the record says so.**
+    /// The clean complement of [`Self::Indeterminate`], exactly as it is for
+    /// [`InterruptResult::Rejected`].
+    ///
+    /// The reason is human text, safe to show verbatim. **It never carries an id the
+    /// phone did not send**: the app-server's own refusal for a stale steer names the
+    /// turn the session is really running, and neither the broker's refusal nor this
+    /// daemon's passes that on.
+    Rejected { reason: String },
+    /// Written, outcome unknown — the daemon was killed between claiming the compose and
+    /// learning what it did. Never retried automatically: saying something twice is not a
+    /// recoverable mistake, and a person who can see the screen is a better judge.
     Indeterminate { reason: String },
 }
 
@@ -756,6 +859,21 @@ pub struct Capabilities {
     /// names which of the conditions failed — be what the operator reads.
     #[serde(default)]
     pub codex_interrupt: bool,
+    /// **This daemon honours a compose for a Codex session whose control link is
+    /// `Subscribed`** — it really speaks to the model, and reports which turn heard it.
+    ///
+    /// Advertised for [`Capabilities::codex_interrupt`]'s reason, and it is a stronger
+    /// one here: `compose` is a NEW message, so a daemon below minor 18 does not decode
+    /// it at all and answers nothing. A phone that sent one and waited would wait for
+    /// ever. Absent decodes `false`, which is exactly what such a daemon meant.
+    ///
+    /// **Connection-global and build-shaped**, with the same caveat spelled out on its
+    /// sibling: it says what this daemon honours and nothing about one session. Compose
+    /// exists only for Codex, so a client scopes the affordance by the session's
+    /// [`crate::event::SessionSummary::agent`] as well, and lets the refusal — which
+    /// always names which condition failed — be what the operator reads.
+    #[serde(default)]
+    pub codex_compose: bool,
     /// The agents this daemon can actually host, named honestly. A client scopes
     /// what it offers to this set and intersects it with its own
     /// [`ClientFeatures`]. Empty — from any daemon predating the agent seam — is
@@ -1426,10 +1544,17 @@ mod tests {
              status therefore reachable, and the `codex_interrupt` capability that \
              says so — is minor 17"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 18,
+            "compose — a phone saying something to a Codex session, the daemon choosing \
+             `turn/start` or `turn/steer` by what the session is doing, the `ComposeResult` \
+             statuses that say which happened, and the `codex_compose` capability that \
+             says the daemon understands the message at all — is minor 18"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 17);
+        assert_eq!(crate::PROTOCOL_MINOR, 18);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1838,6 +1963,7 @@ mod tests {
             slash_composer_recovery: true,
             terminal_pty: true,
             codex_interrupt: true,
+            codex_compose: true,
             supported_agents: vec![crate::agent::AgentKind::Claude],
         }
     }

@@ -1618,6 +1618,99 @@ enum Settlement {
 /// exactly what a refusal is; reporting them as unknown would tell a phone the
 /// outcome is unnameable when the ledger has named it, and would earn a turn that
 /// demonstrably ended on its own the same treatment as a daemon killed mid-write.
+/// **What became of one compose, in the link's own vocabulary.**
+///
+/// The link's word, which [`crate::state::Daemon::compose_result`] turns into the phone's.
+/// Kept apart from the wire type for [`InterruptReport`]'s reason: the link answers what it
+/// observed, and the mapping to what a person is told is one function rather than scattered
+/// constructions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComposeReport {
+    /// The thread was idle and these words began a turn.
+    Started { turn_id: String },
+    /// A turn was running and these words joined it — the same turn, not a new one.
+    Steered { turn_id: String },
+    /// This exact compose already ran. `started` says which of the two the ORIGINAL was,
+    /// read from the snapshotted route, so a replay describes what happened rather than
+    /// what would happen now.
+    Duplicate { turn_id: String, started: bool },
+    /// Nothing was written, and here is why.
+    NotApplied(String),
+    /// Written, and what became of it is not known. Never re-sent.
+    Unknown(String),
+}
+
+/// **A settled compose row, replayed.**
+///
+/// The one mapping the link's own `Applied` arm and
+/// [`crate::state::Daemon::compose`]'s terminal read both use, for
+/// [`replayed_interrupt_report`]'s reason: the same question asked at two moments must not
+/// get two answers. The daemon reaches it only when there is no addressee — with a link to
+/// ask, the link's claim is the answer, because it reads and claims without an await
+/// between them and this one always could be stale.
+///
+/// An outcome that names no turn is a refusal, and it replays as one — telling somebody
+/// their words reached the model because a row exists would be the one thing this must not
+/// do.
+pub(crate) fn replayed_compose_report(outcome: &str) -> ComposeReport {
+    match crate::store::parse_compose_outcome(outcome) {
+        Some((route, turn_id)) => ComposeReport::Duplicate {
+            turn_id: turn_id.to_string(),
+            started: route == crate::store::COMPOSE_ROUTE_START,
+        },
+        None => ComposeReport::NotApplied(crate::store::replayed_compose_sentence(outcome)),
+    }
+}
+
+/// **"you already said this and I cannot tell you what happened."**
+///
+/// A const rather than three literals: it is said by the link when its claim comes back
+/// `Indeterminate`, by the link when the record already reads that way, and — since a
+/// terminal row must outrank the link's current state — by
+/// [`crate::state::Daemon::compose`] when there is no addressee to ask. Three copies of a
+/// sentence are three chances for two of them to drift, and the drift would be invisible:
+/// each copy is correct on its own.
+pub(crate) const COMPOSE_ALREADY_SENT_UNKNOWN: &str =
+    "this message was already sent and what became of it is not known; it will not be \
+     sent again. Check the Mac.";
+
+/// **"that id already says something else."**
+///
+/// Named for [`COMPOSE_ALREADY_SENT_UNKNOWN`]'s reason, and one of its own: a conflict is
+/// the one refusal that tells somebody they did something specific, so the two places that
+/// can reach it — the link's claim, and the daemon's terminal read when there is no link to
+/// claim against — must say it identically or the same mistake reads as two different ones.
+pub(crate) const COMPOSE_ID_REUSED: &str =
+    "this request id was used to say something else, so nothing was sent; ask again under \
+     a new one";
+
+/// **What a phone is told when the app-server refused a write, and it is the CODE.**
+///
+/// MEASURED on codex 0.153.4: the refusal for a stale steer is
+/// `-32600 "expected active turn id X but found Y"` — the message NAMES the turn the
+/// session is really running. A phone did not send that id and has no business learning
+/// it from a refusal, and a future message could embed anything at all, so the message is
+/// never passed on. The code is structural and is.
+///
+/// This is [`describe_resume_answer`]'s rule, applied where it had not been: the interrupt
+/// path used to interpolate the server's message into the sentence a phone reads, and the
+/// same `-32600` reaches it for a turn that has already ended.
+///
+/// The message is not lost — it is logged locally by the caller, on the machine that is
+/// entitled to it.
+fn wire_refusal_reason(frame: &Value, what: &str, remedy: &str) -> String {
+    let code = match frame.pointer("/error/code").and_then(Value::as_i64) {
+        Some(code) => code.to_string(),
+        None => "none".to_string(),
+    };
+    // **No author is named, deliberately.** Two different parties refuse on this wire —
+    // the broker, before a byte leaves this machine, and the app-server behind it — and
+    // the frame does not always say which. Saying "Codex refused" when this Mac's own
+    // broker did would send an operator looking in the wrong place. The code is the part
+    // that tells them apart and it is the part that is passed on.
+    format!("{what} was refused (code {code}) and nothing was changed; {remedy}")
+}
+
 pub(crate) fn replayed_interrupt_report(outcome: &str, turn_id: &str) -> InterruptReport {
     if outcome == crate::store::INTERRUPT_ABORTED {
         return InterruptReport::Duplicate {
@@ -1775,6 +1868,101 @@ pub(crate) struct InterruptRequest {
     pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
+/// **One compose the daemon asks the live connection to write.**
+///
+/// The claim is taken by the LINK, for [`InterruptRequest`]'s reason and one more of its
+/// own: **the route is decided here**. Whether these words start a turn or steer one
+/// depends on what the session is doing at the instant of the write, and only the
+/// connection knows that. Deciding it in the daemon and handing the answer down would be
+/// deciding it at one moment and acting on it at another — which is the window that turns
+/// a start into an unguarded steer.
+///
+/// So this ask carries the material's STABLE half — the thread, the visit and the hash over
+/// the words — and the link completes it with the route and the turn at claim time.
+pub(crate) struct ComposeRequest {
+    /// The durable id the phone retried under, and the ledger's key.
+    pub(crate) client_request_id: String,
+    /// The upstream connection this ask was aimed at. See [`InterruptRequest::upstream_epoch`].
+    pub(crate) upstream_epoch: u64,
+    /// The thread the ask was addressed to, as the daemon read it from the addressee.
+    pub(crate) thread_id: String,
+    /// The visit it was addressed in.
+    pub(crate) generation: u64,
+    /// The words. Bounded by the daemon before the ask is made.
+    pub(crate) text: String,
+    /// [`protocol::hash::compose_hash`] over the run and the words, normalised over the
+    /// run's uid so two spellings of one run are one ask.
+    pub(crate) claimed_hash: String,
+    /// Where the outcome goes.
+    pub(crate) reply: tokio::sync::oneshot::Sender<ComposeReport>,
+    /// The actuation gate's read guard, travelling with the ask. See
+    /// [`InterruptRequest::gate`].
+    pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+/// The daemon's end of [`ComposeRequest`].
+#[derive(Clone)]
+pub(crate) struct LinkComposes(tokio::sync::mpsc::UnboundedSender<ComposeRequest>);
+
+/// Mint the daemon's end and the link's end of the compose channel. Split where the link
+/// is installed, for [`interrupt_channel`]'s reason.
+pub(crate) fn compose_channel() -> (
+    LinkComposes,
+    tokio::sync::mpsc::UnboundedReceiver<ComposeRequest>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (LinkComposes(tx), rx)
+}
+
+impl LinkComposes {
+    /// Ask the link to say `text`, and wait for what became of it.
+    ///
+    /// The two `Err` arms are [`LinkInterrupts::interrupt`]'s, read across: a send that
+    /// fails means the link task was already gone, so nothing was claimed and nothing was
+    /// written — the words were not said and the ask is worth repeating. A receive that
+    /// fails means the task went away after taking the ask, and the only truthful thing to
+    /// say is that nothing here knows what happened.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compose(
+        &self,
+        client_request_id: &str,
+        thread_id: String,
+        generation: u64,
+        text: String,
+        claimed_hash: String,
+        upstream_epoch: u64,
+        gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> ComposeReport {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let ask = ComposeRequest {
+            client_request_id: client_request_id.to_string(),
+            upstream_epoch,
+            thread_id,
+            generation,
+            text,
+            claimed_hash,
+            reply,
+            gate,
+        };
+        if self.0.send(ask).is_err() {
+            return ComposeReport::NotApplied(
+                "this Mac's link to the Codex session went away before that message was \
+                 written, so nothing was said; try again"
+                    .into(),
+            );
+        }
+        match answer.await {
+            Ok(report) => report,
+            Err(_) => ComposeReport::Unknown(
+                "this Mac's link to the Codex session stopped while that message was in \
+                 flight, so whether it was said is not known; it will not be sent again. \
+                 Check the Mac."
+                    .into(),
+            ),
+        }
+    }
+}
+
 /// The daemon's end of [`InterruptRequest`].
 ///
 /// Unbounded for [`LinkAnswers`]'s reason: it carries at most one entry per turn a
@@ -1850,6 +2038,13 @@ impl LinkInterrupts {
 /// thing they stopped stopped.
 pub(crate) type OpenInterrupts = Arc<Mutex<std::collections::BTreeMap<i64, PendingInterrupt>>>;
 
+/// **Composes written on one connection whose answer has not arrived yet, keyed by the
+/// wire id they were written under.**
+///
+/// A map for [`OpenInterrupts`]'s reason, and shared with [`run`] so that every way a
+/// connection can end settles them.
+pub(crate) type OpenComposes = Arc<Mutex<std::collections::BTreeMap<i64, PendingCompose>>>;
+
 /// **How long an interrupt waits for the turn it named to end.**
 ///
 /// The wire does not answer this question in its response: `turn/interrupt` returns
@@ -1868,6 +2063,20 @@ pub(crate) type OpenInterrupts = Arc<Mutex<std::collections::BTreeMap<i64, Pendi
 pub(crate) const INTERRUPT_BUDGET: Duration = Duration::from_secs(15);
 #[cfg(test)]
 pub(crate) const INTERRUPT_BUDGET: Duration = Duration::from_millis(750);
+
+/// How long a written compose waits for its own answer.
+///
+/// **Shorter than [`INTERRUPT_BUDGET`], and the difference is what is being waited for.**
+/// An interrupt waits for the turn's TERMINAL, which is the only evidence it has and can
+/// be a whole turn away. A compose waits for the JSON-RPC response to its own request,
+/// which the app-server was measured to send at once on both routes — the `turn/start`
+/// answer carries `result.turn.id` and the `turn/steer` answer carries `result.turnId`.
+/// A response that has not arrived in this long is not late; the broker or this link is
+/// gone.
+#[cfg(not(test))]
+pub(crate) const COMPOSE_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub(crate) const COMPOSE_BUDGET: Duration = Duration::from_millis(750);
 
 /// **Answers written on one connection and not yet reported on, keyed by the wire id
 /// they were written on.**
@@ -2101,6 +2310,39 @@ pub(crate) fn insert_pending_interrupt_for_tests(
     outcome
 }
 
+/// **Test-only.** Put a written compose into an open-composes ledger without standing up
+/// a connection, so a caller can prove what its answer — or the connection's ending —
+/// does to it. The fields are this module's; the guard is the caller's.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_pending_compose_for_tests(
+    open: &OpenComposes,
+    wire_id: i64,
+    client_request_id: &str,
+    thread_id: &str,
+    route: &'static str,
+    composed_against: Option<&str>,
+    gate: tokio::sync::OwnedRwLockReadGuard<()>,
+) -> tokio::sync::oneshot::Receiver<ComposeReport> {
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    open.lock().expect("open composes").insert(
+        wire_id,
+        PendingCompose {
+            client_request_id: client_request_id.to_string(),
+            claimed_hash: format!("hash-of-{client_request_id}"),
+            thread_id: thread_id.to_string(),
+            route,
+            composed_against: composed_against.map(str::to_string),
+            deadline: tokio::time::Instant::now() + COMPOSE_BUDGET,
+            replies: vec![reply],
+            _gates: vec![gate],
+            #[cfg(test)]
+            told: None,
+        },
+    );
+    outcome
+}
+
 /// **Test-only.** Put an admitted answer into an open-answers ledger without
 /// standing up a connection, so a caller can prove that aborting the link settles
 /// it durably. The fields are this module's; the guard is the caller's, moved in the
@@ -2155,6 +2397,52 @@ pub(crate) async fn settle_open_answers(
 /// point: the write may have reached the app-server, so the truthful statement is
 /// that nothing here knows, and the truthful consequence is that it is never sent
 /// again.
+/// **Every compose this link wrote and never heard about, made terminal.**
+///
+/// The counterpart of [`settle_open_interrupts`] and the same shape, because the hazard is
+/// the same one: a claim nobody settles is an id no phone can ever re-ask under, and a
+/// person left waiting for an answer that is not coming. Saying something twice is not a
+/// recoverable mistake, so the terminal is `indeterminate` and it is never retried.
+pub(crate) async fn settle_open_composes(
+    daemon: &Arc<Daemon>,
+    session: &SessionKey,
+    open: &OpenComposes,
+    cause: &str,
+) {
+    let held: Vec<PendingCompose> = std::mem::take(&mut *open.lock().expect("open composes"))
+        .into_values()
+        .collect();
+    for mut pending in held {
+        let recorded = daemon
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_COMPOSE,
+                session.uid.clone(),
+                pending.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await;
+        let report = match recorded {
+            Ok(_) => ComposeReport::Unknown(format!(
+                "{cause}, so whether that message reached the model is not known; it will \
+                 not be sent again. Check the Mac."
+            )),
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not record a written compose as \
+                     indeterminate ({err:#})",
+                    session.name
+                );
+                ComposeReport::Unknown(format!(
+                    "{cause}, and this Mac could not record that either, so it cannot say \
+                     what became of it. Check the Mac."
+                ))
+            }
+        };
+        pending.tell(report);
+    }
+}
+
 pub(crate) async fn settle_open_interrupts(
     daemon: &Arc<Daemon>,
     session: &SessionKey,
@@ -2401,6 +2689,11 @@ pub struct LinkCarry {
     /// of them a written interrupt's claim stayed `applying` for ever while the
     /// person who asked for it was never told anything at all.
     open_interrupts: OpenInterrupts,
+    /// **The composes this link has written and is still waiting on**, riding the carry
+    /// for exactly the reason the interrupts do: an aborted task never runs its own
+    /// teardown, and a claim left `applying` is one no phone can ever re-ask under the
+    /// same id while the person who made it is told nothing at all.
+    open_composes: OpenComposes,
 }
 
 impl LinkCarry {
@@ -2425,6 +2718,10 @@ impl LinkCarry {
     /// [`run`] as the ledger its connection loop fills and drains.
     pub(crate) fn open_interrupts(&self) -> OpenInterrupts {
         Arc::clone(&self.open_interrupts)
+    }
+
+    pub(crate) fn open_composes(&self) -> OpenComposes {
+        Arc::clone(&self.open_composes)
     }
 
     /// **What this link knows, taken by value.** The one thing retention reads.
@@ -2497,6 +2794,10 @@ impl LinkCarry {
 /// stops at its next await point, and every fact it produced was already durable
 /// when it produced it, so a cancellation can cost a live subscriber the *push* of
 /// a final event, never the event.
+// One receiver per operation the daemon can ask this link for, and there are three now.
+// Bundling them into a struct to satisfy an arity lint would hide which channels a link
+// holds behind a name, and it is the list that a reader checks against the teardown.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     daemon: Arc<Daemon>,
     session: SessionKey,
@@ -2505,6 +2806,7 @@ pub async fn run(
     carry: LinkCarry,
     mut answers: tokio::sync::mpsc::UnboundedReceiver<AnswerRequest>,
     mut interrupts: tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
+    mut composes: tokio::sync::mpsc::UnboundedReceiver<ComposeRequest>,
 ) {
     let mut adapter = CodexAdapter::new(session.clone());
     // **The chase survives a reconnect** — see [`Carried`] — and, in this cell, a
@@ -2538,6 +2840,8 @@ pub async fn run(
     // reaches the settle below — is settled by the daemon instead, out of this very
     // map. See [`LinkCarry::open_interrupts`].
     let open_interrupts: OpenInterrupts = carry.open_interrupts();
+    // The third of the three, for exactly the same reason as the second.
+    let open_composes: OpenComposes = carry.open_composes();
 
     crate::log_info!(
         "codex link for {} ({}) attaching to {} at generation {}",
@@ -2566,6 +2870,8 @@ pub async fn run(
             &open_answers,
             &mut interrupts,
             &open_interrupts,
+            &mut composes,
+            &open_composes,
         )
         .await;
         // **Whatever the connection was still waiting to hear about is settled
@@ -2592,6 +2898,15 @@ pub async fn run(
              was in flight",
         )
         .await;
+        // And for the third: a compose written and never answered is a claim nobody can
+        // settle and a person told nothing at all.
+        settle_open_composes(
+            &daemon,
+            &session,
+            &open_composes,
+            "the link's connection to Codex ended while this message was in flight",
+        )
+        .await;
         // **Refused, not queued, once there is no connection to write on.** An ask
         // that never reached a connection was never claimed and never written, so
         // the card it names is still answerable. Leaving it in the channel would
@@ -2614,6 +2929,15 @@ pub async fn run(
             let _ = ask.reply.send(InterruptReport::NotApplied(
                 "the link to this Codex session has no live connection, so nothing was \
                  sent; stop the turn at the Mac"
+                    .into(),
+            ));
+        }
+        // And the third, for the same reason again: words handed to whatever socket comes
+        // up next would be said into a session nobody is still looking at.
+        while let Ok(ask) = composes.try_recv() {
+            let _ = ask.reply.send(ComposeReport::NotApplied(
+                "the link to this Codex session has no live connection, so nothing was \
+                 said; say it at the Mac"
                     .into(),
             ));
         }
@@ -2840,6 +3164,8 @@ async fn serve_connection(
     open_answers: &OpenAnswers,
     interrupts: &mut tokio::sync::mpsc::UnboundedReceiver<InterruptRequest>,
     open_interrupts: &OpenInterrupts,
+    composes: &mut tokio::sync::mpsc::UnboundedReceiver<ComposeRequest>,
+    open_composes: &OpenComposes,
 ) -> Result<()> {
     let stream = tokio::time::timeout(CONNECT_BUDGET, UnixStream::connect(&link.socket))
         .await
@@ -2922,6 +3248,8 @@ async fn serve_connection(
         outstanding: std::collections::BTreeMap::new(),
         open_answers: Arc::clone(open_answers),
         open_interrupts: Arc::clone(open_interrupts),
+        open_composes: Arc::clone(open_composes),
+        launch: None,
         running_turn: None,
         swept_generation: None,
         registered_generation: link.generation,
@@ -3220,7 +3548,25 @@ async fn serve_connection(
             Attach::Backoff { until, .. } => Some(*until),
             _ => None,
         };
-        let deadline = [deadline, answer_due, interrupt_due]
+        // **A compose that is never answered leaves a person waiting on words they think
+        // were said.** The response is the only evidence there is, and the app-server was
+        // measured to send it at once on both routes — so one that has not arrived within
+        // the budget is not late. The connection is dropped so it reconnects, and `run`
+        // settles what it left on the way out.
+        let compose_due = conn
+            .open_composes
+            .lock()
+            .expect("open composes")
+            .values()
+            .map(|held| held.deadline)
+            .min();
+        if compose_due.is_some_and(|at| Instant::now() >= at) {
+            bail!(
+                "no answer arrived for a compose within {COMPOSE_BUDGET:?}; dropping the \
+                 ccd leg so it reconnects"
+            );
+        }
+        let deadline = [deadline, answer_due, interrupt_due, compose_due]
             .into_iter()
             .flatten()
             .min();
@@ -3253,6 +3599,10 @@ async fn serve_connection(
             }
             Some(ask) = interrupts.recv() => {
                 conn.interrupt_turn(&mut ws, ask).await?;
+                continue;
+            }
+            Some(ask) = composes.recv() => {
+                conn.compose_turn(&mut ws, ask).await?;
                 continue;
             }
         };
@@ -3308,6 +3658,7 @@ async fn serve_connection(
                 // caller would wait out the whole budget for a terminal that was
                 // never coming.
                 FrameKind::Response if conn.note_interrupt_response(&frame).await => {}
+                FrameKind::Response if conn.note_compose_response(&frame).await => {}
                 // Not the answer this link is waiting on (a late one, or one from a
                 // superseded attach), or not a frame at all. Neither goes near the
                 // bind/filter/normalize path: that path is for notifications, and
@@ -3689,6 +4040,17 @@ struct Connection<'a> {
     /// [`OpenInterrupts`]. Held by handle for [`Connection::open_answers`]'s reason:
     /// a connection ending, however it ends, still owes every one of them a terminal.
     open_interrupts: OpenInterrupts,
+    /// **Composes written on this socket whose answer has not arrived yet** — see
+    /// [`OpenComposes`]. Held by handle for the same reason its two siblings are.
+    open_composes: OpenComposes,
+    /// **What the thread this connection is on runs under**, learned from the accepted
+    /// `thread/resume` answer.
+    ///
+    /// `None` until a resume is accepted, and a compose that would START a turn is refused
+    /// while it is: a `turn/start` assembled from guesses is one the broker refuses, and
+    /// refusing it here names the fact that is missing instead. A steer needs none of it —
+    /// the measured `turn/steer` carries no ownership params at all — so it is unaffected.
+    launch: Option<crate::codex_adapter::TurnLaunch>,
     /// **The turn this connection has watched start and has not watched end.**
     ///
     /// The one fact that lets a stop be refused *here* rather than at the broker,
@@ -3799,6 +4161,80 @@ impl PendingInterrupt {
     /// and an entry that has reported is finished with — every caller of this is one
     /// of the terminals that also removes the entry from the ledger.
     fn tell(&mut self, report: InterruptReport) {
+        for reply in std::mem::take(&mut self.replies) {
+            let _ = reply.send(report.clone());
+        }
+    }
+}
+
+/// **One compose written on this connection, waiting for its answer.**
+pub(crate) struct PendingCompose {
+    /// The ledger's key, so the answer settles the claim the phone retried under.
+    client_request_id: String,
+    /// **The hash over the words**, so a join is the ledger's own definition of a
+    /// duplicate rather than a looser one. An id alone says "this is a retry" without
+    /// saying a retry *of what*.
+    claimed_hash: String,
+    /// The thread the words were sent to.
+    thread_id: String,
+    /// Which route was written, snapshotted in the claim before the byte went out. The
+    /// answer is read differently for each — a start's carries `result.turn.id`, a
+    /// steer's carries `result.turnId` — and the phone is told a different thing.
+    route: &'static str,
+    /// For a steer, the turn it was composed against; `None` for a start, whose turn does
+    /// not exist until the answer names it.
+    composed_against: Option<String>,
+    /// When this wait stops being a wait and becomes an unknown.
+    deadline: tokio::time::Instant,
+    /// Everyone waiting on this one write, for [`PendingInterrupt::replies`]'s reason: a
+    /// retry under the same id while the first is in flight is the same question and hears
+    /// the same answer.
+    replies: Vec<tokio::sync::oneshot::Sender<ComposeReport>>,
+    /// One actuation-gate read guard per waiter. See [`PendingInterrupt::_gates`].
+    _gates: Vec<tokio::sync::OwnedRwLockReadGuard<()>>,
+    /// **Test-only.** The last thing [`PendingCompose::tell`] said, so a test can assert
+    /// on the SENTENCE without standing up a waiter for it.
+    #[cfg(test)]
+    told: Option<ComposeReport>,
+}
+
+impl PendingCompose {
+    /// **Test-only.** An entry with no waiter attached, for asserting what the report
+    /// path SAYS rather than what a caller happens to receive — the sentence is the
+    /// thing under test, and a `oneshot` in between only obscures it.
+    #[cfg(test)]
+    fn for_tests(
+        client_request_id: &str,
+        thread_id: &str,
+        route: &'static str,
+        composed_against: Option<&str>,
+    ) -> PendingCompose {
+        PendingCompose {
+            client_request_id: client_request_id.to_string(),
+            claimed_hash: "h".into(),
+            thread_id: thread_id.to_string(),
+            route,
+            composed_against: composed_against.map(str::to_string),
+            deadline: tokio::time::Instant::now() + COMPOSE_BUDGET,
+            replies: Vec::new(),
+            _gates: Vec::new(),
+            #[cfg(test)]
+            told: None,
+        }
+    }
+
+    /// **Test-only.** What [`PendingCompose::tell`] said.
+    #[cfg(test)]
+    fn told_for_tests(&self) -> ComposeReport {
+        self.told.clone().expect("the entry was told something")
+    }
+
+    /// **Tell everyone waiting on this write the same thing, once.**
+    fn tell(&mut self, report: ComposeReport) {
+        #[cfg(test)]
+        {
+            self.told = Some(report.clone());
+        }
         for reply in std::mem::take(&mut self.replies) {
             let _ = reply.send(report.clone());
         }
@@ -3941,6 +4377,191 @@ fn interrupt_refusal(
         );
     }
     None
+}
+
+/// **Everything that refuses a compose before a byte is written, in one place — and the
+/// ROUTE it takes if nothing does.**
+///
+/// A free function taking the facts, for [`interrupt_refusal`]'s reason. It returns the
+/// route rather than a bare `Ok`, because deciding the route IS the last of these checks:
+/// the same read of the running turn that would refuse a stale ask is the read that says
+/// whether these words start a turn or join one.
+///
+/// **The order is the interrupt's**, and for the same reasons: the connection first,
+/// because an ask aimed at a socket that is gone is not a question about this one; then the
+/// thread, then the visit, then the moment.
+fn compose_route(
+    visit: &Visit,
+    running_turn: Option<&RunningTurn>,
+    switch_pending: bool,
+    thread_id: &str,
+    generation: u64,
+    upstream_epoch: u64,
+) -> Result<&'static str, &'static str> {
+    if visit.upstream_epoch != upstream_epoch {
+        return Err(
+            "this Mac's link to the Codex session reconnected while that message was in \
+             flight, so nothing was said; try again",
+        );
+    }
+    if visit.thread_id.as_deref() != Some(thread_id) {
+        return Err(
+            "this Codex session is not on the thread that message was addressed to, so \
+             nothing was said; say it at the Mac",
+        );
+    }
+    if visit.generation != generation {
+        return Err(
+            "this Codex session has moved on since that message was composed, so nothing \
+             was said; open the run again",
+        );
+    }
+    // **A switch in flight refuses BOTH routes.** The broker refuses them too — a
+    // reserved switch fails a `turn/start`'s admission outright, and leaves no running
+    // turn for a steer to name — but a claim taken here would be a durable record of an
+    // actuation the broker was always going to refuse, which is the thing claiming before
+    // writing exists to avoid.
+    if switch_pending {
+        return Err(
+            "this Codex session is moving to another thread, so nothing was said; try \
+             again once it has settled",
+        );
+    }
+    // **The route, decided by the same read that gates it.**
+    //
+    // A running turn this connection watched start, on this thread, in this visit, means
+    // these words join it. Anything else means the thread is idle as this link knows it,
+    // and they begin a turn.
+    //
+    // The turn's THREAD and VISIT are compared, not just its id: a turn recorded under a
+    // visit this link has left cannot be steered, however the ids read. That is the same
+    // structural property [`RunningTurn::is_named_by`] gives the stop control, reached
+    // here through the fields rather than through a claim that does not exist yet.
+    match running_turn {
+        Some(running) if running.thread_id == thread_id && running.generation == generation => {
+            Ok(crate::store::COMPOSE_ROUTE_STEER)
+        }
+        _ => Ok(crate::store::COMPOSE_ROUTE_START),
+    }
+}
+
+/// **The material one compose is claimed with**, built from the route this link just
+/// decided.
+///
+/// A free function beside [`compose_frame`] and for the same reason, plus one that is
+/// specific to this pair: the claim and the frame are two statements about ONE actuation,
+/// and the whole of G4 is that they agree — a row saying `turn_start` beside a frame
+/// saying `turn/steer` is a retry that would replay the wrong thing for ever, because the
+/// material is immutable once written. Built here, they can be asserted against each other
+/// without a socket (`the_claim_and_the_frame_are_the_same_statement`).
+fn compose_material(
+    route: &str,
+    thread_id: &str,
+    generation: u64,
+    composed_against: Option<&str>,
+    claimed_hash: &str,
+) -> crate::store::ClaimedMaterial {
+    crate::store::ClaimedMaterial {
+        thread_id: thread_id.to_string(),
+        generation,
+        route: route.to_string(),
+        target_turn_id: composed_against.map(str::to_string),
+        claimed_hash: claimed_hash.to_string(),
+    }
+}
+
+/// **The exact frame this link writes for one compose.**
+///
+/// A free function for [`compose_route`]'s reason and one sharper: this frame has to
+/// satisfy every ownership rule the BROKER holds, in another crate, and a rule that can be
+/// satisfied in principle by a frame this link cannot build is a feature that compiles and
+/// cannot start a turn. That is not a hypothetical — it is exactly what the stale
+/// `serviceTier` pin did to the TUI's own frame on 0.153.4. So the frame is built where it
+/// can be asserted against the broker's own admission
+/// (`the_frame_the_daemon_authors_for_a_phones_start_is_admitted`, and its twin here).
+///
+/// # Why a start carries fourteen keys and a steer carries six
+///
+/// Both are the MEASURED shapes, and neither is a superset chosen for safety. A
+/// `turn/start` is ownership-carrying: the broker requires `approvalPolicy` and
+/// `approvalsReviewer` present and equal to the launch fingerprint, `cwd` and
+/// `runtimeWorkspaceRoots` equal to what was bound at the thread's creation,
+/// `sandboxPolicy` exactly null (which DEFERS to that thread's own proven policy), and the
+/// six authorization-adjacent params present and null — a MISSING one of those is as
+/// unprovable as a populated one. A `turn/steer` carries no ownership fields at all and is
+/// pinned to exactly its six measured keys, so five or seven is refused.
+///
+/// Crate-visible for one reason: the live busy-rule gate drives a `turn/start` on a raw
+/// ccd connection, and it has to be THIS frame. Written out by hand there it was a second
+/// statement of the same fourteen keys, which is the shape of thing that goes stale
+/// silently — the probe would keep passing while proving the rule about a frame the link
+/// no longer sends.
+pub(crate) fn compose_frame(
+    wire_id: i64,
+    route: &str,
+    thread_id: &str,
+    composed_against: Option<&str>,
+    text: &str,
+    launch: Option<&crate::codex_adapter::TurnLaunch>,
+) -> Value {
+    let input = json!([{"type": "text", "text": text, "text_elements": []}]);
+    if route == crate::store::COMPOSE_ROUTE_STEER {
+        return json!({
+            "id": wire_id,
+            "method": "turn/steer",
+            "params": {
+                "threadId": thread_id,
+                "expectedTurnId": composed_against,
+                "input": input,
+                "clientUserMessageId": Value::Null,
+                "responsesapiClientMetadata": Value::Null,
+                "additionalContext": Value::Null,
+            },
+        });
+    }
+    let launch = launch.expect("a start refuses before this when the launch is unknown");
+    json!({
+        "id": wire_id,
+        "method": "turn/start",
+        "params": {
+            "threadId": thread_id,
+            "input": input,
+            // The ownership fields, from the accepted resume answer — the server echoing
+            // what this thread was created with, which the broker proved at that creation
+            // and proves again now.
+            "approvalPolicy": launch.approval_policy,
+            "approvalsReviewer": launch.approvals_reviewer,
+            "cwd": launch.cwd,
+            // **No `runtimeWorkspaceRoots`, and this link could not send one if it wanted
+            // to.** MEASURED on codex 0.153.4 against the app-server's own socket: the key
+            // is refused outright — `turn/start.runtimeWorkspaceRoots requires
+            // experimentalApi capability` — for any client that did not declare that
+            // capability at `initialize`. The TUI declares it; this link declares
+            // `clientInfo` and nothing else, deliberately. The same frame without the key
+            // is accepted.
+            //
+            // Nothing is lost. The broker's head-check proves the named thread is the
+            // session's one verified thread, whose roots it installed only after proving
+            // them exactly `[launch cwd]`; a turn that omits the field runs under those.
+            // It is the deferral `sandboxPolicy: null` already makes, and it leaves the
+            // phone unable to name a workspace at all.
+            // The measured `sandboxPolicy: null`, which DEFERS to the thread's own policy.
+            "sandboxPolicy": Value::Null,
+            // The six captured-null params. Each is authorization-adjacent and none was
+            // ever observed carrying a value; a populated one is refused and so is a
+            // missing one.
+            "permissions": Value::Null,
+            "environments": Value::Null,
+            "multiAgentMode": Value::Null,
+            "responsesapiClientMetadata": Value::Null,
+            "additionalContext": Value::Null,
+            "outputSchema": Value::Null,
+            // Measured null-or-object, and this link nominates none: the collaboration
+            // mode is the operator's own setting and a phone does not get to change it.
+            "collaborationMode": Value::Null,
+            "clientUserMessageId": Value::Null,
+        },
+    })
 }
 
 /// **The binding and the subscription, resolved into one answer.**
@@ -4450,6 +5071,17 @@ impl Connection<'_> {
         // before the writes, and deliberately not undone if they fail — the visit is
         // per-connection, and a failed attach ends the connection anyway.
         self.visit.thread_id = Some(thread.to_string());
+        // **What this thread runs under, taken from the answer that resumed it.** The
+        // three values a `turn/start` must carry — see
+        // [`crate::codex_adapter::TurnLaunch`]. They are not a grant: the broker asserts
+        // every one of them against the launch fingerprint it holds and refuses the turn
+        // if any disagrees, so a wrong value costs a refusal and never a widening. This is
+        // how the daemon learns the shape of a frame it never authored before.
+        //
+        // Overwritten on every accepted answer, including a re-attach to the same thread,
+        // so the daemon speaks from the latest thing the server said rather than from the
+        // first.
+        self.launch = seed.launch().cloned();
         // **THE RUN IS MID-TURN, AND THIS IS THE ONLY WITNESS THERE IS.** A
         // completion admitted moments ago is waiting out its dispatch grace;
         // if the link dropped and the next turn began while it was down, no
@@ -5335,6 +5967,459 @@ impl Connection<'_> {
         .await
     }
 
+    /// **Claim one phone compose, decide its route, and write it.**
+    ///
+    /// The interrupt's shape with one difference that runs through all of it: **the route
+    /// is not known until this moment**, so it is decided here, written into the claim as
+    /// immutable material, and never recomputed. That is what makes G4's rule true — a
+    /// compose issued as a `turn/start` is re-issued as a `turn/start`, and a retry after
+    /// the session became busy replays the start rather than becoming a steer that puts
+    /// the words into a turn nobody composed them for.
+    async fn compose_turn<S>(
+        &mut self,
+        ws: &mut tokio_tungstenite::WebSocketStream<S>,
+        ask: ComposeRequest,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let refuse = |ask: ComposeRequest, why: &str| {
+            let _ = ask.reply.send(ComposeReport::NotApplied(why.to_string()));
+        };
+        // A retry of an ask still in flight joins it rather than being refused. See
+        // [`Connection::join_open_interrupt`] for the whole argument.
+        let Some(ask) = self.join_open_compose(ask) else {
+            return Ok(());
+        };
+        // The record is asked before the ask is judged, for `interrupt_turn`'s reason: two
+        // asks under one id can both be past the daemon's pre-enqueue read, and the second
+        // must hear what the first was told rather than a refusal about a state that has
+        // moved on since.
+        if let Some(recorded) = self.recorded_compose_outcome(&ask).await {
+            let _ = ask.reply.send(recorded);
+            return Ok(());
+        }
+        let route = match compose_route(
+            &self.visit,
+            self.running_turn.as_ref(),
+            self.switch_candidate.is_some(),
+            &ask.thread_id,
+            ask.generation,
+            ask.upstream_epoch,
+        ) {
+            Ok(route) => route,
+            Err(why) => {
+                refuse(ask, why);
+                return Ok(());
+            }
+        };
+        // **A start needs the frame's ownership fields, and this link may not invent
+        // them.** They come from the accepted resume answer — the server echoing what the
+        // thread was created with, which the broker fingerprint-asserted at that creation
+        // and will assert again now. So getting one wrong costs a refusal, never a
+        // widening; not having them at all costs this sentence, which names the missing
+        // fact rather than sending a frame that cannot be admitted.
+        let launch = match (route, self.launch.clone()) {
+            (crate::store::COMPOSE_ROUTE_START, None) => {
+                refuse(
+                    ask,
+                    "this Mac has not yet read what this Codex thread runs under, so it \
+                     cannot start a turn on it; try again shortly, or say it at the Mac",
+                );
+                return Ok(());
+            }
+            (_, launch) => launch,
+        };
+        // The turn a steer is composed against: the one this connection is watching.
+        // Present by construction on this route — it is what `compose_route` read to
+        // choose it.
+        let composed_against = (route == crate::store::COMPOSE_ROUTE_STEER)
+            .then(|| self.running_turn.as_ref().map(|t| t.turn_id.clone()))
+            .flatten();
+
+        // The durable claim, taken now that everything that could refuse has been asked,
+        // and before a byte is written. The route and the turn go INTO it, which is what a
+        // replay reads back.
+        let claimed = compose_material(
+            route,
+            &ask.thread_id,
+            ask.generation,
+            composed_against.as_deref(),
+            &ask.claimed_hash,
+        );
+        let now = protocol::time::now_rfc3339();
+        let claim = self
+            .daemon
+            .db
+            .claim_mutation(
+                crate::store::OPERATION_COMPOSE,
+                self.session.uid.clone(),
+                ask.client_request_id.clone(),
+                claimed,
+                now,
+            )
+            .await;
+        match claim {
+            Ok(crate::store::MutationClaim::Claimed) => {}
+            Ok(crate::store::MutationClaim::Applied { outcome, .. }) => {
+                let _ = ask.reply.send(replayed_compose_report(&outcome));
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
+                let _ = ask
+                    .reply
+                    .send(ComposeReport::Unknown(COMPOSE_ALREADY_SENT_UNKNOWN.into()));
+                return Ok(());
+            }
+            // **A generic sentence, deliberately**, for `interrupt_turn`'s reason: the
+            // material a conflict compares includes the visit generation and the route,
+            // which are this daemon's own bookkeeping. The case where the CALLER really
+            // did reuse an id for different WORDS is caught before a claim is attempted,
+            // by [`crate::state::Daemon::compose`], and that one says so plainly.
+            // **The sentence the daemon used to say.** Its pre-claim copy of this read is
+            // gone (one question, one answer — see [`crate::state::Daemon::compose`]), and
+            // the wording it had for this case was the better of the two: a person who
+            // reused an id for different words did something specific and can act on being
+            // told so. Unlike the interrupt's deliberately generic conflict text, a
+            // compose's material carries nothing the caller cannot see — the route and the
+            // turn are chosen here, but a CONFLICT can only be reached by a different hash,
+            // because the same id with the same words joins the entry above or replays the
+            // row. So naming the cause blames nobody for bookkeeping they cannot see.
+            Ok(crate::store::MutationClaim::Conflict) => {
+                refuse(ask, COMPOSE_ID_REUSED);
+                return Ok(());
+            }
+            Ok(crate::store::MutationClaim::NoSession) => {
+                refuse(ask, "this run is gone, so nothing can be said to it");
+                return Ok(());
+            }
+            // **The error is logged here and not sent.** A store `Display` is an anyhow
+            // chain whose open paths name absolute filesystem locations; the phone is told
+            // what happened and what to do, which is all it can act on. This is the rule
+            // [`wire_refusal_reason`] already applies to the app-server's own text.
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not claim the compose {}: {err:#}",
+                    self.session.name,
+                    ask.client_request_id
+                );
+                refuse(
+                    ask,
+                    "this Mac could not record that the message is being sent; nothing \
+                     was sent. Check the Mac.",
+                );
+                return Ok(());
+            }
+        }
+
+        let wire_id = self.next_id;
+        self.next_id += 1;
+        let frame = compose_frame(
+            wire_id,
+            route,
+            &ask.thread_id,
+            composed_against.as_deref(),
+            &ask.text,
+            launch.as_ref(),
+        );
+        self.open_composes.lock().expect("open composes").insert(
+            wire_id,
+            PendingCompose {
+                client_request_id: ask.client_request_id.clone(),
+                claimed_hash: ask.claimed_hash.clone(),
+                thread_id: ask.thread_id.clone(),
+                route,
+                composed_against,
+                deadline: tokio::time::Instant::now() + COMPOSE_BUDGET,
+                replies: vec![ask.reply],
+                // The write is happening now; the guard moves from the ask to the
+                // pending entry and is released only when it is drained.
+                _gates: vec![ask.gate],
+                #[cfg(test)]
+                told: None,
+            },
+        );
+        self.send(ws, frame).await
+    }
+
+    /// **Attach a retry to the compose it is a retry OF, or hand it back.**
+    ///
+    /// [`Connection::join_open_interrupt`]'s rule, keyed on what makes two composes one:
+    /// the same request id AND the same words. A second ask under one id carrying
+    /// different words is two mutations under one key, and that falls through to the claim,
+    /// which is the thing that decides it.
+    fn join_open_compose(&self, ask: ComposeRequest) -> Option<ComposeRequest> {
+        let mut open = self.open_composes.lock().expect("open composes");
+        let joined = open.values_mut().find(|held| {
+            held.client_request_id == ask.client_request_id && held.claimed_hash == ask.claimed_hash
+        });
+        match joined {
+            Some(held) => {
+                held.replies.push(ask.reply);
+                held._gates.push(ask.gate);
+                None
+            }
+            None => Some(ask),
+        }
+    }
+
+    /// **What the ledger already recorded for this ask, if anything terminal.**
+    ///
+    /// [`Connection::recorded_interrupt_outcome`]'s twin. The material is compared on what
+    /// the CLIENT bound — the words — for `Daemon::interrupt`'s reason: the route, the
+    /// thread and the visit are this daemon's bookkeeping, and a person who retried has
+    /// done nothing wrong about any of them.
+    async fn recorded_compose_outcome(&self, ask: &ComposeRequest) -> Option<ComposeReport> {
+        let state = self
+            .daemon
+            .db
+            .mutation_status(
+                crate::store::OPERATION_COMPOSE,
+                self.session.uid.clone(),
+                ask.client_request_id.clone(),
+            )
+            .await
+            .ok()??;
+        if state.claimed.claimed_hash != ask.claimed_hash {
+            return None;
+        }
+        match state.status {
+            crate::store::AnswerStatus::Settled(outcome) => Some(replayed_compose_report(&outcome)),
+            crate::store::AnswerStatus::Indeterminate => {
+                Some(ComposeReport::Unknown(COMPOSE_ALREADY_SENT_UNKNOWN.into()))
+            }
+            // An attempt this very connection has in flight. Left to the claim, which is
+            // the one that decides.
+            crate::store::AnswerStatus::Applying => None,
+        }
+    }
+
+    /// **A compose's own response is its outcome, and that is the whole difference from an
+    /// interrupt.**
+    ///
+    /// MEASURED on codex 0.153.4: both writes are answered at once and both answers name a
+    /// turn — a `turn/start` with `result.turn.id`, a `turn/steer` with `result.turnId`
+    /// (which is the RUNNING turn's id, because a steer joins the turn rather than making
+    /// one). An interrupt has to wait for a terminal because its own answer carries
+    /// nothing; a compose does not.
+    ///
+    /// An **error** settles it as refused, and the reason a phone reads is built from the
+    /// CODE alone — see [`wire_refusal_reason`] for the measured message that is why.
+    ///
+    /// Returns whether the frame was this connection's to consume.
+    async fn note_compose_response(&mut self, frame: &Value) -> bool {
+        let Some(wire_id) = frame.get("id").and_then(Value::as_i64) else {
+            return false;
+        };
+        let mut held = {
+            let mut open = self.open_composes.lock().expect("open composes");
+            match open.remove(&wire_id) {
+                Some(held) => held,
+                None => return false,
+            }
+        };
+        if frame.get("error").is_some() {
+            let why = frame
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("no reason given");
+            // Logged HERE, on the machine entitled to it, and not passed on.
+            crate::log_info!(
+                "codex link for {}: a compose on thread {} was refused ({why})",
+                self.session.name,
+                held.thread_id
+            );
+            let settlement = self
+                .settle_compose_claim(&held, crate::store::COMPOSE_REFUSED)
+                .await;
+            let ordinary = ComposeReport::NotApplied(wire_refusal_reason(
+                frame,
+                "that message",
+                "say it at the Mac",
+            ));
+            self.report_settled_compose(&mut held, settlement, ordinary)
+                .await;
+            return true;
+        }
+        // The turn the answer names, read at the route's own pointer.
+        //
+        // **A steer's answer must name the turn it was composed AGAINST**, and that is
+        // checked rather than assumed. MEASURED on 0.153.4: the result of a `turn/steer`
+        // is the running turn's id, which is the id the request already carried — so an
+        // answer naming a different one is a shape this build has never seen and cannot
+        // read as "these words joined that turn". Failing the filter drops through to the
+        // unreadable-answer arm below, which is terminal `indeterminate`: the write
+        // happened, so "nothing was said" is false, and what it did cannot be named.
+        let turn = if held.route == crate::store::COMPOSE_ROUTE_STEER {
+            frame
+                .pointer("/result/turnId")
+                .and_then(Value::as_str)
+                .filter(|t| Some(*t) == held.composed_against.as_deref())
+        } else {
+            frame.pointer("/result/turn/id").and_then(Value::as_str)
+        }
+        .filter(|t| !t.is_empty());
+        let Some(turn) = turn else {
+            // **An answer this build cannot read is not evidence.** The write happened, so
+            // "nothing was sent" would be false; what became of it cannot be named, so
+            // terminal indeterminate is the only true statement left.
+            crate::log_error!(
+                "codex link for {}: a compose was answered with a result naming no turn; \
+                 recording it as indeterminate",
+                self.session.name
+            );
+            let settlement = self.abandon_compose_claim(&held).await;
+            self.report_settled_compose(
+                &mut held,
+                settlement,
+                ComposeReport::Unknown(
+                    "Codex answered this message with something this Mac could not read, \
+                     so it cannot say what became of it; it will not be sent again. Check \
+                     the Mac."
+                        .into(),
+                ),
+            )
+            .await;
+            return true;
+        };
+        let turn = turn.to_string();
+        let settlement = self
+            .settle_compose_claim(&held, &crate::store::compose_outcome(held.route, &turn))
+            .await;
+        let ordinary = if held.route == crate::store::COMPOSE_ROUTE_STEER {
+            ComposeReport::Steered {
+                turn_id: turn.clone(),
+            }
+        } else {
+            ComposeReport::Started {
+                turn_id: turn.clone(),
+            }
+        };
+        self.report_settled_compose(&mut held, settlement, ordinary)
+            .await;
+        true
+    }
+
+    /// Record a compose's terminal outcome.
+    async fn settle_compose_claim(&self, held: &PendingCompose, outcome: &str) -> Settlement {
+        let settled_at = protocol::time::now_rfc3339();
+        match self
+            .daemon
+            .db
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+                outcome.to_string(),
+                settled_at,
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => Settlement::Superseded,
+            // Logged here, not carried: `Settlement::Unrecorded`'s string reaches the
+            // phone through [`Connection::report_settled_compose`], and a store error is
+            // an anyhow chain whose open paths name absolute filesystem locations.
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not settle the compose {}: {err:#}",
+                    self.session.name,
+                    held.client_request_id
+                );
+                // The variant is shared with the answer and interrupt paths, so it keeps
+                // its string; what this passes is fixed public text rather than the
+                // error's own.
+                Settlement::Unrecorded(String::new())
+            }
+        }
+    }
+
+    /// Make a compose terminal WITHOUT claiming it did anything.
+    async fn abandon_compose_claim(&self, held: &PendingCompose) -> Settlement {
+        match self
+            .daemon
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_COMPOSE,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => Settlement::Superseded,
+            // Logged here, not carried: `Settlement::Unrecorded`'s string reaches the
+            // phone through [`Connection::report_settled_compose`], and a store error is
+            // an anyhow chain whose open paths name absolute filesystem locations.
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not settle the compose {}: {err:#}",
+                    self.session.name,
+                    held.client_request_id
+                );
+                // The variant is shared with the answer and interrupt paths, so it keeps
+                // its string; what this passes is fixed public text rather than the
+                // error's own.
+                Settlement::Unrecorded(String::new())
+            }
+        }
+    }
+
+    /// **Tell the waiters, and let the RECORD decide what they are told.**
+    ///
+    /// [`Connection::report_settled_interrupt`]'s rule: an outcome this Mac could not write
+    /// down is one it may not assert, because the next ask under that id would read the
+    /// row and disagree with what was just said.
+    async fn report_settled_compose(
+        &self,
+        held: &mut PendingCompose,
+        settlement: Settlement,
+        ordinary: ComposeReport,
+    ) {
+        let report = match settlement {
+            Settlement::Recorded => ordinary,
+            // Somebody else made it terminal first — the recovery sweep, or this row's own
+            // indeterminate settle. Read the record rather than assert over it.
+            Settlement::Superseded => match self
+                .daemon
+                .db
+                .mutation_status(
+                    crate::store::OPERATION_COMPOSE,
+                    self.session.uid.clone(),
+                    held.client_request_id.clone(),
+                )
+                .await
+            {
+                Ok(Some(state)) => match state.status {
+                    crate::store::AnswerStatus::Settled(outcome) => {
+                        replayed_compose_report(&outcome)
+                    }
+                    _ => ComposeReport::Unknown(
+                        "this message was sent and what became of it is not known; it will \
+                         not be sent again. Check the Mac."
+                            .into(),
+                    ),
+                },
+                _ => ComposeReport::Unknown(
+                    "this message was sent and this Mac could not read what became of it; \
+                     it will not be sent again. Check the Mac."
+                        .into(),
+                ),
+            },
+            // **Fixed text, and the error is not in it.** The compose helpers log the
+            // store's own `Display` — an anyhow chain whose open paths name absolute
+            // filesystem locations — and hand this arm an empty string, so there is
+            // nothing local to interpolate even by accident.
+            Settlement::Unrecorded(_) => ComposeReport::Unknown(
+                "this message was sent and this Mac could not record what became of it; \
+                 it will not be sent again. Check the Mac."
+                    .into(),
+            ),
+        };
+        held.tell(report);
+    }
+
     /// **Attach a retry to the ask it is a retry OF, or hand it back.**
     ///
     /// `None` when the ask joined an entry already waiting — it will be told whatever
@@ -5470,8 +6555,15 @@ impl Connection<'_> {
         self.report_settled_interrupt(
             &mut held,
             settlement,
-            InterruptReport::NotApplied(format!(
-                "Codex refused to stop that turn ({why}); nothing was changed"
+            // **The CODE, not the message** — see [`wire_refusal_reason`]. MEASURED on
+            // 0.153.4: the app-server's refusal for a turn that has already ended is
+            // `-32600 "expected active turn id X but found Y"`, and X is the turn the
+            // session is really running. This sentence reaches a phone, which did not
+            // send that id. `why` is logged just above, on the machine entitled to it.
+            InterruptReport::NotApplied(wire_refusal_reason(
+                frame,
+                "that stop",
+                "stop the turn at the Mac",
             )),
         )
         .await;
@@ -5547,7 +6639,7 @@ impl Connection<'_> {
                 crate::store::OPERATION_INTERRUPT,
                 self.session.uid.clone(),
                 held.client_request_id.clone(),
-                outcome,
+                outcome.to_string(),
                 protocol::time::now_rfc3339(),
             )
             .await
@@ -6768,6 +7860,18 @@ impl Connection<'_> {
         self.visit.generation += 1;
         self.visit.thread_id = Some(thread.to_string());
         self.running_turn = None;
+        // **What the OLD thread ran under says nothing about the new one.** The values
+        // are per-thread — they are what its own creation bound — and carrying them
+        // across a switch would author a turn on the new thread out of the old one's
+        // ownership fields. The broker would refuse that, but the honest state is to have
+        // nothing until the new thread's own resume answer arrives.
+        //
+        // **This clears 2e-era state that only compose made reachable**, which is why it
+        // lives in this chunk: before a phone could start a turn, nothing read these
+        // values, so a stale set survived a switch harmlessly. Kept deliberately rather
+        // than deferred — the field is introduced here and leaving it stale on the one
+        // transition that invalidates it would be shipping the bug with the feature.
+        self.launch = None;
     }
 
     fn apply_switch_candidate(&mut self) -> Option<String> {
@@ -10281,6 +11385,7 @@ mod tests {
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
             crate::codex_link::interrupt_channel().1,
+            crate::codex_link::compose_channel().1,
         ));
         // Sampled rather than slept through: see the note on this function.
         let mut published: Vec<CodexAddressee> = Vec::new();
@@ -10363,6 +11468,7 @@ mod tests {
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
             crate::codex_link::interrupt_channel().1,
+            crate::codex_link::compose_channel().1,
         ));
         let mut published: Vec<CodexAddressee> = Vec::new();
         let until = Instant::now() + settle;
@@ -10459,6 +11565,7 @@ mod tests {
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
             crate::codex_link::interrupt_channel().1,
+            crate::codex_link::compose_channel().1,
         ));
         tokio::time::sleep(Duration::from_secs(2)).await;
         let stale = daemon
@@ -10530,6 +11637,7 @@ mod tests {
             carry.clone(),
             crate::codex_link::answer_channel().1,
             crate::codex_link::interrupt_channel().1,
+            crate::codex_link::compose_channel().1,
         ));
         tokio::time::sleep(settle).await;
         let out = (
@@ -11259,6 +12367,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -11304,6 +12414,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -12222,6 +13334,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: generation,
@@ -12434,6 +13548,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -12512,6 +13628,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13216,6 +14334,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13353,6 +14473,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13456,6 +14578,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13575,6 +14699,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13692,6 +14818,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13856,6 +14984,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14039,6 +15169,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14213,6 +15345,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14321,6 +15455,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14647,6 +15783,7 @@ mod tests {
             LinkCarry::new(),
             crate::codex_link::answer_channel().1,
             crate::codex_link::interrupt_channel().1,
+            crate::codex_link::compose_channel().1,
         ));
         tokio::time::sleep(Duration::from_secs(3)).await;
         let connections = leg.connections.load(std::sync::atomic::Ordering::SeqCst);
@@ -15133,6 +16270,7 @@ mod tests {
                 LinkCarry::new(),
                 asks,
                 crate::codex_link::interrupt_channel().1,
+                crate::codex_link::compose_channel().1,
             ));
             AnsweringLink {
                 leg,
@@ -15398,6 +16536,8 @@ mod tests {
             outstanding: std::collections::BTreeMap::new(),
             open_answers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            launch: None,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -16084,6 +17224,702 @@ mod tests {
                 .unwrap(),
             crate::store::MutationClaim::Claimed
         );
+    }
+
+    /// Put a compose claim in the ledger the way the link would, so a settle has a row.
+    fn claim_a_compose(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        route: &str,
+        against: Option<&str>,
+        text: &str,
+    ) {
+        let material = crate::store::ClaimedMaterial {
+            thread_id: LIFECYCLE_THREAD.into(),
+            generation: 1,
+            route: route.into(),
+            target_turn_id: against.map(str::to_string),
+            claimed_hash: protocol::hash::compose_hash(uid, text),
+        };
+        assert_eq!(
+            daemon
+                .store
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    uid,
+                    request_id,
+                    &material,
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap(),
+            crate::store::MutationClaim::Claimed
+        );
+    }
+
+    /// **The frame a phone's start authors is the one the broker admits.**
+    ///
+    /// The ccd half of a pin whose other half lives in `codex-broker`
+    /// (`the_frame_the_daemon_authors_for_a_phones_start_is_admitted`). Two crates, one
+    /// frame: this asserts what the daemon emits, and that one asserts the broker forwards
+    /// it. Neither is worth much alone — a rule the broker could satisfy in principle but
+    /// this frame could not is a feature that compiles and cannot start a turn, which is
+    /// exactly what the stale `serviceTier` pin did to the TUI's own frame on 0.153.4.
+    ///
+    /// **Mutation:** drop `outputSchema` from [`compose_frame`] and the broker's twin goes
+    /// red while this one still passes — which is why the pair is written as a pair.
+    #[test]
+    fn the_frame_a_phone_start_authors_is_the_one_the_broker_admits() {
+        let launch = crate::codex_adapter::TurnLaunch {
+            approval_policy: "untrusted".into(),
+            approvals_reviewer: "user".into(),
+            cwd: json!("/work/proj"),
+        };
+        let start = compose_frame(
+            3,
+            crate::store::COMPOSE_ROUTE_START,
+            "01a0-head",
+            None,
+            "do the thing",
+            Some(&launch),
+        );
+        assert_eq!(start["method"], "turn/start");
+        let params = start["params"].as_object().expect("an object");
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "additionalContext",
+                "approvalPolicy",
+                "approvalsReviewer",
+                "clientUserMessageId",
+                "collaborationMode",
+                "cwd",
+                "environments",
+                "input",
+                "multiAgentMode",
+                "outputSchema",
+                "permissions",
+                "responsesapiClientMetadata",
+                "sandboxPolicy",
+                "threadId",
+            ],
+            "the broker's twin test carries this exact set; a key added here and not there \
+             is a turn that cannot start"
+        );
+        // **`runtimeWorkspaceRoots` is absent, and it is the one absence that is measured
+        // rather than chosen.** codex 0.153.4 refuses the key on a `turn/start` from a
+        // client that did not declare `experimentalApi`; this link declares `clientInfo`
+        // and nothing else. A build that started sending it would be refused by the
+        // app-server, after the broker had admitted it and a claim had been taken.
+        assert!(
+            !params.contains_key("runtimeWorkspaceRoots"),
+            "the phone may not name a workspace, and could not send this key if it tried"
+        );
+        // The six the broker requires PRESENT and null, plus the sandbox deferral.
+        for key in [
+            "permissions",
+            "environments",
+            "multiAgentMode",
+            "responsesapiClientMetadata",
+            "additionalContext",
+            "outputSchema",
+            "sandboxPolicy",
+            "collaborationMode",
+        ] {
+            assert_eq!(params[key], Value::Null, "params.{key}");
+        }
+        // The ownership values come from the resume answer, not from anything this link
+        // chose: a value it invented would be refused, which is the fail-closed direction.
+        assert_eq!(params["approvalPolicy"], "untrusted");
+        assert_eq!(params["approvalsReviewer"], "user");
+        assert_eq!(params["cwd"], "/work/proj");
+        // The words, as the one text item the ccd leg is allowed.
+        assert_eq!(
+            params["input"],
+            json!([{"type": "text", "text": "do the thing", "text_elements": []}])
+        );
+
+        // The steer is the tighter of the two: exactly six keys, so five or seven is
+        // refused by the broker's own pin.
+        let steer = compose_frame(
+            4,
+            crate::store::COMPOSE_ROUTE_STEER,
+            "01a0-head",
+            Some(APPROVAL_TURN),
+            "also say HELLO",
+            None,
+        );
+        assert_eq!(steer["method"], "turn/steer");
+        let params = steer["params"].as_object().expect("an object");
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "additionalContext",
+                "clientUserMessageId",
+                "expectedTurnId",
+                "input",
+                "responsesapiClientMetadata",
+                "threadId",
+            ]
+        );
+        assert_eq!(params["expectedTurnId"], APPROVAL_TURN);
+    }
+
+    /// **F7: a row this build cannot read is refused plainly, not replayed as a steer.**
+    ///
+    /// `parse_compose_outcome` split on the first space and returned whatever it found, and
+    /// `replayed_compose_report` then asked `route == COMPOSE_ROUTE_START` — so ANY other
+    /// word came back `Duplicate{started:false}`, which the phone renders as "your words
+    /// joined a running turn". About words this daemon cannot account for. Reachable from
+    /// a corrupt row, or from a third route a future build writes and this one does not
+    /// know.
+    ///
+    /// **Mutation:** drop the `matches!` on the route and the first two rows go green as
+    /// duplicates.
+    #[test]
+    fn an_unreadable_compose_outcome_is_refused_rather_than_replayed_as_a_steer() {
+        for corrupt in [
+            "turn_bogus 01a0-a-real-looking-turn",
+            "delivered 01a0-a-real-looking-turn",
+            " 01a0-a-real-looking-turn",
+            "turn_start ",
+            "turn_start",
+        ] {
+            assert_eq!(
+                crate::store::parse_compose_outcome(corrupt),
+                None,
+                "{corrupt:?} names no route this build wrote"
+            );
+            let report = replayed_compose_report(corrupt);
+            assert!(
+                matches!(report, ComposeReport::NotApplied(_)),
+                "{corrupt:?} must replay as a refusal, not as a turn it joined: {report:?}"
+            );
+            // And the sentence carries none of the row — a corrupt outcome can hold a turn
+            // id the phone never sent.
+            let ComposeReport::NotApplied(reason) = report else {
+                unreachable!()
+            };
+            assert!(
+                !reason.contains("01a0-a-real-looking-turn"),
+                "the stored word reached the phone: {reason}"
+            );
+        }
+        // The two real routes still read.
+        for (route, started) in [
+            (crate::store::COMPOSE_ROUTE_START, true),
+            (crate::store::COMPOSE_ROUTE_STEER, false),
+        ] {
+            assert_eq!(
+                replayed_compose_report(&crate::store::compose_outcome(route, "01a0-t")),
+                ComposeReport::Duplicate {
+                    turn_id: "01a0-t".into(),
+                    started,
+                }
+            );
+        }
+    }
+
+    /// **F3: a store error is logged here and never sent to the phone.**
+    ///
+    /// A `Display` on this daemon's store is an anyhow chain whose open paths name
+    /// absolute filesystem locations, and the compose paths interpolated it into
+    /// `Rejected`/`Indeterminate` reasons. The wire-refusal path already had this rule —
+    /// [`wire_refusal_reason`] passes the numeric code and nothing else — and this is the
+    /// same rule applied to the other source of text on the same wire.
+    ///
+    /// Asserted over the sentences themselves, which is where the leak would be: the
+    /// settlement helpers hand [`Settlement::Unrecorded`] an EMPTY string, so there is
+    /// nothing local to interpolate even by accident.
+    #[tokio::test]
+    async fn a_store_error_never_reaches_the_phone_from_a_compose() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C05".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        // A compose that was written and whose settle could not be recorded. The held
+        // entry names no ledger row, so `settle_mutation` reports it did not win and the
+        // report path reads the record back — the shape a real unrecorded settle takes.
+        let mut held = PendingCompose::for_tests(
+            "req-unrecorded",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+        );
+        let secret = "/Users/someone/Library/Application Support/private.sqlite";
+        conn.report_settled_compose(
+            &mut held,
+            Settlement::Unrecorded(secret.to_string()),
+            ComposeReport::Started {
+                turn_id: "01a0-t".into(),
+            },
+        )
+        .await;
+        let ComposeReport::Unknown(reason) = held.told_for_tests() else {
+            panic!("an unrecorded settle is unknown")
+        };
+        assert!(
+            !reason.contains(secret) && !reason.contains("/Users/"),
+            "a local path reached the phone: {reason}"
+        );
+        assert!(reason.contains("Check the Mac"), "{reason}");
+    }
+
+    /// **The claim and the frame are the same statement about one actuation.**
+    ///
+    /// The whole of G4 rests on this pair agreeing. The claimed material is IMMUTABLE once
+    /// written and a retry replays it, so a row recording `turn_start` beside a frame that
+    /// said `turn/steer` is not a one-off mistake — it is a compose that will be replayed
+    /// as the wrong thing for as long as the row exists, telling the operator their words
+    /// began a turn when they joined one.
+    ///
+    /// Asserted over BOTH routes, from the one value each is built from, because the bug
+    /// this exists for is exactly the one where the two stop being built from it. A
+    /// mutation that hard-codes either side's route survived a suite that only checked the
+    /// ledger's own replay — the replay was faithful to a material nothing proved was
+    /// right — which is why the assertion is over the pair rather than over either half.
+    ///
+    /// **Mutation:** hard-code `route` in [`compose_material`] (or in [`compose_frame`])
+    /// and this goes red.
+    #[test]
+    fn the_claim_and_the_frame_are_the_same_statement() {
+        let launch = crate::codex_adapter::TurnLaunch {
+            approval_policy: "untrusted".into(),
+            approvals_reviewer: "user".into(),
+            cwd: json!("/work/proj"),
+        };
+        for (route, method, against) in [
+            (
+                crate::store::COMPOSE_ROUTE_START,
+                "turn/start",
+                None::<&str>,
+            ),
+            (
+                crate::store::COMPOSE_ROUTE_STEER,
+                "turn/steer",
+                Some(APPROVAL_TURN),
+            ),
+        ] {
+            let claimed =
+                compose_material(route, LIFECYCLE_THREAD, 7, against, "hash-of-the-words");
+            let frame = compose_frame(
+                5,
+                route,
+                LIFECYCLE_THREAD,
+                against,
+                "the words",
+                Some(&launch),
+            );
+            assert_eq!(
+                claimed.route, route,
+                "the row records the route that was decided"
+            );
+            assert_eq!(
+                frame["method"], method,
+                "and the frame writes the method that route names"
+            );
+            // The turn a steer was composed against is in BOTH, and a start names none in
+            // either — the two halves of "what was this compose aimed at".
+            assert_eq!(claimed.target_turn_id.as_deref(), against);
+            assert_eq!(
+                frame["params"]["expectedTurnId"].as_str(),
+                against,
+                "a steer names the turn it joined; a start names none"
+            );
+            assert_eq!(claimed.thread_id, LIFECYCLE_THREAD);
+            assert_eq!(frame["params"]["threadId"], LIFECYCLE_THREAD);
+            assert_eq!(claimed.generation, 7);
+            assert_eq!(claimed.claimed_hash, "hash-of-the-words");
+        }
+    }
+
+    /// **G1/G2: the answer to a compose is its outcome, and the route decides which
+    /// sentence the phone hears.**
+    ///
+    /// MEASURED on codex 0.153.4: a `turn/start` is answered with `result.turn.id` — a
+    /// NEW turn — and a `turn/steer` with `result.turnId`, which is the RUNNING turn's id
+    /// because a steer joins the turn rather than making one. Two pointers, two sentences,
+    /// and collapsing them would lose the one fact the operator asked for.
+    ///
+    /// **Mutation:** read both answers at the start's pointer and the steer half goes red
+    /// — a steer's `result` has no `turn` object at all, so it would settle indeterminate.
+    #[tokio::test]
+    async fn a_composes_own_answer_says_whether_it_started_a_turn_or_joined_one() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C01".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // A start: the answer names a turn that did not exist when the words were sent.
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-start",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "do the thing",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7001,
+            "req-start",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            a_gate_guard().await,
+        );
+        assert!(
+            conn.note_compose_response(
+                &json!({"id": 7001, "result": {"turn": {"id": "01a0-fresh-turn"}}})
+            )
+            .await
+        );
+        assert_eq!(
+            outcome.await.expect("the caller is always told"),
+            ComposeReport::Started {
+                turn_id: "01a0-fresh-turn".into()
+            }
+        );
+        // The record carries the route AND the turn, which is what a duplicate replays.
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-start")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Settled(
+                "turn_start 01a0-fresh-turn".into()
+            ))
+        );
+
+        // A steer: the answer names the turn that was already running.
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-steer",
+            crate::store::COMPOSE_ROUTE_STEER,
+            Some(APPROVAL_TURN),
+            "also say HELLO",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7002,
+            "req-steer",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_STEER,
+            Some(APPROVAL_TURN),
+            a_gate_guard().await,
+        );
+        assert!(
+            conn.note_compose_response(&json!({"id": 7002, "result": {"turnId": APPROVAL_TURN}}))
+                .await
+        );
+        assert_eq!(
+            outcome.await.expect("the caller is always told"),
+            ComposeReport::Steered {
+                turn_id: APPROVAL_TURN.into()
+            }
+        );
+    }
+
+    /// **G3: a refusal that reaches the phone carries the CODE and no id.**
+    ///
+    /// MEASURED on 0.153.4: the app-server's refusal for a stale steer is
+    /// `-32600 "expected active turn id X but found Y"`, and X is the turn the session is
+    /// really running. The phone did not send that id. The broker's own gate means this
+    /// frame is not written in the ordinary case at all — but the gate is point-in-time, a
+    /// turn can end between the classification and the hand-off, so the daemon-side rule
+    /// is what makes the leak unreachable rather than unlikely.
+    ///
+    /// **Mutation:** interpolate `error.message` into the report and this goes red.
+    #[tokio::test]
+    async fn a_wire_refusal_reaches_the_phone_as_a_code_and_never_as_an_id() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C02".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-stale",
+            crate::store::COMPOSE_ROUTE_STEER,
+            Some("01a0-a-turn-that-ended"),
+            "too late",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7003,
+            "req-stale",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_STEER,
+            Some("01a0-a-turn-that-ended"),
+            a_gate_guard().await,
+        );
+        // The measured frame, verbatim from `fixtures/codex/steer-refusals-0.153.4.txt`.
+        let leaky = "expected active turn id `01a07b25-af6e-7821-b7c7-ee15046d55a0` but \
+                     found `01a07b25-af6e-7821-b7c7-ee15046d55ab`";
+        assert!(
+            conn.note_compose_response(
+                &json!({"id": 7003, "error": {"code": -32600, "message": leaky}})
+            )
+            .await
+        );
+        let ComposeReport::NotApplied(reason) = outcome.await.expect("the caller is always told")
+        else {
+            panic!("a refused compose is not applied")
+        };
+        assert!(
+            reason.contains("-32600"),
+            "the code is structural and is passed on: {reason}"
+        );
+        assert!(
+            !reason.contains("01a07b25-af6e-7821-b7c7-ee15046d55ab"),
+            "the running turn's id must never reach the phone: {reason}"
+        );
+        assert!(
+            !reason.contains("expected active turn id"),
+            "and neither must the message that carries it: {reason}"
+        );
+        // Terminal, and terminal as a refusal: nothing was said, and a retry under this
+        // id replays that rather than saying it.
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-stale")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Settled(
+                crate::store::COMPOSE_REFUSED.into()
+            ))
+        );
+    }
+
+    /// **G4: a retry replays the SNAPSHOT and never becomes a steer.**
+    ///
+    /// The rule the ledger's own DDL wrote down before this subject existed: the claimed
+    /// material is immutable, so a compose issued as a `turn/start` is re-issued as a
+    /// `turn/start` even if the session has since become busy. Converting it would put the
+    /// words into a turn nobody composed them for.
+    ///
+    /// The second half is the other side of the same law: the same id carrying different
+    /// WORDS is two mutations under one key, and neither is actuated on a guess.
+    ///
+    /// **Mutation:** recompute the route at replay time and the first assertion goes red.
+    #[tokio::test]
+    async fn a_compose_retry_replays_the_route_it_was_claimed_with() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C03".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-1",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "start something",
+        );
+        daemon
+            .store
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                &session.uid,
+                "req-1",
+                &crate::store::compose_outcome(
+                    crate::store::COMPOSE_ROUTE_START,
+                    "01a0-the-turn-it-began",
+                ),
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+
+        // The session has moved on — a turn is running now — and the replay still says
+        // "this started a turn", because that is what happened.
+        let state = daemon
+            .store
+            .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-1")
+            .unwrap()
+            .expect("the settled row");
+        let crate::store::AnswerStatus::Settled(outcome) = state.status else {
+            panic!("the row is settled")
+        };
+        assert_eq!(
+            replayed_compose_report(&outcome),
+            ComposeReport::Duplicate {
+                turn_id: "01a0-the-turn-it-began".into(),
+                started: true,
+            },
+            "a replay describes what happened, not what would happen now"
+        );
+
+        // The same id carrying different words is a conflict, and nothing is actuated.
+        let different = crate::store::ClaimedMaterial {
+            thread_id: LIFECYCLE_THREAD.into(),
+            generation: 1,
+            route: crate::store::COMPOSE_ROUTE_START.into(),
+            target_turn_id: None,
+            claimed_hash: protocol::hash::compose_hash(&session.uid, "say something else"),
+        };
+        assert_eq!(
+            daemon
+                .store
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    &session.uid,
+                    "req-1",
+                    &different,
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap(),
+            crate::store::MutationClaim::Conflict
+        );
+    }
+
+    /// **G6: a link that stops after the write records `indeterminate` and never says it
+    /// again.**
+    ///
+    /// Saying something twice is not a recoverable mistake. The claim is durable and the
+    /// write happened, so neither "it was said" nor "nothing was sent" is available —
+    /// terminal `indeterminate` is the only statement left that is true either way, and
+    /// terminal is the point.
+    ///
+    /// **Mutation:** settle these as refused and both halves go red — a retry would be
+    /// admitted and the words said a second time.
+    #[tokio::test]
+    async fn a_compose_the_link_never_heard_about_is_terminal_and_never_re_sent() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C04".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let open: OpenComposes = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-lost",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "into the void",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &open,
+            7004,
+            "req-lost",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            a_gate_guard().await,
+        );
+        settle_open_composes(&daemon, &session, &open, "the link stopped").await;
+        let ComposeReport::Unknown(reason) = outcome.await.expect("the caller is always told")
+        else {
+            panic!("a compose nobody heard about is unknown")
+        };
+        assert!(
+            reason.contains("not be sent again"),
+            "the sentence has to say it will not be repeated: {reason}"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-lost")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+        // And the map is empty, so a second drain reports nothing twice.
+        assert!(open.lock().expect("open composes").is_empty());
+    }
+
+    /// **The route is decided by the state at the write, and every refusal is taken
+    /// before a byte.**
+    ///
+    /// [`compose_route`] is the whole of it, asserted directly for
+    /// [`interrupt_refusal`]'s reason: these are the checks the design rests on and each
+    /// should be provable without standing up a socket.
+    ///
+    /// **Mutation:** return `COMPOSE_ROUTE_STEER` whenever a running turn exists, ignoring
+    /// its thread and visit, and the cross-visit row goes red — words composed for a
+    /// thread this link has left would join a turn on another one.
+    #[test]
+    fn the_route_a_compose_takes_is_decided_by_the_visit_it_is_written_in() {
+        let visit = Visit {
+            generation: 4,
+            upstream_epoch: 9,
+            thread_id: Some(LIFECYCLE_THREAD.to_string()),
+        };
+        let running = RunningTurn {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+            generation: 4,
+            turn_id: APPROVAL_TURN.to_string(),
+        };
+
+        // Idle: a start.
+        assert_eq!(
+            compose_route(&visit, None, false, LIFECYCLE_THREAD, 4, 9),
+            Ok(crate::store::COMPOSE_ROUTE_START)
+        );
+        // Busy on this thread, in this visit: a steer.
+        assert_eq!(
+            compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 4, 9),
+            Ok(crate::store::COMPOSE_ROUTE_STEER)
+        );
+        // **A turn from a visit this link has left is not steerable**, and the fall-back
+        // is a start rather than a refusal: the thread really is idle as far as this
+        // visit is concerned.
+        let stale = RunningTurn {
+            generation: 3,
+            ..running.clone()
+        };
+        assert_eq!(
+            compose_route(&visit, Some(&stale), false, LIFECYCLE_THREAD, 4, 9),
+            Ok(crate::store::COMPOSE_ROUTE_START)
+        );
+        // A reconnect, a foreign thread, a moved visit and a switch in flight each refuse
+        // before anything is claimed.
+        assert!(compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 4, 8).is_err());
+        assert!(compose_route(&visit, Some(&running), false, "01a0-a-stranger", 4, 9).is_err());
+        assert!(compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 3, 9).is_err());
+        assert!(compose_route(&visit, Some(&running), true, LIFECYCLE_THREAD, 4, 9).is_err());
     }
 
     /// **The turn's own terminal is what settles an interrupt, and its `status` is

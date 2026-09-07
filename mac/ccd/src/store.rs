@@ -819,6 +819,79 @@ pub const OPERATION_ANSWER: &str = "answer";
 /// it.
 pub const OPERATION_INTERRUPT: &str = "interrupt";
 
+/// **The `operation_kind` a phone compose is claimed under.**
+///
+/// ONE kind for both routes, not two, and the schema said so before the subject existed:
+/// the DDL names "answer, compose, interrupt" as the three kinds, and
+/// [`ClaimedMaterial::route`] reserves `"turn_start"` and `"turn_steer"` as a compose's
+/// two routes. That split is what the retry law needs. A compose's identity is the WORDS —
+/// the phone composed a message and is retrying the same message — while whether those
+/// words start a turn or join one is a fact about the session at the instant of the write.
+/// Two kinds would make one message under one id two different mutations, so an honest
+/// retry of an unacknowledged send would be claimed afresh under the other kind and the
+/// words would be said twice. One kind with the route in the immutable material is the
+/// shape where a retry replays what actually happened.
+pub const OPERATION_COMPOSE: &str = "compose";
+
+/// A compose that began a turn on an idle thread.
+pub const COMPOSE_ROUTE_START: &str = "turn_start";
+/// A compose that joined the turn the session was already running.
+pub const COMPOSE_ROUTE_STEER: &str = "turn_steer";
+/// A compose the wire refused. Terminal, and replayed as a refusal rather than re-sent.
+pub const COMPOSE_REFUSED: &str = "refused";
+
+/// **The recorded outcome of a compose that reached the model**, which is the route it
+/// took and the turn that heard it.
+///
+/// The turn is in the OUTCOME rather than in the claimed material because for a start it
+/// is not known at claim time — the app-server mints it and reports it in `turn/started`.
+/// (For a steer it is known, and is also in `target_turn_id`; recording it both ways keeps
+/// one reader for both routes.)
+pub fn compose_outcome(route: &str, turn_id: &str) -> String {
+    format!("{route} {turn_id}")
+}
+
+/// The inverse of [`compose_outcome`]: `(route, turn_id)`, or `None` for an outcome that
+/// named no turn (a refusal).
+///
+/// `split_once` rather than a whitespace split, so a turn id that somehow contained a
+/// space round-trips whole rather than being silently truncated to its first word.
+pub fn parse_compose_outcome(outcome: &str) -> Option<(&str, &str)> {
+    let (route, turn) = outcome.split_once(' ')?;
+    if turn.is_empty() {
+        return None;
+    }
+    // **The route is one of the two, or this row is unreadable.**
+    //
+    // It used to return whatever the first token was, and `replayed_compose_report` then
+    // asked `route == COMPOSE_ROUTE_START` — so any other word replayed to the phone as
+    // `Duplicate{started:false}`, which reads as "your words joined a running turn". A
+    // corrupt row, or a third route a future build writes and this one does not know,
+    // would say that about words it cannot account for. Refusing to read it is the only
+    // honest answer, and the caller already has one: an outcome that names no turn
+    // replays as a plain refusal.
+    if !matches!(route, COMPOSE_ROUTE_START | COMPOSE_ROUTE_STEER) {
+        return None;
+    }
+    Some((route, turn))
+}
+
+/// The sentence a replayed compose is told, for an outcome that named no turn.
+pub fn replayed_compose_sentence(outcome: &str) -> String {
+    match outcome {
+        COMPOSE_REFUSED => "an earlier attempt to say this was refused, so nothing was \
+                            sent again"
+            .to_string(),
+        // **The outcome is not interpolated.** A row this build cannot read carries a
+        // turn id the phone never sent — `parse_compose_outcome` refuses an unknown route
+        // and lands here — and there is nothing in the stored word a caller can act on
+        // beyond the fact that this id is spent.
+        _ => {
+            "this message is already settled and will not be sent again; check the Mac".to_string()
+        }
+    }
+}
+
 /// **Every `operation_kind` the ledger has, in one list.**
 ///
 /// The kinds are still named individually by the paths that *write* them, because each
@@ -837,7 +910,7 @@ pub const OPERATION_INTERRUPT: &str = "interrupt";
 /// swept by every abort path the day it exists, rather than by whichever ones somebody
 /// remembered. That is worth the one `match` on the kind inside the loop, which is the
 /// price of the two closers genuinely differing.
-pub const OPERATION_KINDS: [&str; 2] = [OPERATION_ANSWER, OPERATION_INTERRUPT];
+pub const OPERATION_KINDS: [&str; 3] = [OPERATION_ANSWER, OPERATION_INTERRUPT, OPERATION_COMPOSE];
 
 /// Close one answer claim inside a caller's transaction, **or fail the whole
 /// transaction**.

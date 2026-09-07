@@ -1433,6 +1433,30 @@ where
             )
             .await?;
         }
+        // Say something to a Codex session. Every refusal is a typed `Rejected` naming
+        // the reason, so a mutation result is never a silence, and a Claude session is
+        // refused by the agent branch inside — the daemon is the one place that knows
+        // which agent a run is hosting, and `send_text` is where a Claude session's free
+        // text goes.
+        ClientMessage::Compose {
+            session_id,
+            request_id,
+            text,
+            payload_hash,
+        } => {
+            let result = daemon
+                .compose(&session_id, &request_id, text, &payload_hash)
+                .await;
+            send(
+                sink,
+                &ServerMessage::ComposeResult {
+                    session_id,
+                    request_id,
+                    result,
+                },
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -2856,6 +2880,12 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // `Capabilities::codex_interrupt`, which names what a client must add to it to
         // know whether one particular session can be stopped right now.
         codex_interrupt: daemon
+            .supported_agents()
+            .contains(&protocol::agent::AgentKind::Codex),
+        // Composed from the same fact and carrying the same caveat: it says this build
+        // understands the message, never that a particular session can be composed to.
+        // See `Capabilities::codex_compose`.
+        codex_compose: daemon
             .supported_agents()
             .contains(&protocol::agent::AgentKind::Codex),
         // **Omitted while the phone can do nothing with it.** This used to read

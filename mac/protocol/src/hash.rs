@@ -1370,6 +1370,31 @@ pub fn interrupt_hash(session_ref: &str, turn_id: &str) -> String {
     sha256_hex(material.as_bytes())
 }
 
+/// Identity of one `compose` mutation: which session is told which text.
+///
+/// The same length-prefixed, domain-tagged shape as [`interrupt_hash`], for the same
+/// reason — a retry under one `request_id` carrying different TEXT is a different
+/// mutation and is refused rather than replayed.
+///
+/// **The turn the compose was composed against is deliberately NOT in it.** A phone
+/// composes a message; whether that message becomes a new turn or joins a running one is
+/// decided by what the session is doing at the instant the daemon looks, and the phone
+/// cannot know that when it hashes. Putting the turn in here would make the honest retry
+/// of an unacknowledged send — the whole reason the hash exists — a conflict whenever the
+/// session moved in between. The route and the turn ARE part of the ledger's claimed
+/// material, which is where a replay reads them from; this hash is what binds an id to the
+/// words.
+pub fn compose_hash(session_ref: &str, text: &str) -> String {
+    let mut material = String::from("codeconnect.compose.v1");
+    for field in [session_ref, text] {
+        material.push('\n');
+        material.push_str(&field.len().to_string());
+        material.push(':');
+        material.push_str(field);
+    }
+    sha256_hex(material.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

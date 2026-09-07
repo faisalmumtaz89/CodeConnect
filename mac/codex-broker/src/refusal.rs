@@ -102,7 +102,7 @@ use crate::message::{classify_shape, RequestId, Shape, WsPayload};
 use crate::redact;
 use crate::response_capability::ResponseCapabilityRegistry;
 use crate::session::{
-    ConnId, IdAdmission, PrefixAdmission, ThreadBinding, TurnAdmission, CREATION_METHOD,
+    ConnId, IdAdmission, PrefixAdmission, ThreadBinding, TurnAdmission, TurnLeg, CREATION_METHOD,
     MAX_ACTIVE_TURNS, TURN_METHOD, UNSUBSCRIBE_METHOD,
 };
 
@@ -365,6 +365,209 @@ fn ledger_refusal(
     }
 }
 
+/// **The turn admission both legs share.**
+///
+/// Extracted when 4b gave the ccd leg a `turn/start` cell of its own: the fingerprint, the
+/// head-check, the workspace binding, the id ledger and the busy-mark are the same
+/// question whoever is asking, and two copies of that question would be two chances to
+/// widen one of them. `leg` says which caller is asking — see [`TurnLeg`], which names
+/// the two rules the phone carries and the keyboard does not.
+fn classify_turn_start(
+    env: &Env,
+    method: &str,
+    id: Option<RequestId>,
+    params: &serde_json::Value,
+    leg: TurnLeg,
+) -> RelayAction {
+    // **The phone's own projection runs FIRST.** A frame this leg may not author is not a
+    // fingerprint question, and answering it as one would send an operator reading the log
+    // after the ownership rules for a key that is simply not this producer's — and would
+    // put that key's NAME in the durable log, which the fingerprint's per-key refusals do
+    // and this one deliberately does not. It is pure — no lock, no claim — so a refusal
+    // here leaves nothing behind.
+    if leg == TurnLeg::Phone {
+        if let Err(detail) = check_phone_turn_projection(params) {
+            return refuse_request(
+                id,
+                E_POLICY_REFUSED,
+                "turn refused: it is not the shape this session accepts from a phone",
+                format!("{}: {detail}", redact::method(method)),
+            );
+        }
+    }
+    let verdict = match assert_fingerprint(env.fingerprint, method, params) {
+        Ok(v) => v,
+        Err(refusal) => {
+            return refuse_request(
+                id,
+                E_POLICY_REFUSED,
+                "request refused by session policy",
+                format!(
+                    "{}: fingerprint refused ({:?}): {}",
+                    // Belt-and-braces: only the four ownership methods reach this
+                    // disposition (pinned by the golden matrix), so `method` is
+                    // broker-owned here — but rendering it through the grammar keeps
+                    // "no raw client method reaches a note" a TOTAL invariant rather
+                    // than a four-arm case analysis.
+                    redact::method(method),
+                    refusal.kind,
+                    refusal.detail
+                ),
+            );
+        }
+    };
+    // **ONE ATOMIC DECISION**: head-check, workspace-check, id ledger
+    // and the busy-mark that keeps a switch from being admitted between this
+    // decision and the relay's upstream write — all under a single lock inside
+    // `try_admit_turn`. They used to be three separate lock acquisitions from here,
+    // and a switch admitted between the first and the last left the turn forwarded
+    // against a head that had already moved.
+    //
+    // A turn without a usable id cannot be admitted (nothing could correlate its
+    // answer), and the first check in `classify_request_disposition` already
+    // refused that case — so the id is present here by construction.
+    let Some(turn_id) = id.clone() else {
+        return refuse_request(
+            id,
+            E_POLICY_REFUSED,
+            "turn refused: it does not name this session's bound thread",
+            "turn/start without a usable request id".to_string(),
+        );
+    };
+    let Some(named) = params.get("threadId").and_then(|t| t.as_str()) else {
+        return refuse_request(
+            Some(turn_id),
+            E_POLICY_REFUSED,
+            "turn refused: it does not name this session's bound thread",
+            "turn/start without a string threadId".to_string(),
+        );
+    };
+    let admission = match leg {
+        TurnLeg::OperatorKeyboard => env.threads.try_admit_turn(
+            env.conn,
+            &turn_id,
+            named,
+            params.get("cwd"),
+            params.get("runtimeWorkspaceRoots"),
+        ),
+        TurnLeg::Phone => env.threads.try_admit_idle_turn(
+            env.conn,
+            &turn_id,
+            named,
+            params.get("cwd"),
+            params.get("runtimeWorkspaceRoots"),
+        ),
+    };
+    match admission {
+        TurnAdmission::Admitted => {}
+        TurnAdmission::NotTheHead { detail } => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: it does not name this session's bound thread",
+                detail,
+            )
+        }
+        // A DIFFERENT failure from the head-check (the thread identity is correct;
+        // the workspace is not), so it carries its own message — an operator
+        // reading the audit log must not be sent hunting a thread-identity
+        // mismatch.
+        TurnAdmission::WrongWorkspace { detail } => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: it does not run in the workspace bound at its \
+                     thread's creation",
+                detail,
+            )
+        }
+        // A reserved switch's prefix has already had a wire effect.
+        TurnAdmission::SwitchReserved => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: a thread switch is in progress on this session",
+                format!(
+                    "{}: a switch is reserved — its unsubscribe prefix has already \
+                         forwarded and its thread/start is expected next, so this turn \
+                         would be authorized against a head that is about to move",
+                    redact::method(method)
+                ),
+            )
+        }
+        // **A turn on a thread that is already running one, from EITHER leg.** It was the
+        // phone's rule alone, and that left the two legs racing to become each other's
+        // implicit steer; both are held to it now. Nothing the measured TUI does is newly
+        // refused — it sends `turn/steer` while busy and never a second `turn/start`. See
+        // [`crate::session::TurnAdmission::ThreadAlreadyBusy`] for the measurement.
+        TurnAdmission::ThreadAlreadyBusy => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: this session is already running a turn",
+                format!(
+                    "{}: a turn is running on this thread, and a start sent now would \
+                         be accepted by the app-server as an implicit steer into it with \
+                         no expectedTurnId to guard staleness; turn/steer is the method \
+                         for this case",
+                    redact::method(method)
+                ),
+            )
+        }
+        // The cardinality bound, refused legibly rather than dropped.
+        TurnAdmission::TooManyActiveTurns => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: too many turns are already in flight",
+                format!(
+                    "{}: this session already holds {MAX_ACTIVE_TURNS} admitted \
+                         turns whose terminals have not been observed",
+                    redact::method(method)
+                ),
+            )
+        }
+        // This connection unsubscribed itself and never came back.
+        TurnAdmission::ConnectionUnsubscribed { thread } => {
+            return refuse_request(
+                Some(turn_id),
+                E_POLICY_REFUSED,
+                "turn refused: this connection is no longer subscribed to the thread",
+                format!(
+                    "{}: this connection's thread/unsubscribe for {} forwarded and \
+                         the switch behind it then FAILED at the server, so it is not \
+                         receiving that thread's stream. Its turns stay refused until a \
+                         thread/resume re-subscribes it; the session still owns the \
+                         thread and other connections are unaffected",
+                    redact::method(method),
+                    redact::thread_id(&thread)
+                ),
+            )
+        }
+        TurnAdmission::Ledger(verdict) => {
+            return ledger_refusal(env, method, Some(turn_id), verdict)
+        }
+    }
+    match verdict {
+        // O14 — **a future proven turn shape.** This arm is UNREACHABLE BY
+        // CONSTRUCTION for the only method with this disposition today: on
+        // `turn/start` the sandbox boundary accepts exactly one shape —
+        // `params.sandboxPolicy: null` — and the absence rule refuses when it is
+        // missing, so every turn that gets this far DEFERRED. No test reaches it.
+        // It is kept, and labeled honestly rather than deleted, because it is the
+        // correct action for any FUTURE method routed to this disposition (or a
+        // future turn shape whose sandbox is proven outright); making it a refusal
+        // would encode "proven is worse than deferred", which is backwards.
+        FpVerdict::Proven => RelayAction::Forward {
+            note: "turn/start: fingerprint asserted and head-checked",
+        },
+        FpVerdict::SandboxDeferredToBoundThread => RelayAction::Forward {
+            note: "turn/start: head-checked; sandbox deferral discharged by the \
+                       verified thread binding",
+        },
+    }
+}
+
 fn classify_request_disposition(
     role: Role,
     env: &Env,
@@ -548,146 +751,57 @@ fn classify_request_disposition(
         // `thread/settings/update` cannot move its policy afterwards. So this arm must
         // never forward on a verdict it did not pair with a passing head-check.
         Disposition::FingerprintThenHeadCheck => {
-            let verdict = match assert_fingerprint(env.fingerprint, method, params) {
-                Ok(v) => v,
-                Err(refusal) => {
-                    return refuse_request(
-                        id,
-                        E_POLICY_REFUSED,
-                        "request refused by session policy",
-                        format!(
-                            "{}: fingerprint refused ({:?}): {}",
-                            // Belt-and-braces: only the four ownership methods reach this
-                            // disposition (pinned by the golden matrix), so `method` is
-                            // broker-owned here — but rendering it through the grammar keeps
-                            // "no raw client method reaches a note" a TOTAL invariant rather
-                            // than a four-arm case analysis.
-                            redact::method(method),
-                            refusal.kind,
-                            refusal.detail
-                        ),
-                    );
-                }
-            };
-            // **ONE ATOMIC DECISION**: head-check, workspace-check, id ledger
-            // and the busy-mark that keeps a switch from being admitted between this
-            // decision and the relay's upstream write — all under a single lock inside
-            // `try_admit_turn`. They used to be three separate lock acquisitions from here,
-            // and a switch admitted between the first and the last left the turn forwarded
-            // against a head that had already moved.
-            //
-            // A turn without a usable id cannot be admitted (nothing could correlate its
-            // answer), and the first check in `classify_request_disposition` already
-            // refused that case — so the id is present here by construction.
-            let Some(turn_id) = id.clone() else {
-                return refuse_request(
+            classify_turn_start(env, method, id, params, TurnLeg::OperatorKeyboard)
+        }
+        // Everything the TUI's turn proves, plus the two rules the phone's leg adds. See
+        // [`Disposition::FingerprintThenIdleTurn`].
+        Disposition::FingerprintThenIdleTurn => {
+            classify_turn_start(env, method, id, params, TurnLeg::Phone)
+        }
+        // The composer on the operator's own keyboard: the head-check, and the
+        // app-server's own `expectedTurnId` guard for staleness.
+        Disposition::SteerHeadThread => {
+            match check_steer_binding(env, params, SteerRule::HeadThreadOnly) {
+                Err(SteerRefusal::Shape(detail)) => refuse_request(
                     id,
                     E_POLICY_REFUSED,
-                    "turn refused: it does not name this session's bound thread",
-                    "turn/start without a usable request id".to_string(),
-                );
-            };
-            let Some(named) = params.get("threadId").and_then(|t| t.as_str()) else {
-                return refuse_request(
-                    Some(turn_id),
+                    "steer refused: it is not the shape this session accepts",
+                    format!("{}: {detail}", redact::method(method)),
+                ),
+                Err(SteerRefusal::Binding(detail)) => refuse_request(
+                    id,
                     E_POLICY_REFUSED,
-                    "turn refused: it does not name this session's bound thread",
-                    "turn/start without a string threadId".to_string(),
-                );
-            };
-            match env.threads.try_admit_turn(
-                env.conn,
-                &turn_id,
-                named,
-                params.get("cwd"),
-                params.get("runtimeWorkspaceRoots"),
-            ) {
-                TurnAdmission::Admitted => {}
-                TurnAdmission::NotTheHead { detail } => {
-                    return refuse_request(
-                        Some(turn_id),
-                        E_POLICY_REFUSED,
-                        "turn refused: it does not name this session's bound thread",
-                        detail,
-                    )
-                }
-                // A DIFFERENT failure from the head-check (the thread identity is correct;
-                // the workspace is not), so it carries its own message — an operator
-                // reading the audit log must not be sent hunting a thread-identity
-                // mismatch.
-                TurnAdmission::WrongWorkspace { detail } => {
-                    return refuse_request(
-                        Some(turn_id),
-                        E_POLICY_REFUSED,
-                        "turn refused: it does not run in the workspace bound at its \
-                         thread's creation",
-                        detail,
-                    )
-                }
-                // A reserved switch's prefix has already had a wire effect.
-                TurnAdmission::SwitchReserved => {
-                    return refuse_request(
-                        Some(turn_id),
-                        E_POLICY_REFUSED,
-                        "turn refused: a thread switch is in progress on this session",
-                        format!(
-                            "{}: a switch is reserved — its unsubscribe prefix has already \
-                             forwarded and its thread/start is expected next, so this turn \
-                             would be authorized against a head that is about to move",
-                            redact::method(method)
-                        ),
-                    )
-                }
-                // The cardinality bound, refused legibly rather than dropped.
-                TurnAdmission::TooManyActiveTurns => {
-                    return refuse_request(
-                        Some(turn_id),
-                        E_POLICY_REFUSED,
-                        "turn refused: too many turns are already in flight",
-                        format!(
-                            "{}: this session already holds {MAX_ACTIVE_TURNS} admitted \
-                             turns whose terminals have not been observed",
-                            redact::method(method)
-                        ),
-                    )
-                }
-                // This connection unsubscribed itself and never came back.
-                TurnAdmission::ConnectionUnsubscribed { thread } => {
-                    return refuse_request(
-                        Some(turn_id),
-                        E_POLICY_REFUSED,
-                        "turn refused: this connection is no longer subscribed to the thread",
-                        format!(
-                            "{}: this connection's thread/unsubscribe for {} forwarded and \
-                             the switch behind it then FAILED at the server, so it is not \
-                             receiving that thread's stream. Its turns stay refused until a \
-                             thread/resume re-subscribes it; the session still owns the \
-                             thread and other connections are unaffected",
-                            redact::method(method),
-                            redact::thread_id(&thread)
-                        ),
-                    )
-                }
-                TurnAdmission::Ledger(verdict) => {
-                    return ledger_refusal(env, method, Some(turn_id), verdict)
-                }
-            }
-            match verdict {
-                // O14 — **a future proven turn shape.** This arm is UNREACHABLE BY
-                // CONSTRUCTION for the only method with this disposition today: on
-                // `turn/start` the sandbox boundary accepts exactly one shape —
-                // `params.sandboxPolicy: null` — and the absence rule refuses when it is
-                // missing, so every turn that gets this far DEFERRED. No test reaches it.
-                // It is kept, and labeled honestly rather than deleted, because it is the
-                // correct action for any FUTURE method routed to this disposition (or a
-                // future turn shape whose sandbox is proven outright); making it a refusal
-                // would encode "proven is worse than deferred", which is backwards.
-                FpVerdict::Proven => RelayAction::Forward {
-                    note: "turn/start: fingerprint asserted and head-checked",
+                    "steer refused: it does not name this session's thread",
+                    format!("{}: {detail}", redact::method(method)),
+                ),
+                Ok(()) => RelayAction::Forward {
+                    note: "turn/steer: names this session's head thread",
                 },
-                FpVerdict::SandboxDeferredToBoundThread => RelayAction::Forward {
-                    note: "turn/start: head-checked; sandbox deferral discharged by the \
-                           verified thread binding",
+            }
+        }
+        // The composer on the phone: the same head-check, plus the running-turn binding
+        // and the text-only input rule. See [`Disposition::SteerRunningTurn`].
+        Disposition::SteerRunningTurn => {
+            match check_steer_binding(env, params, SteerRule::RunningTurnAndTextOnly) {
+                Err(SteerRefusal::Shape(detail)) => refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    "steer refused: it is not the shape this session accepts",
+                    format!("{}: {detail}", redact::method(method)),
+                ),
+                Err(SteerRefusal::Binding(detail)) => refuse_request(
+                    id,
+                    E_POLICY_REFUSED,
+                    // **This sentence names no turn, and that is the point.** The
+                    // app-server's own refusal for the same frame is
+                    // `-32600 "expected active turn id X but found Y"`, which hands the
+                    // caller the id of the turn the session is really running. This one
+                    // reaches a phone, so it carries only what the phone already sent.
+                    "steer refused: it does not name the turn this session is running",
+                    format!("{}: {detail}", redact::method(method)),
+                ),
+                Ok(()) => RelayAction::Forward {
+                    note: "turn/steer: names this session's running turn, text only",
                 },
             }
         }
@@ -792,18 +906,16 @@ fn classify_request_disposition(
         // Deferred dispositions fail closed until their machinery (and, for D2/D3, their
         // subject) lands in Phase 3.
         //
-        // **`turn/interrupt` used to be one of these, and it is not any more.** Driven live
-        // on 0.153 with it deferred, Ctrl-C 5.4 s into a long turn sent
-        // `turn/interrupt{threadId,turnId}`, this arm refused it, the TUI printed a banner
-        // naming the broker, and the turn ran to its own end. That is tolerable only while
-        // turns end on their own — it left a hung command, or work the user needed to
-        // stop, with no way out but killing the session. Refusing the one stop control is
-        // a safety decision, not a deferral, so it is now
-        // `Disposition::InterruptActiveTurn`, bound to this session's RUNNING turn.
+        // **Both of the actuations that used to be here have left.** `turn/interrupt` left
+        // in 4a and `turn/steer` in 4b, each for the same reason and each after the same
+        // measurement: driven live with the arm deferred, the operator of a hosted session
+        // could not stop their own turn (4a) and could not redirect it (4b) — the pane
+        // printed a banner naming the broker and the work carried on. Refusing the only
+        // control a person has is a safety decision, not a deferral.
         //
-        // `turn/steer` stays here: it INJECTS content into a running turn, which is the
-        // vector actuation D2 exists to fence.
-        Disposition::HeadCheck | Disposition::ConsumeLocally => refuse_request(
+        // What remains is the one-use response-capability fanout, whose machinery really is
+        // still to come.
+        Disposition::ConsumeLocally => refuse_request(
             id,
             E_METHOD_UNAVAILABLE,
             "method not available yet through the broker",
@@ -1087,6 +1199,372 @@ fn check_read_binding(env: &Env, method: &str, params: &serde_json::Value) -> Re
         if let Some(value) = obj.get(*key) {
             check_read_param(env, key, *rule, value)?;
         }
+    }
+    Ok(())
+}
+
+/// **The complete `turn/start` param key set the phone's own producer writes**, sorted.
+///
+/// `ccd::codex_link::compose_frame` emits exactly these fourteen. Pinned for
+/// [`STEER_PARAMS`]' reason and one sharper: this cell ran the shared, TUI-grounded
+/// fingerprint, so it inherited the twenty-four names the OPERATOR's frame may carry —
+/// and five of those have no value rule at all. `model` and `effort` are cross-checked
+/// only inside `check_collaboration_mode`, which never runs when `collaborationMode` is
+/// null, which is exactly what the phone sends; `serviceTier` is a preference admitted as
+/// any non-empty string, on the stated argument that only the person at the keyboard can
+/// set it — an argument about the other leg; `personality` and `summary` are ungated.
+/// Measured over the real relay: all five, and a 4096-byte `clientUserMessageId`,
+/// forwarded from this leg.
+///
+/// So this leg gets the frame its daemon authors, not the union the keyboard's names
+/// admit. Widening it means widening the producer first.
+const PHONE_TURN_PARAMS: [&str; 14] = [
+    "additionalContext",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "clientUserMessageId",
+    "collaborationMode",
+    "cwd",
+    "environments",
+    "input",
+    "multiAgentMode",
+    "outputSchema",
+    "permissions",
+    "responsesapiClientMetadata",
+    "sandboxPolicy",
+    "threadId",
+];
+
+/// The two `turn/start` params the phone sends as JSON null that the shared fingerprint
+/// does NOT hold to that rule.
+///
+/// `collaborationMode` is measured null-or-object there, and `clientUserMessageId` is on
+/// the "deliberately not gated" list. [`STEER_NULL_PARAMS`]' own comment claimed
+/// `turn/start` held two of its three keys to the same rule; it held one, and the gap was
+/// the free-form byte channel that comment says it closed. It is closed on this leg now.
+const PHONE_TURN_NULL_PARAMS: [&str; 2] = ["clientUserMessageId", "collaborationMode"];
+
+/// **Is this `turn/start` the frame the phone's own daemon writes?**
+///
+/// Runs BEFORE [`assert_fingerprint`] in the phone's arm, and before anything is claimed,
+/// so a frame this leg may not author never reaches the fingerprint's more specific
+/// refusals and never takes the busy mark.
+///
+/// Shapes and counts in the detail, never a key name or a value — the keys here are
+/// client-chosen and this lands in a durable `broker.log` ([`crate::redact`]).
+fn check_phone_turn_projection(params: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = params.as_object() else {
+        return Err(format!(
+            "params is a {}; the measured value is an object",
+            redact::value_shape(Some(params))
+        ));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != PHONE_TURN_PARAMS {
+        let supplied = keys.len();
+        let missing = PHONE_TURN_PARAMS
+            .iter()
+            .filter(|name| !keys.contains(*name))
+            .count();
+        let unexpected = keys
+            .iter()
+            .filter(|key| !PHONE_TURN_PARAMS.contains(*key))
+            .count();
+        return Err(format!(
+            "params carries {supplied} keys: {unexpected} unexpected, and {missing} of \
+             the {} this leg's own producer writes absent. Key names are client-chosen \
+             and are not logged",
+            PHONE_TURN_PARAMS.len()
+        ));
+    }
+    for key in PHONE_TURN_NULL_PARAMS {
+        match obj.get(key) {
+            Some(serde_json::Value::Null) => {}
+            other => {
+                return Err(format!(
+                    "params.{key}: this leg's producer writes JSON null; a {} is a shape \
+                     it does not author",
+                    redact::value_shape(other)
+                ))
+            }
+        }
+    }
+    check_phone_input(params)
+}
+
+/// **The ceiling on the text a phone may put in the model's mouth, at the boundary.**
+///
+/// The daemon caps its own compose at `protocol::ws::MAX_COMPOSE_BYTES` and the WebSocket
+/// layer caps a frame at a megabyte, so nothing reachable through the shipping daemon
+/// exceeds this. The broker is nonetheless the boundary, and this was the one admitted ccd
+/// param with no bound of its own — a 2 MB single text item classified `Forward`, measured
+/// over the real relay.
+///
+/// **This crate cannot import `protocol`** (it has no such dependency, deliberately: the
+/// security core depends on serde and tokio and nothing of ours). So the number is written
+/// here and `ccd` — which can see both — asserts the two are equal, in
+/// `the_brokers_phone_text_bound_is_the_protocols`. A boundary looser than the producer's
+/// own limit is a rule the producer keeps and the boundary does not, which is the shape
+/// this module exists to refuse.
+pub const MAX_PHONE_TEXT_BYTES: usize = 8 * 1024;
+
+/// The complete measured `turn/steer` param key set, sorted — the allowlist
+/// [`check_steer_binding`] compares against, and counts a deviation from.
+///
+/// MEASURED on codex 0.153.4 through the frame tee: typing during a running turn sends
+/// exactly these six keys (`fixtures/codex/steer-0.153.4.jsonl`). Three of them are
+/// required by the schema and three are optional there, and this pin requires all six —
+/// the same discipline [`INTERRUPT_PARAMS`] keeps, and for the same reason: the shape a
+/// future release would use to introduce a new channel on this method is a key, and a
+/// broker that ignored unknown keys would forward that channel unexamined the day it
+/// appears. Widening needs a new capture, not an argument.
+const STEER_PARAMS: [&str; 6] = [
+    "additionalContext",
+    "clientUserMessageId",
+    "expectedTurnId",
+    "input",
+    "responsesapiClientMetadata",
+    "threadId",
+];
+
+/// The three `turn/steer` params measured as JSON null on every captured steer. Each is a
+/// map the caller fills in — `additionalContext` carries `{kind, value}` entries the model
+/// reads, `responsesapiClientMetadata` reaches the upstream API — and neither was ever
+/// observed carrying anything, so a populated one is a shape this broker cannot prove.
+/// `clientUserMessageId` is the third, and it was nearly left out on the grounds that it is
+/// a UX correlation id rather than a channel — which `turn/start` says too, on its own
+/// "deliberately NOT gated" list. The difference is that a turn's id rides a frame whose
+/// every other key is pinned by an exhaustive allowlist, while a steer has six keys and no
+/// fingerprint at all: leaving one of them an unbounded client-chosen string would make it
+/// the only free-form byte channel on the method. It was measured null
+/// (`fixtures/codex/steer-0.153.4.jsonl`), so pinning it costs nothing that has been seen.
+///
+/// `turn/start` holds two of these three to the same rule ([`crate::fingerprint`]'s
+/// captured-null set), and holding them to it here is what stops the two methods becoming
+/// two different answers to one question.
+const STEER_NULL_PARAMS: [&str; 3] = [
+    "additionalContext",
+    "clientUserMessageId",
+    "responsesapiClientMetadata",
+];
+
+/// **Why a steer was refused**, in the two categories a caller can act on differently.
+///
+/// A frame this session never accepts from anybody, and a frame that is fine but names the
+/// wrong thing, are different news: the first says "your client is wrong", the second says
+/// "you are late". Collapsing them into one sentence — which an earlier form of this did —
+/// tells somebody whose steer arrived a moment after the turn ended that their app is
+/// broken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SteerRefusal {
+    /// The params are not the measured shape.
+    Shape(String),
+    /// The shape is right; the thread, the turn or the input is not.
+    Binding(String),
+}
+
+/// Which of the two steer rules a leg is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerRule {
+    /// The operator's own keyboard: the params shape and the head thread. The turn is the
+    /// app-server's to guard, and its answer lands on the pane the person is reading.
+    HeadThreadOnly,
+    /// The phone: additionally, `expectedTurnId` must be the turn this session is running,
+    /// and every `input` item must be text.
+    RunningTurnAndTextOnly,
+}
+
+/// **Is this steer one this leg may send?**
+///
+/// The params shape and the head-check on both legs; the running-turn binding and the
+/// text-only input rule on the phone's. Every refusal detail names shapes and counts, never
+/// a client-chosen key or value — this lands in the durable `broker.log` (see
+/// [`crate::redact`]).
+fn check_steer_binding(
+    env: &Env,
+    params: &serde_json::Value,
+    rule: SteerRule,
+) -> Result<(), SteerRefusal> {
+    let Some(obj) = params.as_object() else {
+        return Err(SteerRefusal::Shape(format!(
+            "params is a {}; the measured value is an object",
+            redact::value_shape(Some(params))
+        )));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != STEER_PARAMS {
+        // The SHAPE, never the names — [`check_interrupt_binding`]'s rule, for the same
+        // reason: the keys are attacker-chosen bytes and this detail is durable.
+        let supplied = keys.len();
+        let missing = STEER_PARAMS
+            .iter()
+            .filter(|name| !keys.contains(*name))
+            .count();
+        let unexpected = keys
+            .iter()
+            .filter(|key| !STEER_PARAMS.contains(*key))
+            .count();
+        return Err(SteerRefusal::Shape(format!(
+            "params carries {supplied} keys: {unexpected} unexpected, and {missing} of \
+             the {} the measured frame carries absent. Key names are client-chosen and \
+             are not logged",
+            STEER_PARAMS.len()
+        )));
+    }
+    for key in STEER_NULL_PARAMS {
+        match obj.get(key) {
+            Some(serde_json::Value::Null) => {}
+            other => {
+                return Err(SteerRefusal::Shape(format!(
+                    "params.{key}: captured boundary — every measured steer sent this key \
+                     as JSON null; a {} was never captured and cannot be proven",
+                    redact::value_shape(other)
+                )))
+            }
+        }
+    }
+    let (Some(thread), Some(expected)) = (
+        obj.get("threadId").and_then(|v| v.as_str()),
+        obj.get("expectedTurnId").and_then(|v| v.as_str()),
+    ) else {
+        return Err(SteerRefusal::Shape(
+            "params.threadId or params.expectedTurnId is not a string".to_string(),
+        ));
+    };
+    // **The SOLE session thread**, for [`check_interrupt_binding`]'s reason: a steer is an
+    // actuation, and a thread this session has left is readable but never actuable.
+    if env.threads.sole_session_thread().as_deref() != Some(thread) {
+        return Err(SteerRefusal::Binding(format!(
+            "thread {} is not this session's one active thread — a thread this session \
+             has left is readable, never actuable",
+            redact::thread_id(thread)
+        )));
+    }
+    if rule == SteerRule::HeadThreadOnly {
+        return Ok(());
+    }
+    if !env.threads.is_active_turn(thread, expected) {
+        return Err(SteerRefusal::Binding(format!(
+            "turn {} is not a running turn of thread {} — a phone may only steer the turn \
+             this session is currently running, and the app-server's own refusal for this \
+             frame would have named the turn that is",
+            redact::thread_id(expected),
+            redact::thread_id(thread)
+        )));
+    }
+    check_phone_input(params).map_err(SteerRefusal::Binding)
+}
+
+/// **Every `input` item a phone sends is TEXT.**
+///
+/// The `UserInput` union the pinned schema carries has seven arms, and six of them name
+/// something outside the turn: `localImage`, `localAudio`, `skill` and `mention` each carry
+/// an absolute filesystem PATH the app-server opens itself — outside the model's sandbox,
+/// so no `sandboxPolicy` fences it — and `image`/`audio` each carry a URL. A phone that
+/// could name those would hold a read-and-exfiltrate primitive over the whole machine,
+/// reached through the one method it is allowed to compose with.
+///
+/// The operator's own keyboard keeps the whole union, and that asymmetry is deliberate
+/// rather than an oversight: the person at the machine drags a file into their own composer
+/// and can already read it. The phone cannot read a byte of that machine by any other
+/// route, and this is not the place to give it one.
+///
+/// Shape and counts only in the detail, for [`crate::redact`]'s reason — an item's `path`
+/// is exactly the kind of client-chosen string that must not reach the audit log.
+fn check_phone_input(params: &serde_json::Value) -> Result<(), String> {
+    let Some(items) = params.get("input") else {
+        return Err("params.input is absent; a compose with no input composes nothing".into());
+    };
+    let Some(items) = items.as_array() else {
+        return Err(format!(
+            "params.input is a {}; the measured value is an array",
+            redact::value_shape(Some(items))
+        ));
+    };
+    // **Exactly ONE item.** `compose_frame` writes one, always — a compose is one message.
+    // The rule used to be "at least one, all of them text", which admitted a frame with
+    // two items and any number more; measured over the real relay as `Forward`. An empty
+    // array is the same refusal from the other side: the app-server answers it
+    // `-32600 "no active turn to steer"`, a sentence about the TURN for a frame whose
+    // problem is that it says nothing.
+    if items.len() != 1 {
+        return Err(format!(
+            "params.input carries {} items; this leg's producer writes exactly one, \
+             because a compose is one message",
+            items.len()
+        ));
+    }
+    if let Err(why) = check_phone_text_item(&items[0]) {
+        return Err(format!("params.input[0]: {why}"));
+    }
+    Ok(())
+}
+
+/// **The measured `text` arm of the `UserInput` union, and only it, exactly.**
+///
+/// `{"type":"text","text":"…","text_elements":[]}` — the shape every captured client sends
+/// and the one `compose_frame` writes. Three rules, and each closes something that was
+/// measured forwarding over the real relay:
+///
+/// * **the key set is exact.** The union's other six arms — `localImage`, `localAudio`,
+///   `skill`, `mention` (each an absolute filesystem PATH the app-server opens itself,
+///   outside the model's sandbox) and `image`/`audio` (a URL) — are refused by the `type`
+///   rule; an extra key beside a legitimate `text` is refused by this one, because the
+///   threat this module is written against is a future release giving a key a meaning.
+/// * **`text_elements` is exactly `[]`,** not merely an array. Every capture is empty and
+///   the producer writes empty; the schema's `TextElement` carries a `placeholder` it does
+///   not say is inert, and an arbitrary array of them forwarded.
+/// * **`text` is bounded** by [`MAX_PHONE_TEXT_BYTES`]. A 2 MB single item forwarded.
+///
+/// The operator's keyboard keeps the whole union and no bound: the person at the machine
+/// drags a file into their own composer and can already read it.
+fn check_phone_text_item(item: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = item.as_object() else {
+        return Err(format!(
+            "a {} is not the measured text item",
+            redact::value_shape(Some(item))
+        ));
+    };
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    if keys != ["text", "text_elements", "type"] {
+        return Err(format!(
+            "it carries {} keys; the measured text item carries exactly three. The input \
+             union also admits local file paths (localImage, localAudio, skill, mention) \
+             and remote URLs (image, audio), which the app-server opens itself and no \
+             sandbox policy fences; a phone composes with text, and with nothing beside \
+             it. Key names are client-chosen and are not logged",
+            keys.len()
+        ));
+    }
+    if obj.get("type").and_then(|t| t.as_str()) != Some("text") {
+        return Err("its type is not text".to_string());
+    }
+    if !obj["text_elements"]
+        .as_array()
+        .is_some_and(|a| a.is_empty())
+    {
+        return Err(format!(
+            "its text_elements is {}; every measured value is the empty array, and this \
+             leg's producer writes one",
+            redact::value_shape(obj.get("text_elements"))
+        ));
+    }
+    let Some(text) = obj.get("text").and_then(|t| t.as_str()) else {
+        return Err(format!(
+            "its text is a {}",
+            redact::value_shape(obj.get("text"))
+        ));
+    };
+    if text.len() > MAX_PHONE_TEXT_BYTES {
+        return Err(format!(
+            "its text is {} bytes; the ceiling this leg's own daemon advertises is {}. \
+             The value is client-chosen and is not logged",
+            text.len(),
+            MAX_PHONE_TEXT_BYTES
+        ));
     }
     Ok(())
 }
@@ -1601,6 +2079,10 @@ mod tests {
             "id": 11,
             "params": {
                 "threadId": thread,
+                "input": [{"type": "text", "text": "do the thing", "text_elements": []}],
+                // Measured on every captured turn, and the phone's producer writes it too;
+                // without it this fixture was not the frame either leg actually sends.
+                "clientUserMessageId": null,
                 "approvalPolicy": "untrusted",
                 "approvalsReviewer": "user",
                 "sandboxPolicy": null,
@@ -1616,6 +2098,39 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    /// The captured `turn/steer` params naming `thread` and the turn it was composed
+    /// against. MEASURED on codex 0.153.4: six keys, three of them required by the
+    /// schema, the two metadata fields null (`fixtures/codex/steer-0.153.4.jsonl`).
+    fn steer_params(thread: &str, expected_turn: &str) -> serde_json::Value {
+        json!({
+            "threadId": thread,
+            "expectedTurnId": expected_turn,
+            "input": [{"type": "text", "text": "also say HELLO", "text_elements": []}],
+            "clientUserMessageId": null,
+            "responsesapiClientMetadata": null,
+            "additionalContext": null
+        })
+    }
+
+    /// The captured steer as a whole frame.
+    fn steer(thread: &str, expected_turn: &str) -> String {
+        json!({"method": "turn/steer", "id": 12, "params": steer_params(thread, expected_turn)})
+            .to_string()
+    }
+
+    /// **The turn a PHONE authors**: the captured shape minus the one key its leg may not
+    /// send. See [`crate::session`]'s `roots_may_defer` and
+    /// `fixtures/codex/compose-refusals-0.153.4.txt`.
+    fn phone_turn(thread: &str) -> String {
+        let mut frame: serde_json::Value =
+            serde_json::from_str(&turn(thread)).expect("the captured turn parses");
+        frame["params"]
+            .as_object_mut()
+            .expect("params is an object")
+            .remove("runtimeWorkspaceRoots");
+        frame.to_string()
     }
 
     /// The captured turn on the bound thread, in the bound workspace.
@@ -1734,6 +2249,19 @@ mod tests {
             RelayAction::SyntheticError { frame, .. } => {
                 let v: serde_json::Value = serde_json::from_str(frame).unwrap();
                 v["error"]["code"].as_i64().unwrap()
+            }
+            other => panic!("expected a synthetic error, got {other:?}"),
+        }
+    }
+
+    /// The CLIENT-visible message of a refusal — the sentence that reaches the phone or
+    /// the pane, as distinct from [`refused_note`], which is the audit-log detail and never
+    /// leaves this machine.
+    fn refused_message(a: &RelayAction) -> String {
+        match a {
+            RelayAction::SyntheticError { frame, .. } => {
+                let v: serde_json::Value = serde_json::from_str(frame).unwrap();
+                v["error"]["message"].as_str().unwrap().to_string()
             }
             other => panic!("expected a synthetic error, got {other:?}"),
         }
@@ -2924,7 +3452,7 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
         // The note counts the unknown param, it never names it.
         assert!(
-            refused_note(&a).contains("unknown top-level parameter (1 of 14)"),
+            refused_note(&a).contains("unknown top-level parameter (1 of 16)"),
             "{}",
             refused_note(&a)
         );
@@ -2944,7 +3472,7 @@ mod tests {
         let a = go_env(Role::Tui, &threads, &frame.to_string());
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
         assert!(
-            refused_note(&a).contains("unknown top-level parameter (1 of 14)"),
+            refused_note(&a).contains("unknown top-level parameter (1 of 16)"),
             "{}",
             refused_note(&a)
         );
@@ -3279,11 +3807,624 @@ mod tests {
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
     }
 
+    /// **The exact frame the daemon authors for a phone's start is admitted.**
+    ///
+    /// The two halves of this feature live in two crates, and this is the pin that keeps
+    /// them one thing. `ccd::codex_link::Connection::compose_turn` builds a `turn/start`
+    /// out of the values the accepted `thread/resume` answer gave it; every ownership rule
+    /// in [`crate::fingerprint`] then has to admit it. A rule this file could satisfy in
+    /// principle but that frame could not is a feature that compiles and cannot start a
+    /// turn — which is exactly the failure the `serviceTier` measurement found on the
+    /// TUI's own frame.
+    ///
+    /// So the frame below is a transcription of the one the daemon emits, and its ccd-side
+    /// twin (`the_frame_a_phone_start_authors_is_the_one_the_broker_admits`) asserts the
+    /// daemon really emits it. Neither test is worth much alone.
+    ///
+    /// **Mutation:** drop any of the six captured-null params from the daemon's frame and
+    /// this goes red — a MISSING key is as unprovable as a populated one.
     #[test]
-    fn ccd_turn_start_on_the_verified_bound_thread_is_still_role_refused() {
-        // The head-check must not have opened a ccd path: ccd observes and attaches only.
-        let a = go_env(Role::Ccd, &bound_session("01a0-head"), &turn("01a0-head"));
+    fn the_frame_the_daemon_authors_for_a_phones_start_is_admitted() {
+        let threads = bound_session("01a0-head");
+        // Verbatim from `compose_turn`'s `turn/start` arm: fourteen keys, the three
+        // ownership values from the resume answer, `sandboxPolicy: null` deferring to the
+        // thread, and the six captured-null params present and null.
+        let authored = json!({
+            "method": "turn/start",
+            "id": 3,
+            "params": {
+                "threadId": "01a0-head",
+                "input": [{"type": "text", "text": "do the thing", "text_elements": []}],
+                "approvalPolicy": "untrusted",
+                "approvalsReviewer": "user",
+                "cwd": BOUND_CWD,
+                // **No `runtimeWorkspaceRoots`, and that is MEASURED rather than tidy.**
+                // codex 0.153.4 refuses the key on a `turn/start` from any client that
+                // did not declare `experimentalApi` at `initialize` — which the TUI does
+                // and the ccd control link does not
+                // (`fixtures/codex/compose-refusals-0.153.4.txt`). The alternative was to
+                // declare that capability on the phone's leg, which buys one field by
+                // handing it the experimental parameter surface of the whole API.
+                "sandboxPolicy": null,
+                "permissions": null,
+                "environments": null,
+                "multiAgentMode": null,
+                "responsesapiClientMetadata": null,
+                "additionalContext": null,
+                "outputSchema": null,
+                "collaborationMode": null,
+                "clientUserMessageId": null
+            }
+        });
+        let a = go_env(Role::Ccd, &threads, &authored.to_string());
+        assert!(
+            matches!(a, RelayAction::Forward { .. }),
+            "the frame the daemon actually authors must be admitted: {a:?}"
+        );
+
+        // **And the operator's own frame, which DOES carry the roots, is unaffected.**
+        // The absence rule is the phone's alone; the TUI leg keeps exact equality. Asked
+        // of its OWN session, because the phone's turn above marked this one busy and a
+        // start now needs an idle thread whichever leg asks (F2).
+        let fresh = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &fresh, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+    }
+
+    /// **The ccd `turn/start` the app-server actually received, out of the fixture.**
+    ///
+    /// The live compose gate writes this row itself, from
+    /// `crate::codex_link::compose_frame`'s own output rather than a copy of it, so the
+    /// bytes here are the bytes that leg put on the socket. `cwd` is scrubbed to
+    /// [`BOUND_CWD`] in the capture — it is the only value in the frame that names the
+    /// machine it ran on — which is why this session's own cwd needs no substitution
+    /// below.
+    fn recorded_ccd_turn_start() -> serde_json::Value {
+        const CAPTURE: &str = include_str!("../../../fixtures/codex/compose-0.153.4.jsonl");
+        CAPTURE
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| {
+                row["conn"] == "ccd"
+                    && row["dir"] == "c2s"
+                    && row["frame"]["method"] == "turn/start"
+            })
+            .expect("the compose capture carries the ccd leg's turn/start")["frame"]
+            .clone()
+    }
+
+    /// **The fourteen keys, pinned to the frame the wire carried rather than to a third
+    /// copy of them.**
+    ///
+    /// [`the_frame_the_daemon_authors_for_a_phones_start_is_admitted`] states the frame in
+    /// Rust here, and its twin in `ccd` states it again from the encoder's side. Both are
+    /// worth having — but two hand-written statements agreeing with each other is not
+    /// evidence about a wire. A key added to [`PHONE_TURN_PARAMS`] and to `compose_frame`
+    /// in one edit would leave every one of those assertions green while the admission
+    /// widened.
+    ///
+    /// So the list is pinned here to a recorded frame instead: the `ccd` c2s row of
+    /// `fixtures/codex/compose-0.153.4.jsonl`, which the live gate wrote out of
+    /// `compose_frame`'s own output and the real app-server received on a busy thread —
+    /// the run that answered it `-32001 turn refused: this session is already running a
+    /// turn`, recorded beside it. A key with no counterpart in that frame has nothing
+    /// behind it.
+    ///
+    /// **Mutation:** add any key to [`PHONE_TURN_PARAMS`] — this goes red naming it, and
+    /// the widened cell stays green.
+    #[test]
+    fn the_phones_fourteen_keys_are_the_ones_the_wire_carried() {
+        let recorded = recorded_ccd_turn_start();
+        let params = recorded["params"]
+            .as_object()
+            .expect("a recorded turn/start has params");
+        let mut recorded_keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        recorded_keys.sort_unstable();
+        assert_eq!(
+            recorded_keys, PHONE_TURN_PARAMS,
+            "the projection admits exactly the keys the daemon put on the wire; a \
+             difference either way is a key admitted with no frame behind it or a frame \
+             this broker would refuse"
+        );
+
+        // And it is admitted, not merely shaped right. The session's own thread id and
+        // the fingerprint's own `approvalPolicy` are substituted because those two values
+        // are properties of the run that recorded the frame rather than of the frame's
+        // shape — every other byte is the recorded one, `cwd` included.
+        let threads = bound_session("01a0-head");
+        let mut frame = recorded.clone();
+        frame["id"] = json!(3);
+        frame["params"]["threadId"] = json!("01a0-head");
+        frame["params"]["approvalPolicy"] = json!("untrusted");
+        let admitted = go_env(Role::Ccd, &threads, &frame.to_string());
+        assert!(
+            matches!(admitted, RelayAction::Forward { .. }),
+            "the recorded frame must be the one this leg admits: {admitted:?}"
+        );
+    }
+
+    /// **A phone that names a workspace is refused, and naming the RIGHT one does not
+    /// help.**
+    ///
+    /// Its own session, because the rule under test is about the roots and a session with
+    /// a turn already running would refuse this frame for being busy instead — which is
+    /// how an earlier form of this assertion passed while the rule it names was not being
+    /// exercised at all.
+    ///
+    /// **Mutation:** admit only the ABSENCE (`leg == Phone && roots.is_none()`) rather
+    /// than refusing every presence, and this goes red: the equal-value frame forwards,
+    /// the app-server then refuses it `requires experimentalApi capability`, and the phone
+    /// has spent a durable claim and an upstream write to be told what this broker knew.
+    #[test]
+    fn a_phone_that_names_a_workspace_is_refused_even_when_it_names_the_right_one() {
+        let threads = bound_session("01a0-head");
+        for roots in [
+            json!([BOUND_ROOT]),
+            json!(["/work/other"]),
+            json!([]),
+            serde_json::Value::Null,
+        ] {
+            let mut named: serde_json::Value =
+                serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+            named["params"]["runtimeWorkspaceRoots"] = roots.clone();
+            let a = go_env(Role::Ccd, &threads, &named.to_string());
+            assert_eq!(
+                refused_code(&a),
+                E_POLICY_REFUSED,
+                "the phone may not name a workspace: {roots}"
+            );
+            // **Refused by the PROJECTION now, not by the workspace comparison** — and
+            // that is the stronger statement, taken earlier: `runtimeWorkspaceRoots` is
+            // not among the fourteen keys this leg's producer writes, so the frame is
+            // refused for not being the phone's frame before anything asks what the value
+            // says. The workspace rule behind it is unchanged and still guards the
+            // keyboard's leg (`only_the_phones_turn_may_omit_the_workspace_roots`).
+            assert!(
+                refused_message(&a).contains("shape this session accepts from a phone"),
+                "{}",
+                refused_message(&a)
+            );
+            // And the note names the SHAPE, never the path.
+            assert!(
+                !refused_note(&a).contains("/work"),
+                "the workspace value leaked into the audit log: {}",
+                refused_note(&a)
+            );
+        }
+    }
+
+    /// **The exact frame the daemon authors for a phone's steer is admitted.**
+    ///
+    /// [`the_frame_the_daemon_authors_for_a_phones_start_is_admitted`]'s twin, and the
+    /// tighter of the two: the steer's param set is pinned to exactly six keys, so a
+    /// daemon that sent five or seven would be refused.
+    #[test]
+    fn the_frame_the_daemon_authors_for_a_phones_steer_is_admitted() {
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        // Verbatim from `compose_turn`'s `turn/steer` arm.
+        let authored = json!({
+            "method": "turn/steer",
+            "id": 4,
+            "params": {
+                "threadId": "01a0-head",
+                "expectedTurnId": "01a0-turn",
+                "input": [{"type": "text", "text": "also say HELLO", "text_elements": []}],
+                "clientUserMessageId": null,
+                "responsesapiClientMetadata": null,
+                "additionalContext": null
+            }
+        });
+        let a = go_env(Role::Ccd, &threads, &authored.to_string());
+        assert!(
+            matches!(a, RelayAction::Forward { .. }),
+            "the frame the daemon actually authors must be admitted: {a:?}"
+        );
+    }
+
+    /// **F1: the phone's `turn/start` is pinned to the phone's OWN frame, not the
+    /// keyboard's twenty-four names.**
+    ///
+    /// The ccd cell ran the shared TUI-grounded fingerprint and added only an input check,
+    /// so it inherited every name the operator's frame may carry. Reproduced over the real
+    /// relay with the upstream bytes recorded: `model`, `effort`, `serviceTier`,
+    /// `personality`, `summary`, a 4096-byte `clientUserMessageId`, arbitrary
+    /// `text_elements` and a 2 MB text ALL forwarded from this leg. Five of those names
+    /// have no value rule at all — `model`/`effort` are cross-checked only inside
+    /// `check_collaboration_mode`, which never runs when `collaborationMode` is null,
+    /// which is exactly what the phone sends.
+    ///
+    /// The report and `fixtures/codex/compose-refusals-0.153.4.txt` both state the
+    /// narrowness as a property of the CHANGE. It was a property of the daemon's encoder.
+    /// Every other cell this leg can actuate pins its params exhaustively
+    /// ([`STEER_PARAMS`], [`INTERRUPT_PARAMS`]); this was the one that did not, and it was
+    /// the widest.
+    ///
+    /// **Mutation:** admit `serviceTier`, or a second input item, or a non-empty
+    /// `text_elements`, or drop the size cap — each turns a row below green.
+    #[test]
+    fn the_phones_turn_start_is_pinned_to_the_phones_own_frame() {
+        let threads = bound_session("01a0-head");
+        let seq = std::cell::Cell::new(0u32);
+        let with = |mutate: &dyn Fn(&mut serde_json::Value)| {
+            seq.set(seq.get() + 1);
+            let mut frame: serde_json::Value =
+                serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+            frame["id"] = json!(format!("p1-{}", seq.get()));
+            mutate(&mut frame);
+            go_env(Role::Ccd, &threads, &frame.to_string())
+        };
+
+        // The frame the daemon authors is admitted, unchanged.
+        assert!(
+            matches!(with(&|_| {}), RelayAction::Forward { .. }),
+            "the daemon's own frame must still forward"
+        );
+
+        // **Every TUI-only name is refused**, including the preference fields the shared
+        // fingerprint was widened for. `serviceTier` is the sharpest: it was admitted for
+        // the operator's keyboard on the argument that only the person at the machine can
+        // set it, and that argument is about the OTHER leg.
+        for key in [
+            "model",
+            "effort",
+            "serviceTier",
+            "serviceTierForTurn",
+            "personality",
+            "summary",
+            "toolOutput",
+            "turnTrigger",
+            "cyberAccessProgram",
+            "runtimeWorkspaceRoots",
+            "aFutureKeyNobodyHasMeasured",
+        ] {
+            let a = with(&|f| f["params"][key] = json!("anything"));
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "params.{key}");
+            assert!(
+                !refused_note(&a).contains(key),
+                "the key name is client-chosen and must not reach the log: {}",
+                refused_note(&a)
+            );
+        }
+        // And a MISSING key is refused too: the pin is the exact set, not a subset.
+        for key in ["cwd", "sandboxPolicy", "outputSchema", "collaborationMode"] {
+            let a = with(&|f| {
+                f["params"]
+                    .as_object_mut()
+                    .expect("params is an object")
+                    .remove(key);
+            });
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "missing params.{key}");
+        }
+
+        // **`clientUserMessageId` and `collaborationMode` are exactly null**, which is the
+        // parity `STEER_NULL_PARAMS`' own comment claimed `turn/start` already had and did
+        // not: a 4096-byte id forwarded from this leg.
+        for (key, value) in [
+            ("clientUserMessageId", json!("x".repeat(4096))),
+            ("clientUserMessageId", json!("m-1")),
+            ("collaborationMode", json!({"mode": "default"})),
+        ] {
+            let a = with(&|f| f["params"][key] = value.clone());
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "params.{key}");
+        }
+    }
+
+    /// **F1: a phone composes ONE text item, of the measured shape, within the bound its
+    /// own daemon advertises.**
+    ///
+    /// Split from the key-set gate because these are the three sub-values the reviews found
+    /// unfenced: any number of items, any `text_elements` array, and no size bound at all —
+    /// a 2 MB text forwarded. The daemon caps at `MAX_COMPOSE_BYTES` and the broker is the
+    /// boundary; a rule the producer keeps and the boundary does not is the shape this
+    /// module exists to refuse.
+    #[test]
+    fn a_phone_composes_one_measured_text_item_within_the_bound() {
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        let seq = std::cell::Cell::new(0u32);
+        // Driven on the STEER cell, which is idle-independent, so the same input rule can
+        // be asserted without a fresh session per row. The start cell shares the rule.
+        let with_input = |input: serde_json::Value| {
+            seq.set(seq.get() + 1);
+            let mut params = steer_params("01a0-head", "01a0-turn");
+            params["input"] = input;
+            go_env(
+                Role::Ccd,
+                &threads,
+                &json!({"method":"turn/steer","id":format!("i-{}", seq.get()),
+                        "params":params})
+                .to_string(),
+            )
+        };
+        let one = |text: serde_json::Value| json!([{"type":"text","text":text,"text_elements":[]}]);
+
+        assert!(matches!(
+            with_input(one(json!("hello"))),
+            RelayAction::Forward { .. }
+        ));
+
+        // TWO items: the daemon writes one, always.
+        assert_eq!(
+            refused_code(&with_input(json!([
+                {"type":"text","text":"first","text_elements":[]},
+                {"type":"text","text":"second","text_elements":[]}
+            ]))),
+            E_POLICY_REFUSED
+        );
+        // A NON-EMPTY `text_elements`: every capture is `[]`, and `TextElement` carries a
+        // `placeholder` the schema does not say is inert.
+        assert_eq!(
+            refused_code(&with_input(json!([{
+                "type":"text","text":"hi",
+                "text_elements":[{"byteRange":{"start":0,"end":2},
+                                  "placeholder":"/Users/someone/.ssh/id_rsa"}]
+            }]))),
+            E_POLICY_REFUSED
+        );
+        // An ABSENT `text_elements`: the daemon writes it, so its absence is not this
+        // producer's frame.
+        assert_eq!(
+            refused_code(&with_input(json!([{"type":"text","text":"hi"}]))),
+            E_POLICY_REFUSED
+        );
+        // Over the bound the phone's own daemon advertises.
+        let too_long = "x".repeat(MAX_PHONE_TEXT_BYTES + 1);
+        let a = with_input(one(json!(too_long)));
         assert_eq!(refused_code(&a), E_POLICY_REFUSED);
+        assert!(
+            !refused_note(&a).contains("xxxx"),
+            "the text must not reach the log: {}",
+            refused_note(&a)
+        );
+        // Exactly at the bound is fine.
+        assert!(matches!(
+            with_input(one(json!("x".repeat(MAX_PHONE_TEXT_BYTES)))),
+            RelayAction::Forward { .. }
+        ));
+    }
+
+    /// **F2: a `turn/start` is admitted only on an IDLE thread, on BOTH legs.**
+    ///
+    /// The idle rule was the phone's alone, which left a cross-leg race: a phone start
+    /// installs the busy mark, a TUI start is admitted anyway because the keyboard has no
+    /// idle rule, the TUI pump wins the upstream write, and the phone's frame lands as an
+    /// implicit steer into the operator's turn — while the phone's durable row says
+    /// `turn_start T` and the phone is told `Started{T}`. Classification order under one
+    /// mutex does not order two upstream pumps.
+    ///
+    /// Requiring idle for everybody refuses nothing a real client does: MEASURED (M2), the
+    /// 0.153 TUI sends `turn/steer` while a turn is running, never a second `turn/start`.
+    ///
+    /// **Mutation:** restore `leg == TurnLeg::Phone &&` on the busy check → red.
+    #[test]
+    fn a_turn_starts_only_on_an_idle_thread_whichever_leg_asks() {
+        // Phone first, then the keyboard.
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Ccd, &threads, &phone_turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        let mut keyboard: serde_json::Value =
+            serde_json::from_str(&turn("01a0-head")).expect("the captured turn parses");
+        keyboard["id"] = json!(51);
+        let refused = go_env(Role::Tui, &threads, &keyboard.to_string());
+        assert_eq!(refused_code(&refused), E_POLICY_REFUSED);
+        assert!(
+            refused_message(&refused).contains("already running a turn"),
+            "{}",
+            refused_message(&refused)
+        );
+        assert!(
+            matches!(refused, RelayAction::SyntheticError { .. }),
+            "and zero bytes upstream"
+        );
+
+        // The keyboard first, then the phone — the direction that already held, asserted
+        // here so the pair reads as one rule rather than two.
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        let mut phone: serde_json::Value =
+            serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+        phone["id"] = json!("p-after");
+        assert_eq!(
+            refused_code(&go_env(Role::Ccd, &threads, &phone.to_string())),
+            E_POLICY_REFUSED
+        );
+
+        // Two keyboard starts, which is the case the old rule allowed outright.
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        let mut second: serde_json::Value =
+            serde_json::from_str(&turn("01a0-head")).expect("the captured turn parses");
+        second["id"] = json!(52);
+        assert_eq!(
+            refused_code(&go_env(Role::Tui, &threads, &second.to_string())),
+            E_POLICY_REFUSED,
+            "the app-server would have taken this as an implicit steer"
+        );
+    }
+
+    /// **The workspace deferral is the PHONE's, and the keyboard keeps exact equality.**
+    ///
+    /// The phone's `turn/start` omits `runtimeWorkspaceRoots` because codex 0.153.4
+    /// refuses the key from a client that did not declare `experimentalApi`
+    /// (`fixtures/codex/compose-refusals-0.153.4.txt`), and the broker admits that absence
+    /// because the head-check has already proven the thread whose roots it would name.
+    ///
+    /// That argument is about a leg that CANNOT send the field. The TUI sends it on every
+    /// turn, so an absence there is not a deferral — it is a turn whose workspace this
+    /// broker was never shown, and relaxing the rule for it would buy nothing and lose the
+    /// anchor 2e-7c put in.
+    ///
+    /// **Mutation:** make `roots_may_defer` unconditional and this goes red while every
+    /// other row in this module stays green — which is precisely why it is written down.
+    #[test]
+    fn only_the_phones_turn_may_omit_the_workspace_roots() {
+        let threads = bound_session("01a0-head");
+        let mut absent: serde_json::Value =
+            serde_json::from_str(&turn("01a0-head")).expect("the captured turn parses");
+        absent["params"]
+            .as_object_mut()
+            .expect("params is an object")
+            .remove("runtimeWorkspaceRoots");
+
+        // The keyboard: refused, and refused as a WORKSPACE question rather than as a
+        // thread-identity one.
+        let refused = go_env(Role::Tui, &threads, &absent.to_string());
+        assert_eq!(refused_code(&refused), E_POLICY_REFUSED);
+        assert!(
+            refused_message(&refused).contains("workspace bound at its thread's creation"),
+            "{}",
+            refused_message(&refused)
+        );
+
+        // The phone: admitted, on the same frame, and only because it is the phone.
+        let mut for_the_phone = absent.clone();
+        for_the_phone["id"] = json!(41);
+        assert!(
+            matches!(
+                go_env(Role::Ccd, &threads, &for_the_phone.to_string()),
+                RelayAction::Forward { .. }
+            ),
+            "the phone's turn defers its roots to the verified thread"
+        );
+
+        // And an absent `cwd` is refused on BOTH legs: it is not gated by the
+        // app-server, so there is no reason for either leg to leave it out, and no
+        // measurement admitting it.
+        for role in [Role::Tui, Role::Ccd] {
+            let mut no_cwd = absent.clone();
+            no_cwd["params"]
+                .as_object_mut()
+                .expect("params is an object")
+                .remove("cwd");
+            no_cwd["id"] = json!(42);
+            assert_eq!(
+                refused_code(&go_env(role, &threads, &no_cwd.to_string())),
+                E_POLICY_REFUSED,
+                "{role:?} may not omit cwd"
+            );
+        }
+    }
+
+    /// **A turn the phone starts is admitted only while the thread is IDLE.**
+    ///
+    /// The head-check opened a ccd path in 4b, and this is the rule that keeps it from
+    /// being the one the app-server would have applied. MEASURED on 0.153.4 against the
+    /// server's own socket: a byte-identical `turn/start` sent while a turn is running is
+    /// ACCEPTED and answered with the RUNNING turn's id — an implicit steer with no
+    /// `expectedTurnId` and therefore no staleness guard. So a start refuses while a turn
+    /// is busy, and `turn/steer` — which carries the guard natively — is the method for
+    /// that case.
+    ///
+    /// The rule began as the phone's alone and is now BOTH legs' (F2): see
+    /// `a_turn_starts_only_on_an_idle_thread_whichever_leg_asks` for the cross-leg race
+    /// that closed.
+    #[test]
+    fn the_phone_starts_a_turn_only_on_an_idle_thread() {
+        let threads = bound_session("01a0-head");
+
+        // Idle: the phone's start is admitted under the same fingerprint, head-check and
+        // workspace binding the TUI's own turn is held to.
+        let idle = go_env(Role::Ccd, &threads, &phone_turn("01a0-head"));
+        assert!(
+            matches!(idle, RelayAction::Forward { .. }),
+            "an idle thread admits the phone's turn: {idle:?}"
+        );
+        // That admission marked the thread busy, exactly as the TUI's does.
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+
+        // Busy: refused HERE, with zero bytes, rather than becoming the server's
+        // unguarded implicit steer.
+        let mut busy_frame: serde_json::Value =
+            serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+        busy_frame["id"] = json!(12);
+        let busy = go_env(Role::Ccd, &threads, &busy_frame.to_string());
+        assert_eq!(refused_code(&busy), E_POLICY_REFUSED);
+        assert!(
+            refused_message(&busy).contains("already running a turn"),
+            "the refusal must say which condition failed: {}",
+            refused_message(&busy)
+        );
+
+        // **And the TUI leg is refused too, which it was not when this rule was first
+        // written.** The idle rule started as the phone's alone, and that left a cross-leg
+        // race: two legs are two upstream pumps, so a keyboard start admitted after the
+        // phone's mark could win the write and the phone's frame would land as an implicit
+        // steer into the operator's turn. It refuses nothing a real client does — MEASURED,
+        // the TUI sends `turn/steer` here. See
+        // `a_turn_starts_only_on_an_idle_thread_whichever_leg_asks`.
+        let mut tui_frame: serde_json::Value =
+            serde_json::from_str(&turn("01a0-head")).expect("the captured turn parses");
+        tui_frame["id"] = json!(13);
+        let keyboard = go_env(Role::Tui, &threads, &tui_frame.to_string());
+        assert_eq!(refused_code(&keyboard), E_POLICY_REFUSED);
+        assert!(
+            refused_message(&keyboard).contains("already running a turn"),
+            "{}",
+            refused_message(&keyboard)
+        );
+    }
+
+    /// **The phone's turn is held to the same fingerprint the operator's is.**
+    ///
+    /// Admitting the method by role is not admitting the frame: a foreign fingerprint, a
+    /// thread this session did not create, or a workspace other than the one bound at that
+    /// thread's creation each forwards zero bytes. These are the rows a widening mutation
+    /// turns green.
+    #[test]
+    fn the_phones_turn_is_fingerprinted_head_checked_and_workspace_bound() {
+        let threads = bound_session("01a0-head");
+        // A foreign fingerprint: the turn names an approval policy this session was not
+        // launched with.
+        let mut foreign: serde_json::Value =
+            serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+        foreign["params"]["approvalPolicy"] = json!("never");
+        assert_eq!(
+            refused_code(&go_env(Role::Ccd, &threads, &foreign.to_string())),
+            E_POLICY_REFUSED
+        );
+        // A thread this session does not have bound.
+        assert_eq!(
+            refused_code(&go_env(Role::Ccd, &threads, &phone_turn("01a0-a-stranger"))),
+            E_POLICY_REFUSED
+        );
+        // The right thread, the wrong workspace. `cwd` is still exact on this leg — only
+        // the roots defer — so a phone naming another directory is refused.
+        let mut elsewhere: serde_json::Value =
+            serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+        elsewhere["params"]["cwd"] = json!("/work/other");
+        let elsewhere = elsewhere.to_string();
+        assert_eq!(
+            refused_code(&go_env(Role::Ccd, &threads, &elsewhere)),
+            E_POLICY_REFUSED
+        );
     }
 
     #[test]
@@ -3295,7 +4436,10 @@ mod tests {
 
     #[test]
     fn ccd_start_fork_turn_are_role_refused() {
-        for m in ["thread/start", "thread/fork", "turn/start"] {
+        // `turn/start` left this list in 4b — it is now admitted on an idle thread under
+        // its own disposition. Thread CREATION stays refused by role: ccd attaches to the
+        // thread the operator's session made and never makes one.
+        for m in ["thread/start", "thread/fork"] {
             let text = format!(
                 r#"{{"method":"{m}","id":1,"params":{{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}}}"#
             );
@@ -3894,27 +5038,301 @@ mod tests {
         );
     }
 
-    /// The deferred cell that REMAINS deferred still fails closed with the
-    /// method-unavailable code.
+    /// **A steer from the operator's own keyboard reaches this session's head thread.**
     ///
-    /// `turn/steer` only. It INJECTS content into a running turn, which is the vector
-    /// actuation D2 exists to fence, so it stays Phase 3's.
-    /// `turn/interrupt` left this set deliberately — see
-    /// [`the_interrupt_is_bound_to_the_running_turn`] and
-    /// [`crate::allowlist::Disposition::InterruptActiveTurn`].
+    /// The cell was `HeadCheck` — deferred, refuse-always — and MEASURED on 0.153.4 that
+    /// meant the pane printed a banner naming the broker and the operator could not
+    /// redirect their own model mid-turn. The staleness question is left to the
+    /// app-server, which guards `expectedTurnId` natively and whose answer lands on the
+    /// screen the person is looking at.
     #[test]
-    fn the_still_deferred_actuation_fails_closed() {
-        let a = go(
-            Role::Tui,
-            &json!({"method":"turn/steer","id":3,"params":{"threadId":"01a0-head"}}).to_string(),
+    fn the_operators_keyboard_steers_this_sessions_head_thread() {
+        let threads = bound_session("01a0-head");
+        assert!(
+            matches!(
+                go_env(Role::Tui, &threads, &steer("01a0-head", "01a0-any-turn")),
+                RelayAction::Forward { .. }
+            ),
+            "the operator must be able to steer their own session"
         );
-        match a {
-            RelayAction::SyntheticError { frame, .. } => {
-                let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                assert_eq!(v["error"]["code"], E_METHOD_UNAVAILABLE);
-            }
-            other => panic!("{other:?}"),
+        // A thread this session is not on is refused here, with zero bytes — the same
+        // scoping every other actuation on this leg gets.
+        assert_eq!(
+            refused_code(&go_env(
+                Role::Tui,
+                &threads,
+                &steer("01a0-a-stranger", "01a0-any-turn")
+            )),
+            E_POLICY_REFUSED
+        );
+        // And the params are the measured shape: the six keys the real TUI sends, no more
+        // and no fewer, with the two metadata fields exactly null.
+        for params in [
+            json!({"threadId":"01a0-head","expectedTurnId":"01a0-t","input":[]}),
+            json!({"threadId":"01a0-head","expectedTurnId":"01a0-t","input":[],
+                   "clientUserMessageId":null,"responsesapiClientMetadata":null,
+                   "additionalContext":null,"force":true}),
+            json!({"threadId":"01a0-head","expectedTurnId":"01a0-t","input":[],
+                   "clientUserMessageId":null,"responsesapiClientMetadata":null,
+                   "additionalContext":{"a":{"kind":"application","value":"x"}}}),
+        ] {
+            let a = go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"turn/steer","id":91,"params":params}).to_string(),
+            );
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{params}");
         }
+    }
+
+    /// **The phone steers the turn this session is running, and no other.**
+    ///
+    /// The extra rule the ccd leg carries, and why it is not tidiness. MEASURED on
+    /// 0.153.4: the app-server answers a stale `expectedTurnId` with
+    /// `-32600 "expected active turn id X but found Y"` — it hands the caller the REAL
+    /// running turn's id. A phone is not looking at the pane and has no business learning
+    /// that from a refusal, so a stale steer is answered here, with zero bytes upstream,
+    /// by the same `is_active_turn` predicate that binds the stop control.
+    ///
+    /// A mutation that widens this arm to a plain forward turns every refused row below
+    /// green.
+    #[test]
+    fn the_phone_steers_only_the_turn_this_session_is_running() {
+        let threads = bound_session("01a0-head");
+        let seq = std::cell::Cell::new(0u32);
+        let from_the_phone = |params: serde_json::Value| {
+            seq.set(seq.get() + 1);
+            go_env(
+                Role::Ccd,
+                &threads,
+                &json!({"method":"turn/steer","id":format!("s-{}", seq.get()),
+                        "params":params})
+                .to_string(),
+            )
+        };
+
+        // Nothing is running, so there is nothing to steer. The server would have said
+        // "no active turn to steer"; this says it without spending a byte.
+        assert_eq!(
+            refused_code(&from_the_phone(steer_params("01a0-head", "01a0-turn"))),
+            E_POLICY_REFUSED
+        );
+
+        // A turn the TUI started and the server answered.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        assert!(
+            matches!(
+                from_the_phone(steer_params("01a0-head", "01a0-turn")),
+                RelayAction::Forward { .. }
+            ),
+            "the phone must be able to steer the turn this session is running"
+        );
+
+        // A turn that is not the running one, and a thread this session is not on.
+        for params in [
+            steer_params("01a0-head", "01a0-some-other-turn"),
+            steer_params("01a0-a-stranger", "01a0-turn"),
+        ] {
+            assert_eq!(
+                refused_code(&from_the_phone(params.clone())),
+                E_POLICY_REFUSED,
+                "{params}"
+            );
+        }
+
+        // **The refusal names no turn.** The whole reason this gate is here is that the
+        // server's own answer would have named the running one.
+        let stale = from_the_phone(steer_params("01a0-head", "01a0-some-other-turn"));
+        assert!(
+            !refused_message(&stale).contains("01a0-turn"),
+            "a refusal that reaches the phone must not carry an id it did not send: {}",
+            refused_message(&stale)
+        );
+
+        // After the terminal there is nothing to steer again.
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"method":"turn/completed",
+                    "params":{"threadId":"01a0-head","turn":{"id":"01a0-turn"}}})
+            .to_string(),
+        );
+        let ended = from_the_phone(steer_params("01a0-head", "01a0-turn"));
+        assert_eq!(refused_code(&ended), E_POLICY_REFUSED);
+        assert!(
+            matches!(ended, RelayAction::SyntheticError { .. }),
+            "every refusal above is composed here; the upstream socket is never written"
+        );
+    }
+
+    /// **A phone may steer with TEXT and nothing else.**
+    ///
+    /// The `UserInput` union the schema pins also carries `localImage`, `localAudio`,
+    /// `skill` and `mention` — each naming an absolute filesystem PATH the app-server
+    /// opens itself, outside the model's sandbox — and `image`/`audio`, which name a URL.
+    /// A phone that could send those would have a read-and-exfiltrate primitive no sandbox
+    /// policy fences: it does not run in the workspace and cannot otherwise read a byte of
+    /// it. The person at the keyboard drags files into their own composer and can already
+    /// read them, so the TUI leg keeps the whole union.
+    #[test]
+    fn the_phone_may_steer_with_text_and_nothing_else() {
+        let threads = bound_session("01a0-head");
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+
+        let with_input = |role: Role, id: &str, input: serde_json::Value| {
+            let mut params = steer_params("01a0-head", "01a0-turn");
+            params["input"] = input;
+            go_env(
+                role,
+                &threads,
+                &json!({"method":"turn/steer","id":id,"params":params}).to_string(),
+            )
+        };
+
+        for (n, item) in [
+            json!({"type":"localImage","path":"/Users/someone/.ssh/id_rsa"}),
+            json!({"type":"localAudio","path":"/work/proj/.env"}),
+            json!({"type":"skill","name":"x","path":"/work/proj/.env"}),
+            json!({"type":"mention","name":"x","path":"/work/proj/.env"}),
+            json!({"type":"image","url":"https://example.invalid/x.png"}),
+            json!({"type":"audio","url":"https://example.invalid/x.wav"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let a = with_input(Role::Ccd, &format!("i-{n}"), json!([item.clone()]));
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{item}");
+            // The same item from the operator's own keyboard is theirs to send.
+            assert!(
+                matches!(
+                    with_input(Role::Tui, &format!("t-{n}"), json!([item.clone()])),
+                    RelayAction::Forward { .. }
+                ),
+                "the keyboard keeps the whole union: {item}"
+            );
+        }
+
+        // **A `text` item carrying an extra key is refused too**, which is the difference
+        // between reading `item["type"]` and reading the item. The union's text arm is
+        // `{type, text, text_elements}`; anything beside them is a key this build has
+        // never measured, and the threat this module is written against is a future
+        // release giving one a meaning.
+        for odd in [
+            json!({"type":"text","text":"hi","text_elements":[],"path":"/Users/someone/.ssh/id_rsa"}),
+            json!({"type":"text","text":"hi","url":"https://example.invalid/x"}),
+            json!({"type":"text","text_elements":[]}),
+            json!({"type":"text","text":42}),
+            json!("just a string"),
+        ] {
+            let a = with_input(Role::Ccd, "odd", json!([odd.clone()]));
+            assert_eq!(refused_code(&a), E_POLICY_REFUSED, "{odd}");
+        }
+        // An EMPTY input composes nothing, and is answered here rather than upstream —
+        // where the app-server's own sentence is about the turn, not about the frame.
+        assert_eq!(
+            refused_code(&with_input(Role::Ccd, "empty", json!([]))),
+            E_POLICY_REFUSED
+        );
+
+        // A text item mixed in with a path item is still refused: the rule is over every
+        // item, not over the first one.
+        let mixed = with_input(
+            Role::Ccd,
+            "mixed",
+            json!([
+                {"type":"text","text":"look at this","text_elements":[]},
+                {"type":"localImage","path":"/Users/someone/.ssh/id_rsa"}
+            ]),
+        );
+        assert_eq!(refused_code(&mixed), E_POLICY_REFUSED);
+
+        // And the shape the phone actually sends forwards.
+        assert!(matches!(
+            with_input(
+                Role::Ccd,
+                "ok",
+                json!([{"type":"text","text":"stop and summarise","text_elements":[]}])
+            ),
+            RelayAction::Forward { .. }
+        ));
+    }
+
+    /// **A ccd write cannot interleave with a thread switch, and this is why.**
+    ///
+    /// D2/D3's deferred "serialize ccd writes across a switch" clause comes due with the
+    /// first ccd write that can actuate, and 4b is it. The answer is that the existing
+    /// machinery already closes it, transitively, in both directions — so the smallest arm
+    /// is no arm at all, and this is the test that says so rather than an assertion in
+    /// prose.
+    ///
+    /// * A **reserved** switch (its `thread/unsubscribe` prefix has forwarded, its
+    ///   `thread/start` is expected next) refuses a `turn/start` on either leg —
+    ///   `TurnAdmission::SwitchReserved`. So no turn can BEGIN inside the window.
+    /// * A reservation is only granted while no turn is busy (`creation_preconditions`),
+    ///   and no turn can begin during it, so inside the window `is_active_turn` is false
+    ///   for every id — and a steer therefore refuses too.
+    /// * A **pending** switch leaves no `Creation::Bound` head at all, so the head-check
+    ///   every ccd write starts with refuses on its own.
+    #[test]
+    fn a_ccd_write_cannot_interleave_with_a_switch() {
+        let threads = bound_session("01a0-head");
+        // A turn runs, is answered, and ends — so the session is idle and switchable.
+        assert!(matches!(
+            go_env(Role::Tui, &threads, &turn("01a0-head")),
+            RelayAction::Forward { .. }
+        ));
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"id": 11, "result": {"turn": {"id": "01a0-turn"}}}).to_string(),
+        );
+        threads.observe_server_frame(
+            CONN_A,
+            &json!({"method":"turn/completed",
+                    "params":{"threadId":"01a0-head","turn":{"id":"01a0-turn"}}})
+            .to_string(),
+        );
+
+        // The operator presses `/new`: the prefix forwards and reserves the switch.
+        assert!(matches!(
+            go_env(
+                Role::Tui,
+                &threads,
+                &json!({"method":"thread/unsubscribe","id":"u-1",
+                        "params":{"threadId":"01a0-head"}})
+                .to_string()
+            ),
+            RelayAction::Forward { .. }
+        ));
+
+        // Inside the reservation window the phone's start is refused...
+        let mut start: serde_json::Value =
+            serde_json::from_str(&phone_turn("01a0-head")).expect("the phone's turn parses");
+        start["id"] = json!(77);
+        let refused_start = go_env(Role::Ccd, &threads, &start.to_string());
+        assert_eq!(refused_code(&refused_start), E_POLICY_REFUSED);
+        assert!(
+            refused_message(&refused_start).contains("switch is in progress"),
+            "{}",
+            refused_message(&refused_start)
+        );
+
+        // ...and so is its steer, because a reservation is only granted while nothing is
+        // running and nothing can start inside it.
+        let refused_steer = go_env(Role::Ccd, &threads, &steer("01a0-head", "01a0-turn"));
+        assert_eq!(refused_code(&refused_steer), E_POLICY_REFUSED);
     }
 
     /// **The session's stop control is bound to the turn it is running, and to nothing

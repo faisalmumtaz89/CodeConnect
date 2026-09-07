@@ -1,0 +1,62 @@
+codex 0.153.4 — what a turn/start needs from the client that sends it
+=====================================================================
+
+codex-cli 0.153.4, sha256 b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3.
+Every row is the app-server's OWN socket with no broker in between, so what is
+measured is the SERVER's rule and not a policy of ours. Absolute paths scrubbed
+to /work/. The thread is the session's own head, idle at the first row.
+
+--- what each client declares at `initialize` ---
+The real TUI (captured off the tui leg through the frame tee):
+    "capabilities": {"experimentalApi": true,
+                     "optOutNotificationMethods": null,
+                     "requestAttestation": false}
+    "clientInfo":   {"name": "codex-tui", "title": null, "version": "0.153.4"}
+
+The CodeConnect control link (mac/ccd/src/codex_link.rs), verbatim:
+    "clientInfo": {"name": "codeconnect-ccd", "title": "CodeConnect daemon",
+                   "version": "<crate version>"}
+    — and NO `capabilities` member at all.
+
+--- the initialize RESULT is the same either way ---
+leg=no-caps    initialize -> {"codexHome":"/work/codexhome","platformFamily":"unix","platformOs":"macos","userAgent":"codex-tui/0.153.4 (Mac OS 26.5.2; arm64) tmux/3.7b (cc-4b-capprobe; 0.0.0)"}
+leg=withcap    initialize -> {"codexHome":"/work/codexhome","platformFamily":"unix","platformOs":"macos","userAgent":"codex-tui/0.153.4 (Mac OS 26.5.2; arm64) tmux/3.7b (cc-4b-capprobe; 0.0.0)"}
+results identical = True
+
+So the capability advertises nothing new in the handshake; it gates params at
+the moment they are used.
+
+--- and this is the one param it gates on a turn ---
+leg=no-caps    turn/start WITH roots + cwd            -> error code=-32600 message="turn/start.runtimeWorkspaceRoots requires experimentalApi capability"
+leg=no-caps    turn/start WITHOUT roots, WITH cwd     -> result={"turn": {"id": "01a07be5-f197-70f2-9a22-5220f164687b", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": null, "startedAt": null, "completedAt": null, "durationMs": null}}
+leg=no-caps    turn/start WITHOUT roots, WITHOUT cwd  -> result={"turn": {"id": "01a07be5-f197-70f2-9a22-5220f164687b", ...}}
+
+The third row returns the SAME turn id as the second because the second STARTED
+a turn: it is the implicit steer again (see steer-refusals-0.153.4.txt), not a
+statement about an absent `cwd`. `cwd` is not gated — the second row carries it
+and is accepted.
+
+--- how this reached us, which is the part worth keeping ---
+The first live run of the 4b compose gate failed here, not in a test:
+
+    COMPOSE (idle) -> Rejected { reason: "that message was refused (code -32600)
+                                 and nothing was changed; say it at the Mac" }
+    broker/daemon log: a compose on thread 01a07b96-… was refused
+                       (turn/start.runtimeWorkspaceRoots requires experimentalApi capability)
+
+The daemon had assembled the turn out of the values its accepted `thread/resume`
+answer reported, which is right — but one of those values is a key this client is
+not allowed to send. No unit test could have found it: the broker admits the
+frame, and the refusal comes from the server behind it.
+
+--- and why the fix is to drop the field rather than to declare the capability ---
+Declaring `experimentalApi` on the ccd leg would buy one field by handing the
+phone's leg the experimental parameter surface of the whole API — 133 methods'
+worth of params the allowlist fences by NAME but does not fence by shape, on the
+one leg a phone can reach. Dropping the field costs nothing: the broker's
+head-check has already proven the turn names the session's ONE verified thread,
+and that thread's `runtimeWorkspaceRoots` were installed only after being proven
+exactly `[launch cwd]`. A turn that omits the field runs under those. It is the
+same deferral `sandboxPolicy: null` already makes, discharged by the same check —
+and it leaves the phone unable to NAME a workspace at all, which is narrower than
+the operator's own frame rather than wider.

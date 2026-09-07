@@ -403,8 +403,17 @@ q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,clai
 # byte-identical.
 q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
    VALUES('interrupt','$CX','${CX_REQ}-stop','hi','$CX_THREAD',7,'stop','$CX_TURN','done','aborted','2026-09-05T00:00:02.000Z','2026-09-05T00:00:03.000Z');"
-[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "2" ] \
-  || { echo "FAIL: the Codex answer and interrupt seeds did not both land"; exit 1; }
+# **And a settled compose beside those two, under the ledger's third kind.** Same
+# argument, made once more because the first two were the ones that could still have
+# been read as "the two kinds the schema was written for": a kind whose whole content
+# is a different string in `operation_kind` and a different word in `route` inherits
+# the table's isolation with no migration and no arm of its own. Its `outcome` carries
+# a turn id, which no other kind's does — a compose's answer is which turn heard it —
+# so this row also proves the outcome column round-trips a value rather than a keyword.
+q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,claimed_hash,thread_id,generation,route,target_turn_id,status,outcome,started_at,settled_at)
+   VALUES('compose','$CX','${CX_REQ}-say','hc','$CX_THREAD',7,'turn_start',NULL,'done','turn_start $CX_TURN','2026-09-05T00:00:04.000Z','2026-09-05T00:00:05.000Z');"
+[ "$(q "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid='$CX';")" = "3" ] \
+  || { echo "FAIL: the Codex answer, interrupt and compose seeds did not all land"; exit 1; }
 
 # The complete durable Codex state, hashed. Anything the old daemon or the old
 # CLI touches changes this — the run, its events, AND its open cards.

@@ -371,7 +371,32 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     [`ws::InterruptResult`]'s variants are byte-identical to minor 15; what
 ///     changed is that the daemon now does the thing, which is precisely the kind
 ///     of fact a minor exists to let a peer assume rather than probe for.
-pub const PROTOCOL_MINOR: u32 = 17;
+///   * `18` — **`compose`: the phone says something to a Codex session.**
+///     [`ws::ClientMessage::Compose`] carries words and a ledger identity; the daemon
+///     decides what becomes of them from what the session is doing when it writes — a
+///     `turn/start` on an idle thread, a `turn/steer` into a running turn — and answers
+///     with a [`ws::ComposeResult`] that says which. Three things a client must know,
+///     and a client written against minor 17 needs all three:
+///       - [`ws::Capabilities::codex_compose`] — this daemon understands the message.
+///         Stronger than its interrupt sibling: `compose` is a NEW message, so a daemon
+///         below this minor decodes nothing and answers nothing, and a phone that sent
+///         one would wait for ever. Absent decodes `false`, which is what such a daemon
+///         meant. Compose exists only for Codex, so the affordance is scoped by the
+///         session's [`event::SessionSummary::agent`] as well.
+///       - **`started` and `steered` are different news and must not be collapsed.** The
+///         first says these words began a turn; the second says they joined one already
+///         running, whose id is the SAME turn — a steer produces no `turn/started` and
+///         the only terminal is the original turn's. A client that rendered both as
+///         "sent" would lose the one fact the operator asked for.
+///       - **the route is snapshotted, so a duplicate replays what happened rather than
+///         what would happen now.** A compose issued as a start is re-issued as a start;
+///         it never becomes a steer because the session has since become busy, which
+///         would put the words into a turn nobody composed them for.
+///
+///     Nothing existing changed shape. `send_text` is untouched and stays Claude's: it
+///     types at the Mac's TTY and shares no ledger, result type or failure vocabulary
+///     with this.
+pub const PROTOCOL_MINOR: u32 = 18;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

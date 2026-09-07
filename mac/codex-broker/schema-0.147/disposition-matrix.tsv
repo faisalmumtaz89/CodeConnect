@@ -521,11 +521,11 @@ Ccd	Request	turn/interrupt	InterruptActiveTurn
 Ccd	Notification	turn/interrupt	Refuse(NotAllowlisted)
 Tui	Request	turn/start	FingerprintThenHeadCheck
 Tui	Notification	turn/start	Refuse(NotAllowlisted)
-Ccd	Request	turn/start	Refuse(RoleNotPermitted)
+Ccd	Request	turn/start	FingerprintThenIdleTurn
 Ccd	Notification	turn/start	Refuse(NotAllowlisted)
-Tui	Request	turn/steer	HeadCheck
+Tui	Request	turn/steer	SteerHeadThread
 Tui	Notification	turn/steer	Refuse(NotAllowlisted)
-Ccd	Request	turn/steer	Refuse(NotAllowlisted)
+Ccd	Request	turn/steer	SteerRunningTurn
 Ccd	Notification	turn/steer	Refuse(NotAllowlisted)
 Tui	Request	windowsSandbox/readiness	Refuse(NotAllowlisted)
 Tui	Notification	windowsSandbox/readiness	Refuse(NotAllowlisted)

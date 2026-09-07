@@ -26,13 +26,20 @@
 //! bypass methods resolve to `Refuse(CodeExecBypass)`, and every forwarded method
 //! is a real pinned method (drift test).
 //!
-//! ## Deferred dispositions (clean seam for the switch/fanout sub-chunk)
+//! ## Deferred dispositions (clean seam for the fanout sub-chunk)
 //!
-//! Two composable actions from the plan's set — `head-check` and `consume-locally` —
-//! require machinery still deferred (the D2 vector barrier and the one-use
-//! response-capability fanout). Their table entries are **final and correct**
-//! ([`Disposition::HeadCheck`], [`Disposition::ConsumeLocally`]); only their *executor
-//! branches* are stubbed, and they **fail closed** here (see [`crate::refusal`]).
+//! ONE composable action from the plan's set — `consume-locally` — still requires
+//! machinery that is deferred (the one-use response-capability fanout). Its table entry is
+//! **final and correct** ([`Disposition::ConsumeLocally`]); only its *executor branch* is
+//! stubbed, and it **fails closed** here (see [`crate::refusal`]).
+//!
+//! `head-check` is no longer one of them. It existed for exactly one cell, `turn/steer`,
+//! held behind D2's vector barrier — and Phase 4b measured what that deferral cost: the
+//! operator of a hosted session could not steer their own model from their own keyboard,
+//! which is the same "refusing the only control is a safety decision, not a deferral"
+//! that took `turn/interrupt` out of this paragraph in 4a. The cell is now
+//! [`Disposition::SteerHeadThread`] on the TUI leg and [`Disposition::SteerRunningTurn`]
+//! on ccd's, and a variant nothing maps to is dead weight, so `HeadCheck` is gone.
 //!
 //! The third — `hold/serialize` — is GONE as of 2e-4c. It existed for exactly one cell,
 //! `thread/unsubscribe`, to hold the switch marker behind D2's linearization latch. D2 and
@@ -76,7 +83,8 @@ pub enum RefuseReason {
     /// ownership (e.g. `thread/settings/update`). Never forwarded.
     OwnershipAdjacent,
     /// A method the role's least-privilege model forbids (e.g. ccd attempting
-    /// `thread/start` / `thread/fork` / `turn/start` — ccd observes and attaches only).
+    /// `thread/start` / `thread/fork` — ccd attaches to the thread the operator's own
+    /// session created and never creates one).
     RoleNotPermitted,
     /// The launch fingerprint could not be asserted — a conflicting ownership value,
     /// or an absent one on a policy-setting method (absence ≠ forward). Produced by
@@ -92,9 +100,13 @@ pub enum RefuseReason {
     Deferred,
 }
 
-/// The composable disposition of a single allowlist cell. The plan's action set is
-/// `{refuse, consume-locally, hold/serialize, head-check, fingerprint-assert/inject,
-/// forward}`; all six are represented.
+/// The composable disposition of a single allowlist cell.
+///
+/// The plan's action set was `{refuse, consume-locally, hold/serialize, head-check,
+/// fingerprint-assert/inject, forward}` and this enum used to claim all six were
+/// represented. Two are not, and both left for the same reason rather than by neglect:
+/// `hold/serialize` had one cell and lost it to 2e-4c, and `head-check` had one cell and
+/// became two real checks in 4b. What is here is what the broker does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// Forward the reassembled bytes upstream unchanged (vetted benign).
@@ -126,6 +138,25 @@ pub enum Disposition {
     /// upstream seal — replaces the subset wholesale when it lands; it fills in the
     /// executor, not this table.
     FingerprintThenHeadCheck,
+    /// **`turn/start` from the phone**: everything [`Disposition::FingerprintThenHeadCheck`]
+    /// proves, plus the thread must be IDLE, plus the text-only `input` rule
+    /// [`Disposition::SteerRunningTurn`] carries.
+    ///
+    /// # The idle rule is the whole reason this is a separate cell
+    ///
+    /// MEASURED on 0.153.4, against the app-server's own socket: a `turn/start` sent while
+    /// a turn is running is not queued and is not refused — it is ACCEPTED, and answered
+    /// with the RUNNING turn's id. It is an implicit steer. And unlike a real
+    /// `turn/steer` it carries no `expectedTurnId`, so it has no staleness guard at all:
+    /// a phone whose view of the session is a second out of date would inject its text
+    /// into whatever turn happened to be running when the bytes landed.
+    ///
+    /// So the phone's start is admitted only against an idle thread, and the phone's steer
+    /// is the guarded method that exists for the other case. The TUI leg keeps
+    /// [`Disposition::FingerprintThenHeadCheck`] and the server's own behaviour: it is the
+    /// operator's own keyboard, they are looking at the pane, and the measured TUI sends a
+    /// `turn/steer` there rather than a second `turn/start`.
+    FingerprintThenIdleTurn,
     /// Refuse now (zero upstream bytes; synthetic error only for a request with a
     /// usable id).
     Refuse(RefuseReason),
@@ -193,9 +224,44 @@ pub enum Disposition {
     /// named here rather than left implied, because "one session per process" reads like a
     /// connection-level guarantee and is not one.
     ReadSessionThread,
-    /// DEFERRED: the D2 vector acceptance barrier for a thread-scoped actuation
-    /// (`turn/steer`).
-    HeadCheck,
+    /// **`turn/steer` on the operator's own keyboard**: forward iff `params.threadId` is
+    /// this session's bound head thread and the params are the measured shape.
+    ///
+    /// This was `HeadCheck` — deferred, refuse-always — and that was not a safe terminal
+    /// state, for the same reason `turn/interrupt` was not. MEASURED on 0.153.4: typing
+    /// during a running turn sends `turn/steer`, the broker refused it with `-32601`, and
+    /// a hosted operator could not redirect their own model from their own keyboard. The
+    /// composer's only other affordance is to wait for the turn to end.
+    ///
+    /// **The staleness guard is the server's, and it is native.** A steer names the turn
+    /// it was composed against in `expectedTurnId`, and the app-server refuses one that
+    /// does not match — so this leg passes it through rather than second-guessing it. The
+    /// operator is looking at the pane; the server's answer reaches their screen.
+    ///
+    /// **It cannot move the launch fingerprint.** MEASURED: a steer carries no `cwd`, no
+    /// `sandboxPolicy`, no `approvalPolicy` and no `runtimeWorkspaceRoots` — its whole
+    /// params surface is a thread, a turn, some input and two null metadata fields. So the
+    /// head-check is the entire authorization question, and there is no fingerprint to
+    /// assert.
+    SteerHeadThread,
+    /// **`turn/steer` from the phone**: everything [`Disposition::SteerHeadThread`] proves,
+    /// plus two things the ccd leg needs and the TUI leg does not.
+    ///
+    /// 1. **`expectedTurnId` must be the turn this session is actually running** — the same
+    ///    [`crate::session::ThreadBinding::is_active_turn`] predicate that binds
+    ///    [`Disposition::InterruptActiveTurn`]. MEASURED on 0.153.4: the app-server refuses
+    ///    a stale one with `-32600 "expected active turn id X but found Y"`, which hands
+    ///    the caller the REAL running turn id. A phone is not looking at the pane and has
+    ///    no business learning that id from a refusal, so a stale steer forwards zero bytes
+    ///    and is refused here instead of upstream.
+    /// 2. **Every `input` item is TEXT.** The `UserInput` union also carries `localImage`,
+    ///    `localAudio`, `skill` and `mention` — each taking an absolute filesystem PATH the
+    ///    app-server reads itself, outside the model's sandbox — and `image`/`audio`, which
+    ///    take a URL. A phone that could name those would have a read-and-exfiltrate
+    ///    primitive that no sandbox policy fences. The person at the keyboard legitimately
+    ///    drags a file into their own composer and can already read it; the phone cannot,
+    ///    so this leg admits the one arm it needs.
+    SteerRunningTurn,
     /// Forward iff `params.threadId` is this session's bound thread AND `params.turnId` is
     /// a turn this broker admitted, the server answered, and no terminal has cleared —
     /// i.e. the turn that is actually RUNNING.
@@ -216,8 +282,9 @@ pub enum Disposition {
     /// [`crate::session::SessionThreads::is_active_turn`] already decides, and that
     /// predicate is the same one the turn ledger keeps for its own fencing.
     ///
-    /// `turn/steer` deliberately stays [`Disposition::HeadCheck`]: it INJECTS content into
-    /// a running turn, which is the vector actuation D2 exists for.
+    /// `turn/steer` is its own pair of cells — [`Disposition::SteerHeadThread`] and
+    /// [`Disposition::SteerRunningTurn`] — because it INJECTS content into a running turn,
+    /// which needs more of the phone than of the keyboard.
     InterruptActiveTurn,
     /// DEFERRED: consume as a one-use response capability and fan out the winner
     /// (method-less approval answers).
@@ -311,9 +378,9 @@ fn tui_request(method: &str) -> Disposition {
 
         // The measured `/new` switch marker: scoped to a session thread (2e-4c).
         "thread/unsubscribe" => UnsubscribeSessionThread,
-        // Thread-scoped actuations — final dispositions whose machinery is deferred
-        // (fail closed here).
-        "turn/steer" => HeadCheck,
+        // The composer, mid-turn. Bound to this session's head thread; the turn it names
+        // is the app-server's to guard. See [`Disposition::SteerHeadThread`].
+        "turn/steer" => SteerHeadThread,
         // The session's one stop control — bound to the running turn, not deferred. See
         // [`Disposition::InterruptActiveTurn`].
         "turn/interrupt" => InterruptActiveTurn,
@@ -331,9 +398,19 @@ fn ccd_request(method: &str) -> Disposition {
     use RefuseReason::*;
     match method {
         // Attach only: ccd may resume a session-owned thread (fingerprint-asserted +
-        // target-bound at runtime); it may NOT create threads or start turns.
+        // target-bound at runtime); it may NOT create threads.
         "thread/resume" => FingerprintAssert,
-        "thread/start" | "thread/fork" | "turn/start" => Refuse(RoleNotPermitted),
+        "thread/start" | "thread/fork" => Refuse(RoleNotPermitted),
+
+        // **The phone puts words in the model's mouth, and these are the two cells that
+        // let it.** They are kept apart because the wire keeps them apart: a start is for
+        // an idle thread and a steer is for a running turn, and the measured app-server
+        // will happily accept a start for BOTH — answering the second with the running
+        // turn's id and no staleness guard. Admitting one cell for both cases would have
+        // been admitting that. See [`Disposition::FingerprintThenIdleTurn`] and
+        // [`Disposition::SteerRunningTurn`] for what each proves.
+        "turn/start" => FingerprintThenIdleTurn,
+        "turn/steer" => SteerRunningTurn,
 
         // **The session's one stop control, and the one actuation this leg has.**
         // The same disposition and the same gate the TUI leg gets: an interrupt is
@@ -468,6 +545,54 @@ mod tests {
         );
     }
 
+    /// **The phone may steer, and the operator's own keyboard may steer.**
+    ///
+    /// Both legs carry `turn/steer`, and they carry DIFFERENT dispositions — which is the
+    /// point of naming them here. The TUI leg is the person at the machine: the broker
+    /// proves the steer names this session's head thread and lets the app-server's own
+    /// `expectedTurnId` guard decide staleness. The ccd leg is a phone that cannot see the
+    /// pane: the broker additionally proves the turn it names is the one this session is
+    /// running, so a stale steer forwards zero bytes instead of being refused upstream by
+    /// an error that names the real turn.
+    #[test]
+    fn steering_is_admitted_on_both_legs_under_different_rules() {
+        assert_eq!(
+            disposition(Role::Tui, Request, "turn/steer"),
+            Disposition::SteerHeadThread
+        );
+        assert_eq!(
+            disposition(Role::Ccd, Request, "turn/steer"),
+            Disposition::SteerRunningTurn
+        );
+        // Steering is a request. A notification-shaped one answers nobody and is refused
+        // on both legs, like every other actuation.
+        for r in [Role::Tui, Role::Ccd] {
+            assert_eq!(
+                disposition(r, Notification, "turn/steer"),
+                Disposition::Refuse(RefuseReason::NotAllowlisted)
+            );
+        }
+    }
+
+    /// **A turn the phone starts is admitted only on an IDLE thread.**
+    ///
+    /// MEASURED on 0.153.4: the app-server accepts a `turn/start` while a turn is running
+    /// and answers with the RUNNING turn's id — an implicit steer carrying no
+    /// `expectedTurnId` and therefore no staleness guard at all. The TUI leg keeps that
+    /// behaviour (it is the operator's own keyboard, and the TUI does not send one); the
+    /// ccd leg gets its own disposition so the table itself says the rule is different.
+    #[test]
+    fn the_phone_may_start_a_turn_only_on_an_idle_thread() {
+        assert_eq!(
+            disposition(Role::Ccd, Request, "turn/start"),
+            Disposition::FingerprintThenIdleTurn
+        );
+        assert_eq!(
+            disposition(Role::Tui, Request, "turn/start"),
+            Disposition::FingerprintThenHeadCheck
+        );
+    }
+
     #[test]
     fn ccd_leg_attaches_and_may_stop_a_turn_and_does_nothing_else() {
         // ccd may resume (attach) and may stop the turn this session is running. It
@@ -484,20 +609,23 @@ mod tests {
             disposition(Role::Ccd, Request, "turn/interrupt"),
             Disposition::InterruptActiveTurn
         );
-        for m in ["thread/start", "thread/fork", "turn/start"] {
+        for m in ["thread/start", "thread/fork"] {
             assert_eq!(
                 disposition(Role::Ccd, Request, m),
                 Disposition::Refuse(RefuseReason::RoleNotPermitted),
                 "{m}"
             );
         }
-        // Steering INJECTS content into a running turn, which is the actuation the
-        // vector barrier exists for. Admitting the stop control is not a licence to
-        // admit it, and the two are kept apart here so a reader can see that the
-        // pair was considered rather than that one was forgotten.
+        // Composing is the leg's other actuation, and it is TWO cells rather than one
+        // because the wire treats a start on a busy thread as a steer with no staleness
+        // guard. They are asserted in their own test so the pair reads as considered.
+        assert_eq!(
+            disposition(Role::Ccd, Request, "turn/start"),
+            Disposition::FingerprintThenIdleTurn
+        );
         assert_eq!(
             disposition(Role::Ccd, Request, "turn/steer"),
-            Disposition::Refuse(RefuseReason::NotAllowlisted)
+            Disposition::SteerRunningTurn
         );
         assert_eq!(
             disposition(Role::Ccd, Request, "account/read"),

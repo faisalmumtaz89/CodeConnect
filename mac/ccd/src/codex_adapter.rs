@@ -74,6 +74,28 @@ fn require_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// cannot read. A present value that is not a non-empty string is: it means the field
 /// has changed type under us, and reading past it would be reading a shape nobody
 /// measured.
+/// **The three values a turn needs, or nothing.**
+///
+/// All three or none, deliberately. Each is shape-checked by
+/// [`CodexAdapter::plan_resume_seed`] before this runs, so an answer that reaches here
+/// with one missing is one the wire genuinely did not send it on — and a `turn/start`
+/// assembled from two of them plus a guess is a frame the broker refuses, with a refusal
+/// that would read as a bug in the guess rather than as the missing field it is.
+///
+/// `cwd` is taken as the `Value` it is, not as a parsed string: the broker compares it by
+/// exact structural equality against what it bound at the thread's creation, so anything
+/// this side did to it could only make that comparison fail.
+fn read_turn_launch(result: &Value) -> Option<TurnLaunch> {
+    let approval_policy = require_str(result, "approvalPolicy")?.to_string();
+    let approvals_reviewer = require_str(result, "approvalsReviewer")?.to_string();
+    let cwd = result.get("cwd").filter(|v| v.is_string())?.clone();
+    Some(TurnLaunch {
+        approval_policy,
+        approvals_reviewer,
+        cwd,
+    })
+}
+
 fn absent_or_nonempty_str(v: &Value, key: &str) -> bool {
     match v.get(key) {
         None | Some(Value::Null) => true,
@@ -222,6 +244,32 @@ const RESUME_ITEMS_VIEW_FULL: &str = "full";
 /// caller that got them all written applies the state rebuild. A seed that is planned
 /// and never applied has changed nothing, so the attach that failed can simply be
 /// retried on the next connection.
+/// **What a resumed thread runs under, taken from the answer that resumed it.**
+///
+/// The three values a `turn/start` must carry to be admitted: the broker asserts each
+/// against the launch fingerprint it holds, and refuses the turn if any disagrees. So this
+/// is not a grant — the daemon cannot widen anything by getting one wrong, only be refused
+/// — it is how the daemon learns the shape of a frame it never authored before.
+///
+/// They come from the **response**, which is the server echoing what the thread was
+/// created with, and that creation was itself fingerprint-asserted and workspace-verified
+/// by the broker when it was admitted. So a value here is one the broker has already
+/// proven once and will prove again.
+///
+/// `plan_resume_seed` already checked `approvalPolicy`, `approvalsReviewer` and `cwd` for
+/// shape — the note there says why, and names this as the chunk that would read them.
+/// `runtimeWorkspaceRoots` is deliberately NOT read: the phone's `turn/start` does not
+/// carry it (MEASURED — codex refuses the key from a client that has not declared
+/// `experimentalApi`), and the broker admits its absence because the head-check has
+/// already proven the thread whose roots it would name. A value nothing sends is a value
+/// this struct has no business holding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnLaunch {
+    pub approval_policy: String,
+    pub approvals_reviewer: String,
+    pub cwd: Value,
+}
+
 pub struct ResumeSeed {
     /// The thread this answer was read under — the one the resume asked about.
     thread_id: String,
@@ -242,6 +290,10 @@ pub struct ResumeSeed {
     /// reported by the caller, never inferred from the event count.
     described_turns: usize,
     terminal_turns: usize,
+    /// What this thread runs under, when the answer described all three values. `None`
+    /// when any of them was absent — a partial set cannot author a turn, and guessing the
+    /// missing one is exactly the thing the broker would refuse.
+    launch: Option<TurnLaunch>,
 }
 
 impl ResumeSeed {
@@ -274,6 +326,11 @@ impl ResumeSeed {
     /// [`crate::codex_link`]'s follow-up attach.
     pub fn running_turn_ids(&self) -> &[String] {
         &self.running_turns
+    }
+
+    /// What this thread runs under, if the answer said all four things.
+    pub fn launch(&self) -> Option<&TurnLaunch> {
+        self.launch.as_ref()
     }
 }
 
@@ -682,6 +739,7 @@ impl CodexAdapter {
             terminal_turns,
             running_turns,
             discarded_usage,
+            launch: read_turn_launch(result),
         })
     }
 

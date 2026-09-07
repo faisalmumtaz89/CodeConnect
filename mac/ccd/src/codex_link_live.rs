@@ -2474,6 +2474,61 @@ impl PhoneOverTheWire {
             .expect("the phone must be able to decode the daemon's interrupt_result")
     }
 
+    /// **The composer.** Sends the `compose` a phone sends and decodes the
+    /// `compose_result` a phone decodes.
+    async fn compose(
+        &mut self,
+        session_ref: &str,
+        request_id: &str,
+        text: &str,
+        budget: Duration,
+    ) -> protocol::ws::ComposeResult {
+        self.send_compose(session_ref, request_id, text).await;
+        self.next_compose_result(request_id, budget).await
+    }
+
+    /// **The composer, without waiting for the verdict.**
+    ///
+    /// The kill gate has to catch the daemon between the write and the answer. This
+    /// writes the frame and leaves; what the daemon did with it is read out of its
+    /// database.
+    async fn send_compose(&mut self, session_ref: &str, request_id: &str, text: &str) {
+        // The hash is computed the way the phone computes it — over the reference it used
+        // and the words it showed — so a daemon that derived it differently is caught here
+        // rather than agreeing with a constant this file wrote down.
+        let frame = serde_json::json!({
+            "type": "compose",
+            "session_id": session_ref,
+            "request_id": request_id,
+            "text": text,
+            "payload_hash": protocol::hash::compose_hash(session_ref, text),
+        });
+        println!("PHONE-> {frame}");
+        self.ws
+            .send(Message::Text(frame.to_string()))
+            .await
+            .expect("write the compose");
+    }
+
+    /// The next `compose_result` for one id. Separate from [`PhoneOverTheWire::compose`]
+    /// for [`PhoneOverTheWire::next_interrupt_result`]'s reason: a gate about two taps
+    /// under one id has to read TWO replies to the same `request_id`.
+    async fn next_compose_result(
+        &mut self,
+        request_id: &str,
+        budget: Duration,
+    ) -> protocol::ws::ComposeResult {
+        let reply = self
+            .read_until(budget, |frame| {
+                frame["type"].as_str() == Some("compose_result")
+                    && frame["request_id"].as_str() == Some(request_id)
+            })
+            .await
+            .unwrap_or_else(|| panic!("no compose_result for {request_id} within {budget:?}"));
+        serde_json::from_value(reply["result"].clone())
+            .expect("the phone must be able to decode the daemon's compose_result")
+    }
+
     /// **The stop, without waiting for the verdict.**
     ///
     /// The kill gate has to catch the daemon between the claim and the terminal, and
@@ -2799,6 +2854,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         crate::codex_link::LinkCarry::new(),
         crate::codex_link::answer_channel().1,
         crate::codex_link::interrupt_channel().1,
+        crate::codex_link::compose_channel().1,
     ));
 
     // The measuring instrument for claim 5, attached HERE rather than later: it has
@@ -4017,6 +4073,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         crate::codex_link::LinkCarry::new(),
         crate::codex_link::answer_channel().1,
         crate::codex_link::interrupt_channel().1,
+        crate::codex_link::compose_channel().1,
     ));
     let mut third_log: Vec<String> = Vec::new();
     let reattached = wait_until(Duration::from_secs(60), || {
@@ -6785,6 +6842,27 @@ fn answer_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>
 }
 
 /// The interrupt ledger of one run, in a database this process does not own.
+/// The compose ledger of a run in a database this process does not own.
+fn compose_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>)> {
+    let conn = rusqlite::Connection::open(db).expect("open the child's database");
+    let mut stmt = conn
+        .prepare(
+            "SELECT client_request_id, status, outcome FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2
+              ORDER BY started_at ASC",
+        )
+        .expect("prepare the compose ledger read");
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::store::OPERATION_COMPOSE, uid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("read the compose ledger")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("decode the compose ledger");
+    rows
+}
+
 fn interrupt_ledger_at(db: &Path, uid: &str) -> Vec<(String, String, Option<String>)> {
     let conn = rusqlite::Connection::open(db).expect("open the child's database");
     let mut stmt = conn
@@ -11545,6 +11623,28 @@ async fn wait_for_a_subscribed_link(daemon: &Arc<crate::state::Daemon>) -> bool 
     .await
 }
 
+/// The settled compose rows of a run, in the order this gate's ids were used.
+fn compose_ledger(daemon: &Arc<crate::state::Daemon>, uid: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for id in ["say-1", "say-2", "say-killed"] {
+        if let Ok(Some(state)) =
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_COMPOSE, uid, id)
+        {
+            out.push((
+                id.to_string(),
+                match state.status {
+                    crate::store::AnswerStatus::Applying => "applying".into(),
+                    crate::store::AnswerStatus::Settled(outcome) => outcome,
+                    crate::store::AnswerStatus::Indeterminate => "indeterminate".into(),
+                },
+            ));
+        }
+    }
+    out
+}
+
 fn interrupt_ledger(daemon: &Arc<crate::state::Daemon>, uid: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for id in [
@@ -12013,6 +12113,469 @@ async fn a_phone_stops_a_real_turn_and_the_record_says_so_exactly_once() {
     );
     let _ = std::fs::remove_file(&marker);
     teardown(sub, coord, "/tmp/cc-4a-gate-unused");
+}
+
+/// **G1, G2, G3, G5, G7: the phone says something to a real Codex session.**
+///
+/// One session, one long turn, and every gate that can ride it — because each live turn is
+/// a real model turn against a real quota, and a gate that could share one and did not is
+/// spending somebody's allowance to re-prove a session came up.
+///
+/// * **G1 idle start.** The thread is idle, the phone composes, and a REAL turn begins:
+///   `turn/started` on the wire, and the phone told `Started{turn}` naming it. The words
+///   are a `turn/start` this daemon authored out of the resume answer's own values, which
+///   is the first frame in this system a phone has ever caused.
+/// * **G2 active steer.** With that turn running, the phone composes again. No second turn
+///   starts, the phone is told `Steered{turn}` naming the SAME turn, and the model obeys
+///   it in-turn — the pane carries the steered word.
+/// * **G7 the implicit steer is closed.** Asserted from the wire rather than argued: the
+///   steer above went out as `turn/steer`, and the broker's own gate is what would have
+///   refused a `turn/start` in its place. The `turn/start` count over the whole gate is
+///   what proves no second turn was begun.
+/// * **G5 a duplicate.** The same id again is one wire write and one outcome.
+/// * **G3 a refusal carries no id the phone did not send.** After the terminal, a compose
+///   under a fresh id starts a turn rather than steering one — so the refusal G3 wants is
+///   driven at the daemon in the unit gate, and what is proven HERE is the property that
+///   matters live: no reply the phone receives across the whole run carries a turn id it
+///   was not itself told.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_starts_a_real_turn_and_then_steers_it() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("compose");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    // The warm-up turn is what creates the rollout the link resumes from — and the resume
+    // answer is where this daemon learns what the thread runs under, which is what lets it
+    // author a `turn/start` at all.
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let _registration = register_the_run(&daemon, &session, &sb).await;
+    assert!(
+        wait_for_a_subscribed_link(&daemon).await,
+        "the link never subscribed"
+    );
+
+    let (sub, tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+    let starts_before = sub
+        .seen()
+        .iter()
+        .filter(|f| f["method"] == "turn/started")
+        .count();
+
+    // ---- G1: the idle start ---------------------------------------------------
+    let marker = "COMPOSE-GATE-ONE";
+    let started = phone
+        .compose(
+            "cc-1",
+            "say-1",
+            &format!(
+                "Write out the integers from 1 to 900, one per line, in order, with no \
+                 commentary and no code. Do not use any tool. Then say {marker}."
+            ),
+            Duration::from_secs(120),
+        )
+        .await;
+    println!("COMPOSE (idle) -> {started:?}");
+    let protocol::ws::ComposeResult::Started { turn_id } = &started else {
+        panic!("an idle thread must begin a turn: {started:?}")
+    };
+    let turn_id = turn_id.clone();
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            sub.seen().iter().any(|f| {
+                f["method"] == "turn/started"
+                    && f["params"]["turn"]["id"].as_str() == Some(turn_id.as_str())
+            })
+        })
+        .await,
+        "the wire must show the turn this daemon says it began. methods: {:?}",
+        sub.methods()
+    );
+
+    // ---- G2: the steer, into that same turn -----------------------------------
+    let steered_word = "HELLO-STEER-4B";
+    let steered = phone
+        .compose(
+            "cc-1",
+            "say-2",
+            &format!("Also say the word {steered_word} when you are done."),
+            Duration::from_secs(120),
+        )
+        .await;
+    println!("COMPOSE (busy) -> {steered:?}");
+    assert_eq!(
+        steered,
+        protocol::ws::ComposeResult::Steered {
+            turn_id: turn_id.clone()
+        },
+        "a compose into a running turn joins it, and names the turn it joined"
+    );
+
+    // ---- G5: the duplicate ----------------------------------------------------
+    let again = phone
+        .compose(
+            "cc-1",
+            "say-2",
+            &format!("Also say the word {steered_word} when you are done."),
+            Duration::from_secs(60),
+        )
+        .await;
+    println!("COMPOSE (duplicate) -> {again:?}");
+    assert_eq!(
+        again,
+        protocol::ws::ComposeResult::Duplicate {
+            turn_id: turn_id.clone(),
+            started: false,
+        },
+        "a duplicate replays the recorded outcome, including which route it took"
+    );
+
+    // ---- G7: a ccd `turn/start` while the turn is busy forwards ZERO bytes ------
+    //
+    // **Placed HERE, while the turn is still running, and that is not incidental.** The
+    // first run of this gate put the probe after the terminal wait below: the thread was
+    // idle, the broker rightly admitted the frame, and a SECOND real turn began — which
+    // is the correct behaviour for an idle thread and says nothing at all about the busy
+    // rule. A probe about a precondition has to be taken while the precondition holds.
+    //
+    // Driven on a RAW ccd connection rather than through the daemon, because the daemon
+    // never sends one: `compose_route` chooses a steer while a turn is running, which is
+    // the whole point. What has to be proven live is the BROKER's half — that the leg
+    // itself refuses the frame — because that is what stands between a future caller and
+    // the app-server's implicit steer.
+    //
+    // MEASURED on 0.153.4 against the server's own socket: this frame is ACCEPTED there
+    // and answered with the running turn's id, carrying no `expectedTurnId` and therefore
+    // no staleness guard at all.
+    //
+    // The frame is [`crate::codex_link::compose_frame`]'s own output rather than a copy of
+    // its fourteen keys, so a probe that still passes is a probe about the frame this link
+    // actually sends. Its `cwd` is the launch cwd, derived from what this gate launched
+    // rather than from anything the wire said: the coordinator was given `--cwd /tmp` and
+    // canonicalizes it once before it becomes the broker's anchor. There is no
+    // `runtimeWorkspaceRoots`, for the reason `compose_frame` states — codex 0.153.4
+    // refuses the key from a client that did not declare `experimentalApi`, and this leg
+    // does not.
+    let busy_probe_params;
+    let busy_probe_answer;
+    {
+        let launch_cwd = std::fs::canonicalize("/tmp")
+            .expect("/tmp resolves")
+            .to_string_lossy()
+            .into_owned();
+        let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+        // The handshake first: an unopened connection answers `-32600 "Not initialized"`
+        // to everything, which is a fact about the probe rather than about the rule.
+        assert!(
+            raw.initialize().await["result"].is_object(),
+            "the probe's initialize must be answered"
+        );
+        raw.notify("initialized", serde_json::json!({})).await;
+        let launch = crate::codex_adapter::TurnLaunch {
+            approval_policy: "on-request".into(),
+            approvals_reviewer: "user".into(),
+            cwd: serde_json::Value::String(launch_cwd),
+        };
+        busy_probe_params = crate::codex_link::compose_frame(
+            0,
+            crate::store::COMPOSE_ROUTE_START,
+            &tapped_thread,
+            None,
+            "sneak in",
+            Some(&launch),
+        )["params"]
+            .clone();
+        let refused = raw
+            .request(
+                "turn/start",
+                busy_probe_params.clone(),
+                Duration::from_secs(30),
+            )
+            .await;
+        println!("CCD turn/start WHILE BUSY -> {refused}");
+        assert_eq!(
+            refused["error"]["code"].as_i64(),
+            Some(-32001),
+            "a ccd turn/start on a busy thread must be refused by the broker: {refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("already running a turn"),
+            "the refusal names the condition that failed: {message}"
+        );
+        assert!(
+            refused.get("result").is_none(),
+            "and it is a refusal, not the running turn's id: {refused}"
+        );
+        busy_probe_answer = refused["error"].clone();
+    }
+
+    // ---- the turn ends, and the model obeyed the steer -------------------------
+    assert!(
+        wait_until(Duration::from_secs(300), || turn_has_ended(&sub, &turn_id)).await,
+        "the steered turn never ended. methods: {:?}",
+        sub.methods()
+    );
+    let pane = sb.capture_pane_history();
+    assert!(
+        pane.contains(steered_word),
+        "the model must have obeyed the steer in-turn; the pane is the evidence. \
+         pane:\n{pane}"
+    );
+
+    // ---- G7/G2: exactly ONE turn was begun -------------------------------------
+    let starts = sub
+        .seen()
+        .iter()
+        .filter(|f| f["method"] == "turn/started")
+        .count()
+        - starts_before;
+    assert_eq!(
+        starts,
+        1,
+        "the steer must have joined the turn rather than begun a second one — a \
+         `turn/start` sent while busy is what the app-server would have accepted as an \
+         unguarded implicit steer, and the ccd leg refuses it. methods: {:?}",
+        sub.methods()
+    );
+
+    // ---- the ledger holds one row per id, settled with its own route ------------
+    let ledger = compose_ledger(&daemon, &session.uid);
+    println!("COMPOSE LEDGER {ledger:?}");
+    assert_eq!(
+        ledger,
+        vec![
+            ("say-1".to_string(), format!("turn_start {turn_id}")),
+            ("say-2".to_string(), format!("turn_steer {turn_id}")),
+        ],
+        "two ids, two settled rows, each naming the route it actually took"
+    );
+
+    // ---- THE CAPTURE --------------------------------------------------------
+    // The two frames a phone causes, in the `{conn,dir,frame}` shape the committed
+    // fixtures use, beside what the wire answered them with. Written from the tapped
+    // observer's own stream plus the frames this gate KNOWS were authored, because the
+    // authoring connection is the daemon's link and its c2s never reaches a tap.
+    //
+    // The run dir is swept when the sandbox drops, so `CC_CODEX_COMPOSE_CAPTURE` names
+    // somewhere a capture survives — the way `CC_CODEX_BOUNCE_CAPTURE` does.
+    let capture = match std::env::var("CC_CODEX_COMPOSE_CAPTURE") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("compose-capture.jsonl"),
+    };
+    let mut lines = String::new();
+    let mut write = |conn: &str, dir: &str, frame: &Value| {
+        lines.push_str(&serde_json::json!({"conn": conn, "dir": dir, "frame": frame}).to_string());
+        lines.push('\n');
+    };
+    // What the phone asked for, and what it was told — the ends of the operation.
+    write(
+        "phone",
+        "c2s",
+        &serde_json::json!({"type": "compose", "request_id": "say-1", "text": "<the prompt>"}),
+    );
+    write(
+        "phone",
+        "s2c",
+        &serde_json::json!({"type": "compose_result", "request_id": "say-1",
+                            "result": {"status": "started", "turn_id": turn_id}}),
+    );
+    write(
+        "phone",
+        "c2s",
+        &serde_json::json!({"type": "compose", "request_id": "say-2", "text": "<the steer>"}),
+    );
+    write(
+        "phone",
+        "s2c",
+        &serde_json::json!({"type": "compose_result", "request_id": "say-2",
+                            "result": {"status": "steered", "turn_id": turn_id}}),
+    );
+    // And every frame the subscribed observer saw for that turn: the `turn/started` the
+    // start caused, and the ONE `turn/completed` that ends both of them — a steer emits
+    // no start of its own, which is the fact this capture exists to carry.
+    for frame in sub.seen() {
+        let names_the_turn = frame["params"]["turn"]["id"].as_str() == Some(turn_id.as_str());
+        let method = frame["method"].as_str().unwrap_or_default();
+        if names_the_turn && (method == "turn/started" || method == "turn/completed") {
+            write("ccd-observer", "s2c", &frame);
+        }
+    }
+    // And the busy probe, which is the only c2s frame on this leg anyone can record: the
+    // link's own connection is the daemon's and its writes reach no tap. These are the
+    // fourteen keys a phone's `turn/start` is admitted with, as the app-server itself
+    // received them, beside the answer it gave. The refusal is the broker's, not the
+    // server's — which is the point of recording the pair: the server would have accepted
+    // this frame and folded it into the running turn.
+    //
+    // The real `cwd` is the sandbox's canonicalized `/tmp`, scrubbed here to the same
+    // `/work/proj` the other committed captures use. It is the only value in the frame
+    // that names this machine.
+    let mut recorded_probe = busy_probe_params.clone();
+    recorded_probe["cwd"] = serde_json::Value::String("/work/proj".into());
+    write(
+        "ccd",
+        "c2s",
+        &serde_json::json!({"method": "turn/start", "params": recorded_probe}),
+    );
+    write(
+        "ccd",
+        "s2c",
+        &serde_json::json!({"error": busy_probe_answer}),
+    );
+    std::fs::write(&capture, &lines).expect("write the compose capture");
+    println!("CAPTURE WRITTEN: {}", capture.display());
+
+    println!(
+        "GATE PASS — a phone started a real turn, steered it in flight, the model obeyed \
+         the steer, and no second turn was begun"
+    );
+    teardown(sub, coord, "/tmp/cc-4b-gate-unused");
+}
+
+/// **G6: a daemon killed after writing a compose records `indeterminate` and never says
+/// it again.**
+///
+/// The interrupt kill gate read across, on the same machinery and for a higher stake:
+/// saying something twice puts words in a model's mouth twice, which is not a recoverable
+/// mistake. A REAL `ccd` process takes the claim and writes the frame; the gate holds the
+/// leg so the answer cannot come back; the process is killed; a NEW process on the database
+/// it left behind is what has to make that claim terminal.
+///
+/// **Mutation:** let the recovery sweep skip `OPERATION_COMPOSE` — the sweep reads
+/// `OPERATION_KINDS`, so this is one constant — and the restart leaves the row `applying`,
+/// which the second tap would then be admitted against and the words said twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_daemon_killed_after_writing_a_compose_records_unknown_and_never_says_it_again() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("killsay");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
+    let uid = session.uid.clone();
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+
+    let mut ccd = CcdChild::start();
+    println!(
+        "SPAWNED a real ccd on {} (pid {}), loopback :{}",
+        ccd.home.display(),
+        ccd.child.id(),
+        ccd.port
+    );
+    let supervisor = ccd.register(&session, gate.path()).await;
+    let db = ccd.db();
+    wait_for_a_composer(&sb).await;
+    // The warm-up turn creates the rollout the link resumes from, and that resume answer
+    // is where the daemon learns what the thread runs under — without it a start has
+    // nothing to author a frame from and is refused before any claim, which would leave
+    // this gate with no write to kill after.
+    run_the_warm_up_turn(&sb).await;
+    let (sub, _thread) = subscribed_tap(&sb, "ccd-observer").await;
+
+    // ---- the phone says something, and nothing will ever tell it what happened ----
+    let text = "Write out the integers from 1 to 900, one per line, with no commentary.";
+    gate.hold();
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    phone.send_compose(&uid, "say-killed", text).await;
+
+    // The claim proves the child accepted the ask and wrote the frame — read out of its
+    // own database, because there is no in-process handle to ask.
+    let claimed = wait_until(Duration::from_secs(30), || {
+        compose_ledger_at(&db, &uid)
+            .first()
+            .map(|(_, status, _)| status == "applying")
+            .unwrap_or(false)
+    })
+    .await;
+    println!(
+        "MEASURED claim before the kill = {:?}",
+        compose_ledger_at(&db, &uid)
+    );
+    assert!(
+        claimed,
+        "the child never took a durable claim, so there is no in-flight compose for a \
+         kill to catch. child stderr:\n{}",
+        read_file(&ccd.home.join("ccd.stderr.log"))
+    );
+
+    // ---- THE KILL ------------------------------------------------------------
+    ccd.kill();
+    println!("KILLED — the process that wrote the compose is gone, mid-flight");
+    drop(supervisor);
+    phone.close();
+
+    // ---- and the write really had landed -------------------------------------
+    gate.release();
+    let began = wait_until(Duration::from_secs(120), || {
+        sub.seen().iter().any(|f| f["method"] == "turn/started")
+    })
+    .await;
+    println!("MEASURED the turn really began = {began}");
+
+    // ---- a NEW process, on the database the kill left behind ------------------
+    ccd.restart();
+    println!("RESTARTED — a process that has only ever seen this database from disk");
+    let recovered = wait_until(Duration::from_secs(30), || {
+        compose_ledger_at(&db, &uid)
+            .first()
+            .map(|(_, status, _)| status == "indeterminate")
+            .unwrap_or(false)
+    })
+    .await;
+    let ledger = compose_ledger_at(&db, &uid);
+    println!("MEASURED ledger after the restart = {ledger:?}");
+    assert!(
+        recovered,
+        "a claim the kill left behind must be made terminal at the next start: {ledger:?}"
+    );
+
+    // A fresh link on the same thread, which is what a restarted daemon really does — and
+    // the one thing that could say those words a second time.
+    let supervisor = ccd.register(&session, gate.path()).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let mut phone = PhoneOverTheWire::connect_to(
+        std::net::SocketAddr::from(([127, 0, 0, 1], ccd.port)),
+        &ccd.token,
+    )
+    .await;
+    let second_tap = phone
+        .compose(&uid, "say-killed", text, Duration::from_secs(30))
+        .await;
+    println!("MEASURED a second tap after the restart = {second_tap:?}");
+    let protocol::ws::ComposeResult::Indeterminate { reason } = &second_tap else {
+        panic!("a recovered claim is terminal and is never said again: {second_tap:?}");
+    };
+    assert!(reason.contains("not known"), "{reason}");
+    assert_eq!(
+        compose_ledger_at(&db, &uid),
+        ledger,
+        "the second tap must have changed nothing"
+    );
+
+    println!(
+        "GATE PASS — a kill after the write leaves one terminal unknown, and the words \
+         are never said twice"
+    );
+    drop(supervisor);
+    gate.close();
+    sub.handle.abort();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
 }
 
 /// **Two taps under ONE id on a real running turn hear one outcome.**

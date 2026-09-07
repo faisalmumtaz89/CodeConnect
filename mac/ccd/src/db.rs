@@ -378,7 +378,10 @@ impl Db {
         operation_kind: &'static str,
         session_uid: String,
         client_request_id: String,
-        outcome: &'static str,
+        // **An owned string, not a `&'static str`.** The interrupt's outcomes are a fixed
+        // vocabulary of three words; a compose's carries the turn that heard it, which is
+        // known only at runtime.
+        outcome: String,
         settled_at: String,
     ) -> Result<bool> {
         self.run(move |store| {
@@ -386,7 +389,7 @@ impl Db {
                 operation_kind,
                 &session_uid,
                 &client_request_id,
-                outcome,
+                &outcome,
                 &settled_at,
             )
         })
