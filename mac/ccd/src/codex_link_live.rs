@@ -1133,6 +1133,7 @@ impl LiveSandbox {
     /// as long as the assertions need. The hang is a hang, not a fake readiness:
     /// nothing here reports `Ready`.
     fn spawn_coordinator(&self, codex: &Path) -> Child {
+        self.pin_model_from_env();
         Command::new(resolve_codeconnect())
             .arg("internal-codex-coordinator")
             .args(["--uid", &self.uid])
@@ -1412,6 +1413,41 @@ impl LiveSandbox {
             .expect("create the sandbox config.toml");
         writeln!(f, "model = \"{model}\"").expect("write model");
         writeln!(f, "model_reasoning_effort = \"{effort}\"").expect("write effort");
+    }
+
+    /// `CC_CODEX_LIVE_MODEL`: pin THIS SANDBOX's model, for gates that pin none.
+    ///
+    /// The operator's own `~/.codex/config.toml` is never read or written by this harness
+    /// — a sandbox has its own `CODEX_HOME` and this writes inside it — so the knob cannot
+    /// change what the person at the machine runs.
+    ///
+    /// It exists because a gate's model is otherwise the account default, and an account
+    /// whose default is quota-blocked cannot complete the warm-up turn every live gate
+    /// starts with: the run then fails for a reason that has nothing to do with what it
+    /// asserts. Pointing it at a model with allowance left (e.g.
+    /// `CC_CODEX_LIVE_MODEL=gpt-5.3-codex-spark`) makes the gate measurable again.
+    ///
+    /// An explicit [`Self::pin_model`] WINS: this only supplies a model to a gate that
+    /// chose none, so a gate whose subject is a particular model still measures that one.
+    /// Called from `spawn_coordinator`, i.e. after any such pin and before the app-server
+    /// reads the config.
+    fn pin_model_from_env(&self) {
+        let Ok(model) = std::env::var("CC_CODEX_LIVE_MODEL") else {
+            return;
+        };
+        let config = self.codex_home.join("config.toml");
+        if model.is_empty() || config.exists() {
+            return;
+        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&config)
+            .expect("create the sandbox config.toml");
+        writeln!(f, "model = \"{model}\"").expect("write the env-pinned model");
     }
 
     /// The base and the credential it holds, so a test can prove they are GONE

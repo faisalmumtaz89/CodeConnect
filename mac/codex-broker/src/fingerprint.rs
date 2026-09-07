@@ -136,6 +136,16 @@
 //! is not in the captured turn/start set, so a `config` object on a `turn/start` now
 //! refuses outright.
 //!
+//! The pin is grounded on three captures now, not one: the 0.147 frame, the four keys 0.153
+//! adds ([`TURN_START_0153_NULL_PARAMS`]), and the twenty-fourth key 0.153.4 adds
+//! (`serviceTier` — see [`check_turn_start_service_tier`] for what it selects and why it is
+//! a preference rather than a capability). Each widening is attributable to the capture that
+//! carried it, and the union is asserted against the fixtures themselves
+//! (`the_captured_param_set_is_exactly_the_grounded_captures`) so the constant cannot drift
+//! from the frames it claims to enumerate. This is also the cost of the pin, stated plainly:
+//! a codex release that adds ONE top-level param refuses every hosted turn until it is
+//! re-grounded, which is what 0.153.4 did.
+//!
 //! **Deliberately NOT gated**, so the triage is visible rather than silent: `model`,
 //! `effort`, `summary`, `personality`, `clientUserMessageId`, `input`, `threadId`, `cwd`,
 //! `runtimeWorkspaceRoots`. The first five are model/UX knobs — they select which model
@@ -223,14 +233,27 @@
 //!
 //! `serviceTier` is the one that has since been measured, and it is worth stating how,
 //! because it is the shape of a whole CLASS of gap: both of those captures were taken
-//! against the empty test `CODEX_HOME` the live gates build, and the TUI sends that key only
-//! when the operator's own `config.toml` sets `service_tier`. No capture taken against an
-//! empty config could ever have carried it, so "no capture exercised it" was a fact about the
-//! corpus, not about the client. A real operator's launch refused at `thread/start`, their
-//! TUI exited, and the fix was a third capture
+//! against the empty test `CODEX_HOME` the live gates build, and on the 0.153 creation frame
+//! the TUI sent that key only when the operator's own `config.toml` set `service_tier`. No
+//! capture taken against an empty config could ever have carried it, so "no capture
+//! exercised it" was a fact about the corpus, not about the client. A real operator's launch
+//! refused at `thread/start`, their TUI exited, and the fix was a third capture
 //! (`fixtures/codex/thread-start-operator-config-0.153.jsonl`) — not an argument. It is
 //! admitted as a PREFERENCE (a speed/usage tier), null-or-non-empty-string, by
 //! [`check_thread_start_service_tier`]; it is not a capability and is not pinned like one.
+//!
+//! **A measured correction to the sentence above, and the reason it is stated rather than
+//! quietly patched.** "The TUI sends `serviceTier` only when the operator's config sets
+//! `service_tier`" was true of the frame it was measured on, and it is FALSE as a statement
+//! about the client. On codex **0.153.4** the TUI puts `serviceTier: "default"` on EVERY
+//! `turn/start`, from a `CODEX_HOME` holding no `config.toml` at all — controlled twice
+//! (empty home on the stock default model; a scratch config setting only `model`), both 24
+//! keys with the key present (`fixtures/codex/turn-start-servicetier-0.153.4.json`). The
+//! same session's `thread/start` sent 23 keys WITHOUT it. So the key's presence is per
+//! METHOD and per VERSION, not per config, and the scope of the original finding is "the
+//! 0.153 creation frame". The turn admits it by the same rule
+//! ([`check_turn_start_service_tier`]), grounded on that capture and on nothing else.
+//!
 //! Note the boundary this does NOT cross: `thread/resume`'s own allowlist still refuses
 //! `serviceTier`, because no captured resume carries it.
 //!
@@ -687,6 +710,7 @@ fn check_turn_start_captured_shape(params: &Value) -> Result<(), FingerprintRefu
         }
     }
     check_turn_start_0153_shape(params)?;
+    check_turn_start_service_tier(params)?;
     check_collaboration_mode(params)
 }
 
@@ -721,8 +745,13 @@ const THREAD_START_0153_NULL_PARAMS: [&str; 1] = ["projectId"];
 /// The first two captures were both taken against a minimal test `CODEX_HOME` — the
 /// isolated one the live gates build, holding `auth.json` and nothing else. That is a
 /// `config.toml` with no operator settings in it, and it is why this list was 23 for as
-/// long as it was: the TUI only sends `serviceTier` when the user's own config sets
-/// `service_tier`, so no capture taken against an empty config could ever have carried it.
+/// long as it was: on the 0.153 CREATION frame the TUI sends `serviceTier` only when the
+/// user's own config sets `service_tier`, so no capture taken against an empty config could
+/// ever have carried it. (That qualifier is load-bearing and it was learned the hard way —
+/// the unqualified version of this sentence, "the TUI only sends it when the config asks",
+/// is false of `turn/start` on 0.153.4, which sends it unconditionally. See
+/// [`check_turn_start_service_tier`]. The 0.153.4 creation frame still behaves as described
+/// here: 23 keys, no `serviceTier`.)
 /// The gap was not a gap in the schema census — `the_captured_thread_start_census_is_pinned`
 /// named `serviceTier` as a schema property no capture had exercised, and refusing it was
 /// correct on that evidence. It was a gap in the CORPUS.
@@ -981,6 +1010,53 @@ fn check_thread_start_dynamic_tools(params: &Value) -> Result<(), FingerprintRef
 /// Empty string refuses with the rest: it was never captured, and a field whose whole
 /// content is "which named tier" cannot name one with no characters.
 fn check_thread_start_service_tier(params: &Value) -> Result<(), FingerprintRefusal> {
+    check_service_tier_preference(params)
+}
+
+/// `turn/start`'s `serviceTier`, by the SAME rule as the creation's
+/// ([`check_thread_start_service_tier`]) and deliberately through the same body, so the two
+/// admissions cannot drift apart into two different definitions of "a tier name".
+///
+/// # The measurement that put it here, which corrects what this module used to say
+///
+/// The creation's rule was written with the sentence "the TUI sends `serviceTier` only when
+/// the operator's own `config.toml` sets `service_tier`". That was measured, and it was
+/// true of the frame it was measured on. It is NOT true of a turn on codex **0.153.4**:
+/// that TUI puts `serviceTier: "default"` on **every** `turn/start`, from a `CODEX_HOME`
+/// holding no `config.toml` at all — controlled twice, once against an empty home on the
+/// stock default model and once against a scratch config setting only `model`, both 24 keys
+/// with the key present (`fixtures/codex/turn-start-servicetier-0.153.4.json`). The same
+/// session's `thread/start` sent 23 keys WITHOUT it. So the key's presence is per-METHOD and
+/// per-version, not per-config, and the honest scope of the old sentence is "the 0.153
+/// creation frame", not "the client".
+///
+/// The cost of the stale pin was total: `turn/start params: unknown top-level parameter
+/// (1 of 24)` on every hosted turn, and a pane reading `Failed to start turn … request
+/// refused by session policy (code -32001)`. Nothing else about a turn had changed.
+///
+/// # Why admitting it is safe HERE, which is not the creation's argument
+///
+/// The creation's safety came from provenance — a `thread/start` is a TUI-only request. A
+/// turn is not: `ccd` authors turns. But the phone's leg never reaches this rule, because
+/// `turn/start` on the ccd leg is refused by ROLE, before any fingerprint runs — MEASURED
+/// on 0.153.4 as `-32001 "method refused: not permitted for this endpoint role"` for a
+/// byte-identical 24-key frame (`fixtures/codex/steer-refusals-0.153.4.txt`). So the only
+/// party that can set this is, again, the person at the keyboard, and what they are setting
+/// is which speed tier their own answer comes back on.
+///
+/// It is admitted as a PREFERENCE and not as a capability, which is the whole reason it
+/// gets a shape class rather than the exact-value pin [`TURN_START_0153_NULL_PARAMS`] holds
+/// its four keys to. Note that `serviceTierForTurn` — the per-turn sibling — stays in that
+/// null pin: no capture has ever carried a value on it, and this measurement is not about
+/// it.
+fn check_turn_start_service_tier(params: &Value) -> Result<(), FingerprintRefusal> {
+    check_service_tier_preference(params)
+}
+
+/// The one body behind both `serviceTier` admissions: absent, JSON null, or a NON-EMPTY
+/// STRING. Shared rather than duplicated so the refusal wording, and the rule itself, are
+/// literally the same on the creation and on the turn.
+fn check_service_tier_preference(params: &Value) -> Result<(), FingerprintRefusal> {
     match params.get("serviceTier") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::String(s)) if !s.is_empty() => Ok(()),
@@ -1212,7 +1288,7 @@ fn check_turn_start_0153_shape(params: &Value) -> Result<(), FingerprintRefusal>
     Ok(())
 }
 
-const TURN_START_CAPTURED_PARAMS: [&str; 23] = [
+const TURN_START_CAPTURED_PARAMS: [&str; 24] = [
     "threadId",
     "clientUserMessageId",
     "input",
@@ -1239,6 +1315,11 @@ const TURN_START_CAPTURED_PARAMS: [&str; 23] = [
     "toolOutput",
     "turnTrigger",
     "cyberAccessProgram",
+    // The 0.153.4 addition, from a third capture. Listed here so it is not an "unknown"
+    // key, and value-checked by [`check_turn_start_service_tier`] — a PREFERENCE rule
+    // (null or a non-empty tier name), not the null pin its `serviceTierForTurn` sibling
+    // above is held to.
+    "serviceTier",
 ];
 
 /// Refuse any top-level `turn/start` param outside the captured set.
@@ -2645,6 +2726,68 @@ mod tests {
         }
     }
 
+    /// The VERBATIM 24-key `turn/start` captured from a real codex **0.153.4** `--remote`
+    /// TUI through the frame tee, on a session whose `CODEX_HOME` held no `config.toml` at
+    /// all (and re-measured against a scratch config that set only `model`: same 24 keys).
+    ///
+    /// It is the corpus's only evidence that `serviceTier` reaches a TURN, and it is the
+    /// frame that REFUSED — `turn/start params: unknown top-level parameter (1 of 24)` —
+    /// which killed every hosted turn on 0.153.4 before it started. Every rule about that
+    /// key on `turn/start` is read off this file and cannot drift from it.
+    fn captured_service_tier_turn_start() -> Value {
+        let frame: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/turn-start-servicetier-0.153.4.json"
+        ))
+        .expect("the 0.153.4 turn/start fixture parses");
+        assert_eq!(frame["dir"], "c2s", "the capture must be a CLIENT frame");
+        assert_eq!(frame["frame"]["method"], "turn/start");
+        frame["frame"]["params"].clone()
+    }
+
+    /// The launch fingerprint the 0.153.4 captured session ran under, read off that turn
+    /// itself wherever the turn carries the dimension, so the two cannot disagree.
+    ///
+    /// `sandbox` is NOT read off the turn, because a turn does not carry it: this frame's
+    /// `sandboxPolicy` is null, which defers to the bound thread, so the field is never
+    /// consulted on this path. It is the `read-only` that session's own `thread/start`
+    /// established (measured in the same tee run).
+    fn service_tier_turn_fp() -> LaunchFingerprint {
+        let p = captured_service_tier_turn_start();
+        LaunchFingerprint {
+            approval_policy: p["approvalPolicy"].as_str().unwrap().into(),
+            approvals_reviewer: p["approvalsReviewer"].as_str().unwrap().into(),
+            sandbox: "read-only".into(),
+            hooks_enabled: true,
+            launch_cwd: p["cwd"].as_str().unwrap().into(),
+        }
+    }
+
+    /// **The real 0.153.4 turn is admitted, verbatim.**
+    ///
+    /// The frame that used to refuse, driven off the capture rather than a hand-built
+    /// object, so this asserts the thing that actually happens on the wire rather than a
+    /// reconstruction of it. The verdict is the deferring one, not `Proven`, because the
+    /// captured `sandboxPolicy` is null — the same answer the 0.147 anchor gives.
+    #[test]
+    fn the_0153_4_turn_start_carrying_service_tier_is_admitted() {
+        let p = captured_service_tier_turn_start();
+        assert_eq!(
+            p.as_object().unwrap().len(),
+            24,
+            "the 0.153.4 capture is a 24-key frame; if it moved, re-ground every rule \
+             read off it"
+        );
+        assert_eq!(
+            p["serviceTier"],
+            json!("default"),
+            "the 24th key is the measured `serviceTier`"
+        );
+        assert_eq!(
+            assert_fingerprint(&service_tier_turn_fp(), "turn/start", &p).unwrap(),
+            FpVerdict::SandboxDeferredToBoundThread,
+        );
+    }
+
     // ANCHOR — the real, unmodified frame off the wire. Its `sandboxPolicy: null` defers
     // to the thread named by `params.threadId`; this module must NOT discharge that. It
     // also proves the captured boundary and the sandbox boundary do not refuse
@@ -2656,6 +2799,88 @@ mod tests {
                 .unwrap(),
             FpVerdict::SandboxDeferredToBoundThread,
         );
+    }
+
+    /// **`serviceTier` on a TURN is admitted as a preference: null or a tier NAME, nothing
+    /// else** — the same rule, and the same refusal, the creation frame gets.
+    ///
+    /// The two mutants this exists to kill:
+    ///
+    /// * *admit any JSON value* (i.e. put the name in the allowlist and stop there) — the
+    ///   refused arms below fail, because a number, a bool, an object, an array and the
+    ///   empty string would all forward.
+    /// * *drop the value check entirely* — identical symptom, same arms, because the name
+    ///   IS in the allowlist now; without [`check_turn_start_service_tier`] nothing else
+    ///   looks at the value.
+    ///
+    /// The admitted arm is a shape class on purpose: the tier ids are the server's to define
+    /// (`model/list` advertises them), and pinning the `"default"` this capture happens to
+    /// carry would refuse the next tier on no evidence, while the ungated top-level `model`
+    /// beside it forwards an equally unmeasured string.
+    #[test]
+    fn the_turn_start_service_tier_preference_admits_names_and_refuses_structure() {
+        let base = captured_service_tier_turn_start();
+        let fp = service_tier_turn_fp();
+
+        for admitted in [json!("default"), json!("priority"), json!(null)] {
+            let mut p = base.clone();
+            p["serviceTier"] = admitted.clone();
+            assert_eq!(
+                assert_fingerprint(&fp, "turn/start", &p).unwrap(),
+                FpVerdict::SandboxDeferredToBoundThread,
+                "serviceTier {admitted} must be admitted as a preference"
+            );
+        }
+        // Absent is admitted too: every 0.147 and 0.153 turn in the corpus omits it.
+        let mut absent = base.clone();
+        absent.as_object_mut().unwrap().remove("serviceTier");
+        assert_eq!(
+            assert_fingerprint(&fp, "turn/start", &absent).unwrap(),
+            FpVerdict::SandboxDeferredToBoundThread,
+        );
+
+        for refused in [json!({}), json!([]), json!(""), json!(1), json!(true)] {
+            let mut p = base.clone();
+            p["serviceTier"] = refused.clone();
+            let e = match assert_fingerprint(&fp, "turn/start", &p) {
+                Ok(verdict) => panic!("serviceTier {refused} must refuse, got {verdict:?}"),
+                Err(e) => e,
+            };
+            assert_eq!(e.kind, FpRefuseKind::Unprovable, "serviceTier {refused}");
+            // The VALUE rule's refusal, not the unknown-key one — the name is admitted.
+            assert!(
+                e.detail.contains("params.serviceTier"),
+                "serviceTier {refused} must refuse on the value rule, got: {}",
+                e.detail
+            );
+            assert!(
+                !e.detail.contains("unknown top-level parameter"),
+                "the NAME is admitted; {refused} must not read as an unknown key: {}",
+                e.detail
+            );
+        }
+    }
+
+    /// The turn's `serviceTier` refusal is WORD-FOR-WORD the creation's.
+    ///
+    /// Asserted rather than described, because "the same rule" is only true while the two
+    /// say the same thing: a future edit that reworded one and not the other would leave an
+    /// operator reading two different definitions of what a tier name is.
+    #[test]
+    fn the_two_service_tier_refusals_are_the_same_sentence() {
+        let mut turn = captured_service_tier_turn_start();
+        turn["serviceTier"] = json!(7);
+        let turn_detail = assert_fingerprint(&service_tier_turn_fp(), "turn/start", &turn)
+            .unwrap_err()
+            .detail;
+
+        let mut creation = captured_operator_thread_start();
+        creation["serviceTier"] = json!(7);
+        let creation_detail = assert_fingerprint(&operator_start_fp(), "thread/start", &creation)
+            .unwrap_err()
+            .detail;
+
+        assert_eq!(turn_detail, creation_detail);
     }
 
     // ---------------------------------------------------------------------
@@ -3114,16 +3339,22 @@ mod tests {
     // The EXHAUSTIVE top-level allowlist. An unknown param refuses, and the
     // enumerated set is exactly the capture's (asserted against the fixture, so the constant
     // cannot drift from the frame it claims to enumerate).
-    /// The allowlist is exactly the 0.147 capture's keys PLUS the four 0.153 additions,
-    /// and not one name more.
+    /// The allowlist is exactly the 0.147 capture's keys PLUS the four 0.153 additions
+    /// PLUS the one key the 0.153.4 capture adds, and not one name more.
     ///
-    /// It used to assert equality with the 0.147 fixture alone. Two codex versions are
-    /// grounded now, so the honest statement is the union — but it is still an exact
-    /// one: every name is attributable to a capture, the two sets may not overlap (an
-    /// overlap would mean a "0.153 addition" that 0.147 already sent, i.e. a
-    /// mis-measurement), and a name belonging to neither fails here.
+    /// It used to assert equality with the 0.147 fixture alone, then with that fixture plus
+    /// the four measured 0.153 additions. Three groundings are in it now, so the honest
+    /// statement is the union — but it is still an exact one: every name is attributable to
+    /// a capture, the 0.147 set and the "0.153 additions" may not overlap (an overlap would
+    /// mean an addition 0.147 already sent, i.e. a mis-measurement), and a name belonging to
+    /// none of the three fails here.
+    ///
+    /// Taken as a union over the fixtures rather than by special-casing the new key past
+    /// the check — the same discipline `the_thread_start_allowlist_is_the_captured_union`
+    /// applies on the creation — so a FOURTH capture widens this list only by being
+    /// committed.
     #[test]
-    fn the_captured_param_set_is_exactly_the_two_grounded_captures() {
+    fn the_captured_param_set_is_exactly_the_grounded_captures() {
         let captured = captured_turn_start_params();
         let from_fixture: Vec<&str> = captured
             .as_object()
@@ -3140,15 +3371,47 @@ mod tests {
             );
         }
 
-        let mut expected: Vec<&str> = from_fixture;
+        let service_tier_turn = captured_service_tier_turn_start();
+        let from_0153_4: Vec<&str> = service_tier_turn
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        let mut expected: Vec<&str> = from_fixture.clone();
         expected.extend(TURN_START_0153_NULL_PARAMS);
+        expected.extend(from_0153_4.iter().copied());
         expected.sort_unstable();
+        expected.dedup();
         let mut allowlisted: Vec<&str> = TURN_START_CAPTURED_PARAMS.to_vec();
         allowlisted.sort_unstable();
         assert_eq!(
             allowlisted, expected,
-            "the allowlist must enumerate exactly the 0.147 capture plus the four \
-             measured 0.153 additions"
+            "the allowlist must enumerate exactly the 0.147 capture ∪ the four measured \
+             0.153 additions ∪ the 0.153.4 capture, and nothing else"
+        );
+
+        // `serviceTier` must be admitted BY THE 0.153.4 CAPTURE and by nothing else — i.e.
+        // it really is the third grounding that widened this list, and the 0.147 frame the
+        // rest of the pin is read off does not carry it.
+        assert!(
+            from_0153_4.contains(&"serviceTier") && !from_fixture.contains(&"serviceTier"),
+            "serviceTier must come from the 0.153.4 capture alone; if the 0.147 capture now \
+             carries it, the corpus moved and this rule must be re-grounded"
+        );
+        // …and it is the ONLY thing that capture adds. A second new key would be a second
+        // widening, and it would be riding in on this one's evidence.
+        let mut added: Vec<&str> = from_0153_4
+            .iter()
+            .copied()
+            .filter(|k| !from_fixture.contains(k) && !TURN_START_0153_NULL_PARAMS.contains(k))
+            .collect();
+        added.sort_unstable();
+        assert_eq!(
+            added,
+            ["serviceTier"],
+            "the 0.153.4 capture must widen the allowlist by exactly one key"
         );
     }
 
@@ -3612,9 +3875,11 @@ mod tests {
     /// (`thread-start-operator-config-0.153.jsonl`) rather than the empty test `CODEX_HOME`
     /// the other two captures used.
     ///
-    /// It is the corpus's only evidence that `serviceTier` reaches the wire at all — the TUI
-    /// sends it only when the user's own config sets `service_tier` — so every rule about
-    /// that key is read off this file and cannot drift from it.
+    /// It is the corpus's only CREATION-frame evidence that `serviceTier` reaches the wire:
+    /// on `thread/start` the TUI sent it only when the user's own config set `service_tier`.
+    /// That condition is `thread/start`'s alone — the 0.153.4 `turn/start` capture carries
+    /// the key with no config at all — so the `thread/start` rules about that key are read
+    /// off this file and cannot drift from it.
     fn captured_operator_thread_start() -> Value {
         let frames: Vec<Value> =
             include_str!("../../../fixtures/codex/thread-start-operator-config-0.153.jsonl")
@@ -3676,9 +3941,12 @@ mod tests {
     /// param. `serviceTier` is the one that moved, and it moved the only way this module
     /// allows: a capture carrying it now exists
     /// (`captured_operator_thread_start`). It is absent HERE because this session ran against
-    /// an empty test `CODEX_HOME` — the TUI sends the key only when the operator's own
-    /// `config.toml` sets `service_tier` — so its absence from this frame was never evidence
-    /// that the TUI does not send it, only that this config did not ask for it.
+    /// an empty test `CODEX_HOME` — on a CREATION the TUI sends the key only when the
+    /// operator's own `config.toml` sets `service_tier`, measured again on 0.153.4 — so its
+    /// absence from this frame was never evidence that the TUI does not send it, only that
+    /// this config did not ask for it. On a TURN the rule is different and the 0.153.4
+    /// capture measured it: sent unconditionally
+    /// (`the_0153_4_turn_start_carrying_service_tier_is_admitted`).
     #[test]
     fn the_captured_thread_start_census_is_pinned() {
         let p = captured_thread_start();
