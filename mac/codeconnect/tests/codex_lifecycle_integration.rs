@@ -28,6 +28,7 @@
 //! is `live_codex_host.rs` and `live_codex_coordinator.rs`, both gated on
 //! `CC_CODEX_LIVE=1`.
 
+use std::os::macos::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -547,8 +548,56 @@ impl Sandbox {
         let _ = std::fs::remove_dir_all(self.expected_run_dir(uid));
         let _ = std::fs::remove_file(&self.sock);
         if let Some(base) = self.home.parent() {
-            let _ = std::fs::remove_dir_all(base);
+            // Thaw before removing: `remove_dir_all` cannot delete an immutable
+            // file. The fake codex carries `UF_IMMUTABLE` whenever a test SIGKILLs
+            // the host inside the hash-pin window — `freeze_and_hash` sets the flag
+            // and the exec path clears it, and a kill in between skips the clear.
+            // That is the very leak this suite exercises in production, and without
+            // this the harness reproduced it in TMPDIR: 66 sandboxes were counted
+            // there, each with a `fake-codex` no `rm -rf` could remove.
+            thaw_tree(base);
+            if let Err(e) = std::fs::remove_dir_all(base) {
+                let msg = format!("sandbox not removed: {} ({e})", base.display());
+                // Silence is how 66 accumulated, so an undeleted sandbox fails the
+                // test — except mid-unwind, where a panic in `Drop` would abort the
+                // binary and bury the assertion that actually failed.
+                if std::thread::panicking() {
+                    eprintln!("{msg}");
+                } else {
+                    panic!("{msg}");
+                }
+            }
         }
+    }
+}
+
+/// Clear `UF_IMMUTABLE` from everything under `dir`, depth first.
+///
+/// Only that bit, off the flag word each file carries *now* — the shape
+/// `protocol::hash`'s clear uses, because a blanket `chflags(0)` would drop flags
+/// this harness never set. Symlinks are skipped rather than thawed: `chflags`
+/// follows them, and this must not reach outside the sandbox. Best-effort —
+/// anything it cannot thaw surfaces as the removal failure above, named there.
+fn thaw_tree(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            thaw_tree(&path);
+        }
+        let Ok(md) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if md.file_type().is_symlink() || md.st_flags() & libc::UF_IMMUTABLE == 0 {
+            continue;
+        }
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+            continue;
+        };
+        // SAFETY: a NUL-terminated path under this test's own temp dir.
+        unsafe { libc::chflags(c.as_ptr(), md.st_flags() & !libc::UF_IMMUTABLE) };
     }
 }
 

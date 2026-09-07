@@ -62,7 +62,37 @@ fn sessions_root() -> PathBuf {
 
 #[cfg(test)]
 thread_local! {
-    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_ROOT: std::cell::RefCell<Option<TestRoot>> = const { std::cell::RefCell::new(None) };
+}
+
+/// This thread's sessions root, and whether this thread is the one that must delete
+/// it on the way out.
+///
+/// It used to be a bare `PathBuf` nobody deleted: one root per test, left in TMPDIR
+/// forever — 90 per `cargo test -p codeconnect`, 365 counted on this machine. The
+/// flag is what makes deleting it safe. An ADOPTING helper thread names the same
+/// root as the test thread that minted it, and a second owner would remove it out
+/// from under the test still using it.
+#[cfg(test)]
+struct TestRoot {
+    dir: PathBuf,
+    owned: bool,
+}
+
+#[cfg(test)]
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        // A test writes a FILE over the root to stage `ENOTDIR`, so a directory
+        // removal is not the only shape this has to undo. Silent and best-effort:
+        // this runs in a TLS destructor after the test body, where a panic aborts
+        // the whole binary rather than failing one test.
+        if std::fs::remove_dir_all(&self.dir).is_err() {
+            let _ = std::fs::remove_file(&self.dir);
+        }
+    }
 }
 
 /// This thread's sessions root, for handing to a helper thread of the same test.
@@ -82,14 +112,14 @@ pub(crate) fn this_thread_sessions_root() -> PathBuf {
 /// *other* test running in parallel into the same directory.
 #[cfg(test)]
 pub(crate) fn adopt_test_sessions_root(dir: PathBuf) {
-    TEST_ROOT.with(|slot| *slot.borrow_mut() = Some(dir));
+    TEST_ROOT.with(|slot| *slot.borrow_mut() = Some(TestRoot { dir, owned: false }));
 }
 
 #[cfg(test)]
 fn test_sessions_root() -> PathBuf {
     TEST_ROOT.with(|slot| {
-        if let Some(dir) = slot.borrow().as_ref() {
-            return dir.clone();
+        if let Some(root) = slot.borrow().as_ref() {
+            return root.dir.clone();
         }
         let dir = std::env::temp_dir().join(format!(
             "cc-launch-test-{}-{:?}-{}",
@@ -101,7 +131,10 @@ fn test_sessions_root() -> PathBuf {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        *slot.borrow_mut() = Some(dir.clone());
+        *slot.borrow_mut() = Some(TestRoot {
+            dir: dir.clone(),
+            owned: true,
+        });
         dir
     })
 }

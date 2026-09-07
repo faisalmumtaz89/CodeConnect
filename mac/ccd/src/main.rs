@@ -1895,7 +1895,45 @@ mod tests {
         key
     }
 
-    fn scratch_root(tag: &str) -> std::path::PathBuf {
+    /// A temp root that removes itself, on the panic path too.
+    ///
+    /// It used to be a bare `PathBuf` nobody deleted, so every test left its root in
+    /// TMPDIR forever — 12 of them were counted there. `Deref`/`AsRef` keep the call
+    /// sites reading as the plain path they were.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => {}
+                // The root is handed out unborn — the test (or `harden_state_dir`)
+                // creates it — so one that never existed left nothing behind.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let msg = format!("scratch not removed: {} ({e})", self.0.display());
+                    // Silence is what let 12 accumulate — but a panic while already
+                    // unwinding aborts the binary and buries the real failure.
+                    assert!(std::thread::panicking(), "{msg}");
+                    eprintln!("{msg}");
+                }
+            }
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch_root(tag: &str) -> Scratch {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "ccd-perm-{tag}-{}-{}",
@@ -1903,7 +1941,7 @@ mod tests {
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        dir
+        Scratch(dir)
     }
 
     fn mode(path: &Path) -> u32 {
