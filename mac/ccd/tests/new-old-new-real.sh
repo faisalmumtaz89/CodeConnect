@@ -262,7 +262,19 @@ assert_uv() {
   uv="$(q 'PRAGMA user_version;')"
   [ "$uv" = "$want" ] || { echo "FAIL: user_version is $uv, not $want ($when)"; exit 1; }
   echo "  user_version $when: $uv"
+  # What the run MEASURED, kept for the verdict at the bottom. The verdict used
+  # to spell the two versions as literals, and they rotted: it still announced
+  # "a REAL v3-binary-opens-a-v4-database downgrade, driven 4 -> 3 -> 4" for
+  # every run after SCHEMA_VERSION reached 5, in the same output as its own
+  # `user_version after the final new reopen: 5`. A PASS line that names a
+  # number the run did not read is a PASS line that can be wrong about what
+  # passed, so the numbers below come from here.
+  LAST_UV="$uv"
 }
+
+# Set from LAST_UV at the two steps that establish them (see `assert_uv`).
+NEW_UV=""
+OLD_UV=""
 
 # The authoritative list of columns the agent-seam migration adds
 # (store.rs COLUMN_ADDITIONS / create_schema): every one must round-trip.
@@ -322,6 +334,7 @@ DEVICE_SEAM_SEEDED='{"agents":["codex"]}|epoch_probe'
 echo "== 1) new ccd migrates the DB =="
 run "$NEW" new1
 assert_uv 5 "after new migrate"
+NEW_UV="$LAST_UV"
 assert_seam_columns_exist "after new migrate"
 for object in codex_sessions all_sessions codex_pending_approvals all_pending_approvals \
               pending_approvals_refuse_codex_card mutation_ledger; do
@@ -446,6 +459,7 @@ run "$OLD" old
 # assertions that follow are what actually decide whether the old daemon wrote.
 grep -iE "liveness|run\(s\)|marked exited" "$H/old.log" | head -4 || true
 assert_uv 3 "after old daemon"
+OLD_UV="$LAST_UV"
 [ "$(q "SELECT lifecycle FROM sessions;")" = "exited" ] || { echo "FAIL: old daemon did not write"; exit 1; }
 assert_seam_columns_exist "after old daemon"
 # The old daemon knows none of the seam columns, so its write (marking the
@@ -1583,8 +1597,13 @@ echo "      with the new daemon's OWN log showing exactly one negotiation — th
 echo "      answered supported=true, so the affirmative control is the launcher's round trip"
 echo "      rather than a second one the harness made on its own connection"
 
-echo "PASS: a REAL v3-binary-opens-a-v4-database downgrade, driven 4 -> 3 -> 4 by the"
-echo "      real binaries: the old daemon rewrote user_version to its own 3, as measured,"
+# The verdict, in the numbers this run actually read out of the database. Refuse
+# to print it at all rather than print it with a blank where a version should be:
+# an unset variable here means a step that should have measured one did not run.
+[ -n "$NEW_UV" ] && [ -n "$OLD_UV" ] \
+  || { echo "FAIL: the run never measured both user_versions (new='$NEW_UV' old='$OLD_UV')"; exit 1; }
+echo "PASS: a REAL v$OLD_UV-binary-opens-a-v$NEW_UV-database downgrade, driven $NEW_UV -> $OLD_UV -> $NEW_UV by the"
+echo "      real binaries: the old daemon rewrote user_version to its own $OLD_UV, as measured,"
 echo "      and that is harmless because the isolation never rested on the number."
 echo "      Seam columns round-tripped byte-for-byte through the old daemon's write;"
 echo "      the foreign-epoch device set survived as bytes and authorizes nothing;"

@@ -1458,6 +1458,64 @@ impl LiveSandbox {
     }
 }
 
+/// Retire a sandbox's private base: kill every live process whose argv NAMES it,
+/// then remove `/tmp/ccll.<pid>.<tag>.<seq>.<hex>` and everything under it.
+///
+/// **Why the tag sweep in `Drop` cannot do this.** That sweep keys on `run_dir`
+/// (`/tmp/cch.*`), which is what the coordinator, the host, the app-server and the
+/// TUI carry — and nothing else does. A shell codex spawns for a tool call carries
+/// the COMMAND, and the only sandbox-owned path a command can carry is one the gate
+/// itself put there. So while the 4a interrupt gates asked for their markers under
+/// `/tmp` directly, the shells that write them were reachable by no sweep this
+/// harness had, and MEASURED they outlived the run: those gates ask for `sleep 45 &&
+/// touch <marker>` and then interrupt the turn, and `/tmp/cc-4a-*.<nanos>.txt`
+/// appeared roughly 45 s AFTER teardown — the approval auto-retires, codex escalates
+/// the same shell once more, and that retry is spawned as the sandbox is being
+/// removed and then runs on, orphaned, long past the process that asked for it.
+///
+/// Putting the marker under `base` is what makes the retry reachable. Captured off
+/// the real 0.153 wire, codex runs such a command as `/bin/zsh -lc 'sleep 45 && touch
+/// <marker>'` (`fixtures/codex/interrupt-0.153.jsonl`), so once the marker lives
+/// under `base` the base path is a substring of that process's `ps` line and
+/// [`tagged_pids`] finds it.
+///
+/// **What the selection actually is: a SUBSTRING sweep over the full base path.**
+/// [`tagged_pids`] kills every process whose whole `ps` command line CONTAINS
+/// `/tmp/ccll.<pid>.<tag>.<seq>.<hex>`. What makes that admissible is not the match
+/// being exact — it is not — but the base being unique to one sandbox: minted from
+/// this process's pid, the gate's tag, a process-local sequence and nanoseconds, and
+/// created by `create_private_dir`, which refuses to adopt an existing directory. So
+/// a sibling sandbox, in this run or a parallel one, cannot name it.
+///
+/// It is still a substring sweep, and the honest limits are two. Anything ELSE that
+/// names this base is killed as well — a `tail -f <base>/broker.log` an operator
+/// left open during a debugging run would go with it. And a pid read out of `ps` and
+/// killed a moment later is the usual scan-to-kill race: only the number is carried,
+/// so a pid recycled in that window is the one that dies. Both are accepted here
+/// because this runs in a test harness's teardown against a path nothing outside the
+/// harness has a reason to hold.
+///
+/// The exact `file_name()` comparison in
+/// [`teardown_kills_the_shell_that_names_the_sandbox_base`] is a different check
+/// entirely — the post-cleanup sweep for a leftover DIRECTORY — and says nothing
+/// about how processes are selected here.
+///
+/// Killing the sandbox's process GROUP would reach the same shell and more, but this
+/// harness never puts a sandbox in a group of its own: the group it would name is
+/// the test runner's.
+fn retire_sandbox_base(base: &Path) {
+    if let Some(tag) = base.to_str() {
+        for pid in tagged_pids(tag) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _ = std::fs::remove_dir_all(base);
+}
+
 impl Drop for LiveSandbox {
     fn drop(&mut self) {
         // The guardians, by VERIFIED identity: neither carries the run dir in its
@@ -1497,7 +1555,7 @@ impl Drop for LiveSandbox {
             .stderr(Stdio::null())
             .status();
         let _ = std::fs::remove_dir_all(&self.run_dir);
-        let _ = std::fs::remove_dir_all(&self.base);
+        retire_sandbox_base(&self.base);
     }
 }
 
@@ -2686,6 +2744,137 @@ async fn the_sandbox_credential_is_written_privately_and_removed_on_drop() {
         base.display()
     );
     println!("CREDENTIAL CLEANUP PASS — {} is gone", base.display());
+}
+
+/// **Teardown ends the shell that names the sandbox, before the sandbox goes.**
+///
+/// The non-live half of the marker fix, and the reason it needs a test of its own:
+/// the fault it guards is a process that OUTLIVES the run, which no assertion inside
+/// a live gate can reach — by the time it misbehaves the gate has long returned. So
+/// it runs in the ordinary suite, against a stand-in for the shell codex spawns: one
+/// of this test's own, carrying the marker path in its argv exactly as the measured
+/// `/bin/zsh -lc 'sleep 45 && touch <marker>'` does.
+///
+/// **Mutation:** drop the `tagged_pids` sweep from [`retire_sandbox_base`] and the
+/// shell is still alive five seconds after teardown — which is the ~45 s of `/tmp`
+/// litter caught at the moment it is created rather than three quarters of a minute
+/// later, when nothing is left to blame.
+#[test]
+fn teardown_kills_the_shell_that_names_the_sandbox_base() {
+    /// [`wait_until`]'s synchronous twin: this test owns a process, not a runtime.
+    fn within(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + budget;
+        loop {
+            if cond() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    let base = PathBuf::from(format!(
+        "/tmp/ccll.{}.teardown.{:x}",
+        std::process::id(),
+        nanos()
+    ));
+    create_private_dir(&base).expect("mk a stand-in sandbox base");
+    let marker = base.join(format!("cc-4a-teardown.{}.txt", nanos()));
+    let tag = base.to_str().expect("short /tmp path is utf-8").to_string();
+
+    let mut shell = Command::new("/bin/sh")
+        .args(["-c", &format!("sleep 45 && touch {}", marker.display())])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the stand-in retry shell");
+    let shell_pid = shell.id() as i32;
+
+    // The premise, asserted rather than assumed: a shell that merely NAMES the base
+    // is reachable by a base-keyed sweep. If `ps` did not carry the whole command
+    // there would be nothing for `Drop` to find and this test would be theatre.
+    let carried = within(Duration::from_secs(5), || {
+        tagged_pids(&tag).contains(&shell_pid)
+    });
+    // `sh -c 'a && b'` forks, and the fork's own argv is just `sleep 45` — no
+    // sandbox path, so no sweep reaches it. Collected while its parent is still
+    // alive to be asked, and killed by this test at the end: the fix's job is that
+    // the `touch` never runs, not that the orphaned sleep is reaped.
+    let mut kids: Vec<i32> = Vec::new();
+    within(Duration::from_secs(3), || {
+        kids = children_of(shell_pid);
+        !kids.is_empty()
+    });
+
+    // ---- THE TEARDOWN, the production path itself --------------------------
+    retire_sandbox_base(&base);
+
+    let died = within(Duration::from_secs(5), || {
+        matches!(shell.try_wait(), Ok(Some(_)))
+    });
+    let survivors = tagged_pids(&tag);
+    let base_gone = !base.exists();
+    // By EXACT basename. `tag.ends_with(name)` would have read the match backwards
+    // and called any `/tmp` entry that happens to be a suffix of this sandbox's
+    // name — down to a single character — a stray of ours.
+    let mine = base.file_name().expect("the base has a name").to_owned();
+    let strays: Vec<String> = std::fs::read_dir("/tmp")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name() == mine)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Cleanup BEFORE the assertions, so a red run leaves no `sleep 45` behind.
+    for pid in survivors.iter().copied().chain(kids) {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = shell.kill();
+    let _ = shell.wait();
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert!(
+        carried,
+        "no process named {tag} in `ps` — the stand-in never started, so nothing \
+         here was measured"
+    );
+    assert!(
+        died,
+        "the shell naming {tag} was still alive five seconds after teardown; in a \
+         real 4a run this is the escalated retry that touches its marker ~45 s AFTER \
+         the sandbox is gone"
+    );
+    assert!(
+        survivors.is_empty(),
+        "teardown left {survivors:?} naming {tag}"
+    );
+    assert!(base_gone, "the sandbox base survived teardown: {tag}");
+    assert!(strays.is_empty(), "{strays:?} survive under /tmp for {tag}");
+    println!("TEARDOWN PASS — the shell naming {tag} is dead and {tag} is gone");
+}
+
+/// The pids `parent` has forked, as `pgrep -P` reports them.
+fn children_of(parent: i32) -> Vec<i32> {
+    Command::new("/usr/bin/pgrep")
+        .args(["-P", &parent.to_string()])
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// **A session launched on a model the fixture never captured still runs a turn** (2e-4c).
@@ -12617,7 +12806,14 @@ async fn two_taps_under_one_id_on_a_real_turn_hear_one_outcome() {
     let (sub, _tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
     let mut phone = PhoneOverTheWire::connect(&daemon).await;
 
-    let marker = format!("/tmp/cc-4a-twotaps.{}.txt", nanos());
+    // Under the sandbox's own base, not bare `/tmp`: the interrupted turn's
+    // escalated retry of this very command is what teardown has to be able to find.
+    // See [`retire_sandbox_base`].
+    let marker = sb
+        .base
+        .join(format!("cc-4a-twotaps.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
     let _ = std::fs::remove_file(&marker);
     let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
     println!("RUNNING TURN = {turn_id}");
@@ -12711,7 +12907,14 @@ async fn an_interrupt_in_flight_is_settled_when_the_supervisor_disconnects() {
     let (sub, _tapped_thread) = subscribed_tap(&sb, "ccd-observer").await;
     let mut phone = PhoneOverTheWire::connect(&daemon).await;
 
-    let marker = format!("/tmp/cc-4a-unreg.{}.txt", nanos());
+    // Under the sandbox's own base, not bare `/tmp`: the interrupted turn's
+    // escalated retry of this very command is what teardown has to be able to find.
+    // See [`retire_sandbox_base`].
+    let marker = sb
+        .base
+        .join(format!("cc-4a-unreg.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
     let _ = std::fs::remove_file(&marker);
     let turn_id = a_turn_that_is_still_running(&sb, &sub, &marker).await;
     println!("RUNNING TURN = {turn_id}");

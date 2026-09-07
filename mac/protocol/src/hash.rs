@@ -1399,6 +1399,8 @@ pub fn compose_hash(session_ref: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    // `st_flags` is on the macOS extension trait; `super::*` brings the unix one.
+    use std::os::macos::fs::MetadataExt as _;
 
     #[test]
     fn known_vector() {
@@ -1582,7 +1584,16 @@ mod tests {
     /// A private scratch directory, named so two tests (or two `cargo test`
     /// processes) cannot collide over one pathname — these tests rename files over
     /// each other and a shared name would make them each other's attacker.
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    ///
+    /// It removes itself, and thaws before it does. The tests below strand
+    /// `UF_IMMUTABLE` (and, in `clear-mismatch`, a `UF_APPEND` relic) on purpose and
+    /// used to thaw one line before a trailing `remove_dir_all`, so any assertion
+    /// firing in between skipped both and left a directory `rm -rf` cannot clear.
+    /// Measured: six default-threaded `cargo test -p protocol hash::` runs left
+    /// **8** `cc-vnode-*` directories in TMPDIR — the freeze tests flake against each
+    /// other over the process-global armed slot, and every flake is a panic. With
+    /// this guard the same six runs, flaking the same way, left **0**.
+    fn scratch(tag: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "cc-vnode-{tag}-{}-{:?}",
             std::process::id(),
@@ -1590,7 +1601,145 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the scratch dir");
-        dir
+        Scratch(dir)
+    }
+
+    /// A scratch dir that removes itself, on the panic path too.
+    ///
+    /// The same guard `fsperm`'s tests carry, with one difference that is the whole
+    /// point here: this `Drop` thaws first, because `remove_dir_all` cannot delete a
+    /// file the OS refuses to unlink and these tests leave exactly such files
+    /// behind. `Deref`/`AsRef` keep the call sites reading as the plain path they
+    /// were — this change has none.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            thaw_tree(&self.0);
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                use std::io::Write as _;
+                let msg = format!("scratch not removed: {} ({e})", self.0.display());
+                // Silence is how the 8 accumulated — but a panic while already
+                // unwinding aborts the binary and buries the real failure.
+                assert!(std::thread::panicking(), "{msg}");
+                // `writeln!` with the result dropped, not `eprintln!`: this line only
+                // ever runs mid-unwind, and `eprintln!` PANICS if the write fails.
+                // A closed or full stderr would turn a reported cleanup failure into
+                // a double panic and abort the binary — losing the real failure,
+                // which is the one thing the `panicking()` branch above exists to
+                // preserve.
+                let _ = writeln!(std::io::stderr(), "{msg}");
+            }
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    /// Clear `UF_IMMUTABLE` and `UF_APPEND` from everything under `dir`, depth first.
+    ///
+    /// Only those two bits — the ones these tests plant — off the flag word each file
+    /// carries *now*, the shape [`clear_held_freeze`] uses, because a blanket
+    /// `chflags(0)` would drop flags the tests never set. Symlinks are skipped rather
+    /// than thawed: `chflags` follows them, and this must not reach outside the
+    /// scratch. Best-effort — anything it cannot thaw surfaces as the removal failure
+    /// above, which names the path.
+    fn thaw_tree(dir: &std::path::Path) {
+        const STUCK: u32 = libc::UF_IMMUTABLE | libc::UF_APPEND;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                thaw_tree(&path);
+            }
+            let Ok(md) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if md.file_type().is_symlink() || md.st_flags() & STUCK == 0 {
+                continue;
+            }
+            let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+                continue;
+            };
+            // SAFETY: a NUL-terminated path under this test's own scratch dir.
+            unsafe { libc::chflags(c.as_ptr(), md.st_flags() & !STUCK) };
+        }
+    }
+
+    /// **A panic between a test's freeze and its thaw must not leave an undeletable
+    /// directory in TMPDIR.** Every `cc-vnode-*` test below strands `UF_IMMUTABLE`
+    /// (and, in `clear-mismatch`, a `UF_APPEND` relic) on purpose and thaws one line
+    /// before its removal, so an assertion that fires in between skips both — and
+    /// `remove_dir_all` cannot delete a file the OS refuses to unlink.
+    ///
+    /// That is not hypothetical here: the freeze tests flake against each other over
+    /// the process-global armed slot under the default thread count, every flake is a
+    /// panic, and six such runs were measured leaving 8 `cc-vnode-*` directories in
+    /// TMPDIR for exactly this reason.
+    ///
+    /// The body panics inside a `catch_unwind` so the unwind runs [`Scratch`]'s
+    /// `Drop` for real rather than a stand-in; the panic it prints on the way out is
+    /// expected, and libtest captures it on the green path.
+    #[test]
+    fn a_panic_between_the_freeze_and_the_thaw_leaves_no_scratch_behind() {
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+        let seen = std::sync::Arc::clone(&recorded);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let dir = scratch("panic-mid-freeze");
+            *seen.lock().unwrap() = Some(dir.to_path_buf());
+            let target = dir.join("codex");
+            std::fs::write(&target, b"frozen when the assertion fired").unwrap();
+
+            // Both bits these tests plant by hand, on one file: the freeze itself,
+            // and the `UF_APPEND` relic `clear-mismatch` uses to stand for a flag
+            // word that moved under the record.
+            let f = std::fs::File::open(&target).unwrap();
+            let st = current_flags(&f).unwrap();
+            assert_eq!(
+                unsafe { libc::fchflags(f.as_raw_fd(), st | libc::UF_IMMUTABLE | libc::UF_APPEND) },
+                0
+            );
+            drop(f);
+
+            // Where an assertion fires: after the freeze, before `thaw(&target)`.
+            panic!("an assertion fires between the freeze and the thaw");
+        }));
+
+        let dir = recorded
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the body recorded the dir it made");
+        let survived = dir.exists();
+        if survived {
+            // Whichever way this lands, it must not itself become the leak.
+            let target = dir.join("codex");
+            if let Ok(c) = std::ffi::CString::new(target.as_os_str().as_encoded_bytes()) {
+                // SAFETY: a NUL-terminated path to a file this test just made.
+                unsafe { libc::chflags(c.as_ptr(), 0) };
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        assert!(outcome.is_err(), "the body has to have panicked");
+        assert!(
+            !survived,
+            "the panic stranded an undeletable scratch dir: {}",
+            dir.display()
+        );
     }
 
     /// [`freeze_and_hash_recording`] with nothing to record.
@@ -1668,8 +1817,6 @@ mod tests {
         // look" and "it is the same file" must not share an answer.
         std::fs::remove_file(&target).unwrap();
         assert!(refuse_unless_path_still_names(&target, &file).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// How large the raced file is. Big enough that a swap landing a millisecond or
@@ -1750,8 +1897,6 @@ mod tests {
             err.contains("replaced while it was being read"),
             "the refusal must say the file moved under the read: {err}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -------------------------------------------- the freeze (A7.1, findings 1 & 2)
@@ -1815,8 +1960,6 @@ mod tests {
                 .is_ok(),
             "the guard's drop must clear the freeze it set"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The guard restores the **exact** prior flags on drop — it clears only the bit
@@ -1860,7 +2003,6 @@ mod tests {
         // Clean up the flag we planted so the scratch dir can be removed.
         let st = current_flags(&f).unwrap();
         unsafe { libc::fchflags(f.as_raw_fd(), st & !libc::UF_NODUMP) };
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A flag the guard did not set is ADOPTED, and never given back — including
@@ -1919,7 +2061,6 @@ mod tests {
         drop(f);
 
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The limits of the freeze, pinned so the docs cannot drift into claiming
@@ -1984,8 +2125,6 @@ mod tests {
              writer defeats it, which is exactly what the type documents"
         );
         drop(guard);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The frozen digest is the digest of the bytes, and a missing file is an error
@@ -2003,7 +2142,6 @@ mod tests {
 
         std::fs::remove_file(&target).unwrap();
         assert!(freeze_and_hash(&target).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2076,7 +2214,6 @@ mod tests {
         );
 
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The clear removes one bit and leaves everything else exactly as found.** A
@@ -2129,7 +2266,6 @@ mod tests {
         );
 
         unsafe { libc::fchflags(f.as_raw_fd(), now & !libc::UF_NODUMP) };
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A saved word carrying `UF_IMMUTABLE` is **impossible** by construction — the
@@ -2162,7 +2298,6 @@ mod tests {
         );
 
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Only a file that is not there is somebody else's business.** Every other
@@ -2219,8 +2354,6 @@ mod tests {
             "an open this process was refused is a question unanswered, not a debt \
              discharged: {verdict:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **An already-clear flag owes nothing, and saying so is not a formality.** The
@@ -2249,7 +2382,6 @@ mod tests {
                 panic!("a clear flag owes nothing, and must not be reported as a clear: {other:?}")
             }
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The record names **who** took the freeze, because a janitor that cannot prove
@@ -2275,7 +2407,6 @@ mod tests {
             crate::proc_identity::boot_identity(),
             "and the boot it was taken under, so a reused pid is not mistaken for it"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The record must land before the hash, not after it.** Hashing a 210 MB
@@ -2332,7 +2463,6 @@ mod tests {
              guard is still holding after it"
         );
         drop(guard);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A `SIGINT` on a path with no launch record still has to give the flag back.**
@@ -2371,7 +2501,6 @@ mod tests {
         release_armed_freeze();
         drop(guard);
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The arming happens AFTER the branch that adopts and BEFORE the flag goes on,
@@ -2504,7 +2633,6 @@ mod tests {
         );
         drop(f);
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Two live holders, and only the setter's release clears.** This is the
@@ -2558,7 +2686,6 @@ mod tests {
         );
         drop(f);
         thaw(&target);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **An adoption arms no release, and does not disturb the one the setter armed.**
@@ -2628,7 +2755,6 @@ mod tests {
         }
         drop(setter);
         thaw(&shared);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The record IS the safety, so a freeze nobody could write down is not handed
@@ -2662,7 +2788,6 @@ mod tests {
             0,
             "and the flag must be back off the file, not left for nobody"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The lock is exclusive, and that is the whole of the synchronisation.** A
@@ -2704,7 +2829,6 @@ mod tests {
             FreezeLock::acquire(&dir.join("never-existed")),
             Err(FreezeLockFailure::Missing(_))
         ));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The FREEZER's half of the lock: it is held across the freeze and the record,
@@ -2745,7 +2869,6 @@ mod tests {
         );
         unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_UN) };
         drop(guard);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The other half of the same rule: a freeze that records NOTHING keeps the
@@ -2810,6 +2933,5 @@ mod tests {
             "the hold must end when the probe does, or one launch would stop every \
              later custodian from ever clearing anything"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
