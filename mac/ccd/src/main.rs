@@ -16,6 +16,7 @@ mod codex_link;
 /// real broker. Test-only, and never built into the daemon.
 #[cfg(test)]
 mod codex_link_live;
+mod codex_refusals;
 mod db;
 #[cfg(test)]
 mod fixture_replay;

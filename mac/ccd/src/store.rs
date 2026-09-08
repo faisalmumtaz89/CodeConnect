@@ -787,16 +787,10 @@ pub const INTERRUPT_REFUSED: &str = "refused";
 /// rather than being guessed at — the terminal is what governs, not the vocabulary.
 pub fn replayed_interrupt_sentence(outcome: &str) -> String {
     match outcome {
-        INTERRUPT_ABORTED => "that turn was already stopped from a phone; nothing was sent \
-                              again"
-            .to_string(),
-        INTERRUPT_TURN_ENDED => "that turn had already ended on its own when this was sent \
-                                 before, so nothing was stopped; nothing was sent again"
-            .to_string(),
-        INTERRUPT_REFUSED => "an earlier request to stop that turn was refused, so nothing \
-                              was sent again"
-            .to_string(),
-        other => format!("this interrupt is already settled ({other}); nothing was sent again"),
+        INTERRUPT_ABORTED => crate::codex_refusals::REPLAY_INTERRUPT_ABORTED.to_string(),
+        INTERRUPT_TURN_ENDED => crate::codex_refusals::REPLAY_INTERRUPT_TURN_ENDED.to_string(),
+        INTERRUPT_REFUSED => crate::codex_refusals::REPLAY_INTERRUPT_REFUSED.to_string(),
+        other => crate::codex_refusals::replay_interrupt_unknown_word(other),
     }
 }
 
@@ -879,16 +873,12 @@ pub fn parse_compose_outcome(outcome: &str) -> Option<(&str, &str)> {
 /// The sentence a replayed compose is told, for an outcome that named no turn.
 pub fn replayed_compose_sentence(outcome: &str) -> String {
     match outcome {
-        COMPOSE_REFUSED => "an earlier attempt to say this was refused, so nothing was \
-                            sent again"
-            .to_string(),
+        COMPOSE_REFUSED => crate::codex_refusals::REPLAY_COMPOSE_REFUSED.to_string(),
         // **The outcome is not interpolated.** A row this build cannot read carries a
         // turn id the phone never sent — `parse_compose_outcome` refuses an unknown route
         // and lands here — and there is nothing in the stored word a caller can act on
         // beyond the fact that this id is spent.
-        _ => {
-            "this message is already settled and will not be sent again; check the Mac".to_string()
-        }
+        _ => crate::codex_refusals::REPLAY_COMPOSE_SETTLED.to_string(),
     }
 }
 

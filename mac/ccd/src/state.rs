@@ -4942,25 +4942,24 @@ impl Daemon {
         //    evidence of Codex any more than "not Claude" is.
         let row = match self.resolve_optional(session_ref).await {
             Ok(Some(row)) => row,
-            Ok(None) => return refuse(format!("unknown session {session_ref}")),
-            Err(err) => return refuse(format!("session lookup failed: {err}")),
+            Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            Err(err) => {
+                return refuse(crate::codex_refusals::session_lookup_failed(
+                    &err.to_string(),
+                ))
+            }
         };
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
             // Claude has no interrupt on this wire. Its stop control is the keyboard
             // at the Mac, and saying so is more useful than a bare refusal.
             protocol::agent::AgentKind::Claude => {
-                return refuse(format!(
-                    "{} is a Claude session, which this daemon cannot stop from a phone; \
-                     press Escape at the Mac",
-                    row.session_uid
-                ))
+                return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
-                return refuse(format!(
-                    "{} is a {name} session, which this daemon does not know how to stop; \
-                     nothing was sent",
-                    row.session_uid
+                return refuse(crate::codex_refusals::interrupt_on_unsupported(
+                    &row.session_uid,
+                    name,
                 ))
             }
         }
@@ -4975,14 +4974,10 @@ impl Daemon {
         //    against the turn the session is running.
         let expected = protocol::hash::interrupt_hash(session_ref, turn_id);
         if expected != payload_hash {
-            return refuse(
-                "stale payload_hash: the turn you asked to stop is not the one this \
-                 request names; nothing was sent"
-                    .into(),
-            );
+            return refuse(crate::codex_refusals::INTERRUPT_STALE_HASH.into());
         }
         if turn_id.is_empty() {
-            return refuse("this request names no turn, so there is nothing to stop".into());
+            return refuse(crate::codex_refusals::INTERRUPT_NAMES_NO_TURN.into());
         }
 
         // 3. **The durable ledger wins over everything.** A terminal claim outlives
@@ -5021,11 +5016,7 @@ impl Daemon {
                     && state.claimed.claimed_hash
                         == protocol::hash::interrupt_hash(&row.session_uid, turn_id);
                 if !bound_to_the_same_turn {
-                    return refuse(
-                        "this request id was used to stop a different turn, so nothing \
-                         was sent; ask again under a new one"
-                            .into(),
-                    );
+                    return refuse(crate::codex_refusals::INTERRUPT_ID_REUSED.into());
                 }
                 match state.status {
                     // Replayed through the one mapping both this path and the link's
@@ -5038,9 +5029,7 @@ impl Daemon {
                     }
                     crate::store::AnswerStatus::Indeterminate => {
                         return InterruptResult::Indeterminate {
-                            reason: "this interrupt was already sent and what became of it \
-                                     is not known; it will not be sent again. Check the Mac."
-                                .into(),
+                            reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
                         }
                     }
                     // `Applying` is an attempt this very daemon has in flight. Left to
@@ -5050,8 +5039,8 @@ impl Daemon {
             }
             Ok(None) => {}
             Err(err) => {
-                return refuse(format!(
-                    "could not read this run's interrupt ledger ({err}); nothing was sent"
+                return refuse(crate::codex_refusals::interrupt_ledger_unreadable(
+                    &err.to_string(),
                 ))
             }
         }
@@ -5067,11 +5056,7 @@ impl Daemon {
         let thread_id = match &addressee {
             crate::codex_link::CodexAddressee::Subscribed { thread_id } => thread_id.clone(),
             crate::codex_link::CodexAddressee::Bound { .. } => {
-                return refuse(
-                    "this Mac is connected to the Codex session but is not yet watching \
-                     its thread, so a stop cannot be confirmed; nothing was sent"
-                        .into(),
-                )
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_BOUND.into())
             }
             // **Three states, three sentences, because they call for three
             // different things from the person reading them.** They shared one, and
@@ -5085,33 +5070,16 @@ impl Daemon {
             // operator something broke when it has simply not started yet sends them
             // looking for a fault that is not there.
             crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
-                return refuse(
-                    "this Mac has lost its control link to the Codex session and is \
-                     reconnecting, so nothing was sent; try again shortly, or stop the \
-                     turn at the Mac"
-                        .into(),
-                )
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_RECONNECTING.into())
             }
             crate::codex_link::CodexAddressee::Offline { thread_id: None } => {
-                return refuse(
-                    "this Mac has not yet reached the Codex session, so nothing was \
-                     sent; try again shortly, or stop the turn at the Mac"
-                        .into(),
-                )
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_NOT_REACHED.into())
             }
             crate::codex_link::CodexAddressee::Unbound { .. } => {
-                return refuse(
-                    "this Mac is connected to the Codex session and is still picking up \
-                     its thread, so nothing was sent; try again in a few seconds"
-                        .into(),
-                )
+                return refuse(crate::codex_refusals::LINK_STILL_PICKING_UP_THREAD.into())
             }
             crate::codex_link::CodexAddressee::NoLink => {
-                return refuse(
-                    "there is no live link to this Codex session, so nothing was sent; \
-                     stop the turn at the Mac"
-                        .into(),
-                )
+                return refuse(crate::codex_refusals::INTERRUPT_NO_LINK.into())
             }
         };
 
@@ -5152,9 +5120,7 @@ impl Daemon {
                     .await
             }
             None => crate::codex_link::InterruptReport::NotApplied(
-                "there is no live link to this Codex session, so nothing was sent; stop \
-                 the turn at the Mac"
-                    .into(),
+                crate::codex_refusals::INTERRUPT_NO_LINK.into(),
             ),
         };
         Daemon::interrupt_result(report)
@@ -5212,8 +5178,12 @@ impl Daemon {
         //    Codex any more than "not Claude" is.
         let row = match self.resolve_optional(session_ref).await {
             Ok(Some(row)) => row,
-            Ok(None) => return refuse(format!("unknown session {session_ref}")),
-            Err(err) => return refuse(format!("session lookup failed: {err}")),
+            Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            Err(err) => {
+                return refuse(crate::codex_refusals::session_lookup_failed(
+                    &err.to_string(),
+                ))
+            }
         };
         match row.agent {
             protocol::agent::AgentKind::Codex => {}
@@ -5222,17 +5192,12 @@ impl Daemon {
             // Mac's TTY and refuses a Codex run by name; this refuses a Claude run by
             // name. Neither silently does the other's job.
             protocol::agent::AgentKind::Claude => {
-                return refuse(format!(
-                    "{} is a Claude session, and this message is the Codex compose; \
-                     send text to a Claude session with send_text instead",
-                    row.session_uid
-                ))
+                return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
             }
             protocol::agent::AgentKind::Unsupported(ref name) => {
-                return refuse(format!(
-                    "{} is a {name} session, which this daemon does not know how to speak \
-                     to; nothing was sent",
-                    row.session_uid
+                return refuse(crate::codex_refusals::compose_on_unsupported(
+                    &row.session_uid,
+                    name,
                 ))
             }
         }
@@ -5243,13 +5208,12 @@ impl Daemon {
         //    there is nothing to say and the app-server's own refusal for it is a shape
         //    this daemon would then have to explain.
         if text.is_empty() {
-            return refuse("this message is empty, so there is nothing to say".into());
+            return refuse(crate::codex_refusals::COMPOSE_EMPTY.into());
         }
         if text.len() > protocol::ws::MAX_COMPOSE_BYTES {
-            return refuse(format!(
-                "this message is {} bytes; the ceiling is {}",
-                text.len(),
-                protocol::ws::MAX_COMPOSE_BYTES
+            return refuse(crate::codex_refusals::compose_too_long(
+                &text.len().to_string(),
+                &protocol::ws::MAX_COMPOSE_BYTES.to_string(),
             ));
         }
 
@@ -5258,11 +5222,7 @@ impl Daemon {
         //    transit and nothing else. What authorizes the words is that the phone is
         //    paired and the run is this Mac's.
         if protocol::hash::compose_hash(session_ref, &text) != payload_hash {
-            return refuse(
-                "stale payload_hash: the message you asked to send is not the one this \
-                 request names; nothing was sent"
-                    .into(),
-            );
+            return refuse(crate::codex_refusals::COMPOSE_STALE_HASH.into());
         }
         // **Normalised over the RUN, not over the reference the caller used.** A phone may
         // name one run by its uid on one tap and by its tmux name on the next; storing the
@@ -5301,27 +5261,21 @@ impl Daemon {
         };
         let addressed = match &addressee {
             crate::codex_link::CodexAddressee::Subscribed { thread_id } => Ok(thread_id.clone()),
-            crate::codex_link::CodexAddressee::Bound { .. } => Err(
-                "this Mac is connected to the Codex session but is not yet watching its \
-                 thread, so a message cannot be confirmed; nothing was sent",
-            ),
-            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => Err(
-                "this Mac has lost its control link to the Codex session and is \
-                 reconnecting, so nothing was sent; try again shortly, or say it at the \
-                 Mac",
-            ),
-            crate::codex_link::CodexAddressee::Offline { thread_id: None } => Err(
-                "this Mac has not yet reached the Codex session, so nothing was sent; try \
-                 again shortly, or say it at the Mac",
-            ),
-            crate::codex_link::CodexAddressee::Unbound { .. } => Err(
-                "this Mac is connected to the Codex session and is still picking up its \
-                 thread, so nothing was sent; try again in a few seconds",
-            ),
-            crate::codex_link::CodexAddressee::NoLink => Err(
-                "there is no live link to this Codex session, so nothing was sent; say it \
-                 at the Mac",
-            ),
+            crate::codex_link::CodexAddressee::Bound { .. } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_BOUND)
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_RECONNECTING)
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: None } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_NOT_REACHED)
+            }
+            crate::codex_link::CodexAddressee::Unbound { .. } => {
+                Err(crate::codex_refusals::LINK_STILL_PICKING_UP_THREAD)
+            }
+            crate::codex_link::CodexAddressee::NoLink => {
+                Err(crate::codex_refusals::COMPOSE_NO_LINK)
+            }
         };
         // **A finished mutation outranks the state of the link, and this is the only place
         // that can say so.**
@@ -5374,9 +5328,7 @@ impl Daemon {
                     .await
             }
             None => crate::codex_link::ComposeReport::NotApplied(
-                "there is no live link to this Codex session, so nothing was sent; say it \
-                 at the Mac"
-                    .into(),
+                crate::codex_refusals::COMPOSE_NO_LINK.into(),
             ),
         };
         Daemon::compose_result(report)
@@ -5446,7 +5398,7 @@ impl Daemon {
         }
         if state.claimed.claimed_hash != claimed_hash {
             return Some(protocol::ws::ComposeResult::Rejected {
-                reason: crate::codex_link::COMPOSE_ID_REUSED.into(),
+                reason: crate::codex_refusals::COMPOSE_ID_REUSED.into(),
             });
         }
         Some(match state.status {
@@ -5457,7 +5409,7 @@ impl Daemon {
             }
             crate::store::AnswerStatus::Indeterminate => {
                 Daemon::compose_result(crate::codex_link::ComposeReport::Unknown(
-                    crate::codex_link::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                    crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
                 ))
             }
             // Returned above. Restated rather than folded into a wildcard so a fourth
@@ -25532,7 +25484,7 @@ mod tests {
         let protocol::ws::ComposeResult::Rejected { reason } = &conflict else {
             panic!("an id reused for other words is refused, not replayed: {conflict:?}")
         };
-        assert_eq!(reason, crate::codex_link::COMPOSE_ID_REUSED);
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_ID_REUSED);
 
         // Written, and what became of it never learned.
         claim("say-2", &hash);
@@ -25543,7 +25495,7 @@ mod tests {
         let protocol::ws::ComposeResult::Indeterminate { reason } = &unknown else {
             panic!("an unprovable compose is never re-sent: {unknown:?}")
         };
-        assert_eq!(reason, crate::codex_link::COMPOSE_ALREADY_SENT_UNKNOWN);
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN);
 
         // An `applying` claim is somebody's live attempt. It is NOT answered here — the
         // claim decides, and the claim lives where the write does.
@@ -26198,6 +26150,146 @@ mod tests {
             "{}",
             serde_json::to_string_pretty(&phase5_wire_rows().await).unwrap()
         );
+    }
+
+    /// **Every sentence a phone can be told a Codex stop or message did not
+    /// happen, as this build says it.**
+    ///
+    /// `fixtures/codex/refusal-sentences.json` exists because the phone reads
+    /// these sentences with `String.contains`. `InterruptResult::Rejected` is a
+    /// bare reason on the wire — there is no code — so the iOS side decides
+    /// whether to grey Stop and Compose for a few seconds by matching the
+    /// clauses that describe a link which is coming back. That match is
+    /// correct for every sentence today and would go silently wrong the first
+    /// time somebody reworded one: nothing on this side would fail, because the
+    /// daemon would still be saying something true.
+    ///
+    /// So [`crate::codex_refusals`] is where each sentence is written, exactly
+    /// once, and this is [`the_minor_19_wire_fixture_is_what_this_build_emits`]'s
+    /// shape applied to it — assert what the phone reads against the
+    /// **committed** bytes, then re-derive those bytes from this build and
+    /// require them to be identical. `ios/` cannot be compiled here, so the
+    /// file is the only place the two sides can meet.
+    ///
+    /// **Nothing is normalised, because nothing in it is read from anything.**
+    /// The interpolated sentences are assembled by calling the very formatters
+    /// production calls, with the fixture's own `{uid}`/`{n}`/`{err}` tokens as
+    /// their arguments — so a template here cannot drift from the code, there
+    /// being no second copy of it to drift.
+    ///
+    /// **Mutation:** edit one sentence in the checked-in file and the byte
+    /// comparison fails, naming the file and the command that regenerates it.
+    #[test]
+    fn the_refusal_sentences_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/refusal-sentences.json");
+        const REGENERATE: &str =
+            "cargo test -p ccd --bin ccd -- --ignored regenerate_the_refusal_sentences_fixture";
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+
+        // Gate one: what the phone matches on, asserted on the committed bytes.
+        let sentences = committed["sentences"]
+            .as_array()
+            .expect("the sentences are a list");
+        let mut link_state = Vec::new();
+        for row in sentences {
+            for key in ["id", "verb", "outcome", "category", "text"] {
+                assert!(
+                    row[key].as_str().is_some_and(|v| !v.is_empty()),
+                    "every row carries a non-empty `{key}`: {row}"
+                );
+            }
+            assert!(
+                matches!(row["verb"].as_str(), Some("interrupt" | "compose" | "both")),
+                "`verb` names a control the phone offers: {row}"
+            );
+            assert!(
+                matches!(row["outcome"].as_str(), Some("rejected" | "indeterminate")),
+                "`outcome` is the wire variant the reason rides in: {row}"
+            );
+            assert!(
+                matches!(
+                    row["category"].as_str(),
+                    Some("link_state" | "permanent" | "transient_local" | "wire_code")
+                ),
+                "`category` is one this file documents: {row}"
+            );
+            if row["category"] == json!("link_state") {
+                link_state.push(row["text"].as_str().expect("a text").to_string());
+            }
+        }
+        assert_eq!(
+            committed["counts"]["total"].as_u64(),
+            Some(sentences.len() as u64),
+            "the count the phone reads is the number of rows it gets"
+        );
+        // **The link-state family is named, not merely counted.** These are the
+        // five addressee states plus the moments a write meets a link that has
+        // just moved, and the phone's whole grey-for-ten-seconds rule is a
+        // statement about exactly this set. A sentence leaving it is the change
+        // worth seeing in a diff.
+        for needle in [
+            "there is no live link to this Codex session",
+            "is not yet watching its thread",
+            "has lost its control link to the Codex session and is reconnecting",
+            "has not yet reached the Codex session",
+            "is still picking up its thread",
+        ] {
+            assert!(
+                link_state.iter().any(|text| text.contains(needle)),
+                "the link-state family still says {needle:?}"
+            );
+        }
+        assert!(
+            link_state
+                .iter()
+                .all(|text| !text.contains("will not be sent again")),
+            "nothing a phone may retry also tells it never to retry"
+        );
+        // The wire's refusal passes a code and never the refuser's message.
+        let wire: Vec<&str> = sentences
+            .iter()
+            .filter(|row| row["category"] == json!("wire_code"))
+            .map(|row| row["text"].as_str().expect("a text"))
+            .collect();
+        assert_eq!(wire.len(), 2, "one for the stop, one for the message");
+        assert!(
+            wire.iter().all(|text| text.contains("(code {n})")),
+            "the code is the part that is passed on: {wire:?}"
+        );
+
+        // Gate two: the file is what this build produces. Compared as a value
+        // first, because that is the comparison whose failure is readable — it
+        // names the row that moved — and then as BYTES, because the phone reads
+        // the file and not a parse of it, and a fixture that may be reformatted
+        // by hand is one whose diff stops being the record of a reword.
+        let derived = crate::codex_refusals::fixture();
+        assert_eq!(
+            derived, committed,
+            "the committed refusal sentences no longer match what this build \
+             emits. Regenerate them: {REGENERATE}"
+        );
+        assert_eq!(
+            FIXTURE,
+            crate::codex_refusals::fixture_bytes(),
+            "the committed refusal sentences say what this build emits but are \
+             not written the way it writes them. Regenerate them: {REGENERATE}"
+        );
+    }
+
+    /// Regenerate `fixtures/codex/refusal-sentences.json`. Run with
+    /// `cargo test -p ccd --bin ccd -- --ignored regenerate_the_refusal_sentences_fixture`.
+    ///
+    /// **It writes the file itself**, rather than printing it for a shell to
+    /// redirect. libtest owns the same stdout, so `--nocapture > file` wrote the
+    /// harness's own "running 1 test" lines into the JSON and produced a fixture
+    /// that did not parse; `CC_REFUSAL_FIXTURE_OUT` names another path when the
+    /// tree should not be touched.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_refusal_sentences_fixture() {
+        let path = crate::codex_refusals::write_fixture();
+        println!("wrote {}", path.display());
     }
 
     /// One drive of the production path, with the clock reads replaced.

@@ -1696,28 +1696,6 @@ pub(crate) fn replayed_compose_report(outcome: &str) -> ComposeReport {
     }
 }
 
-/// **"you already said this and I cannot tell you what happened."**
-///
-/// A const rather than three literals: it is said by the link when its claim comes back
-/// `Indeterminate`, by the link when the record already reads that way, and — since a
-/// terminal row must outrank the link's current state — by
-/// [`crate::state::Daemon::compose`] when there is no addressee to ask. Three copies of a
-/// sentence are three chances for two of them to drift, and the drift would be invisible:
-/// each copy is correct on its own.
-pub(crate) const COMPOSE_ALREADY_SENT_UNKNOWN: &str =
-    "this message was already sent and what became of it is not known; it will not be \
-     sent again. Check the Mac.";
-
-/// **"that id already says something else."**
-///
-/// Named for [`COMPOSE_ALREADY_SENT_UNKNOWN`]'s reason, and one of its own: a conflict is
-/// the one refusal that tells somebody they did something specific, so the two places that
-/// can reach it — the link's claim, and the daemon's terminal read when there is no link to
-/// claim against — must say it identically or the same mistake reads as two different ones.
-pub(crate) const COMPOSE_ID_REUSED: &str =
-    "this request id was used to say something else, so nothing was sent; ask again under \
-     a new one";
-
 /// **What a phone is told when the app-server refused a write, and it is the CODE.**
 ///
 /// MEASURED on codex 0.153.4: the refusal for a stale steer is
@@ -1742,7 +1720,7 @@ fn wire_refusal_reason(frame: &Value, what: &str, remedy: &str) -> String {
     // the frame does not always say which. Saying "Codex refused" when this Mac's own
     // broker did would send an operator looking in the wrong place. The code is the part
     // that tells them apart and it is the part that is passed on.
-    format!("{what} was refused (code {code}) and nothing was changed; {remedy}")
+    crate::codex_refusals::wire_refused(&code, what, remedy)
 }
 
 pub(crate) fn replayed_interrupt_report(outcome: &str, turn_id: &str) -> InterruptReport {
@@ -1979,20 +1957,13 @@ impl LinkComposes {
             gate,
         };
         if self.0.send(ask).is_err() {
-            return ComposeReport::NotApplied(
-                "this Mac's link to the Codex session went away before that message was \
-                 written, so nothing was said; try again"
-                    .into(),
-            );
+            return ComposeReport::NotApplied(crate::codex_refusals::COMPOSE_LINK_WENT_AWAY.into());
         }
         match answer.await {
             Ok(report) => report,
-            Err(_) => ComposeReport::Unknown(
-                "this Mac's link to the Codex session stopped while that message was in \
-                 flight, so whether it was said is not known; it will not be sent again. \
-                 Check the Mac."
-                    .into(),
-            ),
+            Err(_) => {
+                ComposeReport::Unknown(crate::codex_refusals::COMPOSE_LINK_STOPPED_MID_WRITE.into())
+            }
         }
     }
 }
@@ -2048,17 +2019,11 @@ impl LinkInterrupts {
             .is_err()
         {
             return InterruptReport::NotApplied(
-                "the link to this Codex session is not running, so nothing was sent; \
-                 stop the turn at the Mac"
-                    .into(),
+                crate::codex_refusals::INTERRUPT_LINK_NOT_RUNNING.into(),
             );
         }
         outcome.await.unwrap_or_else(|_| {
-            InterruptReport::Unknown(
-                "the link stopped while this interrupt was being written, so whether it \
-                 reached Codex is not known; it will not be sent again. Check the Mac."
-                    .into(),
-            )
+            InterruptReport::Unknown(crate::codex_refusals::INTERRUPT_LINK_STOPPED_MID_WRITE.into())
         })
     }
 }
@@ -2457,20 +2422,14 @@ pub(crate) async fn settle_open_composes(
             )
             .await;
         let report = match recorded {
-            Ok(_) => ComposeReport::Unknown(format!(
-                "{cause}, so whether that message reached the model is not known; it will \
-                 not be sent again. Check the Mac."
-            )),
+            Ok(_) => ComposeReport::Unknown(crate::codex_refusals::compose_settled_unknown(cause)),
             Err(err) => {
                 crate::log_error!(
                     "codex link for {}: could not record a written compose as \
                      indeterminate ({err:#})",
                     session.name
                 );
-                ComposeReport::Unknown(format!(
-                    "{cause}, and this Mac could not record that either, so it cannot say \
-                     what became of it. Check the Mac."
-                ))
+                ComposeReport::Unknown(crate::codex_refusals::compose_settled_unrecorded(cause))
             }
         };
         pending.tell(report);
@@ -2502,10 +2461,9 @@ pub(crate) async fn settle_open_interrupts(
             )
             .await;
         let report = match recorded {
-            Ok(_) => InterruptReport::Unknown(format!(
-                "{cause}, so whether that turn was stopped is not known; it will not be \
-                 sent again. Check the Mac."
-            )),
+            Ok(_) => {
+                InterruptReport::Unknown(crate::codex_refusals::interrupt_settled_unknown(cause))
+            }
             Err(err) => {
                 crate::log_error!(
                     "codex link for {}: could not record that the interrupt {} was left \
@@ -2513,9 +2471,9 @@ pub(crate) async fn settle_open_interrupts(
                     session.name,
                     pending.client_request_id
                 );
-                InterruptReport::Unknown(format!(
-                    "{cause}, and this Mac could not record that either ({err}), so it \
-                     cannot say what became of it. Check the Mac."
+                InterruptReport::Unknown(crate::codex_refusals::interrupt_settled_unrecorded(
+                    cause,
+                    &err.to_string(),
                 ))
             }
         };
@@ -2928,8 +2886,7 @@ pub async fn run(
             &daemon,
             &session,
             &open_interrupts,
-            "the link's connection to Codex ended while this request to stop the turn \
-             was in flight",
+            crate::codex_refusals::INTERRUPT_CONNECTION_ENDED,
         )
         .await;
         // And for the third: a compose written and never answered is a claim nobody can
@@ -2938,7 +2895,7 @@ pub async fn run(
             &daemon,
             &session,
             &open_composes,
-            "the link's connection to Codex ended while this message was in flight",
+            crate::codex_refusals::COMPOSE_CONNECTION_ENDED,
         )
         .await;
         // **Refused, not queued, once there is no connection to write on.** An ask
@@ -2961,18 +2918,14 @@ pub async fn run(
         // at, applied to a turn that may by then be a different one.
         while let Ok(ask) = interrupts.try_recv() {
             let _ = ask.reply.send(InterruptReport::NotApplied(
-                "the link to this Codex session has no live connection, so nothing was \
-                 sent; stop the turn at the Mac"
-                    .into(),
+                crate::codex_refusals::INTERRUPT_NO_CONNECTION.into(),
             ));
         }
         // And the third, for the same reason again: words handed to whatever socket comes
         // up next would be said into a session nobody is still looking at.
         while let Ok(ask) = composes.try_recv() {
             let _ = ask.reply.send(ComposeReport::NotApplied(
-                "the link to this Codex session has no live connection, so nothing was \
-                 said; say it at the Mac"
-                    .into(),
+                crate::codex_refusals::COMPOSE_NO_CONNECTION.into(),
             ));
         }
         // **The connection is over; say so before anything waits.** A resolver that
@@ -4345,7 +4298,7 @@ fn interrupt_refusal(
         .unwrap_or_default()
         .is_empty()
     {
-        return Some("this request names no turn, so there is nothing to stop; nothing was sent");
+        return Some(crate::codex_refusals::LINK_INTERRUPT_NAMES_NO_TURN);
     }
     // **The connection is asked before anything else about the ask**, because an ask
     // aimed at a socket that is gone is not a question about this one. A teardown
@@ -4354,16 +4307,10 @@ fn interrupt_refusal(
     // reads it — and every other check below would pass, because the visit survives a
     // reconnect and the turn may well still be running.
     if visit.upstream_epoch != upstream_epoch {
-        return Some(
-            "this Mac's link to the Codex session reconnected while that request was \
-             in flight, so nothing was sent; try again",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_RECONNECTED_IN_FLIGHT);
     }
     if visit.thread_id.as_deref() != Some(claimed.thread_id.as_str()) {
-        return Some(
-            "this Codex session is not on the thread that turn belongs to, so nothing was \
-             sent; stop it at the Mac",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_OTHER_THREAD);
     }
     // **The generation is the visit, and a visit this link has left is not the one the
     // phone was looking at.** A thread revisited after a `/new` and back again wears
@@ -4372,10 +4319,7 @@ fn interrupt_refusal(
     // no notion of a visit, so a turn id replayed from a visit this session has left
     // passes its rule and fails ours.
     if visit.generation != claimed.generation {
-        return Some(
-            "this Codex session has moved on since that turn was shown, so nothing was \
-             sent; open the run again",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_VISIT_MOVED_ON);
     }
     // **The turn must be the one this connection watched start and has not watched
     // end.** The broker refuses any other, but its refusal arrives after a claim has
@@ -4390,25 +4334,16 @@ fn interrupt_refusal(
     // under a visit this link has left cannot match, however the ids read, even if
     // some future move of the visit forgot to clear it.
     if !running_turn.is_some_and(|running| running.is_named_by(claimed)) {
-        return Some(
-            "that turn is not the one this Codex session is running, so nothing was \
-             sent; it may have finished already",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_TURN_NOT_RUNNING);
     }
     if switch_pending {
-        return Some(
-            "this Codex session is moving to another thread, so nothing was sent; try \
-             again once it has settled",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_THREAD_SWITCHING);
     }
     // **One interrupt per turn.** Two taps on ONE turn are already serialised by the
     // daemon's ledger, so a turn already awaiting a terminal here means a duplicate
     // that serialisation could not have produced.
     if already_waiting {
-        return Some(
-            "an interrupt for that turn is already waiting to take effect, so nothing \
-             was sent again",
-        );
+        return Some(crate::codex_refusals::INTERRUPT_ALREADY_WAITING);
     }
     None
 }
@@ -4433,22 +4368,13 @@ fn compose_route(
     upstream_epoch: u64,
 ) -> Result<&'static str, &'static str> {
     if visit.upstream_epoch != upstream_epoch {
-        return Err(
-            "this Mac's link to the Codex session reconnected while that message was in \
-             flight, so nothing was said; try again",
-        );
+        return Err(crate::codex_refusals::COMPOSE_RECONNECTED_IN_FLIGHT);
     }
     if visit.thread_id.as_deref() != Some(thread_id) {
-        return Err(
-            "this Codex session is not on the thread that message was addressed to, so \
-             nothing was said; say it at the Mac",
-        );
+        return Err(crate::codex_refusals::COMPOSE_OTHER_THREAD);
     }
     if visit.generation != generation {
-        return Err(
-            "this Codex session has moved on since that message was composed, so nothing \
-             was said; open the run again",
-        );
+        return Err(crate::codex_refusals::COMPOSE_VISIT_MOVED_ON);
     }
     // **A switch in flight refuses BOTH routes.** The broker refuses them too — a
     // reserved switch fails a `turn/start`'s admission outright, and leaves no running
@@ -4456,10 +4382,7 @@ fn compose_route(
     // actuation the broker was always going to refuse, which is the thing claiming before
     // writing exists to avoid.
     if switch_pending {
-        return Err(
-            "this Codex session is moving to another thread, so nothing was said; try \
-             again once it has settled",
-        );
+        return Err(crate::codex_refusals::COMPOSE_THREAD_SWITCHING);
     }
     // **The route, decided by the same read that gates it.**
     //
@@ -5932,9 +5855,7 @@ impl Connection<'_> {
             }
             Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
                 let _ = ask.reply.send(InterruptReport::Unknown(
-                    "this interrupt was already sent and what became of it is not known; \
-                     it will not be sent again. Check the Mac."
-                        .into(),
+                    crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
                 ));
                 return Ok(());
             }
@@ -5947,24 +5868,17 @@ impl Connection<'_> {
             // is attempted at all, by [`crate::state::Daemon::interrupt`], and that one
             // says so plainly.
             Ok(crate::store::MutationClaim::Conflict) => {
-                refuse(
-                    ask,
-                    "this request id has already been used for a different stop on this \
-                     run, so nothing was sent; ask again under a new one",
-                );
+                refuse(ask, crate::codex_refusals::INTERRUPT_ID_REUSED_ON_LINK);
                 return Ok(());
             }
             Ok(crate::store::MutationClaim::NoSession) => {
-                refuse(ask, "this run is gone, so its turn cannot be stopped");
+                refuse(ask, crate::codex_refusals::INTERRUPT_RUN_IS_GONE);
                 return Ok(());
             }
             Err(err) => {
                 refuse(
                     ask,
-                    &format!(
-                        "could not record that this interrupt is being sent ({err}); \
-                         nothing was sent"
-                    ),
+                    &crate::codex_refusals::interrupt_claim_unrecorded(&err.to_string()),
                 );
                 return Ok(());
             }
@@ -6055,11 +5969,7 @@ impl Connection<'_> {
         // fact rather than sending a frame that cannot be admitted.
         let launch = match (route, self.launch.clone()) {
             (crate::store::COMPOSE_ROUTE_START, None) => {
-                refuse(
-                    ask,
-                    "this Mac has not yet read what this Codex thread runs under, so it \
-                     cannot start a turn on it; try again shortly, or say it at the Mac",
-                );
+                refuse(ask, crate::codex_refusals::COMPOSE_LAUNCH_UNREAD);
                 return Ok(());
             }
             (_, launch) => launch,
@@ -6100,9 +6010,9 @@ impl Connection<'_> {
                 return Ok(());
             }
             Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
-                let _ = ask
-                    .reply
-                    .send(ComposeReport::Unknown(COMPOSE_ALREADY_SENT_UNKNOWN.into()));
+                let _ = ask.reply.send(ComposeReport::Unknown(
+                    crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                ));
                 return Ok(());
             }
             // **A generic sentence, deliberately**, for `interrupt_turn`'s reason: the
@@ -6120,11 +6030,11 @@ impl Connection<'_> {
             // because the same id with the same words joins the entry above or replays the
             // row. So naming the cause blames nobody for bookkeeping they cannot see.
             Ok(crate::store::MutationClaim::Conflict) => {
-                refuse(ask, COMPOSE_ID_REUSED);
+                refuse(ask, crate::codex_refusals::COMPOSE_ID_REUSED);
                 return Ok(());
             }
             Ok(crate::store::MutationClaim::NoSession) => {
-                refuse(ask, "this run is gone, so nothing can be said to it");
+                refuse(ask, crate::codex_refusals::COMPOSE_RUN_IS_GONE);
                 return Ok(());
             }
             // **The error is logged here and not sent.** A store `Display` is an anyhow
@@ -6137,11 +6047,7 @@ impl Connection<'_> {
                     self.session.name,
                     ask.client_request_id
                 );
-                refuse(
-                    ask,
-                    "this Mac could not record that the message is being sent; nothing \
-                     was sent. Check the Mac.",
-                );
+                refuse(ask, crate::codex_refusals::COMPOSE_CLAIM_UNRECORDED);
                 return Ok(());
             }
         }
@@ -6219,9 +6125,9 @@ impl Connection<'_> {
         }
         match state.status {
             crate::store::AnswerStatus::Settled(outcome) => Some(replayed_compose_report(&outcome)),
-            crate::store::AnswerStatus::Indeterminate => {
-                Some(ComposeReport::Unknown(COMPOSE_ALREADY_SENT_UNKNOWN.into()))
-            }
+            crate::store::AnswerStatus::Indeterminate => Some(ComposeReport::Unknown(
+                crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+            )),
             // An attempt this very connection has in flight. Left to the claim, which is
             // the one that decides.
             crate::store::AnswerStatus::Applying => None,
@@ -6268,8 +6174,8 @@ impl Connection<'_> {
                 .await;
             let ordinary = ComposeReport::NotApplied(wire_refusal_reason(
                 frame,
-                "that message",
-                "say it at the Mac",
+                crate::codex_refusals::COMPOSE_WIRE_SUBJECT,
+                crate::codex_refusals::COMPOSE_WIRE_REMEDY,
             ));
             self.report_settled_compose(&mut held, settlement, ordinary)
                 .await;
@@ -6306,12 +6212,7 @@ impl Connection<'_> {
             self.report_settled_compose(
                 &mut held,
                 settlement,
-                ComposeReport::Unknown(
-                    "Codex answered this message with something this Mac could not read, \
-                     so it cannot say what became of it; it will not be sent again. Check \
-                     the Mac."
-                        .into(),
-                ),
+                ComposeReport::Unknown(crate::codex_refusals::COMPOSE_ANSWER_UNREADABLE.into()),
             )
             .await;
             return true;
@@ -6430,26 +6331,20 @@ impl Connection<'_> {
                         replayed_compose_report(&outcome)
                     }
                     _ => ComposeReport::Unknown(
-                        "this message was sent and what became of it is not known; it will \
-                         not be sent again. Check the Mac."
-                            .into(),
+                        crate::codex_refusals::COMPOSE_SETTLED_ELSEWHERE.into(),
                     ),
                 },
                 _ => ComposeReport::Unknown(
-                    "this message was sent and this Mac could not read what became of it; \
-                     it will not be sent again. Check the Mac."
-                        .into(),
+                    crate::codex_refusals::COMPOSE_SETTLED_ELSEWHERE_UNREADABLE.into(),
                 ),
             },
             // **Fixed text, and the error is not in it.** The compose helpers log the
             // store's own `Display` — an anyhow chain whose open paths name absolute
             // filesystem locations — and hand this arm an empty string, so there is
             // nothing local to interpolate even by accident.
-            Settlement::Unrecorded(_) => ComposeReport::Unknown(
-                "this message was sent and this Mac could not record what became of it; \
-                 it will not be sent again. Check the Mac."
-                    .into(),
-            ),
+            Settlement::Unrecorded(_) => {
+                ComposeReport::Unknown(crate::codex_refusals::COMPOSE_OUTCOME_UNRECORDED.into())
+            }
         };
         held.tell(report);
     }
@@ -6540,9 +6435,7 @@ impl Connection<'_> {
                 Some(replayed_interrupt_report(&outcome, turn_id))
             }
             crate::store::AnswerStatus::Indeterminate => Some(InterruptReport::Unknown(
-                "this interrupt was already sent and what became of it is not known; \
-                 it will not be sent again. Check the Mac."
-                    .into(),
+                crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
             )),
             crate::store::AnswerStatus::Applying => None,
         }
@@ -6596,8 +6489,8 @@ impl Connection<'_> {
             // send that id. `why` is logged just above, on the machine entitled to it.
             InterruptReport::NotApplied(wire_refusal_reason(
                 frame,
-                "that stop",
-                "stop the turn at the Mac",
+                crate::codex_refusals::INTERRUPT_WIRE_SUBJECT,
+                crate::codex_refusals::INTERRUPT_WIRE_REMEDY,
             )),
         )
         .await;
@@ -6641,11 +6534,9 @@ impl Connection<'_> {
                 self.report_settled_interrupt(
                     &mut held,
                     settlement,
-                    InterruptReport::NotApplied(format!(
-                        "that turn ended on its own ({status}) while the request to stop \
-                         it was in flight, so it was not stopped from here; it will not \
-                         be sent again"
-                    )),
+                    InterruptReport::NotApplied(
+                        crate::codex_refusals::interrupt_turn_ended_itself(status),
+                    ),
                 )
                 .await;
             }
@@ -6717,10 +6608,9 @@ impl Connection<'_> {
         let report = match settlement {
             Settlement::Recorded => ordinary,
             Settlement::Superseded => self.winning_interrupt_terminal(held).await,
-            Settlement::Unrecorded(err) => InterruptReport::Unknown(format!(
-                "this Mac could not record what became of that request to stop the turn \
-                 ({err}), so it cannot say; it will not be sent again. Check the Mac."
-            )),
+            Settlement::Unrecorded(err) => {
+                InterruptReport::Unknown(crate::codex_refusals::interrupt_outcome_unrecorded(&err))
+            }
         };
         held.tell(report);
     }
@@ -6747,15 +6637,11 @@ impl Connection<'_> {
                     replayed_interrupt_report(&outcome, &held.turn_id)
                 }
                 _ => InterruptReport::Unknown(
-                    "this request to stop the turn was already settled elsewhere and what \
-                     became of it is not known; it will not be sent again. Check the Mac."
-                        .into(),
+                    crate::codex_refusals::INTERRUPT_SETTLED_ELSEWHERE.into(),
                 ),
             },
             Ok(None) | Err(_) => InterruptReport::Unknown(
-                "this request to stop the turn was settled elsewhere and this Mac cannot \
-                 read what became of it; it will not be sent again. Check the Mac."
-                    .into(),
+                crate::codex_refusals::INTERRUPT_SETTLED_ELSEWHERE_UNREADABLE.into(),
             ),
         }
     }
@@ -7128,9 +7014,7 @@ impl Connection<'_> {
                 self.abandon_interrupts_for_turn(
                     thread_id,
                     turn_id,
-                    "this Mac could not record that the turn ended (turn boundary \
-                     unrecorded), so it cannot say the turn was stopped from here; \
-                     it will not be sent again. Check the Mac.",
+                    crate::codex_refusals::INTERRUPT_BOUNDARY_UNRECORDED,
                 )
                 .await
             }
@@ -7144,9 +7028,7 @@ impl Connection<'_> {
                 self.abandon_interrupts_for_turn(
                     thread_id,
                     turn_id,
-                    "this Mac could not read whether the turn boundary was recorded, so it \
-                     cannot say the turn was stopped from here; it will not be sent \
-                     again. Check the Mac.",
+                    crate::codex_refusals::INTERRUPT_BOUNDARY_UNREADABLE,
                 )
                 .await
             }
