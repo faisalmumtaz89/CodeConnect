@@ -53,6 +53,23 @@ final class PushRegistration: NSObject {
                 self?.onToken?(token, environment)
             }
         }
+        #if DEBUG
+            // **Never ask Apple for a token from a test-host process.** The unit
+            // tests run *inside* this app, and Apple answers this call by way of
+            // `NotificationCenter.default`, which every `PushRegistration` in the
+            // process observes — including the ones a test's own `AppModel` owns.
+            //
+            // On a simulator whose notification authorization was granted by an
+            // earlier run of the app, `requestAndRegister` is therefore answered
+            // without a prompt, a *real* token arrives part-way through the suite,
+            // and it supersedes the synthetic token the test injected: the
+            // credential that was enrolled for the test's token is dropped by the
+            // token recheck, and the real token starts an enrollment of its own
+            // that drains the scripted transport's queue. Measured on a simulator
+            // that had run the app: 9 failures across 6 `RelayOrchestrationTests`,
+            // 0 on an erased one, and 0 here once this call is not made.
+            guard !PushWire.isTestHostProcess else { return }
+        #endif
         UIApplication.shared.registerForRemoteNotifications()
     }
 
@@ -176,6 +193,23 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
 /// Apple's token callback arrives on the app delegate outside any actor, so the
 /// pure helpers it needs live here rather than on the `@MainActor` type.
 enum PushWire {
+    #if DEBUG
+        /// Whether XCTest launched this process to host a test bundle.
+        ///
+        /// `XCTestConfigurationFilePath` is placed in the **host application's**
+        /// environment by XCTest and nowhere else: a build started from the Home
+        /// screen, TestFlight or the App Store is launched by the system, which
+        /// sets no such variable, and it appears in no Info.plist or entitlement
+        /// of this app. A UI test does not set it here either — the variable
+        /// belongs to the *runner* process, and the app under test is launched
+        /// separately — so the UI tests and the render harness continue to drive
+        /// a shipping-identical app. The whole property is `DEBUG`-only, so in a
+        /// Release build the branch it guards is not merely false but absent.
+        static var isTestHostProcess: Bool {
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        }
+    #endif
+
     static let tokenNotification = Notification.Name("cc.push.token")
     static let failureNotification = Notification.Name("cc.push.failed")
     /// A notification was tapped.

@@ -220,7 +220,10 @@ final class DeepLinkRoutingTests: XCTestCase {
 final class SampleFleetTests: XCTestCase {
     private func makeModel() -> AppModel {
         AppModel(
-            pairing: PairingStore(),
+            // Ephemeral: these tests assert on the unpaired state, and a real
+            // simulator the app has been paired on would otherwise hand every
+            // model a pairing that refuses the sample fleet outright.
+            pairing: PairingStore(ephemeral: true),
             cache: EventCache(
                 root: URL(fileURLWithPath: NSTemporaryDirectory())
                     .appendingPathComponent(UUID().uuidString)),

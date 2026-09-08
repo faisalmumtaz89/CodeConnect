@@ -343,6 +343,19 @@ final class PairingStore {
         endpoint = try? JSONDecoder().decode(DaemonEndpoint.self, from: data)
     }
 
+    #if DEBUG
+        /// Test seam: start empty, without reading the Keychain.
+        ///
+        /// `init()` adopts whatever pairing the device already holds, so a suite
+        /// asserting on the *unpaired* state passes on a clean simulator and fails
+        /// on one the app has been paired on — `startSampleFleet` is refused from
+        /// a paired app by design, so the fleet never loads. Clearing the real
+        /// item in `setUp` would make the suite pass by deleting the developer's
+        /// pairing; this lets the suite own its own state instead of destroying
+        /// theirs.
+        init(ephemeral: Bool) {}
+    #endif
+
     /// Persist a durable pairing. A pairing code is refused on purpose: it is
     /// single-use, so storing one would produce a pairing that looks valid and
     /// can never connect.
